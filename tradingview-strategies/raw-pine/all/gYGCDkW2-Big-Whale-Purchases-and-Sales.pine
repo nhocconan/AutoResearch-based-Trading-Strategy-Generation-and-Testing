@@ -1,0 +1,72 @@
+//@version=5
+strategy("Big Whale Purchases and Sales", "Big Whale Moves", overlay=true, initial_capital = 100, default_qty_type = strategy.cash, default_qty_value = 100, pyramiding = 5)
+
+UseStrategy = input.bool(false,"Strategy Mode", "Use this box to switch between strategy and indicator mode", group = "Script Settings")
+//Inputs
+StdDevs = input(2.0,"Standard Deviations", "How many Standard Deviations need to be passed to identify an outlier. 0 will show all changes in whale holdings.", group = "Inputs")
+
+//Chain ID
+Source = input.string(title="Blockchain", defval="BTC", options=["BTC", "ETH", "DOGE", "ADA", "MATIC", "SHIB", "UNI", "OKB", "LEO", "LINK", "LTC", "FTT", "CRO", "ALGO",
+ "QNT", "BCH", "SAND", "MANA", "FXS", "AAVE", "CHZ", "HT", "LDO", "KCS", "AXS", "MKR", "ZEC", "GRT", "FTM", "SNX", "NEXO", "CRV", "BIT", "DASH", "BAT", "ENS", "SUSHI"], group="Inputs")
+
+SourceA = "INTOTHEBLOCK:"+Source+"_WHALESASSETS"
+Assets = request.security(SourceA, "D", close)
+
+//Define day to day change
+AssetMoves = ta.change(Assets,1)
+
+//Catch outliers
+var float bot=0
+var float top=0
+var float mid=0
+if StdDevs != 0
+    [mid2,top2,bot2]=ta.bb(AssetMoves,21,StdDevs)
+    mid:=mid2
+    top:=top2
+    bot:=bot2
+else
+    top:=0
+    bot:=0
+
+//Mark the corresponding Bars
+plotshape(AssetMoves>top and AssetMoves>0 and not UseStrategy,"Purchase",shape.triangleup, location.belowbar, size=size.normal, color=color.green, text = "Purchase", textcolor = color.green, display = display.all-display.status_line)
+plotshape(AssetMoves<bot and AssetMoves<0 and not UseStrategy,"Sale",shape.triangledown, location.abovebar, size=size.normal, color=color.red, text = "Sale", textcolor = color.red, display = display.all-display.status_line)
+
+//Order Conditions
+LongCondition = AssetMoves>top  and AssetMoves>0 and UseStrategy
+ShortCondition = AssetMoves<bot and AssetMoves<0 and UseStrategy
+
+//Order Execution
+if LongCondition
+    strategy.entry("Long", strategy.long)
+if ShortCondition
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・46 lines
+Use on chart
+8
+3
+9
+6
+27 170
+Nov 4, 2022
+Big Whale Purchases and Sales - plots big whale transactions on your chart!
+
+People that hold more than 1% of a crypto currencies circulating supply are considered whales and have a huge influence on price, not just because they can move the market with their huge transactions, but also because other traders often track their wallets and follow their example. Taking a look at whale holdings, one can see why whale worship is so common in crypto: While Bitcoin has a relatively low whale concentration, many of the Top 100 Cryptocurrencies have whales control 60% or more of their circulating supply.
+Integrating IntoTheBlock data, this script plots the transactions of these whales and, in strategy mode, copy trades them.
+
+Features:
+Strategy Mode: Switches the script between an indicator and a strategy.
+
+Standard Deviations: The number of Standard Deviations that a transaction needs to surpass to be considered worth plotting. Setting this to 0 will show all whale transactions, higher settings will only show the biggest transactions.
+
+Blockchain: The Chain on which Whale activity is tracked.
+Dec 3, 2023
+Release Notes
+Replaced switch function with a string combinator.
+
+Fixed rare issue where small purchases would show up as sales if both standard deviation bands had the same sign and vice versa.
+
+Hidden display of 1/0 on status line when in plotshape mode.
+
+

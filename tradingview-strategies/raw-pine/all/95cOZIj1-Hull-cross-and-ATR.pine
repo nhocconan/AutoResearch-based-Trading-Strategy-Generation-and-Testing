@@ -1,0 +1,51 @@
+//@version=3
+//                                                Hull cross and ATR
+strategy("Hull cross and ATR", shorttitle="H&ATR", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=0)
+keh=input(title="Hull Length",type=integer,defval=50)
+length = input(title="ATR Length", defval=50, minval=1)
+smoothing = input(title="ATR Smoothing", defval="RMA", options=["RMA", "SMA", "EMA", "WMA"])
+p=input(ohlc4,type=source,title="Price data")
+n2ma=2*wma(p,round(keh/2))
+nma=wma(p,keh)
+diff=n2ma-nma
+sqn=round(sqrt(keh))
+n2ma1=2*wma(p[1],round(keh/2))
+nma1=wma(p[1],keh)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(keh))
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+ma_function(source, length) => 
+    if smoothing == "RMA"
+        rma(p, length)
+    else
+        if smoothing == "SMA"
+            sma(p, length)
+        else
+            if smoothing == "EMA"
+                ema(p, length)
+            else
+                wma(p, length)
+plot(ma_function(tr(true), length), title = "ATR", color=black, transp=50)
+closelong = n1<n2
+if (closelong)
+    strategy.close("buy")
+closeshort = n1>n2
+if (closeshort)
+    strategy.close("sell")
+if (ma_function(tr(true), length)<p and p>p[length] and n1>n2)
+    strategy.entry("buy", strategy.long, comment="BUY")
+if (ma_function(tr(true), length)>p and p<p[length] and n1<n2)
+    strategy.entry("sell", strategy.short, comment="SELL")
+
+View in Pine Editor・39 lines
+Use on chart
+1
+2
+1
+8
+5 090
+open = Hull crossover and ATR line with price crossover
+close = Hull crossover
+
+

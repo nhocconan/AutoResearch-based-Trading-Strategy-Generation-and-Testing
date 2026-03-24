@@ -1,0 +1,127 @@
+//@version=5
+strategy("BTC Cap Dominance RSI Strategy", overlay=false)
+
+// Inputs
+src = input.source(title='Source', defval=hlc3)
+res = input.timeframe(title='Resolution', defval='1D')
+len = input.int(defval=7, title='Length')
+isdomin = input.bool(title='Use Combination of Dominance RSI ?', defval=true)
+bullLevel = input.float(title='Bull Level', defval=56, step=1.0, maxval=100, minval=0)
+bearLevel = input.float(title='Bear Level', defval=37, step=1.0, maxval=100, minval=0)
+highlightBreakouts = input(title='Highlight Bull/Bear Breakouts ?', defval=true)
+
+// BTC Cap Dominance RSI Definition
+totalcap = request.security('CRYPTOCAP:TOTAL', res, src)
+altcoincap = request.security('CRYPTOCAP:TOTAL2', res, src)
+bitcoincap = totalcap - altcoincap
+dominance = bitcoincap / totalcap
+domin_f(res, len) =>
+    n = ta.rsi(bitcoincap, len)
+    t = (ta.rsi(bitcoincap, len) + ta.rsi(dominance, len))/2
+    isdomin ? t : n
+tot_rsi = domin_f(res, len)
+
+// Plot
+rcColor = tot_rsi > bullLevel ? #0ebb23 : tot_rsi < bearLevel ? #ff0000 : #f4b77d
+maxBand = hline(100, title='Max Level', linestyle=hline.style_dotted, color=color.white)
+hline(0, title='Zero Level', linestyle=hline.style_dotted)
+minBand = hline(0, title='Min Level', linestyle=hline.style_dotted, color=color.white)
+bullBand = hline(bullLevel, title='Bull Level', linestyle=hline.style_dotted)
+bearBand = hline(bearLevel, title='Bear Level', linestyle=hline.style_dotted)
+fill(bullBand, bearBand, color=color.new(color.purple, 95))
+bullFillColor = tot_rsi > bullLevel and highlightBreakouts ? color.green : na
+bearFillColor = tot_rsi < bearLevel and highlightBreakouts ? color.red : na
+fill(maxBand, bullBand, color=color.new(bullFillColor, 80))
+fill(minBand, bearBand, color=color.new(bearFillColor, 80))
+plot(tot_rsi, title='BTC Cap Dominance RSI', linewidth=2, color=rcColor)
+plot(ta.rsi(bitcoincap, len), title='BTC Cap RSI', linewidth=1, color=color.new(color.purple, 0))
+plot(ta.rsi(dominance, len), title='BTC Dominance RSI', linewidth=1, color=color.new(color.blue, 0))
+
+// Long Short conditions
+longCondition = ta.crossover(tot_rsi, bullLevel)
+if longCondition
+    strategy.entry('Long', strategy.long)
+shortCondition = ta.crossunder(tot_rsi, bearLevel)
+if shortCondition
+    strategy.entry('Short', strategy.short)
+
+View in Pine Editor・49 lines
+Use on chart
+1
+7
+7
+7
+5 381
+Feb 20, 2022
+This strategy is based on the BTC Cap Dominance RSI indicator, which is a combination of the RSI of Bitcoin Market Cap and the RSI of Bitcoin Dominance. The concept of this strategy is to get a good grasp of the bitcoin market flow by combining bitcoin dominance as well as bitcoin market cap.
+
+BTC Cap Dominance (BCD) RSI is defined as:
+
+BCD RSI = (BTC Cap RSI + BTC Dominance RSI) / 2
+
+Case 1 (Bull market):
+Both Cap RSI and Dominance RSI values ​​are high
+
+Case 2 (Neutral market):
+Cap RSI is high but Dominance RSI is low
+Cap RSI is low but Dominance RSI is high
+
+Case 3 (Bear market):
+Both Cap RSI and Dominance RSI values ​​are low
+
+When the BCD RSI value closes the candle above the Bull level, it triggers a long signal and when the value closes below the Bear level, it triggers a short signal.
+(Note) Please note that TradingView's market cap symbols (CRYPTOCAP:TOTAL and CRYPTOCAP:TOTAL2) started in January 2020, so strategy backtesting is possible from this point on.
+(Note) Since the real-time BCD RSI value does not come out with this strategy, it is recommended to use it together because the current value can be known and the long-short signal can be predicted in advance by using a separate BCD RSI Index together.
+
+If "Use Combination of dominance RSI ?" is not checked in addition to the recommended default value of the strategy, the recommended values ​​are Length (14), Bull level (74), Bear level (25).
+_______________________________________________________________________
+이 전략은 비트코인 시가총액의 RSI와 비트코인 도미넌스 RSI를 조합하여 만든 BTC Cap Dominance RSI 지표를 기반으로 만들어졌습니다. 이 전략의 컨셉은 비트코인 시가총액뿐만 아니라 비트코인 도미넌스를 조합함으로써 비트코인 시장 흐름을 잘 파악할 수 있도록 하는 것입니다.
+
+BTC Cap Dominance (BCD) RSI는 다음과 같이 정의하였습니다.
+
+BCD RSI = (BTC Cap RSI + BTC Dominance RSI) / 2
+
+Case 1 (강세 장):
+Cap RSI와 Dominance RSI 값 모두 높은 경우
+
+Case 2 (횡보 장):
+Cap RSI는 높지만 Dominance RSI는 낮은 경우
+Cap RSI는 낮지만 Dominance RSI는 높은 경우
+
+Case 3 (약세 장):
+Cap RSI와 Dominance RSI 값 모두 낮은 경우
+
+BCD RSI 값이 Bull level 위에서 캔들 마감할 경우 long 신호를 트리거하고 Bear level 아래에서 캔들 마감할 경우 short 신호를 트리거합니다.
+(주의) 트레이딩뷰의 시가총액 심볼들 (CRYPTOCAP:TOTAL과 CRYPTOCAP:TOTAL2)이 2020년 1월부터 시작하였으므로 이 시점부터 전략 백테스팅이 가능한 점을 유의하십시오.
+(주의) 이 전략은 실시간 BCD RSI 값이 나오지 않기 때문에 별도의 BCD RSI Index를 함께 사용하면 현재 값을 알 수 있어 롱숏 신호를 사전에 예측할 수 있으므로 함께 사용하기를 권장합니다.
+
+전략의 추천 기본값 외에 "Use Combination of dominance RSI ?"를 체크하지 않는 경우 권장하는 값은 Length (14), Bull level (74), Bear level (25) 입니다.
+Feb 22, 2022
+Release Notes
+(Note)
+Since the period of provision of "CRYPTOCAP:TOTAL2", the market capitalization chart of altcoins excluding Bitcoin provided by TradingView, will be changed from January 2020 to January 2021, the period for checking Bitcoin dominance is short. I lost. So, unfortunately, the time period for backtesting this strategy has been shortened.
+However, if you change to day candle, you can backtest from 2014, so we want to change the default value as follows. The existing 4 hour candle default value is not bad as a result of backtesting from January 2020, so there is no problem to use it as is.
+
+1. New default (1D candle)
+Source: hlc3
+Resolution: 1D (or same as chart)
+Length: 7
+(Check) Use Combination of Dominance RSI?
+Bull Level: 56
+Bear Level: 37
+
+2. Previous default (4hr candle)
+Source: close
+Resolution: 4hr (or same as chart)
+Length: 14
+(Check) Use Combination of Dominance RSI?
+Bull Level: 63
+Bear Level: 35
+
+3. Previous default (4 hr candle, without dominance RSI)
+Source: close
+Resolution: 4hr (or same as chart)
+Length: 14
+(UnCheck) Use Combination of Dominance RSI?
+Bull Level: 74
+Bear Level: 25

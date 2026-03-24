@@ -1,0 +1,462 @@
+//@version=6
+strategy("BCTS", "BCTS", overlay = true,
+     initial_capital = 100000, pyramiding = 0,
+     commission_type = strategy.commission.percent, commission_value = 0.0,
+     max_bars_back = 5000)
+
+//────────────────────────────────────────────────────────────────────
+// Inputs
+//────────────────────────────────────────────────────────────────────
+BW_src       = input.source(close, "Source")
+BW_showFast  = input.bool(true,  "Show FAST LPF")
+BW_showSlow  = input.bool(true,  "Show SLOW LPF")
+
+BW_fastPerManual = input.int(250,  "FAST cutoff period (manual, bars)", minval = 2)
+BW_slowPerManual = input.int(1000, "SLOW cutoff period (manual, bars)", minval = 2)
+
+BW_useLongs  = input.bool(true, "Enable Longs")
+BW_useShorts = input.bool(true, "Enable Shorts")
+
+grpAT = "AutoTune"
+BW_autoTune   = input.bool(false, "Auto-tune Fast/Slow on Profit Factor (internal sim)", group=grpAT)
+
+BW_fastMinIn  = input.int(250,  "FAST min",  minval=2, group=grpAT)
+BW_fastMaxIn  = input.int(1000, "FAST max",  minval=2, group=grpAT)
+BW_fastStepIn = input.int(50,  "FAST step", minval=1, group=grpAT)
+
+BW_slowMinIn  = input.int(1000, "SLOW min",  minval=2, group=grpAT)
+BW_slowMaxIn  = input.int(2000, "SLOW max",  minval=2, group=grpAT)
+BW_slowStepIn = input.int(50,  "SLOW step", minval=1, group=grpAT)
+
+BW_minTrades  = input.int(25, "Min CLOSED sim trades to qualify", minval=0, group=grpAT)
+
+//────────────────────────────────────────────────────────────────────
+// Butterworth helpers (2-pole)
+//────────────────────────────────────────────────────────────────────
+BW_coeffs(int _periodInt) =>
+    float p = float(_periodInt)
+    float om = math.tan(math.pi / p)
+    float n  = 1.0 / (1.0 + math.sqrt(2.0) * om + om * om)
+    float b0 = (om * om) * n
+    float b1 = 2.0 * b0
+    float b2 = b0
+    float a1 = 2.0 * (om * om - 1.0) * n
+    float a2 = (1.0 - math.sqrt(2.0) * om + om * om) * n
+    [b0, b1, b2, a1, a2]
+
+BW_butter2pole_single(float _x, int _periodInt) =>
+    [b0, b1, b2, a1, a2] = BW_coeffs(_periodInt)
+    var float y = na
+    y := b0 * _x +
+         b1 * nz(_x[1], _x) +
+         b2 * nz(_x[2], _x) -
+         a1 * nz(y[1], _x) -
+         a2 * nz(y[2], _x)
+    y
+
+//────────────────────────────────────────────────────────────────────
+// AutoTune state
+//────────────────────────────────────────────────────────────────────
+var bool BW_built = false
+
+var array<int>   BW_fastList = array.new_int()
+var array<int>   BW_slowList = array.new_int()
+
+var array<float> BW_f_b0 = array.new_float()
+var array<float> BW_f_b1 = array.new_float()
+var array<float> BW_f_b2 = array.new_float()
+var array<float> BW_f_a1 = array.new_float()
+var array<float> BW_f_a2 = array.new_float()
+
+var array<float> BW_s_b0 = array.new_float()
+var array<float> BW_s_b1 = array.new_float()
+var array<float> BW_s_b2 = array.new_float()
+var array<float> BW_s_a1 = array.new_float()
+var array<float> BW_s_a2 = array.new_float()
+
+var array<float> BW_f_y1 = array.new_float()
+var array<float> BW_f_y2 = array.new_float()
+var array<float> BW_s_y1 = array.new_float()
+var array<float> BW_s_y2 = array.new_float()
+var array<float> BW_f_prev = array.new_float()
+var array<float> BW_s_prev = array.new_float()
+
+var array<int>   BW_pos   = array.new_int()
+var array<float> BW_entry = array.new_float()
+var array<float> BW_gp    = array.new_float()
+var array<float> BW_gl    = array.new_float()
+var array<int>   BW_tr    = array.new_int()
+
+var int   BW_bestFast = na
+var int   BW_bestSlow = na
+var float BW_bestPF   = na
+var int   BW_bestTR   = na
+
+// Track last inputs (NO na on bool)
+var bool BW_hasLast = false
+var bool BW_lastAutoTune = false
+var int  BW_lastFastMin  = 0
+var int  BW_lastFastMax  = 0
+var int  BW_lastFastStep = 0
+var int  BW_lastSlowMin  = 0
+var int  BW_lastSlowMax  = 0
+var int  BW_lastSlowStep = 0
+var int  BW_lastMinTrades = 0
+
+// sanitize ranges
+int BW_fastMin  = math.min(BW_fastMinIn, BW_fastMaxIn)
+int BW_fastMax  = math.max(BW_fastMinIn, BW_fastMaxIn)
+int BW_fastStep = math.max(BW_fastStepIn, 1)
+
+int BW_slowMin  = math.min(BW_slowMinIn, BW_slowMaxIn)
+int BW_slowMax  = math.max(BW_slowMinIn, BW_slowMaxIn)
+int BW_slowStep = math.max(BW_slowStepIn, 1)
+
+bool BW_paramsChanged =
+     not BW_hasLast or
+     BW_lastAutoTune   != BW_autoTune or
+     BW_lastFastMin    != BW_fastMin  or
+     BW_lastFastMax    != BW_fastMax  or
+     BW_lastFastStep   != BW_fastStep or
+     BW_lastSlowMin    != BW_slowMin  or
+     BW_lastSlowMax    != BW_slowMax  or
+     BW_lastSlowStep   != BW_slowStep or
+     BW_lastMinTrades  != BW_minTrades
+
+bool BW_needBuild =
+     BW_autoTune and (
+         BW_paramsChanged or
+         not BW_built or
+         array.size(BW_f_b0) == 0 or
+         array.size(BW_s_b0) == 0
+     )
+
+//────────────────────────────────────────────────────────────────────
+// BUILD candidates
+//────────────────────────────────────────────────────────────────────
+if BW_needBuild
+    BW_lastAutoTune   := BW_autoTune
+    BW_lastFastMin    := BW_fastMin
+    BW_lastFastMax    := BW_fastMax
+    BW_lastFastStep   := BW_fastStep
+    BW_lastSlowMin    := BW_slowMin
+    BW_lastSlowMax    := BW_slowMax
+    BW_lastSlowStep   := BW_slowStep
+    BW_lastMinTrades  := BW_minTrades
+    BW_hasLast        := true
+
+    BW_bestFast := na
+    BW_bestSlow := na
+    BW_bestPF   := na
+    BW_bestTR   := na
+
+    array.clear(BW_fastList)
+    array.clear(BW_slowList)
+
+    int f = BW_fastMin
+    while f <= BW_fastMax
+        array.push(BW_fastList, f)
+        f += BW_fastStep
+
+    int s = BW_slowMin
+    while s <= BW_slowMax
+        array.push(BW_slowList, s)
+        s += BW_slowStep
+
+    int nFast = array.size(BW_fastList)
+    int nSlow = array.size(BW_slowList)
+    int nCand = nFast * nSlow
+
+    // reset arrays with deterministic size
+    BW_f_b0 := array.new_float(nCand, 0.0)
+    BW_f_b1 := array.new_float(nCand, 0.0)
+    BW_f_b2 := array.new_float(nCand, 0.0)
+    BW_f_a1 := array.new_float(nCand, 0.0)
+    BW_f_a2 := array.new_float(nCand, 0.0)
+
+    BW_s_b0 := array.new_float(nCand, 0.0)
+    BW_s_b1 := array.new_float(nCand, 0.0)
+    BW_s_b2 := array.new_float(nCand, 0.0)
+    BW_s_a1 := array.new_float(nCand, 0.0)
+    BW_s_a2 := array.new_float(nCand, 0.0)
+
+    float seed = nz(BW_src, close)
+
+    BW_f_y1   := array.new_float(nCand, seed)
+    BW_f_y2   := array.new_float(nCand, seed)
+    BW_s_y1   := array.new_float(nCand, seed)
+    BW_s_y2   := array.new_float(nCand, seed)
+    BW_f_prev := array.new_float(nCand, seed)
+    BW_s_prev := array.new_float(nCand, seed)
+
+    BW_pos   := array.new_int(nCand, 0)
+    BW_entry := array.new_float(nCand, na)
+    BW_gp    := array.new_float(nCand, 0.0)
+    BW_gl    := array.new_float(nCand, 0.0)
+    BW_tr    := array.new_int(nCand, 0)
+
+    // fill coeffs by index
+    if nCand > 0
+        int iF = 0
+        while iF < nFast
+            int fastP = array.get(BW_fastList, iF)
+            [fb0, fb1, fb2, fa1, fa2] = BW_coeffs(fastP)
+
+            int iS = 0
+            while iS < nSlow
+                int slowP = array.get(BW_slowList, iS)
+                [sb0, sb1, sb2, sa1, sa2] = BW_coeffs(slowP)
+
+                int k = iF * nSlow + iS
+
+                array.set(BW_f_b0, k, fb0), array.set(BW_f_b1, k, fb1), array.set(BW_f_b2, k, fb2), array.set(BW_f_a1, k, fa1), array.set(BW_f_a2, k, fa2)
+                array.set(BW_s_b0, k, sb0), array.set(BW_s_b1, k, sb1), array.set(BW_s_b2, k, sb2), array.set(BW_s_a1, k, sa1), array.set(BW_s_a2, k, sa2)
+
+                iS += 1
+            iF += 1
+
+    BW_built := (nCand > 0 and array.size(BW_tr) == nCand)
+
+// if autotune off
+if not BW_autoTune
+    BW_built := false
+
+//────────────────────────────────────────────────────────────────────
+// Per-bar simulation update
+//────────────────────────────────────────────────────────────────────
+int BW_nCand = array.size(BW_tr)
+int BW_nSlow = array.size(BW_slowList)
+bool BW_ready = BW_autoTune and BW_built and BW_nCand > 0 and BW_nSlow > 0
+
+if BW_ready and bar_index >= 2
+    float x  = nz(BW_src, close)
+    float x1 = nz(BW_src[1], x)
+    float x2 = nz(BW_src[2], x)
+
+    int k = 0
+    while k < BW_nCand
+        float fb0 = array.get(BW_f_b0, k), fb1 = array.get(BW_f_b1, k), fb2 = array.get(BW_f_b2, k), fa1 = array.get(BW_f_a1, k), fa2 = array.get(BW_f_a2, k)
+        float sb0 = array.get(BW_s_b0, k), sb1 = array.get(BW_s_b1, k), sb2 = array.get(BW_s_b2, k), sa1 = array.get(BW_s_a1, k), sa2 = array.get(BW_s_a2, k)
+
+        float fy1 = array.get(BW_f_y1, k), fy2 = array.get(BW_f_y2, k)
+        float sy1 = array.get(BW_s_y1, k), sy2 = array.get(BW_s_y2, k)
+
+        float fNew = fb0*x + fb1*x1 + fb2*x2 - fa1*fy1 - fa2*fy2
+        float sNew = sb0*x + sb1*x1 + sb2*x2 - sa1*sy1 - sa2*sy2
+
+        array.set(BW_f_y2, k, fy1), array.set(BW_f_y1, k, fNew)
+        array.set(BW_s_y2, k, sy1), array.set(BW_s_y1, k, sNew)
+
+        float fPrev = array.get(BW_f_prev, k)
+        float sPrev = array.get(BW_s_prev, k)
+
+        bool crossUp = (fPrev <= sPrev) and (fNew > sNew)
+        bool crossDn = (fPrev >= sPrev) and (fNew < sNew)
+
+        array.set(BW_f_prev, k, fNew)
+        array.set(BW_s_prev, k, sNew)
+
+        int   pos   = array.get(BW_pos, k)
+        float entry = array.get(BW_entry, k)
+        float gp    = array.get(BW_gp, k)
+        float gl    = array.get(BW_gl, k)
+        int   tr    = array.get(BW_tr, k)
+
+        // CROSS UP: close old pos (if any), then open long
+        if crossUp
+            if pos != 0 and not na(entry)
+                float pnl = pos == 1 ? (close - entry) : (entry - close)
+                tr += 1
+                if pnl > 0
+                    gp += pnl
+                else
+                    gl += -pnl
+            pos := 1
+            entry := close
+
+        // CROSS DN: close old pos (if any), then open short
+        if crossDn
+            if pos != 0 and not na(entry)
+                float pnl = pos == 1 ? (close - entry) : (entry - close)
+                tr += 1
+                if pnl > 0
+                    gp += pnl
+                else
+                    gl += -pnl
+            pos := -1
+            entry := close
+
+        array.set(BW_pos, k, pos)
+        array.set(BW_entry, k, entry)
+        array.set(BW_gp, k, gp)
+        array.set(BW_gl, k, gl)
+        array.set(BW_tr, k, tr)
+
+        k += 1
+
+// Force-close all simulated open positions on the last bar
+if BW_ready and barstate.islastconfirmedhistory
+    int k2 = 0
+    while k2 < BW_nCand
+        int   pos2   = array.get(BW_pos, k2)
+        float entry2 = array.get(BW_entry, k2)
+        float gp2    = array.get(BW_gp, k2)
+        float gl2    = array.get(BW_gl, k2)
+        int   tr2    = array.get(BW_tr, k2)
+
+        if pos2 != 0 and not na(entry2)
+            float pnl2 = pos2 == 1 ? (close - entry2) : (entry2 - close)
+            tr2 += 1
+            if pnl2 > 0
+                gp2 += pnl2
+            else
+                gl2 += -pnl2
+
+            array.set(BW_pos, k2, 0)
+            array.set(BW_entry, k2, na)
+            array.set(BW_gp, k2, gp2)
+            array.set(BW_gl, k2, gl2)
+            array.set(BW_tr, k2, tr2)
+
+        k2 += 1
+
+// Pick best PF at end
+if BW_ready and barstate.islastconfirmedhistory
+    float bestPF = -1.0
+    int bestK = na
+
+    int k3 = 0
+    while k3 < BW_nCand
+        float gp = array.get(BW_gp, k3)
+        float gl = array.get(BW_gl, k3)
+        int   tr = array.get(BW_tr, k3)
+
+        float pf = gl > 0 ? gp / gl : (gp > 0 ? 999999.0 : 0.0)
+
+        if tr >= BW_minTrades and pf > bestPF
+            bestPF := pf
+            bestK := k3
+
+        k3 += 1
+
+    if not na(bestK)
+        int bestFastIdx = int(math.floor(bestK / BW_nSlow))
+        int bestSlowIdx = bestK - bestFastIdx * BW_nSlow
+
+        if bestFastIdx >= 0 and bestFastIdx < array.size(BW_fastList) and bestSlowIdx >= 0 and bestSlowIdx < array.size(BW_slowList)
+            BW_bestFast := array.get(BW_fastList, bestFastIdx)
+            BW_bestSlow := array.get(BW_slowList, bestSlowIdx)
+            BW_bestPF   := bestPF
+            BW_bestTR   := array.get(BW_tr, bestK)
+
+//────────────────────────────────────────────────────────────────────
+// Choose periods to trade/plot
+//────────────────────────────────────────────────────────────────────
+int BW_fastPer = (BW_autoTune and not na(BW_bestFast)) ? BW_bestFast : BW_fastPerManual
+int BW_slowPer = (BW_autoTune and not na(BW_bestSlow)) ? BW_bestSlow : BW_slowPerManual
+
+float BW_fast = BW_butter2pole_single(BW_src, BW_fastPer)
+float BW_slow = BW_butter2pole_single(BW_src, BW_slowPer)
+
+// Flip strategy
+bool BW_longSig  = ta.crossover(BW_fast, BW_slow)
+bool BW_shortSig = ta.crossunder(BW_fast, BW_slow)
+
+if BW_longSig
+    if BW_useShorts
+        strategy.close("S")
+    if BW_useLongs
+        strategy.entry("L", strategy.long)
+
+if BW_shortSig
+    if BW_useLongs
+        strategy.close("L")
+    if BW_useShorts
+        strategy.entry("S", strategy.short)
+
+//────────────────────────────────────────────────────────────────────
+// Plots + status box
+//────────────────────────────────────────────────────────────────────
+plot(BW_src, "Source", color = color.new(color.gray, 70))
+plot(BW_showFast ? BW_fast : na, "FAST Butterworth LPF", color = color.new(color.aqua, 0), linewidth = 2)
+plot(BW_showSlow ? BW_slow : na, "SLOW Butterworth LPF", color = color.new(color.orange, 0), linewidth = 2)
+
+var label BW_lbl = na
+if barstate.islastconfirmedhistory
+    label.delete(BW_lbl)
+
+    string atLine =
+         "AT=" + (BW_autoTune ? "ON" : "OFF") +
+         " built=" + (BW_built ? "Y" : "N") +
+         " cand=" + str.tostring(BW_nCand) +
+         " minTR=" + str.tostring(BW_minTrades)
+
+    string bestLine =
+         (BW_autoTune and not na(BW_bestFast)) ?
+         ("Best Fast=" + str.tostring(BW_bestFast) +
+          "  Best Slow=" + str.tostring(BW_bestSlow) +
+          "\nPF=" + str.tostring(BW_bestPF, "#.###") +
+          "  TR=" + str.tostring(BW_bestTR)) :
+         ("Manual Fast=" + str.tostring(BW_fastPerManual) +
+          "  Slow=" + str.tostring(BW_slowPerManual))
+
+    BW_lbl := label.new(bar_index, high, atLine + "\n" + bestLine,
+         style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0))
+
+View in Pine Editor・404 lines
+Use on chart
+4
+768
+Butterworth LPF Flip + AutoTune (PF)
+This strategy trades price trend flips using two Butterworth low-pass filters (a FAST filter and a SLOW filter). A trade is taken when the FAST filter crosses the SLOW filter. Optionally, the script can auto-tune the filter lengths by simulating many Fast/Slow combinations and selecting the pair with the best Profit Factor (PF).
+What the Script Does
+- Computes two 2‑pole Butterworth low‑pass filters on price.
+- Enters LONG when FAST crosses above SLOW.
+- Enters SHORT when FAST crosses below SLOW.
+- Optionally simulates many Fast/Slow length combinations internally.
+- Chooses the Fast/Slow pair with the highest Profit Factor.
+- Trades only the selected best pair.
+Manual Mode (Default)
+1. Leave Auto‑Tune OFF.
+2. Set:
+- FAST cutoff period (bars)
+- SLOW cutoff period (bars)
+3. The strategy will trade using only these values.
+
+Use this mode for normal trading or live deployment.
+Auto‑Tune Mode
+1. Enable Auto‑Tune.
+2. Define Fast and Slow ranges:
+- FAST min / max / step
+- SLOW min / max / step
+3. The script simulates ALL Fast × Slow combinations bar‑by‑bar.
+4. Each combination tracks:
+- Gross Profit
+- Gross Loss
+- Closed trades
+- Profit Factor (PF = GP / GL)
+5. At the end of the chart, the best PF pair is selected and used for trading.
+Interpreting the End Box
+The status label at the end of the chart reports:
+- Whether Auto‑Tune is enabled
+- Number of candidate pairs tested
+- Best FAST period
+- Best SLOW period
+- Profit Factor of the best pair
+- Win Rate (wins ÷ closed trades)
+
+If PF is near 1.0 or trades are very low, expand the range or length of the test.
+Best Practices
+- Use Auto‑Tune ONLY for research and optimization.
+- After finding good parameters, disable Auto‑Tune and trade manually.
+- Keep Fast < Slow (logical separation).
+- Longer charts produce more reliable PF results.
+- Avoid very small step sizes (performance + noise).
+Known Limitations
+- Pine Script runs bar‑by‑bar; tuning is approximate, not vectorized.
+- Large grids increase execution time.
+- Results are historical and NOT predictive.
+- Not suitable for live auto‑optimization.
+Summary
+This script is best viewed as a *research tool first, strategy second*. Use it to discover stable Fast/Slow regimes, then lock them in for simple, repeatable trading.
+

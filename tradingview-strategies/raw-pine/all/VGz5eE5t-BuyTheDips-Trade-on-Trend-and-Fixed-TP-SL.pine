@@ -1,0 +1,74 @@
+//@version=6
+strategy('BuyTheDips Trade on Trend and Fixed TP/SL', overlay = true)
+
+// Input Parameters
+fastLength = input.int(50, title = 'Fast EMA Length', minval = 1)
+slowLength = input.int(200, title = 'Slow EMA Length', minval = 1)
+takeProfitPerc = input.float(0.7, title = 'Take Profit (%)', step = 0.1)
+stopLossPerc = input.float(2.0, title = 'Stop Loss (%)', step = 0.1)
+
+// Calculate EMAs
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+
+// Trend Detection
+isBullishTrend = fastEMA > slowEMA
+isBearishTrend = fastEMA < slowEMA
+
+// Entry Signals
+longSignal = ta.crossover(fastEMA, slowEMA) and isBullishTrend
+shortSignal = ta.crossunder(fastEMA, slowEMA) and isBearishTrend
+
+// Convert TP/SL percentages into price levels
+longTakeProfit = close * (1 + takeProfitPerc / 100)
+longStopLoss = close * (1 - stopLossPerc / 100)
+shortTakeProfit = close * (1 - takeProfitPerc / 100)
+shortStopLoss = close * (1 + stopLossPerc / 100)
+
+// Execute Trades
+if longSignal
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Take Profit/Stop Loss', 'Long', limit = longTakeProfit, stop = longStopLoss)
+
+if shortSignal
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Take Profit/Stop Loss', 'Short', limit = shortTakeProfit, stop = shortStopLoss)
+
+// Plot EMAs
+plot(fastEMA, title = 'Fast EMA', color = color.green, linewidth = 2)
+plot(slowEMA, title = 'Slow EMA', color = color.red, linewidth = 2)
+
+// Plot Buy and Sell Labels
+plotshape(series = longSignal, title = 'Buy Signal', location = location.belowbar, color = color.green, style = shape.labelup, text = 'BUY')
+plotshape(series = shortSignal, title = 'Sell Signal', location = location.abovebar, color = color.red, style = shape.labeldown, text = 'SELL')
+
+View in Pine Editor・46 lines
+Use on chart
+5
+9
+2 556
+
+
+This strategy is designed to trade in the direction of the trend using exponential moving average (EMA) crossovers as signals while employing fixed percentages for take profit (TP) and stop loss (SL) to manage risk and reward. It is suitable for both scalping and swing trading on any timeframe, with its default settings optimized for short-term price movements.
+
+How It Works
+EMA Crossovers:
+
+The strategy uses two EMAs: a fast EMA (shorter period) and a slow EMA (longer period).
+A buy signal is triggered when the fast EMA crosses above the slow EMA, indicating a potential bullish trend.
+A sell signal is triggered when the fast EMA crosses below the slow EMA, signaling a bearish trend.
+Trend Filtering:
+
+To improve signal reliability, the strategy only takes trades in the direction of the overall trend:
+Long trades are executed only when the fast EMA is above the slow EMA (bullish trend).
+Short trades are executed only when the fast EMA is below the slow EMA (bearish trend).
+This filtering ensures trades are aligned with the prevailing market direction, reducing false signals.
+Risk Management (Fixed TP/SL):
+
+The strategy uses fixed percentages for take profit and stop loss:
+Take Profit: A percentage above the entry price for long trades (or below for short trades).
+Stop Loss: A percentage below the entry price for long trades (or above for short trades).
+These percentages can be customized to balance risk and reward according to your trading style.
+For example:
+If the take profit is set to 2% and the stop loss to 1%, the strategy operates with a 2:1 risk-reward ratio. 
+BTCUSDT

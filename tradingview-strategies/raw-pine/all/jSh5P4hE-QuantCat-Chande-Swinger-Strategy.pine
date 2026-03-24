@@ -1,0 +1,74 @@
+//@version=4
+strategy("Chande Minute Swinger", overlay=true)
+
+//Chande
+
+length = input(9, minval=1)
+src = close
+momm = change(src)
+f1(m) => m >= 0.0 ? m : 0.0
+f2(m) => m >= 0.0 ? 0.0 : -m
+m1 = f1(momm)
+m2 = f2(momm)
+sm1 = sum(m1, length)
+sm2 = sum(m2, length)
+percent(nom, div) => 100 * nom / div
+chandeMO = percent(sm1-sm2, sm1+sm2)
+
+//Parameters to change
+
+lengthLookback = 425 //425 golden number
+buyPercentile = 1
+sellPercentile = 99
+linePercentileLow = 2.5
+linePercentileHigh = 97.5
+
+buy = percentile_nearest_rank(chandeMO, lengthLookback, buyPercentile)
+exitBuy= percentile_nearest_rank(chandeMO, lengthLookback, linePercentileHigh)
+sell = percentile_nearest_rank(chandeMO, lengthLookback, sellPercentile)
+exitSell = percentile_nearest_rank(chandeMO, lengthLookback, linePercentileLow)
+
+chandeMA = sma(chandeMO, 9) //sma for potential other strategies implementing cross / trend
+
+//Entry conditions
+
+closeLongCondition = chandeMO > exitBuy ? true : false
+closeShortCondition = chandeMO < exitSell ? true : false
+longCondition = chandeMO < buy
+shortCondition = chandeMO > sell
+
+if (longCondition)
+    strategy.entry("long", strategy.long)
+    
+
+if (shortCondition)
+    strategy.entry("short", strategy.short)
+    
+//Introducing the closes and a stoploss will minimise loss and bring up the sharpe ratio
+//Current settings are enabled for maximum potential but big risk
+    
+//strategy.close("long", when=(closeLongCondition == true))
+//strategy.close("short", when=(closeShortCondition == true))
+
+View in Pine Editor・51 lines
+Use on chart
+4
+7
+5
+10 222
+QuantCat Chande Swinger
+
+This strategy is designed to be used on the 1 minute with mainly bitcoin, and cryptocurrencies. But parameters can be adjusted to ANY pair.
+
+After some long research about chande momentum oscillator, I decided to create a strategy using normal distribution percentage levels to snipe entries. This in turn on the 1 minute can create a nice profit over a consecutive amount of days, the end goal is to get a stronger version of this strategy running on a bot and print some money. This strategy is tightly defined, and can be loosened up to make more trades too- giving a higher sample size and better sharpe ratio.
+
+The strategy checks to see if the Chande value is in an extreme percentile based on the last few hundred chande values- if it is it will open a position.
+
+No stoploss or take profit implemented into the swinger yet, but this will be the next addition to really minimise loss and amplify potential profits.
+
+Any liquid crypto pair on the low timesframes will net a good result with this strategy.
+
+We also have a free 15M and 1H strategy available too.
+
+You can join our discord server to get live alerts for the strategies as well as speak to our devs! Link in signature below!!!
+

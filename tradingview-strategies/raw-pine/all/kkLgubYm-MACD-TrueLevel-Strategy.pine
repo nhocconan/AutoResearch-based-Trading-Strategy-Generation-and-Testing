@@ -1,0 +1,3 @@
+//@version=4
+fill_color=##input(defval=#00bfff0d,type='INPUT_COLOR',##id='in_20')
+##root(root_metainfo,fill_0_0,fill_color,input__color)

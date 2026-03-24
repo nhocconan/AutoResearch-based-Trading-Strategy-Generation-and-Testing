@@ -1,0 +1,198 @@
+//@version=6
+strategy("EURUSD | Yield Curve Flip Strategy (2s10s State Flips)", overlay=true,
+     initial_capital=100000, pyramiding=0,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     calc_on_every_tick=false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+tfRates  = input.timeframe("D", "Rates Timeframe (empfohlen: D)")
+
+symUS2Y  = input.symbol("TVC:US02Y", "US 2Y (TVC)")
+symUS10Y = input.symbol("TVC:US10Y", "US 10Y (TVC)")
+
+// Regime detection
+N        = input.int(5,       "Lookback (days)", minval=1)
+thrCurve = input.float(0.10,  "Curve move thr (pp)", step=0.05) // 0.10 = 10bp
+thrLeg   = input.float(0.05,  "Leg confirm (pp)", step=0.05)   // 0.05 = 5bp
+
+// Trading behavior
+enterFromNeutral      = input.bool(true,  "Ersten State aus Neutral traden")
+allowBearSteepForShort= input.bool(false, "Bear Steepener auch SHORT traden")
+onlyOnNewRatesBar     = input.bool(true,  "Signale nur auf neuem Rates-Bar")
+
+// Visual
+showStateBg = input.bool(true, "State Hintergrund")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pull yields
+// ─────────────────────────────────────────────────────────────────────────────
+us2y  = request.security(symUS2Y,  tfRates, close, barmerge.gaps_off, barmerge.lookahead_off)
+us10y = request.security(symUS10Y, tfRates, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+ratesOk = not (na(us2y) or na(us10y))
+
+ratesTime     = request.security(symUS2Y, tfRates, time, barmerge.gaps_off, barmerge.lookahead_off)
+isNewRatesBar = ta.change(ratesTime) != 0
+
+gate = ratesOk and (not onlyOnNewRatesBar or isNewRatesBar)
+
+// True N-day change based on rates bars (not intraday bars)
+f_change_days(src, days) =>
+    src - ta.valuewhen(isNewRatesBar, src, days)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Curve + regime classification (Bond definitions)
+// ─────────────────────────────────────────────────────────────────────────────
+curveUS = us10y - us2y
+
+dCurveUS = f_change_days(curveUS, N)
+d2yUS    = f_change_days(us2y,  N)
+d10yUS   = f_change_days(us10y, N)
+
+haveHist = not (na(dCurveUS) or na(d2yUS) or na(d10yUS))
+
+isSteep = haveHist and (dCurveUS >  thrCurve)
+isFlat  = haveHist and (dCurveUS < -thrCurve)
+
+// Correct bond-regime labels:
+bullSteep = isSteep and (d2yUS  < -thrLeg)  // yields down, 2Y down more -> steepener
+bearSteep = isSteep and (d10yUS >  thrLeg)  // yields up, 10Y up more -> steepener
+bullFlat  = isFlat  and (d10yUS < -thrLeg)  // yields down, 10Y down more -> flattener
+bearFlat  = isFlat  and (d2yUS  >  thrLeg)  // yields up, 2Y up more -> flattener
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State memory + flip detection
+// curveState: +1 bull, -1 bear, 0 neutral
+// ─────────────────────────────────────────────────────────────────────────────
+var int curveState = 0
+int newState = 0
+
+bool bullNow = bullSteep or bullFlat
+bool bearNow = bearFlat or (allowBearSteepForShort and bearSteep)
+
+if bullNow
+    newState := 1
+else if bearNow
+    newState := -1
+else
+    newState := 0
+
+prevState = curveState
+
+// Update state only on rates bars (prevents noise on intraday)
+if isNewRatesBar and newState != 0
+    curveState := newState
+
+flipToBull = gate and (newState == 1) and ((prevState < 0) or (enterFromNeutral and prevState == 0))
+flipToBear = gate and (newState == -1) and ((prevState > 0) or (enterFromNeutral and prevState == 0))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trading: enter/reverse only on flips
+// ─────────────────────────────────────────────────────────────────────────────
+if flipToBull
+    strategy.close("S")
+    strategy.entry("L", strategy.long)
+
+if flipToBear
+    strategy.close("L")
+    strategy.entry("S", strategy.short)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visuals
+// ─────────────────────────────────────────────────────────────────────────────
+bgcolor(showStateBg ? (curveState > 0 ? color.new(color.green, 88) : curveState < 0 ? color.new(color.red, 88) : na) : na)
+
+plot(curveUS, "US 2s10s", display=display.none)
+plot(dCurveUS, "ΔCurveUS (N days)", display=display.none)
+
+View in Pine Editor・108 lines
+Use on chart
+9
+622
+Strategy Core (Concept)
+
+The strategy trades EURUSD exclusively when the US yield curve regime (2Y/10Y) flips into a new, clearly bullish or bearish regime. The core assumption is that re-pricing in the US yield curve (rather than individual data points) is a robust driver of USD strength or weakness and can act as a structural trigger for trend changes.
+
+⸻
+
+Data Basis
+• Uses US 2Y Yield (TVC:US02Y) and US 10Y Yield (TVC:US10Y).
+• The 2s10s curve is calculated as:
+curveUS = US10Y – US2Y
+• Regime assessment is based on the N-day change (default: 5 days), calculated on true rates bars (not intraday noise).
+
+⸻
+
+Regime Detection (Correct Bond Logic)
+
+First, the strategy checks whether the curve has significantly steepened or flattened over the lookback period:
+• Steepener if Δ(2s10s) > thrCurve (default: +0.10 percentage points = 10 bp)
+• Flattener if Δ(2s10s) < −thrCurve
+
+Next, a leg confirmation determines the specific type of steepener/flattener (default thrLeg = 5 bp):
+
+Bull Steepener
+• Curve steepens because yields fall, with the 2Y falling more (risk-off / rate-cut pricing)
+
+Bear Steepener
+• Curve steepens because yields rise, with the 10Y rising more (reflation / term-premium move)
+
+Bull Flattener
+• Curve flattens because yields fall, with the 10Y falling more (growth shock / long-end rally)
+
+Bear Flattener
+• Curve flattens because yields rise, with the 2Y rising more (hawkish repricing / front-end up)
+
+Important: By default, a Bear Steepener is not treated as a bearish signal, unless allowBearSteepForShort is enabled.
+
+⸻
+
+State Machine (Memory + Flip Triggers)
+
+The strategy maintains a persistent state variable curveState:
+• +1 = bullish
+• −1 = bearish
+• 0 = neutral
+
+The state is updated only on a new rates bar (daily rates when tfRates = "D"), avoiding intraday noise.
+
+A trade is generated only on a true regime flip:
+• flipToBull: new state turns bullish and the previous state was bearish (or neutral, if allowed)
+• flipToBear: new state turns bearish and the previous state was bullish (or neutral, if allowed)
+
+The option enterFromNeutral controls whether the first clear regime emerging from neutral is traded.
+
+The option onlyOnNewRatesBar ensures signals occur only when a new rates bar is printed, providing clean timing.
+
+⸻
+
+Trading Rules (Entry / Exit)
+
+There are no stops, targets, or trailing mechanisms. The strategy is a pure regime-switching / reversal system:
+• On flipToBull
+• Close short (“S”)
+• Open long (“L”)
+• On flipToBear
+• Close long (“L”)
+• Open short (“S”)
+
+Positions are therefore held until the next regime flip.
+
+⸻
+
+Parameter Interpretation
+• N: Smoothing / inertia. Smaller = faster but noisier; larger = more stable but later.
+• thrCurve: Minimum curve move required to define a regime.
+• thrLeg: Minimum move of the confirming leg (2Y or 10Y) to reduce misclassification.
+• allowBearSteepForShort: Makes the system more aggressive (more bearish signals), but represents a different macro case.
+• enterFromNeutral: Increases trade frequency by trading the first regime impulse.
+
+⸻
+
+What You See on the Chart
+• Background shading:
+• Green for bullish state
+• Red for bearish state
+• The curve and Δ-curve are plotted but hidden (display=none), mainly for debugging and analysis.

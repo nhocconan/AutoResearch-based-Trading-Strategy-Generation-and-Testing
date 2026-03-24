@@ -1,0 +1,151 @@
+//@version=4
+strategy("[cache_that_pass] 1m 15m Function - Weighted Standard Deviation", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=20, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.075)
+
+f_weighted_sd_from_series(_src, _weight, _n) => //{
+//  @function: Calculates weighted mean, variance, standard deviation, MSE and RMSE from time series variables
+//  @parameters:
+//      _src: time series variable of sample values
+//      _weight: time series of corresponding weight values.
+//      _n : number of samples
+    _xw = _src * _weight
+    _sum_weight = sum(_weight, _n)
+    _mean = sum(_xw, _n) / _sum_weight
+    float _sqerror_sum = 0
+    int _nonzero_n = 0
+    for _i = 0 to _n - 1
+        _sqerror_sum := _sqerror_sum + pow(_mean - _src[_i], 2) * _weight[_i]
+        _nonzero_n := _weight[_i] != 0 ? _nonzero_n + 1 : _nonzero_n
+    _variance = _sqerror_sum / ((_nonzero_n - 1) * _sum_weight / _nonzero_n)
+    _dev = sqrt(_variance)
+    _mse = _sqerror_sum / _sum_weight
+    _rmse = sqrt(_mse)
+    [_mean, _variance, _dev, _mse, _rmse]
+//}
+// -----------------------------------------------------------------------------
+
+f_weighted_sd_from_arrays(_a_src, _a_weight, _n) => //{
+//  @function: Calculates weighted mean, variance, standard deviation, MSE and RMSE from arrays
+//  Expects index 0 of the arrays to be the most recent sample and weight values!
+//  @parameters:
+//      _a_src: array of sample values
+//      _a_weight: array of corresponding weight values.
+//      _n : number of samples
+    float _mean = na, float _variance = na, float _dev = na, float _mse = na
+    float _rmse = na, float _sqerror_sum = na, float _sum_weight = na
+    float[] _a_xw = array.new_float(_n)
+    int _nonzero_n = 0
+    if array.size(_a_src) >= _n
+        _sum_weight := 0
+        _sqerror_sum := 0
+        for _i = 0 to _n - 1
+            array.set(_a_xw, _i, array.get(_a_src, _i) * array.get(_a_weight, _i))
+            _sum_weight := _sum_weight + array.get(_a_weight, _i)
+            _nonzero_n := array.get(_a_weight, _i) != 0 ? _nonzero_n + 1 : _nonzero_n
+        _mean := array.sum(_a_xw) / _sum_weight
+        for _j = 0 to _n - 1
+            _sqerror_sum := _sqerror_sum + pow(_mean - array.get(_a_src, _j), 2) * array.get(_a_weight, _j)
+        _variance := _sqerror_sum / ((_nonzero_n - 1) * _sum_weight / _nonzero_n)
+        _dev := sqrt(_variance)
+        _mse := _sqerror_sum / _sum_weight
+        _rmse := sqrt(_mse)
+    [_mean, _variance, _dev, _mse, _rmse]
+//}
+
+
+// -----------------------------------------------------------------------------
+// Example usage : 
+// -----------------------------------------------------------------------------
+
+len = input(20)
+
+// -----------------------------------------------------------------------------
+// From series :
+// -----------------------------------------------------------------------------
+[m, v, d, mse, rmse] = f_weighted_sd_from_series(close, volume, len)
+
+
+plot(m, color = color.blue)
+plot(m + d * 2, color = color.blue)
+plot(m - d * 2, color = color.blue)
+// -----------------------------------------------------------------------------
+
+
+
+// -----------------------------------------------------------------------------
+// From arrays : 
+// -----------------------------------------------------------------------------
+var float[] a_src = array.new_float()
+var float[] a_weight = array.new_float()
+
+if barstate.isfirst
+    for i = 1 to len
+        array.unshift(a_weight, i)
+
+array.unshift(a_src, close)
+
+if array.size(a_src) > len
+    array.pop(a_src)
+
+[a_m, a_v, a_d, a_mse, a_rmse] = f_weighted_sd_from_arrays(a_src, a_weight, len)
+
+plot(a_m, color = color.orange)
+plot(a_m + a_d * 2, color = color.orange)
+plot(a_m - a_d * 2, color = color.orange)
+// -----------------------------------------------------------------------------
+
+
+series_text = "Mean : " + tostring(m) + "\nVariance : " + tostring(v) + "\nSD : " + tostring(d) + "\nMSE : " + tostring(mse) +  "\nRMSE : " + tostring(rmse)
+array_text = "Mean : " + tostring(a_m) + "\nVariance : " + tostring(a_v) + "\nSD : " + tostring(a_d) + "\nMSE : " + tostring(a_mse) +  "\nRMSE : " + tostring(a_rmse)
+debug_text = "Volume weighted from time series : \n" + series_text + "\n\nLinearly weighted from arrays : \n" + array_text
+
+//debug = label.new(x = bar_index, y = close, text = debug_text, style = label.style_label_left)
+//.delete(debug[1])
+
+//test strategy
+if low <= (m - d * 2)
+    strategy.entry("LE", strategy.long)
+if high >= (m + d * 2)
+    strategy.entry("SE", strategy.short)
+
+// User Options to Change Inputs (%)
+stopPer = input(3.11, title='Stop Loss %', type=input.float) / 100
+takePer = input(7.50, title='Take Profit %', type=input.float) / 100
+
+// Determine where you've entered and in what direction
+longStop = strategy.position_avg_price * (1 - stopPer)
+shortStop = strategy.position_avg_price * (1 + stopPer)
+shortTake = strategy.position_avg_price * (1 - takePer)
+longTake = strategy.position_avg_price * (1 + takePer)
+
+if strategy.position_size > 0 
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake)
+//    strategy.close("LE", when = (longStop) or (longTake), qty_percent = 100)
+if strategy.position_size < 0 
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake)
+//    strategy.close("SE", when = (shortStop) or (shortTake), qty_percent = 100)
+
+View in Pine Editor・128 lines
+Use on chart
+9
+2
+1
+4 188
+Tradingview Community,
+
+As I progress through my journey, I have come to the realization that it is time to give back. This script isn't a life changer, but it has the building blocks for a motivated individual to optimize the parameters and have a production script ready to go.
+
+Credit for the indicator is due to rumpypumpydumpy
+
+I adapted this indicator to a strategy for crypto markets. 15 minute time frame has worked best for me.
+
+It is a standard deviation script that has 3 important user configured parameters. These 3 things are what the end user should tweak for optimum returns. They are....
+1) Lookback Length - I have had luck with it set to 20, but any value from 1-1000 it will accept.
+2) stopPer - Stop Loss percentage of each trade
+3) takePer - Take Profit percentage of each trade
+
+2 and 3 above are where you will see significant changes in returns by altering them and trying different percentages. An experienced pinescript programmer can take this and build on it even more. If you do, I ask that you please share the script with the community in an open-source fashion.
+
+It also already accounts for the commission percentage of 0.075% that Binance.US uses for people who pay fees with BNB.
+
+How it works...
+It calculates a weighted standard deviation of the price for the lookback period set (so 20 candles is default). It recalculates each time a new candle is printed. It trades when price lows crossunder the bottom of that deviation channel, and sells when price highs crossover the top of that deviation channel. It works best in mid to long term sideways channels / Wyckoff accumulation periods.

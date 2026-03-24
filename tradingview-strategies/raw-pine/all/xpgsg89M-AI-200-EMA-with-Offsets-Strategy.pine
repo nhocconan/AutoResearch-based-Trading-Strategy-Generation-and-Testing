@@ -1,0 +1,45 @@
+//@version=6
+strategy("AI - 200 EMA with Offsets Strategy", overlay=true, calc_on_every_tick=false, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3, pyramiding=1, margin_long=0, margin_short=0, fill_orders_on_standard_ohlc=true)
+
+// === Date Filter ===
+startYear  = input.int(2018, "Start Year", minval=1900, maxval=2100)
+startMonth = input.int(1, "Start Month", minval=1, maxval=12)
+startDay   = input.int(1, "Start Day", minval=1, maxval=31)
+endYear    = input.int(2069, "End Year", minval=1900, maxval=2100)
+endMonth   = input.int(12, "End Month", minval=1, maxval=12)
+endDay     = input.int(31, "End Day", minval=1, maxval=31)
+
+inDateRange = (time >= timestamp(startYear, startMonth, startDay, 0, 0)) and (time <= timestamp(endYear, endMonth, endDay, 23, 59))
+
+// === EMA Calculations ===
+ema200 = ta.ema(close, 200)
+ema200_plus4 = ema200 * 1.04
+ema200_minus4 = ema200 * 0.96
+ema200_minus65 = ema200 * 0.935
+
+// === Plots ===
+plot(ema200, color=color.yellow, title="200 EMA")
+plot(ema200_plus4, color=color.green, title="EMA +4%")
+plot(ema200_minus4, color=color.red, title="EMA -4%")
+plot(ema200_minus65, color=color.blue, title="EMA -6.5%")
+
+// === Strategy Logic ===
+// Long Entry Condition
+buySignal = ta.crossover(close, ema200_plus4)
+// Long Exit Condition
+sellSignal = ta.crossunder(close, ema200_minus65)
+
+// === Orders ===
+if inDateRange and buySignal
+    strategy.entry("Long", strategy.long)
+
+if inDateRange and sellSignal
+    strategy.close("Long")
+
+View in Pine Editor・37 lines
+Use on chart
+4
+0
+1 444
+Long when close price crosses above +4% offset 200 day EMA
+Sell when close price crosses below -6.5% offset 200 day EMA

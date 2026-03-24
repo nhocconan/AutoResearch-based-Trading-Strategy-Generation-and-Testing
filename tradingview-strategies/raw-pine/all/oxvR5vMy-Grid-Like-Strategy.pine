@@ -1,0 +1,103 @@
+//@version=4
+strategy("Grid Like Strategy",overlay=true,process_orders_on_close=true)
+point = input(2.)
+os    = input(1,"Order Size")
+mf    = input(2.,"Martingale Multiplier")
+anti  = input(false,"Anti Martingale")
+//----
+baseline = 0.
+baseline := nz(close > baseline[1] + point or close < baseline[1] - point ? 
+  close : baseline[1],close)
+upper = baseline + point
+lower = baseline - point
+//----
+size = 0.
+loss = change(strategy.losstrades)
+win = change(strategy.wintrades)
+if anti
+    size := win ? size[1]*mf : loss ? os : nz(size[1],os)
+else
+    size := loss ? size[1]*mf : win ? os : nz(size[1],os)
+//----
+if baseline > baseline[1]
+    strategy.entry("Buy",strategy.long,qty=size)
+    strategy.exit("buy/tp/sl","Buy",stop=lower,limit=upper)
+if baseline < baseline[1]
+    strategy.entry("Sell",strategy.short,qty=size)
+    strategy.exit("sell/tp/sl","Sell",stop=upper,limit=lower)
+//----
+plot(baseline,"Plot",#2157f3,2)
+
+View in Pine Editor・33 lines
+Use on chart
+2.6 K
+14
+60 838
+It is possible to use progressive position sizing in order to recover from past losses, a well-known position sizing system being the "martingale", which consists of doubling your position size after a loss, this allows you to recover any previous losses in a losing streak + winning an extra. This system has seen a lot of attention from the trading community (mostly from beginners), and many strategies have been designed around the martingale, one of them being "grid trading strategies".
+
+While such strategies often shows promising results on paper, they are often subjects to many frictions during live trading that makes them totally unusable and dangerous to the trader. The motivations behind posting such a strategy isn't to glorify such systems, but rather to present the problems behind them, many users come to me with their ideas and glorious ways to make money, sometimes they present strategies using the martingale, and it is important to present the flaws of this methodology rather than blindly saying "you shouldn't use it".
+
+Strategy Settings
+
+Point determines the "grid" size and should be adjusted accordingly to the scale of the symbol you are applying the strategy to. Higher value would require larger price movements in order to trigger a trade, as such higher values will generate fewer trades.
+
+The order size determines the number of contracts/shares to purchase.
+
+The martingale multiplier determines the factor by which the position size is multiplied after a loss, using values higher to 2 will "squarify" your balance, while a value of 1 would use a constant position sizing.
+
+Finally, the anti-martingale parameter determines whether the strategy uses a reverse martingale or not, if set to true then the position size is multiplied after any wins.
+
+The Grid
+
+Grid strategies are commons and do not present huge problems until we use certain position sizing methods such as the martingale. A martingale is extremely sensitive to any kind of friction (frictional costs, slippage...etc), the grid strategy aims to provide a stable and simple environment where a martingale might possibly behave well.
+
+
+
+
+The goal of a simple grid strategy is to go long once the price crossover a certain level, a take profit is set at the level above the current one and stop loss is placed at the level below the current one, in a winning scenario the price reach the take profit, the position is closed and a new one is opened with the same setup. In a losing scenario, the price reaches the stop loss level, the position is closed and a short one is opened, the take profit is set at the level below the current one, and a stop loss is set at the level above the current one. Note that all levels are equally spaced.
+
+It follows from this strategy that wins and losses should be constant over time, as such our balance would evolve in a linear fashion. This is a great setup for a martingale, as we are theoretically assured to recover all the looses in a losing streak.
+
+Martingale - Exponential Decays - Risk/Reward
+
+By using a martingale we double our position size (exposure) each time we lose a trade, if we look at our balance when using a martingale we see significant drawdowns, with our balance peaking down significantly. The martingale sequence is subject to exponential growth, as such using a martingale makes our balance exposed to exponential decays, that's really bad, we could basically lose all the initially invested capital in a short amount of time, it follows from this that the theoretical success of a martingale is determined by what is the maximum losing streak you can endure
+
+Now consider how a martingale affects our risk-reward ratio, assuming unity position sizing our martingale sequence can be described by 2^(x-1), using this formula we would get the amount of shares/contracts we need to purchase at the x trade of a losing streak, we would need to purchase 256 contracts in order to recover from a losing streak of size 9, this is enormous when you take into account that your wins are way smaller, the risk-reward ratio is totally unfair.
+
+Of course, some users might think that a losing streak of size 9 is pretty unlikely, if the probability of winning and losing are both equal to 0.5, then the probability of 9 consecutive losses is equal to 0.5^9, there are approximately 0.2% of chance of having such large losing streak, note however that under a ranging market such case scenario could happen, but we will see later that the length of a losing streak is not the only problem.
+
+Other Problems
+
+Having a capital large enough to tank 9any number of consecutive losses is not the only thing one should focus on, as we have to take into account market prices and trading dynamics, that's where the ugly part start.
+
+Our first problem is frictional costs, one example being the spread, but this is a common problem for any strategy, however here a martingale is extra sensitive to it, if the strategy does not account for it then we will still double our positions costs but we might not recover all the losses of a losing streak, instead we would be recovering only a proportion of it, under such scenario you would be certain to lose over time.
+
+Another problem are gaps, market price might open under a stop-loss without triggering it, and this is a big no-no.
+
+
+
+
+Equity of the strategy on AMD, in a desired scenario the equity at the second arrow should have been at a higher position than the equity at the first arrow.
+
+In order for the strategy to be more effective, we would need to trade a market that does not close, such as the cryptocurrency market. Finally, we might be affected by slippage, altho only extreme values might drastically affect our balance.
+
+The Anti Martingale
+
+The strategy lets you use an anti-martingale, which double the position size after a win instead of a loss, the goal here is not to recover from a losing strike but instead to profit from a potential winning streak.
+
+Here we are exposing your balance to exponential gross but you might also lose a trade at the end a winning streak, you will generally want to reinitialize your position size after a few wins instead of waiting for the end of a streak.
+
+Alternative
+
+You can use other-kind of progressions for position sizing, such as a linear one, increasing your position size by a constant number each time you lose. More gentle progressions will recover a proportion of your losses in a losing streak.
+
+You can also simulate the effect of a martingale without doubling your position size by doubling your target profit, if for example you have a 10$ profit-target/stop-loss and lose a trade, you can use a 20$ profit target to recover from the lost trade + gain a profit of 10$. While this approach does not introduce exponential decay in your balance, you are betting on the market reaching your take profits, considering the fact that you are doubling their size you are expecting market volatility to increase drastically over time, as such this approach would not be extremely effective for high losing streak.
+
+Conclusion
+
+You will see a lot of auto-trading strategies that are based on a grid approach, they might even use a martingale. While the backtests will look appealing, you should think twice before using such kind of strategy, remember that frictional costs will be a huge challenge for the strategy, and that it assumes that the trader has an important initial capital. We have also seen that the risk/reward ratio is theoretically the worst you can have on a strategy, having a low reward and a high risk. This does not mean that progressive position sizing is bad, but it should not be pushed to the extreme.
+
+It is nice to note that the martingale is originally a betting system designed for casino games, which unlike trading are not subject to frictional costs, but even casino players don't use it, so why would you?
+
+Thx for reading
+

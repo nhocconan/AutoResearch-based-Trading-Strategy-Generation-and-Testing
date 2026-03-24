@@ -1,0 +1,74 @@
+//@version=5
+strategy("Bitfinex Shorts Strat", 
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, precision=2, initial_capital=1000,
+     pyramiding=2,
+     commission_value=0.05)
+
+//Backtest date range
+StartDate = input.time(timestamp("01 Jan 2021"), title="Start Date")
+EndDate = input.time(timestamp("01 Jan 2024"), title="Start Date")
+inDateRange = (time >= StartDate) and (time < EndDate)
+
+symbolInput = input.symbol(title="Bitfinex Short Symbol", defval="BITFINEX:BTCUSDSHORTS")
+Shorts = request.security(symbolInput, "", open)
+
+// RSI Input Settings
+length = input(title="Length", defval=7, group="RSI Settings" )
+overSold = input(title="High Shorts Threshold", defval=75, group="RSI Settings" )
+overBought = input(title="Low Shorts Threshold", defval=30, group="RSI Settings" )
+
+// Calculating RSI
+vrsi = ta.rsi(Shorts, length)
+RSIunder = ta.crossover(vrsi, overSold)
+RSIover = ta.crossunder(vrsi, overBought)
+
+// Stop Loss Input Settings
+longLossPerc = input.float(title="Long Stop Loss (%)", defval=25, group="Stop Loss Settings") * 0.01
+shortLossPerc = input.float(title="Short Stop Loss (%)", defval=25, group="Stop Loss Settings") * 0.01
+
+// Calculating Stop Loss
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+// Strategy Entry
+if (not na(vrsi))
+    if (inDateRange and RSIover)
+        strategy.entry("LONG", strategy.long, comment="LONG")
+    if (inDateRange and RSIunder)
+        strategy.entry("SHORT", strategy.short, comment="SHORT")
+
+// Submit exit orders based on calculated stop loss price
+if (strategy.position_size > 0)
+    strategy.exit(id="LONG STOP", stop=longStopPrice)
+if (strategy.position_size < 0)
+    strategy.exit(id="SHORT STOP", stop=shortStopPrice)
+
+View in Pine Editor・46 lines
+Use on chart
+1
+5
+5
+1
+3 824
+Overview
+This strat applies the data from BITFINEX:USDSHORTS to the RSI indicator in order to provide SHORT/LONG entries as the number of contracts goes up and down. Although Bitfinex has lost relevance over the years its generally considered an exchange dominated by smart money rather than retail. I'd like to see if any insights can be gained by following their trading behaviour.
+
+How to use
+Select the underlying security you wish to trade and load the indicator. Select the appropriate short security by searching in the Bitfinex Short Symbol. RSI settings apply to short symbol not the actual asset. Strategy shorts the underlying asset when shorts rise and longs when they drop. The shorts symbol will follow the value of the loaded chart. Works best on 4 hour chart.
+
+Why use shorts only rather than both long/shorts?
+Bitfinex longs seem to be on a long-term uptrend accounting for 25x the number of shorts. Might be enormous confidence on part of the whales, but more likely reflects selling spot and buying perp. Given the size disparity and price action I don't think longs info is adding much.
+
+Problems with script:
+a) We don't really know the intentions of short players (e.g. speculation or hedging spot)
+b) The script uses a decline in shorts as a long signal
+c) RSI is a blunt tool there are probably better options for calculating high/lows in shorts
+d) Shorts are accumulated both at highs and also when BTC price is already heavily trending down. This suggests some are speculative (at the highs) or protective/hedging during a decline
+
+Takeaways:
+Based on this strat Bitfinex whales are more wrong than right.
+Results don't carry across well into altcoins using the accompanying short symbol. However, what is interesting is that applying the BITFINEX:BTCUSDSHORTS to altcoin charts does work pretty well.
+Strat needs some refinement to control for entries under different circumstances.
+Probably not a great idea to use this as a strategy in isolation, but highlights how Bitfinex whale behaviour is a good gauge to follow.

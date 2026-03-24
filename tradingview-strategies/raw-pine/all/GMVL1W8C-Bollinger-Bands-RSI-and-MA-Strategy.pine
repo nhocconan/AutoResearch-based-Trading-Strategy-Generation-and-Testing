@@ -1,0 +1,89 @@
+//@version=5
+strategy("Bollinger Bands, RSI, and MA Strategy", overlay=true)
+
+// Define input variables
+b_len = input(20, title="BB Length")
+bb_mult = input(2.0, title="BB Standard Deviation")
+bb_deviation1 = input(1.0, title="BB Deviation 1")
+rsi_len = input(14, title="RSI Length")
+overbought = input(70, title="Overbought RSI Level")
+oversold = input(30, title="Oversold RSI Level")
+ma_len = input(50, title="MA Length")
+stop_loss_percent = input(1.0, title="Stop Loss Percentage")
+source = input(close, title="Source")
+
+// Calculate Bollinger Bands
+bb_upper = ta.sma(source, b_len) + bb_mult * ta.stdev(source, b_len)
+bb_lower = ta.sma(source, b_len) - bb_mult * ta.stdev(source, b_len)
+bb_upper1 = ta.sma(source, b_len) + bb_deviation1 * ta.stdev(source, b_len)
+bb_lower1 = ta.sma(source, b_len) - bb_deviation1 * ta.stdev(source, b_len)
+
+// Calculate RSI
+rsi = ta.rsi(source, rsi_len)
+
+// Calculate Moving Average
+ma = ta.sma(source, ma_len)
+
+// Determine if Bollinger Bands are contracting
+bb_contracting = ta.stdev(source, b_len) < ta.stdev(source, b_len)[1]
+
+// Entry conditions
+enterLong = rsi > overbought and not bb_contracting
+enterShort = rsi < oversold and not bb_contracting
+
+// Exit conditions
+exitLong = close < ma
+exitShort = close > ma
+
+// Exit trades and generate alerts
+if strategy.position_size > 0 and exitLong
+    strategy.close("Long") // Exit the long trade
+    alert("Long Exit", alert.freq_once_per_bar_close)
+if strategy.position_size < 0 and exitShort
+    strategy.close("Short") // Exit the short trade
+    alert("Short Exit", alert.freq_once_per_bar_close)
+
+// Strategy orders
+if enterLong
+    strategy.entry("Long", strategy.long)
+if enterShort
+    strategy.entry("Short", strategy.short)
+if exitLong
+    strategy.close("Long")
+if exitShort
+    strategy.close("Short")
+
+// Plotting Bollinger Bands
+plot(bb_upper, color=color.blue, title="BB Upper 2")
+plot(bb_lower, color=color.blue, title="BB Lower 2")
+plot(bb_upper1, color=color.red, title="BB Upper 1")
+plot(bb_lower1, color=color.red, title="BB Lower 1")
+
+// Plotting RSI
+plot(rsi, color=color.orange, title="RSI")
+
+// Plotting Moving Average
+plot(ma, color=color.green, title="Moving Average")
+
+View in Pine Editor・66 lines
+Use on chart
+2
+0
+2
+7 075
+The "Bollinger Bands, RSI and MA Strategy" is a trend-following strategy that combines the Bollinger Bands indicator, the Relative Strength Index (RSI), and a moving average (MA). It aims to identify potential entry and exit points in the market based on price volatility, momentum, and trend.
+
+The strategy uses two Bollinger Bands with different standard deviations to create price channels. The default settings for the Bollinger Bands are a length of 20 periods and a standard deviation of 2.0. The upper and lower bands of the Bollinger Bands serve as dynamic resistance and support levels, respectively.
+
+The RSI indicator is employed to gauge the strength of price momentum.
+
+The strategy also incorporates a 50-period moving average (MA) to help identify the overall trend direction. When the price is above the MA, it suggests an uptrend, and when the price is below the MA, it suggests a downtrend.
+
+The entry conditions for long trades are when the RSI is above the overbought level and there is no contraction in the Bollinger Bands. For short trades, the entry conditions are when the RSI is below the oversold level and there is no contraction in the Bollinger Bands.
+
+The exit conditions for long trades are when the RSI drops below the overbought level or when the price closes below the 50-period MA.
+For short trades, the exit conditions are when the RSI goes above the oversold level or when the price closes above the 50-period MA.
+
+The strategy generates alerts for potential long and short entry signals, as well as for exit signals when the specified conditions are met. These alerts can be used to receive notifications or take further actions, such as placing trades manually or using automated trading systems.
+
+It is important to note that this strategy serves as a starting point and should be thoroughly backtested and validated with historical data before applying it to live trading. Additionally, it is recommended to consider risk management techniques, including setting appropriate stop-loss and take-profit levels, to effectively manage trades.

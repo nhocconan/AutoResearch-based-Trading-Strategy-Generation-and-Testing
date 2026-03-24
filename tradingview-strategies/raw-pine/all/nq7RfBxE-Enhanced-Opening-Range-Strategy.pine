@@ -1,0 +1,356 @@
+//@version=5
+strategy("Enhanced Opening Range Strategy", overlay=true, max_boxes_count=500, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Opening Range Settings
+or_duration = input.string("15 Minutes", "Opening Range Duration", options=["5 Minutes", "15 Minutes", "30 Minutes", "45 Minutes", "60 Minutes"], group="Opening Range Settings")
+breakout_candles = input.int(2, "Consecutive Candles for Breakout Confirmation", minval=1, maxval=10, group="Opening Range Settings", tooltip="Number of consecutive candles that must close outside the opening range to confirm breakout")
+reverse_logic = input.bool(false, "Reverse Logic (Short on bullish breakout, Long on bearish breakout)", group="Opening Range Settings")
+
+// Position Sizing Settings
+position_sizing_type = input.string("Fixed Contracts", "Position Sizing Type", options=["Fixed Contracts", "Fixed USD Risk"], group="Position Sizing")
+fixed_contracts = input.float(10.0, "Number of Contracts", minval=0.01, step=0.01, group="Position Sizing")
+fixed_usd_risk = input.float(100.0, "USD Risk per Trade", minval=1.0, step=1.0, group="Position Sizing")
+tick_value = input.float(12.50, "Tick Value (USD per point)", minval=0.01, step=0.01, group="Position Sizing", tooltip="For ES: $12.50, NQ: $5.00, etc.")
+
+// Stop Loss and Take Profit Settings
+sl_type = input.string("ATR Multiple", "Stop Loss Type", options=["Range %", "ATR Multiple", "Fixed %", "Fixed Points", "Opposite Range"], group="Risk Management")
+sl_value = input.float(2.0, "Stop Loss Value", minval=0.1, group="Risk Management")
+tp_type = input.string("Risk Reward", "Take Profit Type", options=["Risk Reward", "Range %", "ATR Multiple", "Fixed %", "Fixed Points"], group="Risk Management")
+tp_value = input.float(1.0, "Take Profit Value", minval=0.1, group="Risk Management")
+atr_length = input.int(14, "ATR Length", minval=1, group="Risk Management")
+
+// Second Chance Trade Settings
+enable_second_chance = input.bool(false, "Enable Second Chance Trade", group="Second Chance Trade")
+second_chance_info = input.string("", "Info: If first trade hits SL, allow opposite breakout trade", group="Second Chance Trade")
+
+// Long Short Tool Visualization
+showLongShortTool = input(true, "Show Long Short Tool", group="Long Short Tool")
+riskColor = input.color(color.new(color.red, 70), "Risk Area Color", group="Long Short Tool")
+rewardColor = input.color(color.new(color.green, 70), "Reward Area Color", group="Long Short Tool")
+entryLineColor = input.color(color.white, "Entry Line Color", group="Long Short Tool")
+
+// Dynamic session time based on selected duration
+session_end_time = or_duration == "5 Minutes" ? "0935" : or_duration == "15 Minutes" ? "0945" : or_duration == "30 Minutes" ? "1000" : or_duration == "45 Minutes" ? "1015" : "1030"
+session_time_string = "0930-" + session_end_time
+after_session_start = session_end_time
+
+session_time = time(timeframe.period, session_time_string, "America/New_York")
+in_session = not na(session_time)
+after_session = time(timeframe.period, after_session_start + "-1630", "America/New_York")
+end_of_day_time = time(timeframe.period, "1630-1631", "America/New_York")
+
+var float session_high = na
+var float session_low = na
+var int session_start = na
+var float range_size = na
+var bool session_complete = false
+var bool traded_today = false
+var bool first_trade_loss = false
+var string first_trade_direction = na
+var bool second_chance_taken = false
+
+// Long Short Tool Variables - Arrays to store past 30 days
+var array<line> entryLines = array.new<line>()
+var array<box> riskBoxes = array.new<box>()
+var array<box> rewardBoxes = array.new<box>()
+var array<int> entryBars = array.new<int>()
+
+// ATR calculation
+atr_value = ta.atr(atr_length)
+
+// Consecutive candle tracking
+var int consecutive_bullish_closes = 0
+var int consecutive_bearish_closes = 0
+
+// Function to calculate position size
+get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value) =>
+    if position_sizing_type == "Fixed Contracts"
+        fixed_contracts
+    else
+        // Fixed USD Risk calculation
+        stop_loss_distance = math.abs(entry_price - stop_loss)
+        if stop_loss_distance > 0
+            risk_per_contract = stop_loss_distance * tick_value
+            math.max(0.01, fixed_usd_risk / risk_per_contract)
+        else
+            fixed_contracts
+
+// Function to calculate stop loss
+get_stop_loss(entry_price, is_long, sl_type, sl_value, range_size, atr_value, session_high, session_low) =>
+    switch sl_type
+        "Range %" => is_long ? entry_price - (range_size * sl_value / 100) : entry_price + (range_size * sl_value / 100)
+        "ATR Multiple" => is_long ? entry_price - (atr_value * sl_value) : entry_price + (atr_value * sl_value)
+        "Fixed %" => is_long ? entry_price * (1 - sl_value / 100) : entry_price * (1 + sl_value / 100)
+        "Fixed Points" => is_long ? entry_price - sl_value : entry_price + sl_value
+        "Opposite Range" => is_long ? session_low : session_high
+
+// Function to calculate take profit
+get_take_profit(entry_price, stop_loss, is_long, tp_type, tp_value, range_size, atr_value) =>
+    risk = math.abs(entry_price - stop_loss)
+    switch tp_type
+        "Risk Reward" => is_long ? entry_price + (risk * tp_value) : entry_price - (risk * tp_value)
+        "Range %" => is_long ? entry_price + (range_size * tp_value / 100) : entry_price - (range_size * tp_value / 100)
+        "ATR Multiple" => is_long ? entry_price + (atr_value * tp_value) : entry_price - (atr_value * tp_value)
+        "Fixed %" => is_long ? entry_price * (1 + tp_value / 100) : entry_price * (1 - tp_value / 100)
+        "Fixed Points" => is_long ? entry_price + tp_value : entry_price - tp_value
+
+
+if in_session and not in_session[1]
+    session_high := high
+    session_low := low
+    session_start := time
+    session_complete := false
+    traded_today := false
+    first_trade_loss := false
+    first_trade_direction := na
+    second_chance_taken := false
+    consecutive_bullish_closes := 0
+    consecutive_bearish_closes := 0
+
+if in_session
+    session_high := math.max(session_high, high)
+    session_low := math.min(session_low, low)
+
+if in_session[1] and not in_session
+    box.new(session_start, session_high, time[1], session_low, border_color=color.blue, bgcolor=color.new(color.blue, 90), xloc=xloc.bar_time)
+    end_of_day = timestamp("America/New_York", year, month, dayofmonth, 16, 30)
+    line.new(time[1], session_high, end_of_day, session_high, color=color.red, width=1, xloc=xloc.bar_time)
+    line.new(time[1], session_low, end_of_day, session_low, color=color.red, width=1, xloc=xloc.bar_time)
+    range_size := session_high - session_low
+    session_complete := true
+
+
+// Monitor for stop loss hits on first trade
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and not na(first_trade_direction) and not second_chance_taken
+    // Position was closed, check if it was a loss
+    if (first_trade_direction == "long" and close < session_high) or (first_trade_direction == "short" and close > session_low)
+        first_trade_loss := true
+
+// Track consecutive closes outside the range
+if session_complete and not na(after_session)
+    // Count consecutive bullish closes (above session high)
+    if close > session_high
+        consecutive_bullish_closes := consecutive_bullish_closes + 1
+        consecutive_bearish_closes := 0
+    // Count consecutive bearish closes (below session low)
+    else if close < session_low
+        consecutive_bearish_closes := consecutive_bearish_closes + 1
+        consecutive_bullish_closes := 0
+    // Reset if inside range
+    else
+        consecutive_bullish_closes := 0
+        consecutive_bearish_closes := 0
+
+// Entry Logic
+if session_complete and not na(after_session) and not traded_today
+    // Normal Logic: Buy when candle closes above high
+    if close > session_high and strategy.position_size == 0 and consecutive_bullish_closes >= breakout_candles
+        if not reverse_logic
+            // Normal: Long on bullish breakout
+            entry_price = session_high
+            stop_loss = get_stop_loss(entry_price, true, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, true, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Buy", strategy.long, qty=position_size)
+            strategy.exit("Buy Exit", "Buy", stop=stop_loss, limit=take_profit)
+            traded_today := true
+            first_trade_direction := "long"
+        else
+            // Reverse: Short on bullish breakout
+            entry_price = close
+            stop_loss = get_stop_loss(entry_price, false, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, false, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Reverse Sell", strategy.short, qty=position_size)
+            strategy.exit("Reverse Sell Exit", "Reverse Sell", stop=stop_loss, limit=take_profit)
+            traded_today := true
+            first_trade_direction := "short"
+
+    // Normal Logic: Sell when candle closes below low
+    if close < session_low and strategy.position_size == 0 and consecutive_bearish_closes >= breakout_candles
+        if not reverse_logic
+            // Normal: Short on bearish breakout
+            entry_price = session_low
+            stop_loss = get_stop_loss(entry_price, false, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, false, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Sell", strategy.short, qty=position_size)
+            strategy.exit("Sell Exit", "Sell", stop=stop_loss, limit=take_profit)
+            traded_today := true
+            first_trade_direction := "short"
+        else
+            // Reverse: Long on bearish breakout
+            entry_price = close
+            stop_loss = get_stop_loss(entry_price, true, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, true, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Reverse Buy", strategy.long, qty=position_size)
+            strategy.exit("Reverse Buy Exit", "Reverse Buy", stop=stop_loss, limit=take_profit)
+            traded_today := true
+            first_trade_direction := "long"
+
+// Second Chance Trade Logic
+if enable_second_chance and session_complete and not na(after_session) and first_trade_loss and not second_chance_taken and strategy.position_size == 0
+    // If first trade was long and hit SL, look for short opportunity
+    if first_trade_direction == "long" and close < session_low and consecutive_bearish_closes >= breakout_candles
+        if not reverse_logic
+            // Normal: Short on bearish breakout
+            entry_price = session_low
+            stop_loss = get_stop_loss(entry_price, false, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, false, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Second Sell", strategy.short, qty=position_size)
+            strategy.exit("Second Sell Exit", "Second Sell", stop=stop_loss, limit=take_profit)
+            second_chance_taken := true
+        else
+            // Reverse: Long on bearish breakout
+            entry_price = close
+            stop_loss = get_stop_loss(entry_price, true, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, true, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Second Reverse Buy", strategy.long, qty=position_size)
+            strategy.exit("Second Reverse Buy Exit", "Second Reverse Buy", stop=stop_loss, limit=take_profit)
+            second_chance_taken := true
+
+    // If first trade was short and hit SL, look for long opportunity
+    if first_trade_direction == "short" and close > session_high and consecutive_bullish_closes >= breakout_candles
+        if not reverse_logic
+            // Normal: Long on bullish breakout
+            entry_price = session_high
+            stop_loss = get_stop_loss(entry_price, true, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, true, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Second Buy", strategy.long, qty=position_size)
+            strategy.exit("Second Buy Exit", "Second Buy", stop=stop_loss, limit=take_profit)
+            second_chance_taken := true
+        else
+            // Reverse: Short on bullish breakout
+            entry_price = close
+            stop_loss = get_stop_loss(entry_price, false, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+            take_profit = get_take_profit(entry_price, stop_loss, false, tp_type, tp_value, range_size, atr_value)
+            position_size = get_position_size(entry_price, stop_loss, position_sizing_type, fixed_contracts, fixed_usd_risk, tick_value)
+            strategy.entry("Second Reverse Sell", strategy.short, qty=position_size)
+            strategy.exit("Second Reverse Sell Exit", "Second Reverse Sell", stop=stop_loss, limit=take_profit)
+            second_chance_taken := true
+
+// Long Short Tool - Create visualization when position opens
+if strategy.position_size != 0 and strategy.position_size[1] == 0 and showLongShortTool
+    // Set entry bar
+    currentEntryBar = bar_index
+    
+    // Get current position details for visualization
+    current_entry_price = strategy.position_avg_price
+    
+    // Declare variables
+    current_stop_loss = 0.0
+    current_take_profit = 0.0
+    
+    // Calculate stop loss and take profit based on position direction
+    if strategy.position_size > 0  // Long position
+        current_stop_loss := get_stop_loss(current_entry_price, true, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+        current_take_profit := get_take_profit(current_entry_price, current_stop_loss, true, tp_type, tp_value, range_size, atr_value)
+    else  // Short position
+        current_stop_loss := get_stop_loss(current_entry_price, false, sl_type, sl_value, range_size, atr_value, session_high, session_low)
+        current_take_profit := get_take_profit(current_entry_price, current_stop_loss, false, tp_type, tp_value, range_size, atr_value)
+    
+    // Create entry line using actual strategy entry price
+    newEntryLine = line.new(currentEntryBar, current_entry_price, currentEntryBar + 50, current_entry_price, color=entryLineColor, style=line.style_solid, width=2)
+    array.push(entryLines, newEntryLine)
+    array.push(entryBars, currentEntryBar)
+    
+    // Declare box variables
+    newRiskBox = box(na)
+    newRewardBox = box(na)
+    
+    if strategy.position_size > 0  // Long position
+        // Risk box (entry to stop loss)
+        newRiskBox := box.new(currentEntryBar, current_entry_price, currentEntryBar + 50, current_stop_loss, bgcolor=riskColor, border_color=na)
+        
+        // Reward box (entry to take profit)
+        newRewardBox := box.new(currentEntryBar, current_entry_price, currentEntryBar + 50, current_take_profit, bgcolor=rewardColor, border_color=na)
+        
+    else if strategy.position_size < 0  // Short position
+        // Risk box (entry to stop loss)
+        newRiskBox := box.new(currentEntryBar, current_entry_price, currentEntryBar + 50, current_stop_loss, bgcolor=riskColor, border_color=na)
+        
+        // Reward box (entry to take profit)
+        newRewardBox := box.new(currentEntryBar, current_entry_price, currentEntryBar + 50, current_take_profit, bgcolor=rewardColor, border_color=na)
+    
+    array.push(riskBoxes, newRiskBox)
+    array.push(rewardBoxes, newRewardBox)
+    
+    // Clean up old visualizations (keep only last 30 days)
+    maxDays = 30
+    
+    // Clean up old entry lines
+    while array.size(entryLines) > maxDays
+        oldLine = array.shift(entryLines)
+        line.delete(oldLine)
+    
+    // Clean up old risk boxes
+    while array.size(riskBoxes) > maxDays
+        oldBox = array.shift(riskBoxes)
+        box.delete(oldBox)
+    
+    // Clean up old reward boxes
+    while array.size(rewardBoxes) > maxDays
+        oldBox = array.shift(rewardBoxes)
+        box.delete(oldBox)
+    
+    // Clean up old entry bars
+    while array.size(entryBars) > maxDays
+        array.shift(entryBars)
+
+// Extend Long Short Tool visualization while position is active
+if strategy.position_size != 0 and showLongShortTool and array.size(entryLines) > 0
+    currentBar = bar_index
+    extendTo = currentBar + 10
+    
+    // Extend the most recent entry line
+    if array.size(entryLines) > 0
+        line.set_x2(array.get(entryLines, array.size(entryLines) - 1), extendTo)
+    
+    // Extend the most recent boxes
+    if array.size(riskBoxes) > 0
+        box.set_right(array.get(riskBoxes, array.size(riskBoxes) - 1), extendTo)
+    if array.size(rewardBoxes) > 0
+        box.set_right(array.get(rewardBoxes, array.size(rewardBoxes) - 1), extendTo)
+
+// Close Long Short Tool visualization when position closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and showLongShortTool
+    currentBar = bar_index
+    minEndBar = currentBar
+    
+    // Ensure minimum 4 bars width - if trade closed in less than 4 bars, extend to 4 bars
+    if array.size(entryBars) > 0
+        lastEntryBar = array.get(entryBars, array.size(entryBars) - 1)
+        tradeDuration = currentBar - lastEntryBar
+        
+        // If trade lasted less than 4 bars, extend to minimum 4 bars
+        if tradeDuration < 4
+            minEndBar := lastEntryBar + 4
+        else
+            minEndBar := currentBar
+        
+        // Close the most recent visualization with minimum 4 bars width
+        if array.size(entryLines) > 0
+            line.set_x2(array.get(entryLines, array.size(entryLines) - 1), minEndBar)
+        if array.size(riskBoxes) > 0
+            box.set_right(array.get(riskBoxes, array.size(riskBoxes) - 1), minEndBar)
+        if array.size(rewardBoxes) > 0
+            box.set_right(array.get(rewardBoxes, array.size(rewardBoxes) - 1), minEndBar)
+
+// Force close all positions at end of day
+if not na(end_of_day_time)
+    strategy.close_all(comment="EOD Close")
+
+// Entry arrows
+plotshape(series=strategy.position_size > 0 and strategy.position_size[1] == 0, style=shape.arrowup, location=location.belowbar, color=color.green, size=size.normal, title="Long Entry")
+plotshape(series=strategy.position_size < 0 and strategy.position_size[1] == 0, style=shape.arrowdown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+
+View in Pine Editor・349 lines
+Use on chart
+1
+351
+nice script to trade- Understanding how to deploy custom builds for clients
+- Understanding structure of these builds (are the inner workings of software just directives, executions, other files?)

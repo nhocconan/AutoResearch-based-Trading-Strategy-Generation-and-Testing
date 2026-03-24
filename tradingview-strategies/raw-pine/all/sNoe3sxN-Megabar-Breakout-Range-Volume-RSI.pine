@@ -1,0 +1,127 @@
+//@version=5
+strategy(title='Breakout Range', shorttitle='BrkRange&Vol', overlay=true)
+
+volmalen = input(20, title='Avg Length Vol')
+volmult = input(3, title='Avg Multiplier Vol')
+rangemalen = input(20, title='Avg Length Range')
+rangemult = input(4, title='Avg Multiplier Range')
+
+rsiLengthInput = input.int(14, minval=1, title="RSI Length", group="RSI Settings")
+rsiSourceInput = input.source(close, "Source", group="RSI Settings")
+maTypeInput = input.string("SMA", title="MA Type", options=["SMA", "Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="MA Settings")
+maLengthInput = input.int(14, title="MA Length", group="MA Settings")
+bbMultInput = input.float(2.0, minval=0.001, maxval=50, title="BB StdDev", group="MA Settings")
+
+FilterTradeTime = input.bool(defval=false,title='Filter 0600-1600 CET')
+
+
+//VOL BREAKOUT INDIKATOR
+volma = ta.sma(volume, volmalen)
+volcolor = close > open and volume > volma * volmult ? color.lime : close < open and volume > volma * volmult ? color.red : color.gray
+
+
+//RANGE BREAKOUT INDIKATOR
+Range = if close > open
+    close - open
+else if open > close
+    open - close
+
+rangema = ta.sma(Range, rangemalen)
+rangecolor = close > open and Range > rangema * rangemult ? color.lime : close < open and Range > rangema * rangemult ? color.red : color.gray
+
+
+//RSI INDIKATOR
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "Bollinger Bands" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+
+
+up = ta.rma(math.max(ta.change(rsiSourceInput), 0), rsiLengthInput)
+down = ta.rma(-math.min(ta.change(rsiSourceInput), 0), rsiLengthInput)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsiMA = ma(rsi, maLengthInput, maTypeInput)
+isBB = maTypeInput == "Bollinger Bands"
+
+GrenzeLong = input.int(50, minval=1, title="Value SMA RSI > Long Trades")
+GrenzeShort = input.int(70, minval=1, title="Value SMA RSI < Short Trades")
+
+// Input TP SL
+TP = input.int(title="TP",minval=1, maxval=100000, defval=400)
+SL = input.int(title="SL",minval=1, maxval=100000, defval=300)
+
+
+//FILTER TRADING HOURS
+tradinghours = time(timeframe.period, "0600-1600", "UTC")
+time_condition = FilterTradeTime ? not na(tradinghours) : true
+bgcolor(not na(tradinghours) ? color.rgb(1, 75, 1, 72) : na)
+
+//Entry Condition
+conditionlong = close > open and volume > volma * volmult and Range > rangema * rangemult and rsiMA > GrenzeLong
+conditionshort = close < open and volume > volma * volmult and Range > rangema * rangemult and rsiMA < GrenzeShort
+
+// Show MegaBar
+megabarlong = close > open and volume > volma * volmult and Range > rangema * rangemult
+megabarshort = close < open and volume > volma * volmult and Range > rangema * rangemult
+
+megabarlongarrow = if megabarlong 
+    close - open
+
+megabarshortarrow = if megabarshort
+    close - open
+
+plotarrow(megabarlongarrow, colorup = color.rgb(226, 156, 5), colordown = color.red)
+plotarrow(megabarshortarrow, colorup = color.rgb(114, 235, 2), colordown = color.rgb(233, 7, 56))
+
+if (conditionlong and time_condition)
+    strategy.entry("Long", strategy.long, comment="entry Long")  
+strategy.exit("Long", comment_profit = "TP Long", comment_loss = "SL Long", profit = TP, loss = SL)
+
+
+if (conditionshort and time_condition)
+    strategy.entry("Short", strategy.short, comment="entry Short")
+strategy.exit("Short", comment_profit = "TP Short", comment_loss = "SL Short", profit = TP, loss = SL)
+
+View in Pine Editor・88 lines
+Use on chart
+1
+6
+0
+1
+6 711
+Hey there,
+
+This strategy is based on the idea that certain events lead to what are called Megabars. Megabars are bars that have a very large range and volume. I wanted to verify whether these bars indicate the start of a trend and whether one should follow the trend.
+
+Summary of the Code:
+The code is based on three indicators: the range of the bar, the volume of the bar, and the RSI. When certain values of these indicators are met, a Megabar is identified. The direction of the Megabar indicates the direction in which we should trade.
+
+Why do I combine these indicators?
+I want to identify special bars that have the potential to mark the beginning of a breakout. Therefore, a bar needs to exhibit high volume, have a large range (huge price movement), and we also use the Relative Strength Index (RSI) to assess potential momentum. Only if all three criteria are met within one candle, do we use this as an identifier for a megabar.
+
+Explanation of Drawings on the Chart:
+As you can see, there is a green background on my chart. The green background symbolizes the time when I'm entering a trade. Only if a Megabar happens during that time, I'm ready to enter a trade. The time is between 6 AM and 4 PM CET. It's just because I prefer that time. Also, the strategy draws an error every time a Megabar happens based on VOL and Range only (not on the RSI). That makes it pretty easy to go through your chart and check the biggest bars manually. You can activate or deactivate these settings via the input data of the strategy.
+
+When Do We Enter a Trade?
+We wait for a Megabar to happen during our trading session. If the Megabar is bullish, we open a LONG trade at the opening price of the next candle. If the Megabar is bearish, we open a SHORT trade at the opening price of the next candle.
+
+Where Do We Put Our Take Profit & Stop Loss?
+The default setting is TP = 40 Pips and SL = 30 Pips. In that case, we are always trading with a risk-reward ratio of 1.33 by default. You can easily change these settings via the input data of the strategy.
+
+Strategy Results
+The criteria for Megabars were chosen by me in a way that makes Megabars something special. They are not intended to occur too frequently, as the fundamental idea of this strategy would otherwise not hold. This results in only 37 closed trades within the last 12 months. If you change the criterias for a megabar to a milder one, you will create more Megabars and therefore more trades. It's up to you. I have adapted this strategy to the 30-minute chart of the EURUSD. In the evaluation, we consider a period of 12 months, which I believe is sufficient.
+My default settings for the indicators look like this:
+Avg Length Vol 20
+Avg Multiplier Vol 3
+Avg Length Range 20
+Avg Multiplier Range 4
+Value SMA RSI for Long Trades 50
+Value SMA RSI for Short Trades 70
+IMPORTANT: The current performance overview does not display the results of these settings. Please change the settings to my default ones so that you can see how I use this strategy.
+
+I do not recommend trading this strategy without further testing. The script is meant to reflect a basic idea and be used as a tool to identify Megabars. I have made this strategy completely public so that it can be further developed. One can take this framework and test it on different timeframes and different markets.

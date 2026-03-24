@@ -1,0 +1,329 @@
+//@version=5
+strategy("Pivot Point SuperTrend", overlay = true)
+
+
+
+
+//================ EQUITY MULTIPLIER =================
+eqMult = input.float(3.0, "Equity Multiplier per Trade/Leverage ", minval=0.1, step=0.5)
+
+//================ BTC FILTER =================
+tradeBasis = input.string("BTCUSDT.P", "Trade Direction Based On BTC or Independent",
+     options = ["Chart Coin", "BTCUSDT.P"])
+//================ STOP LOSS =================
+slPerc = input.float(1.0, "Stop Loss %", minval=0.1, step=0.1)
+
+
+
+
+//================ INPUTS =================
+//prd = input.int(2, "Pivot Point Period", minval=1, maxval=50)
+//Factor = input.float(3, "ATR Factor", minval=1, step=0.1)
+//Pd = input.int(10, "ATR Period", minval=1)
+
+showpivot = input(false, "Show Pivot Points")
+showlabel = input(true, "Show Buy/Sell Labels")
+
+//================ SOURCE =================
+src = input.source(close, "Source")
+
+//================ MA SETTINGS =================
+maLen = input.int(200, "MA Length")
+maType = input.string("EMA", "MA Type for Trade Filter",
+     options = ["SMA", "EMA", "WMA", "VWMA", "RMA", "HMA"])
+
+
+
+//================ MA CALCULATIONS =================
+sma  = ta.sma(src, maLen)
+ema  = ta.ema(src, maLen)
+wma  = ta.wma(src, maLen)
+vwma = ta.vwma(src, maLen)
+rma  = ta.rma(src, maLen)
+hma  = ta.hma(src, maLen)
+
+selectedMA =
+     maType == "SMA"  ? sma  :
+     maType == "EMA"  ? ema  :
+     maType == "WMA"  ? wma  :
+     maType == "VWMA" ? vwma :
+     maType == "RMA"  ? rma  : hma
+
+plot(selectedMA, title="Selected MA", color=color.orange, linewidth=2)
+
+//================ PIVOT POINTS =================
+//ph = ta.pivothigh(prd, prd)
+//pl = ta.pivotlow(prd, prd)
+
+ph = ta.pivothigh(2, 2)
+pl = ta.pivotlow(2, 2)
+
+plotshape(ph and showpivot, text="H", style=shape.labeldown, location=location.abovebar, offset=-2)
+plotshape(pl and showpivot, text="L", style=shape.labelup, location=location.belowbar, offset=-2)
+
+//================ CENTER LINE =================
+var float center = na
+lastpp = ph ? ph : pl ? pl : na
+if not na(lastpp)
+    center := na(center) ? lastpp : (center * 2 + lastpp) / 3
+
+//Up = center - Factor * ta.atr(Pd)
+//Dn = center + Factor * ta.atr(Pd)
+Up = center - 3 * ta.atr(10)
+Dn = center + 3 * ta.atr(10)
+
+//================ TREND =================
+var float TUp = na
+var float TDown = na
+var int Trend = 1
+
+TUp   := close[1] > nz(TUp[1])   ? math.max(Up, nz(TUp[1]))   : Up
+TDown := close[1] < nz(TDown[1]) ? math.min(Dn, nz(TDown[1])) : Dn
+
+Trend := close > nz(TDown[1]) ? 1 :
+         close < nz(TUp[1])   ? -1 :
+         nz(Trend[1], 1)
+
+Trailingsl = Trend == 1 ? TUp : TDown
+plot(Trailingsl, color = Trend == 1 ? color.lime : color.red, linewidth = 2)
+
+//================ SIGNALS =================
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+plotshape(bsignal and showlabel, text="Buy",  style=shape.labelup,   location=location.belowbar)
+plotshape(ssignal and showlabel, text="Sell", style=shape.labeldown, location=location.abovebar)
+
+//================ BTC TREND =================
+btcTrend = request.security("BINANCE:BTCUSDT.P", timeframe.period, Trend)
+
+//================ MA FILTER =================
+longCondition  = bsignal and close > selectedMA
+shortCondition = ssignal and close < selectedMA
+
+//================ FINAL TRADE FILTER =================
+finalLong  = tradeBasis == "Chart Coin" ? longCondition  : longCondition  and btcTrend == 1
+finalShort = tradeBasis == "Chart Coin" ? shortCondition : shortCondition and btcTrend == -1
+
+//================ EQUITY-BASED POSITION SIZE =================
+tradeQty = (strategy.equity * eqMult) / close
+
+//================ ENTRIES =================
+strategy.entry("Long",  strategy.long,  qty = tradeQty, when = finalLong)
+strategy.entry("Short", strategy.short, qty = tradeQty, when = finalShort)
+
+//================ STOP LOSS =================
+longSL  = strategy.position_avg_price * (1 - slPerc / 100)
+shortSL = strategy.position_avg_price * (1 + slPerc / 100)
+
+strategy.exit("Long SL",  from_entry="Long",  stop=longSL)
+strategy.exit("Short SL", from_entry="Short", stop=shortSL)
+
+View in Pine Editor・120 lines
+Use on chart
+2
+6
+861
+Jan 12
+
+
+📊 Pivot Point SuperTrend Strategy (MA-Filtered, 100% Equity)
+
+This strategy is a trend-following system that combines Pivot Point–based SuperTrend logic with a higher-timeframe Moving Average filter and percentage-based risk control.
+
+---
+
+🔹 Core Logic
+
+1️⃣ Trend Detection (Pivot Point SuperTrend)
+
+Uses pivot highs and lows to calculate a dynamic center line
+Builds ATR-based upper and lower bands
+Determines market trend:
+
+Bullish trend when price breaks above the trailing band
+Bearish trend when price breaks below the trailing band
+
+Trend changes generate:
+
+Buy signal → trend flips from bearish to bullish
+Sell signal → trend flips from bullish to bearish
+
+---
+
+2️⃣ Moving Average Trend Filter (User-Selectable)
+
+A single Moving Average is used as a higher-timeframe confirmation
+User can select the MA type from a dropdown:
+
+SMA, EMA, WMA, VWMA, RMA, or HMA
+Trade rules:
+
+Long trades only when price is above the selected MA
+Short trades only when price is below the selected MA
+
+This helps avoid counter-trend trades and improves signal quality.
+
+---
+
+3️⃣ Trade Execution & Position Sizing
+
+Strategy uses 100% of account equity per trade
+No pyramiding
+Long and short trades are handled symmetrically
+
+---
+
+4️⃣ Risk Management (Percentage Stop-Loss)
+
+Uses a fixed percentage stop-loss
+Stop-loss is calculated from the actual entry price:
+
+Long SL → Entry Price − SL%
+Short SL → Entry Price + SL%
+Ensures consistent risk control across all trades
+
+---
+
+⏱ Recommended Timeframe & Market
+
+✅ Default / Optimized Use Case
+
+Timeframe: 4-Hour (4H)
+Market: BTC (Bitcoin)
+MA Length (default): 200 EMA
+ATR Factor & Period: Tuned for swing-style trend moves
+
+These default parameters are best suited for 4H BTC based on trend behavior and volatility.
+
+---
+
+⚙️ Customization & Flexibility
+
+All parameters are fully adjustable and can be optimized for:
+
+Different timeframes (1H, Daily, etc.)
+Other cryptocurrencies or markets
+More aggressive or conservative risk profiles
+
+You can modify:
+
+Pivot period
+ATR factor & period
+MA type and length
+Stop-loss percentage
+
+---
+
+🧠 Strategy Style Summary
+
+✔ Trend-following
+✔ MA-filtered confirmation
+✔ No repaint logic
+✔ Works best in trending markets
+✔ Suitable for swing trading
+
+
+
+Jan 12
+Release Notes
+
+
+📊 Pivot Point SuperTrend Strategy (MA-Filtered)
+
+This strategy is a trend-following system that combines Pivot Point–based SuperTrend logic with a higher-timeframe Moving Average filter and percentage-based risk control.
+
+---
+
+🔹 Core Logic
+
+1️⃣ Trend Detection (Pivot Point SuperTrend)
+
+Uses pivot highs and lows to calculate a dynamic center line
+Builds ATR-based upper and lower bands
+Determines market trend:
+
+Bullish trend when price breaks above the trailing band
+Bearish trend when price breaks below the trailing band
+
+Trend changes generate:
+
+Buy signal → trend flips from bearish to bullish
+Sell signal → trend flips from bullish to bearish
+
+---
+
+2️⃣ Moving Average Trend Filter (User-Selectable)
+
+A single Moving Average is used as a higher-timeframe confirmation
+User can select the MA type from a dropdown:
+
+SMA, EMA, WMA, VWMA, RMA, or HMA
+Trade rules:
+
+Long trades only when price is above the selected MA
+Short trades only when price is below the selected MA
+
+This helps avoid counter-trend trades and improves signal quality.
+
+---
+
+3️⃣ Trade Execution & Position Sizing
+
+Strategy uses 100% of account equity per trade
+No pyramiding
+Long and short trades are handled symmetrically
+
+---
+
+4️⃣ Risk Management (Percentage Stop-Loss)
+
+Uses a fixed percentage stop-loss
+Stop-loss is calculated from the actual entry price:
+
+Long SL → Entry Price − SL%
+Short SL → Entry Price + SL%
+Ensures consistent risk control across all trades
+
+---
+
+⏱ Recommended Timeframe & Market
+
+✅ Default / Optimized Use Case
+
+Timeframe: 4-Hour (4H)
+Market: BTC (Bitcoin)
+MA Length (default): 200 EMA
+ATR Factor & Period: Tuned for swing-style trend moves
+
+These default parameters are best suited for 4H BTC based on trend behavior and volatility.
+
+---
+
+⚙️ Customization & Flexibility
+
+All parameters are fully adjustable and can be optimized for:
+
+Different timeframes (1H, Daily, etc.)
+Other cryptocurrencies or markets
+More aggressive or conservative risk profiles
+
+You can modify:
+
+Pivot period
+ATR factor & period
+MA type and length
+Stop-loss percentage
+
+---
+
+🧠 Strategy Style Summary
+
+✔ Trend-following
+✔ MA-filtered confirmation
+✔ No repaint logic
+✔ Works best in trending markets
+✔ Suitable for swing trading
+
+
+

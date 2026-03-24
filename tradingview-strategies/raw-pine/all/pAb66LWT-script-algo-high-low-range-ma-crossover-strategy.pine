@@ -1,0 +1,160 @@
+//@version=5
+strategy("Script_Algo - High Low Range MA Crossover Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// Author: Script_Algo
+// License: MIT
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// MA parameters
+largeLength = input.int(50, title="Large MA Length", minval=1)
+smallLength = input.int(20, title="Small MA Length", minval=1)
+
+// Moving average type selection
+maType = input.string("EMA", title="Moving Average Type", options=["EMA", "SMA", "SSMA", "WMA", "VWMA", "RMA", "DEMA", "TEMA"])
+
+// SSMA function
+ssma(src, length) =>
+    var float sma = na
+    sma := na(sma) ? ta.sma(src, length) : (sma * (length - 1) + src) / length
+
+// MA type selection function
+getMA(src, length) =>
+    switch maType
+        "SMA"  => ta.sma(src, length)
+        "SSMA" => ssma(src, length)
+        "WMA"  => ta.wma(src, length)
+        "VWMA" => ta.vwma(src, length)
+        "RMA"  => ta.rma(src, length)
+        "DEMA" => ta.ema(ta.ema(src, length), length)
+        "TEMA" => ta.ema(ta.ema(ta.ema(src, length), length), length)
+        => ta.ema(src, length)
+
+// MA calculation
+maLargeHigh = getMA(high, largeLength)
+maLargeLow  = getMA(low, largeLength)
+maSmallHigh = getMA(high, smallLength)
+maSmallLow  = getMA(low, smallLength)
+
+// Visualization with fixed titles
+plot(maLargeHigh, color=color.red,    title="Large High MA")
+plot(maLargeLow,  color=color.blue,   title="Large Low MA")
+plot(maSmallHigh, color=color.orange, title="Small High MA")
+plot(maSmallLow,  color=color.green,  title="Small Low MA")
+
+// Add MA type label
+if barstate.islast
+    label.new(bar_index, maSmallLow, text="MA Type: " + maType, style=label.style_label_left, color=color.green, textcolor=color.white)
+
+// Entry/exit logic
+longCondition  = ta.crossover(maSmallLow, maLargeHigh)
+shortCondition = ta.crossunder(maSmallHigh, maLargeLow)
+exitLong       = ta.crossunder(maSmallHigh, maLargeLow)
+exitShort      = ta.crossover(maSmallLow, maLargeHigh)
+
+// Position management with close-before-open logic
+if strategy.position_size < 0 and longCondition
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+else if longCondition
+    strategy.entry("Long", strategy.long)
+    
+if strategy.position_size > 0 and shortCondition
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+else if shortCondition
+    strategy.entry("Short", strategy.short)
+
+// Exit conditions for opposite signals
+if exitLong
+    strategy.close("Long")
+if exitShort
+    strategy.close("Short")
+
+View in Pine Editor・77 lines
+Use on chart
+1
+2
+2
+1
+2 690
+🎯 Core Concept
+
+This strategy uses modified moving averages crossover, built on maximum and minimum prices, to determine entry and exit points in the market. A key advantage of this strategy is that it avoids most false signals in trendless conditions, which is characteristic of traditional moving average crossover strategies. This makes it possible to improve the risk/reward ratio and, consequently, the strategy's profitability.
+
+📊 How the Strategy Works
+
+Main Mechanism
+The strategy builds 4 moving averages:
+
+Two senior MAs (on high and low) with a longer period
+
+Two junior MAs (on high and low) with a shorter period
+
+Buy signal 🟢: when the junior MA of lows crosses above the senior MA of highs
+
+Sell signal 🔴: when the junior MA of highs crosses below the senior MA of lows
+
+As seen on the chart, it was potentially possible to make 9X on the WIFUSDT cryptocurrency pair in just a year and a half. However, be careful—such results may not necessarily be repeated in the future.
+
+Special Feature
+Position closing priority ❗: if an opposite signal arrives while a position is open, the strategy first closes the current position and only then opens a new one
+
+⚙️ Indicator Settings
+Available Moving Average Types
+EMA - Exponential MA
+
+SMA - Simple MA
+
+SSMA - Smoothed MA
+
+WMA - Weighted MA
+
+VWMA - Volume Weighted MA
+
+RMA - Adaptive MA
+
+DEMA - Double EMA
+
+TEMA - Triple EMA
+
+Adjustable Parameters
+Senior MA Length - period for long-term moving averages
+
+Junior MA Length - period for short-term moving averages
+
+✅ Advantages of the Strategy
+
+🛡️ False Signal Protection - using two pairs of modified MAs reduces the number of false entries
+
+🔄 Configuration Flexibility - ability to choose MA type and calculation periods
+
+⚡ Automatic Switching - the strategy automatically closes the current position when receiving an opposite signal
+
+📈 Visual Clarity - all MAs are displayed on the chart in different colors
+
+⚠️ Disadvantages and Risks
+
+📉 Signal Lag - like all MA-based strategies, it may provide delayed signals during sharp movements
+
+🔁 Frequent Switching - in sideways markets, it may lead to multiple consecutive position openings/closings
+
+📊 Requires Optimization - optimal parameters need to be selected for different instruments and timeframes
+
+💡 Usage Recommendations
+Backtest - test the strategy's performance on historical data
+
+Optimize Parameters - select MA periods suitable for the specific trading instrument
+
+Use Filters - add additional filters to confirm signals
+
+Manage Risks - always use stop-loss and take-profit orders.
+
+You can safely connect to the exchange via webhook and enjoy trading.
+
+Good luck and profits to everyone!!

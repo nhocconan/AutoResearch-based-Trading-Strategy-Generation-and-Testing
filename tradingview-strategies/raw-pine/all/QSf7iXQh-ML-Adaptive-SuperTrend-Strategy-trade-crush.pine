@@ -1,0 +1,329 @@
+//@version=5
+strategy("ML Adaptive SuperTrend Strategy [trade_crush]", "🤖 Adaptive SuperTrend Strategy", overlay = true, max_labels_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, currency = currency.USD)
+
+import TradingView/ta/7
+
+// --- Inputs ---
+atr_len = input.int(10, "ATR Length", group = "SuperTrend Settings")
+fact = input.float(3, "SuperTrend Factor", group = "SuperTrend Settings")
+use_ml_adaptive = input.bool(true, "Use ML Adaptive ATR (Centroid)", group = "SuperTrend Settings", tooltip = "When enabled, it uses K-Means centroids for volatility detection. If disabled, it uses standard ATR.")
+confirm_signals = input.bool(true, "Confirm Signals (Non-Repainting)", group = "SuperTrend Settings", tooltip = "Ensures signals are confirmed on bar close before triggering. This prevents repainting visuals.")
+
+training_data_period = input.int(100, "Training Data Length", group = "K-Means Settings")
+highvol = input.float(0.75, "Initial High volatility Percentile Guess", maxval = 1, group = "K-Means Settings")
+midvol = input.float(0.5, "Initial Medium volatility Percentile Guess", maxval = 1, group = "K-Means Settings")
+lowvol = input.float(0.25, "Initial Low volatility Percentile Guess", maxval = 1, group = "K-Means Settings")
+
+// --- Risk Management ---
+sl_type = input.string("None", "Stop Loss Type", options = ["None", "Percentage", "ATR"], group = "Risk Management")
+sl_val = input.float(2.0, "Stop Loss Value", group = "Risk Management")
+tp_type = input.string("None", "Take Profit Type", options = ["None", "Percentage", "ATR"], group = "Risk Management")
+tp_val = input.float(4.0, "Take Profit Value", group = "Risk Management")
+
+ts_enable = input.bool(false, "Enable Trailing Stop", group = "Trailing Stop")
+ts_type = input.string("ATR", "Trailing Stop Type", options = ["Percentage", "ATR"], group = "Trailing Stop")
+ts_val = input.float(2.0, "Trailing Stop Value", group = "Trailing Stop")
+ts_activation = input.float(1.0, "TS Activation Offset (%)", group = "Trailing Stop", tooltip = "Price must move this % in profit before TS activates")
+
+risk_per_trade = input.float(1.0, "Risk % Per Trade (if using Risk Sizing)", group = "Position Sizing", minval = 0.1, maxval = 100)
+use_risk_sizing = input.bool(false, "Use Risk-Based Sizing", group = "Position Sizing", tooltip = "Calculates quantity based on Stop Loss distance and Risk %.")
+
+// --- Appearance ---
+t1 = input.int(70, "Transparency 1", maxval = 100, minval = 0, group = "Appearance")
+t2 = input.int(95, "Transparency 2", maxval = 100, minval = 0, group = "Appearance")
+green = input.color(#00ffbb, "Bullish Color", group = "Appearance")
+red = input.color(#ff1100, "Bearish Color", group = "Appearance")
+
+// --- SuperTrend Function ---
+pine_supertrend(factor, atr) =>
+    src = hl2
+    upperBand = src + factor * atr
+    lowerBand = src - factor * atr
+    prevLowerBand = nz(lowerBand[1])
+    prevUpperBand = nz(upperBand[1])
+
+    lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
+    upperBand := upperBand < prevUpperBand or close[1] > prevUpperBand ? upperBand : prevUpperBand
+    int _direction = na
+    float superTrend = na
+    prevSuperTrend = superTrend[1]
+    if na(atr[1])
+        _direction := 1
+    else if prevSuperTrend == prevUpperBand
+        _direction := close > upperBand ? -1 : 1
+    else
+        _direction := close < lowerBand ? 1 : -1
+    superTrend := _direction == -1 ? lowerBand : upperBand
+    [superTrend, _direction]
+
+// --- Volatility and K-Means ---
+volatility = ta.atr(atr_len)
+upper = ta.highest(volatility, training_data_period)
+lower = ta.lowest(volatility, training_data_period)
+
+high_volatility = lower + (upper-lower) * highvol
+medium_volatility = lower + (upper-lower) * midvol
+low_volatility = lower + (upper-lower) * lowvol
+
+iterations = 0
+size_a = 0
+size_b = 0
+size_c = 0
+
+hv = array.new_float()
+mv = array.new_float()
+lv = array.new_float()
+amean = array.new_float(1,high_volatility)
+bmean = array.new_float(1,medium_volatility)
+cmean = array.new_float(1,low_volatility)
+
+if nz(volatility) > 0 and bar_index >= training_data_period-1
+    while ((amean.size() == 1 ? true : (amean.first() != amean.get(1))) or (bmean.size() == 1 ? true : (bmean.first() != bmean.get(1))) or (cmean.size() == 1 ? true : (cmean.first() != cmean.get(1))))
+        hv.clear()
+        mv.clear()
+        lv.clear()
+        for i = training_data_period-1 to 0
+            _1 = math.abs(volatility[i] - amean.first())
+            _2 = math.abs(volatility[i] - bmean.first())
+            _3 = math.abs(volatility[i] - cmean.first())
+            if _1 < _2 and _1 < _3
+                hv.unshift(volatility[i])
+            if _2 < _1 and _2 < _3
+                mv.unshift(volatility[i])
+            if _3 < _1 and _3 < _2
+                lv.unshift(volatility[i])
+        
+        amean.unshift(hv.avg())
+        bmean.unshift(mv.avg())
+        cmean.unshift(lv.avg())
+        size_a := hv.size()
+        size_b := mv.size()
+        size_c := lv.size()
+        iterations := iterations + 1
+
+hv_new = amean.first()
+mv_new = bmean.first()
+lv_new = cmean.first()
+
+vdist_a = math.abs(volatility - hv_new)
+vdist_b = math.abs(volatility - mv_new)
+vdist_c = math.abs(volatility - lv_new)
+
+distances = array.new_float()
+centroids = array.new_float()
+
+distances.push(vdist_a)
+distances.push(vdist_b)
+distances.push(vdist_c)
+
+centroids.push(hv_new)
+centroids.push(mv_new)
+centroids.push(lv_new)
+
+cluster = distances.indexof(distances.min()) // 0 for high, 1 for medium, 2 for low
+assigned_centroid = cluster == -1 ? na : centroids.get(cluster)
+
+// --- Logic Selection ---
+atr_to_use = use_ml_adaptive ? assigned_centroid : volatility
+[ST, dir] = pine_supertrend(fact, atr_to_use)
+
+// --- Non-Repainting Signals ---
+// If confirm_signals is true, we look at the previous bar's confirmed state
+bullish_signal = confirm_signals ? ta.crossunder(dir[1], 0) : ta.crossunder(dir, 0)
+bearish_signal = confirm_signals ? ta.crossover(dir[1], 0) : ta.crossover(dir, 0)
+
+// --- Quantity Calculation ---
+float qty = na
+if use_risk_sizing and sl_type != "None"
+    float stop_dist = 0.0
+    if sl_type == "Percentage"
+        stop_dist := close * (sl_val / 100)
+    else if sl_type == "ATR"
+        stop_dist := sl_val * volatility
+    
+    if stop_dist > 0
+        risk_amount = strategy.equity * (risk_per_trade / 100)
+        qty := risk_amount / stop_dist
+
+// --- Strategy Execution ---
+if bullish_signal
+    strategy.entry("Long", strategy.long, qty = qty, comment = "ML Bullish")
+
+if bearish_signal
+    strategy.entry("Short", strategy.short, qty = qty, comment = "ML Bearish")
+
+// --- Trailing Stop Variables ---
+var float ts_price = na
+var bool ts_active = false
+
+if strategy.position_size == 0
+    ts_price := na
+    ts_active := false
+
+// --- Risk Management Logic ---
+float stop_price = na
+float take_profit_price = na
+
+if strategy.position_size > 0
+    // Initial SL
+    if sl_type == "Percentage"
+        stop_price := strategy.position_avg_price * (1 - sl_val / 100)
+    else if sl_type == "ATR"
+        stop_price := strategy.position_avg_price - sl_val * volatility
+    
+    // TP
+    if tp_type == "Percentage"
+        take_profit_price := strategy.position_avg_price * (1 + tp_val / 100)
+    else if tp_type == "ATR"
+        take_profit_price := strategy.position_avg_price + tp_val * volatility
+
+    // Trailing Stop Logic
+    if ts_enable
+        float activation_price = strategy.position_avg_price * (1 + ts_activation / 100)
+        if high >= activation_price
+            ts_active := true
+        
+        if ts_active
+            float current_ts = na
+            if ts_type == "Percentage"
+                current_ts := high * (1 - ts_val / 100)
+            else
+                current_ts := high - ts_val * volatility
+            
+            ts_price := na(ts_price) ? current_ts : math.max(ts_price, current_ts)
+            stop_price := na(stop_price) ? ts_price : math.max(stop_price, ts_price)
+
+    strategy.exit("Exit Long", "Long", stop = stop_price, limit = take_profit_price, comment_loss = ts_active ? "TS" : "SL", comment_profit = "TP")
+
+if strategy.position_size < 0
+    // Initial SL
+    if sl_type == "Percentage"
+        stop_price := strategy.position_avg_price * (1 + sl_val / 100)
+    else if sl_type == "ATR"
+        stop_price := strategy.position_avg_price + sl_val * volatility
+    
+    // TP
+    if tp_type == "Percentage"
+        take_profit_price := strategy.position_avg_price * (1 - tp_val / 100)
+    else if tp_type == "ATR"
+        take_profit_price := strategy.position_avg_price - tp_val * volatility
+
+    // Trailing Stop Logic
+    if ts_enable
+        float activation_price = strategy.position_avg_price * (1 - ts_activation / 100)
+        if low <= activation_price
+            ts_active := true
+        
+        if ts_active
+            float current_ts = na
+            if ts_type == "Percentage"
+                current_ts := low * (1 + ts_val / 100)
+            else
+                current_ts := low + ts_val * volatility
+            
+            ts_price := na(ts_price) ? current_ts : math.min(ts_price, current_ts)
+            stop_price := na(stop_price) ? ts_price : math.min(stop_price, ts_price)
+
+    strategy.exit("Exit Short", "Short", stop = stop_price, limit = take_profit_price, comment_loss = ts_active ? "TS" : "SL", comment_profit = "TP")
+
+// --- Plotting ---
+upTrend = plot(dir == -1 ? ST : na, color = color.new(green, t1), style = plot.style_linebr)
+downTrend = plot(dir == 1 ? ST : na, color = color.new(red, t1), style = plot.style_linebr)
+bodyMiddle = plot(barstate.isfirst ? na : (open + close) / 2, "Body Middle", display = display.none)
+
+fill(bodyMiddle, upTrend, (open + close) / 2, ST, color.new(green, t2), color.new(green, t1))
+fill(bodyMiddle, downTrend, ST, (open + close) / 2, color.new(red, t1), color.new(red, t2))
+
+plotshape(bullish_signal ? ST : na, "Bullish Trend", shape.labelup, location.absolute, green, text = "▲", textcolor = chart.fg_color, size = size.small)
+plotshape(bearish_signal ? ST : na, "Bearish Trend", shape.labeldown, location.absolute, red, text = "▼", textcolor = chart.fg_color, size = size.small)
+
+// --- Dashboard ---
+if barstate.islast
+    var data_table = table.new(position=position.top_right, columns=4, rows=4, bgcolor = chart.bg_color, border_width=1, border_color = chart.fg_color, frame_color = chart.fg_color, frame_width = 1)
+    table.cell(data_table, 0, 0, "Cluster (Volatility)", text_color = chart.fg_color)
+    table.cell(data_table, 1, 0, "Centroid (ATR)", text_color = chart.fg_color)
+    table.cell(data_table, 2, 0, "Size", text_color = chart.fg_color)
+    table.cell(data_table, 3, 0, "Current", text_color = chart.fg_color)
+
+    table.cell(data_table, 0, 1, "3 (High)", text_color = chart.fg_color)
+    table.cell(data_table, 0, 2, "2 (Medium)", text_color = chart.fg_color)
+    table.cell(data_table, 0, 3, "1 (Low)", text_color = chart.fg_color)
+
+    table.cell(data_table, 1, 1, str.format("{0,number,#.##}", hv_new), text_color = chart.fg_color)
+    table.cell(data_table, 1, 2, str.format("{0,number,#.##}", mv_new), text_color = chart.fg_color)
+    table.cell(data_table, 1, 3, str.format("{0,number,#.##}", lv_new), text_color = chart.fg_color)
+
+    table.cell(data_table, 2, 1, str.format("{0,number,#.##}", size_c), text_color = chart.fg_color)
+    table.cell(data_table, 2, 2, str.format("{0,number,#.##}", size_b), text_color = chart.fg_color)
+    table.cell(data_table, 2, 3, str.format("{0,number,#.##}", size_a), text_color = chart.fg_color)
+
+    table.cell(data_table, 3, 1, "HIGH", text_color = cluster == 0 ? chart.bg_color : chart.fg_color, bgcolor = cluster == 0 ? chart.fg_color : chart.bg_color)
+    table.cell(data_table, 3, 2, "MEDIUM", text_color = cluster == 1 ? chart.bg_color : chart.fg_color, bgcolor = cluster == 1 ? chart.fg_color : chart.bg_color)
+    table.cell(data_table, 3, 3, "LOW", text_color = cluster == 2 ? chart.bg_color : chart.fg_color, bgcolor = cluster == 2 ? chart.fg_color : chart.bg_color)
+
+View in Pine Editor・265 lines
+Use on chart
+1
+0
+2
+1 886
+# ML Adaptive SuperTrend Strategy - User Guide
+
+## Introduction
+The **ML Adaptive SuperTrend Strategy** is a sophisticated trading tool that combines traditional trend-following logic with **Machine Learning (K-Means Clustering)** to dynamically adapt to market volatility. Unlike standard SuperTrend indicators that use a fixed ATR, this strategy analyzes historical volatility to categorize the current market into distinct clusters, providing more precise entries and exits.
+
+> [!IMPORTANT]
+> **Special Thanks:** This strategy is based on the innovative work of **AlgoAlpha**. You can explore their extensive library of high-quality indicators and strategies on TradingView: [AlgoAlpha's Profile](tradingview.com/u/AlgoAlpha/).
+
+---
+
+## Machine Learning Engine (K-Means)
+The core of this strategy is its ability to "learn" from recent market behavior.
+- **K-Means Clustering**: The script takes the last $N$ bars of ATR data and runs an iterative clustering algorithm to find three "centroids" representing **High**, **Medium**, and **Low** volatility.
+- **Adaptive ATR**: Based on the current volatility, the strategy selects the nearest centroid to use as the ATR value for the SuperTrend calculation. This ensures the trailing stop tightens during low volatility and widens during high volatility to avoid "noise".
+
+---
+
+## Key Features
+
+### 1. Non-Repainting Signals
+- **Confirm Signals**: When enabled, signals are only triggered after a bar closes. This ensures that the arrows and entries you see on the chart are permanent and reliable for backtesting.
+
+### 2. Intelligent Risk Management
+- **Multiple SL/TP Types**: Choose between **Percentage** based stops or **ATR** based stops for both Stop Loss and Take Profit.
+- **Trailing Stop Loss (TSL)**:
+- Supports both Percentage and ATR modes.
+- **Activation Offset**: Only activates the trailing mechanism after the price has moved a certain percentage in your favor, protecting early-stage trades.
+
+### 3. Risk-Based Position Sizing
+- **Dynamic Quantity**: If enabled, the strategy automatically calculates the trade size based on your **Risk % Per Trade** and the distance to your **Stop Loss**. This ensures you never lose more than your defined risk on a single trade.
+
+---
+
+## User Input Guide
+
+### SuperTrend & ML Settings
+- **ATR Length**: The window used to calculate market volatility.
+- **SuperTrend Factor**: The multiplier that determines the distance of the trailing stop from the price.
+- **Use ML Adaptive ATR**: Toggle between the ML-enhanced logic and standard ATR.
+- **Training Data Length**: How many historical bars the ML engine analyzes to find clusters.
+
+### Risk Management
+- **Stop Loss Type**: Set to Percentage, ATR, or None.
+- **TS Activation Offset**: The profit buffer required before the trailing stop starts following the price.
+- **Use Risk-Based Sizing**: Toggle this to let the script manage your position size automatically.
+
+---
+
+## How to Trade with This Strategy
+1. **Monitor the Dashboard**: Check the top-right table to see which volatility cluster the market is currently in.
+2. **Observe the Fills**: The adaptive fills (green/red) visualize the "breathing room" the strategy is giving the price.
+3. **Execution**: The strategy enters on "ML Bullish" (Triangle Up) and "ML Bearish" (Triangle Down) signals.
+4. **Exits**: The script will automatically exit based on your SL, TP, or Trailing Stop settings.
+
+---
+
+## Credits
+Original Concept: **AlgoAlpha**
+Strategy Conversion & Enhancements: **Antigravity AI**
+

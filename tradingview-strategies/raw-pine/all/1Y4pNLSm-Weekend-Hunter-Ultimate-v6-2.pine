@@ -1,0 +1,449 @@
+//@version=6
+strategy("Weekend Hunter Ultimate v6.2 [PRODUCTION READY]", 
+         overlay=true, 
+         pyramiding=0,
+         calc_bars_count=5000,
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=10,
+         commission_type=strategy.commission.percent,
+         commission_value=0.075,
+         slippage=3,
+         initial_capital=500)
+
+// ========================================
+// WEEKEND-ONLY CONFIGURATION
+// ========================================
+
+enable_weekend_only = input.bool(true, "WEEKEND TRADING ONLY", tooltip="Saturday-Sunday when institutions are offline")
+weekend_start_day = input.string("Saturday", "Weekend Start", options=["Friday", "Saturday"])
+weekend_end_day = input.string("Sunday", "Weekend End", options=["Sunday", "Monday"])
+
+// Optimal Weekend Windows (Research-Based)
+optimal_saturday_start = input.int(0, "Saturday Start Hour (UTC)", minval=0, maxval=23)
+optimal_sunday_end = input.int(23, "Sunday End Hour (UTC)", minval=0, maxval=23)
+prime_sunday_window = input.bool(true, "Enable Prime Sunday Window (0-8 UTC)")
+
+// Weekend Detection Logic
+is_saturday = dayofweek == dayofweek.saturday
+is_sunday = dayofweek == dayofweek.sunday
+is_weekend = is_saturday or is_sunday
+current_hour = hour(time)
+
+// Prime Weekend Window
+in_prime_window = is_sunday and current_hour >= 0 and current_hour <= 8
+in_weekend_hours = (is_saturday and current_hour >= optimal_saturday_start) or 
+                  (is_sunday and current_hour <= optimal_sunday_end)
+
+weekend_trading_active = enable_weekend_only ? (is_weekend and in_weekend_hours) : true
+
+// ========================================
+// POSITION & CAPITAL MANAGEMENT
+// ========================================
+
+var float daily_pnl = 0.0
+var float weekend_pnl = 0.0
+var int last_day = 0
+var int consecutive_losses = 0
+
+// Maximum concurrent positions with $500
+max_concurrent_positions = 4
+current_positions = strategy.opentrades
+
+// Smart Capital Management
+available_capital = strategy.equity - (strategy.position_size * close)
+min_capital_per_trade = 120.0
+safety_buffer = 50.0
+can_afford_position = available_capital > (min_capital_per_trade + safety_buffer)
+position_available = current_positions < max_concurrent_positions
+
+// ========================================
+// AGGRESSIVE 65% WIN RATE CONFIGURATION
+// ========================================
+
+historical_win_rate = input.float(65.0, "Target Win Rate %", minval=60.0, maxval=70.0) / 100
+avg_win_percent = input.float(5.5, "Average Win %", minval=4.0, maxval=7.0) / 100
+avg_loss_percent = input.float(1.8, "Average Loss %", minval=1.5, maxval=2.5) / 100
+
+// Loss Limits
+max_daily_loss = input.float(5.0, "Max Daily Loss %", minval=3.0, maxval=8.0)
+max_weekend_loss = input.float(15.0, "Max Weekend Loss %", minval=10.0, maxval=20.0)
+max_consecutive_losses_allowed = 4
+
+// ========================================
+// DYNAMIC LEVERAGE SYSTEM 5-20x
+// ========================================
+
+min_leverage = input.float(5.0, "Minimum Leverage", minval=5.0, maxval=10.0)
+max_leverage = input.float(20.0, "Maximum Leverage", minval=15.0, maxval=25.0)
+
+// EXACT COIN-SPECIFIC RISK PROFILES
+symbol_risk_profile = syminfo.ticker == "BTCUSDT" ? 0.9 : 
+                      syminfo.ticker == "ETHUSDT" ? 0.85 : 
+                      syminfo.ticker == "LINKUSDT" ? 0.75 :
+                      syminfo.ticker == "XRPUSDT" ? 0.75 :
+                      syminfo.ticker == "DOGEUSDT" ? 0.6 :
+                      syminfo.ticker == "SOLUSDT" ? 0.7 :
+                      syminfo.ticker == "AVAXUSDT" ? 0.7 :
+                      syminfo.ticker == "1000PEPEUSDT" ? 0.5 :
+                      syminfo.ticker == "TONUSDT" ? 0.65 :
+                      syminfo.ticker == "POLUSDT" ? 0.7 : 0.5
+
+// ========================================
+// PROFIT PROTECTION SYSTEM
+// ========================================
+
+use_trailing = input.bool(true, "Enable Smart Trailing", tooltip="Protects profits when approaching target")
+trailing_activation_percent = input.float(2.5, "Trailing Activation %", minval=2.0, maxval=3.5)
+trailing_distance_percent = input.float(1.5, "Trail Distance %", minval=1.0, maxval=2.0)
+
+// ========================================
+// MULTI-TIMEFRAME CONFLUENCE
+// ========================================
+
+// 4H Trend Bias
+htf_4h_close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+htf_4h_ema50 = request.security(syminfo.tickerid, "240", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+
+// 1H Momentum Confirmation - Fixed MACD
+[htf_1h_macd, htf_1h_signal, htf_1h_hist] = request.security(syminfo.tickerid, "60", ta.macd(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+htf_1h_rsi = request.security(syminfo.tickerid, "60", ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+// Trend Alignment Scoring
+htf_4h_trend = htf_4h_close > htf_4h_ema50 ? 1 : -1
+htf_1h_momentum = htf_1h_macd > htf_1h_signal ? 1 : -1
+current_trend = close > ta.ema(close, 20) ? 1 : -1
+
+trend_alignment = (htf_4h_trend + htf_1h_momentum + current_trend) / 3.0
+
+// ========================================
+// VOLATILITY & MARKET REGIME
+// ========================================
+
+atr_period = 14
+atr_value = ta.atr(atr_period)
+atr_percentage = (atr_value / close) * 100
+
+volatility_regime = atr_percentage < 2.0 ? "Low" : atr_percentage < 5.0 ? "Medium" : "High"
+
+// Weekend Liquidity Adjustment
+volume_sma = ta.sma(volume, 20)
+current_liquidity_ratio = volume / volume_sma
+weekend_liquidity_adjustment = is_weekend ? math.min(current_liquidity_ratio * 0.8, 1.0) : 1.0
+
+// ========================================
+// CVD DIVERGENCE DETECTION
+// ========================================
+
+var float cvd = 0.0
+bull_volume = close > open ? volume : 0
+bear_volume = close < open ? volume : 0
+volume_delta = bull_volume - bear_volume
+cvd := cvd + volume_delta
+
+// Divergence Detection
+price_higher = close > close[10]
+cvd_lower = cvd < cvd[10]
+bearish_divergence = price_higher and cvd_lower
+
+price_lower = close < close[10]
+cvd_higher = cvd > cvd[10]
+bullish_divergence = price_lower and cvd_higher
+
+// ========================================
+// SIGNAL GENERATION SYSTEM
+// ========================================
+
+// Primary Indicators
+rsi = ta.rsi(close, 8)
+
+// Fixed MACD unpacking
+[macd_line, signal_line, histogram] = ta.macd(close, 8, 17, 9)
+
+// Fixed Bollinger Bands unpacking
+[bb_upper, bb_middle, bb_lower] = ta.bb(close, 20, 2.5)
+
+// Volume Confirmation
+volume_surge = volume > (volume_sma * 1.5)
+min_volume_threshold = ta.sma(volume, 100) * 0.1
+valid_volume = volume > min_volume_threshold
+volume_confirmation = volume_surge and current_liquidity_ratio > 0.7 and valid_volume
+
+// Signal Strength Calculation
+var float signal_strength = 0.0
+
+// Trend Component (40% weight)
+trend_score = trend_alignment * 40
+
+// Momentum Component (30% weight)
+momentum_bullish = rsi < 30 and rsi > rsi[1]
+momentum_bearish = rsi > 70 and rsi < rsi[1]
+momentum_score = momentum_bullish ? 30 : momentum_bearish ? -30 : 0
+
+// Volume Component (20% weight)
+volume_score = volume_confirmation ? 20 : 0
+volume_score := volume_score + (bullish_divergence ? 10 : bearish_divergence ? -10 : 0)
+
+// Weekend Component (10% weight) - Fixed type
+weekend_score = is_weekend ? 10.0 : 0.0
+if in_prime_window
+    weekend_score := weekend_score * 1.5
+
+signal_strength := trend_score + momentum_score + volume_score + weekend_score
+
+// Weekend Signal Boost
+if is_weekend
+    signal_strength := signal_strength * 1.2
+if in_prime_window
+    signal_strength := signal_strength * 1.3
+
+// ========================================
+// DYNAMIC LEVERAGE CALCULATION
+// ========================================
+
+// Safety Score Components
+volatility_safety = volatility_regime == "Low" ? 1.0 : volatility_regime == "Medium" ? 0.7 : 0.4
+signal_confidence = math.abs(signal_strength) / 100
+overall_safety = (volatility_safety + signal_confidence) / 2 * symbol_risk_profile
+
+// Calculate Dynamic Leverage
+leverage_range = max_leverage - min_leverage
+dynamic_leverage = min_leverage + (leverage_range * overall_safety)
+final_leverage = math.round(math.max(min_leverage, math.min(max_leverage, dynamic_leverage)), 1)
+
+// ========================================
+// POSITION SIZING WITH CAPITAL CHECK
+// ========================================
+
+// Signal Thresholds
+min_signal_strength = input.float(55.0, "Minimum Signal Strength", minval=45.0, maxval=65.0)
+high_confidence_threshold = input.float(75.0, "High Confidence Threshold", minval=70.0, maxval=85.0)
+
+high_confidence = math.abs(signal_strength) > high_confidence_threshold
+position_multiplier = high_confidence ? 1.3 : 1.0
+
+// Calculate Position Size
+base_position_usd = 120.0
+desired_position_usd = base_position_usd * position_multiplier
+
+// Pair-specific adjustment
+pair_multiplier = syminfo.ticker == "1000PEPEUSDT" ? 0.5 : syminfo.ticker == "BTCUSDT" ? 1.0 : syminfo.ticker == "ETHUSDT" ? 1.0 : 0.8
+
+final_position_usd = desired_position_usd * pair_multiplier
+contracts = can_afford_position ? final_position_usd / close : 0
+
+// ========================================
+// ENTRY CONDITIONS WITH ALL SAFETY CHECKS
+// ========================================
+
+// Signal Conditions
+strong_bullish_signal = signal_strength > min_signal_strength and trend_alignment > 0
+strong_bearish_signal = signal_strength < -min_signal_strength and trend_alignment < 0
+
+// Flash Crash Protection (8%)
+flash_crash_detected = math.abs((close - close[4]) / close[4]) > 0.08
+
+// Loss Tracking
+if dayofmonth != last_day
+    daily_pnl := 0.0
+    if dayofweek == dayofweek.monday
+        weekend_pnl := 0.0
+    last_day := dayofmonth
+
+daily_loss_pct = (daily_pnl / strategy.equity) * 100
+weekend_loss_pct = (weekend_pnl / strategy.equity) * 100
+loss_limits_active = daily_loss_pct <= -max_daily_loss or weekend_loss_pct <= -max_weekend_loss or consecutive_losses >= max_consecutive_losses_allowed
+
+// Emergency Stop at -30% Account Level
+account_emergency_stop = strategy.equity < (strategy.initial_capital * 0.7)
+
+// Final Entry Conditions (fixed line continuation)
+can_enter_long = strong_bullish_signal and weekend_trading_active and not loss_limits_active and position_available and can_afford_position and strategy.position_size == 0 and not flash_crash_detected and not account_emergency_stop
+
+can_enter_short = strong_bearish_signal and weekend_trading_active and not loss_limits_active and position_available and can_afford_position and strategy.position_size == 0 and not flash_crash_detected and not account_emergency_stop
+
+// ========================================
+// DYNAMIC STOP LOSS & TAKE PROFIT
+// ========================================
+
+// ATR-Based with Leverage Adjustment  
+base_atr_mult_sl = input.float(1.5, "Base ATR Multiplier SL", minval=1.0, maxval=2.0)
+base_atr_mult_tp = input.float(4.5, "Base ATR Multiplier TP", minval=3.5, maxval=6.0)
+
+leverage_adjustment = 1.0 + (final_leverage - 5) / 50
+atr_mult_sl = base_atr_mult_sl / leverage_adjustment
+atr_mult_tp = base_atr_mult_tp * (1.0 + signal_confidence * 0.2)
+
+stop_distance = atr_value * atr_mult_sl
+tp_distance = atr_value * atr_mult_tp
+
+long_stop = close - stop_distance
+long_tp = close + tp_distance
+short_stop = close + stop_distance
+short_tp = close - tp_distance
+
+// ========================================
+// STRATEGY EXECUTION WITH ALERTS
+// ========================================
+
+// Long Entry with alert
+if can_enter_long
+    alert_message = '{"action":"open_long","ticker":"' + syminfo.ticker + '","price":"' + str.tostring(close) + '","leverage":"' + str.tostring(final_leverage) + '","stop_loss":"' + str.tostring(long_stop) + '","take_profit":"' + str.tostring(long_tp) + '"}'
+    strategy.entry("Long", strategy.long, qty=contracts, comment="L " + str.tostring(final_leverage, "#.#") + "x S:" + str.tostring(signal_strength, "#"))
+    alert(alert_message, alert.freq_once_per_bar)
+    
+    if use_trailing
+        strategy.exit("Long Exit", "Long", stop=long_stop, limit=long_tp, trail_points=close * trailing_activation_percent / 100, trail_offset=close * trailing_distance_percent / 100)
+    else
+        strategy.exit("Long Exit", "Long", stop=long_stop, limit=long_tp)
+
+// Short Entry with alert
+if can_enter_short  
+    alert_message = '{"action":"open_short","ticker":"' + syminfo.ticker + '","price":"' + str.tostring(close) + '","leverage":"' + str.tostring(final_leverage) + '","stop_loss":"' + str.tostring(short_stop) + '","take_profit":"' + str.tostring(short_tp) + '"}'
+    strategy.entry("Short", strategy.short, qty=contracts, comment="S " + str.tostring(final_leverage, "#.#") + "x S:" + str.tostring(signal_strength, "#"))
+    alert(alert_message, alert.freq_once_per_bar)
+    
+    if use_trailing
+        strategy.exit("Short Exit", "Short", stop=short_stop, limit=short_tp, trail_points=close * trailing_activation_percent / 100, trail_offset=close * trailing_distance_percent / 100)
+    else
+        strategy.exit("Short Exit", "Short", stop=short_stop, limit=short_tp)
+
+// Emergency Exits with alert
+if strategy.position_size != 0
+    entry_price = strategy.position_avg_price
+    current_profit_pct = strategy.position_size > 0 ? ((close - entry_price) / entry_price * 100) : ((entry_price - close) / entry_price * 100)
+    
+    // Liquidation Protection
+    liq_distance = 100 / final_leverage * 0.8
+    approaching_liquidation = math.abs(current_profit_pct) > liq_distance
+    
+    if approaching_liquidation or flash_crash_detected or account_emergency_stop
+        alert('{"action":"close_all","ticker":"' + syminfo.ticker + '"}', alert.freq_once_per_bar)
+        strategy.close_all(comment="EMERGENCY")
+
+// Weekend End Exit
+if dayofweek == dayofweek.monday and hour == 0 and strategy.position_size != 0
+    alert('{"action":"close_all","ticker":"' + syminfo.ticker + '"}', alert.freq_once_per_bar)
+    strategy.close_all(comment="Weekend End")
+
+// Track Consecutive Losses
+if strategy.closedtrades > strategy.closedtrades[1]
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        consecutive_losses := consecutive_losses + 1
+    else
+        consecutive_losses := 0
+    
+    // Update P&L
+    trade_pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    daily_pnl := daily_pnl + trade_pnl
+    if is_weekend
+        weekend_pnl := weekend_pnl + trade_pnl
+
+// ========================================
+// VISUALIZATION & MONITORING
+// ========================================
+
+// Weekend Background
+bgcolor(is_weekend ? color.new(color.blue, 95) : na, title="Weekend")
+bgcolor(in_prime_window ? color.new(color.purple, 90) : na, title="Prime")
+
+// Signal Strength
+plot(signal_strength, "Signal", signal_strength > 0 ? color.lime : color.red, 2)
+hline(min_signal_strength, "Min Signal", color.green, hline.style_dashed)
+hline(-min_signal_strength, "Min Signal", color.red, hline.style_dashed)
+
+// Entry Signals
+plotshape(can_enter_long, "Long", shape.triangleup, location.belowbar, high_confidence ? color.lime : color.green, size=size.small)
+plotshape(can_enter_short, "Short", shape.triangledown, location.abovebar, high_confidence ? color.red : color.maroon, size=size.small)
+
+// Warnings
+bgcolor(loss_limits_active ? color.new(color.red, 80) : na, title="Loss Limit")
+bgcolor(account_emergency_stop ? color.new(color.purple, 80) : na, title="Emergency")
+
+// Performance Table
+if barstate.islast
+    var table perf = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+    
+    table.cell(perf, 0, 0, "Equity", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 0, "$" + str.tostring(strategy.equity, "#"), text_color=color.blue, bgcolor=color.white)
+    
+    table.cell(perf, 0, 1, "Leverage", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 1, str.tostring(final_leverage, "#.#") + "x", text_color=color.blue, bgcolor=color.white)
+    
+    table.cell(perf, 0, 2, "Signal", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 2, str.tostring(signal_strength, "#"), text_color=signal_strength > 0 ? color.green : color.red, bgcolor=color.white)
+    
+    table.cell(perf, 0, 3, "Positions", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 3, str.tostring(current_positions) + "/4", text_color=color.blue, bgcolor=color.white)
+    
+    table.cell(perf, 0, 4, "Daily P&L", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 4, "$" + str.tostring(daily_pnl, "#.##"), text_color=daily_pnl > 0 ? color.green : color.red, bgcolor=color.white)
+    
+    table.cell(perf, 0, 5, "Weekend", text_color=color.black, bgcolor=color.white)  
+    table.cell(perf, 1, 5, "$" + str.tostring(weekend_pnl, "#.##"), text_color=weekend_pnl > 0 ? color.green : color.red, bgcolor=color.white)
+    
+    table.cell(perf, 0, 6, "Win Rate", text_color=color.black, bgcolor=color.white)
+    win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    table.cell(perf, 1, 6, str.tostring(win_rate, "#.#") + "%", text_color=win_rate > 60 ? color.green : color.red, bgcolor=color.white)
+    
+    table.cell(perf, 0, 7, "Volatility", text_color=color.black, bgcolor=color.white)
+    table.cell(perf, 1, 7, volatility_regime, text_color=volatility_regime == "Low" ? color.green : volatility_regime == "Medium" ? color.orange : color.red, bgcolor=color.white)
+
+View in Pine Editor・389 lines
+Use on chart
+2
+2
+1 262
+Weekend Hunter Ultimate v6.2 - Automated Crypto Weekend Trading System
+
+OVERVIEW:
+Specialized trading strategy designed for cryptocurrency weekend markets (Saturday-Sunday) when institutional traders are typically offline and market dynamics differ significantly from weekdays. Optimized for 15-minute timeframe execution with multi-timeframe confluence analysis.
+
+KEY FEATURES:
+- Weekend-Only Trading: Automatically activates during configurable weekend hours
+- Dynamic Leverage: 5-20x leverage adjusted based on market safety and signal confidence
+- Multi-Timeframe Analysis: Combines 4H trend, 1H momentum, and 15M execution
+- 10 Pre-configured Crypto Pairs: BTC, ETH, LINK, XRP, DOGE, SOL, AVAX, PEPE, TON, POL
+- Position & Risk Management: Max 4 concurrent positions, -30% account protection
+- Smart Trailing Stops: Protects profits when approaching targets
+
+RISK MANAGEMENT:
+- Maximum daily loss: 5% (configurable)
+- Maximum weekend loss: 15% (configurable)
+- Per-position risk: Capped at 120-156 USDT
+- Emergency stops for flash crashes (8% moves)
+- Consecutive loss protection (4 losses = pause)
+
+TECHNICAL INDICATORS:
+- CVD (Cumulative Volume Delta) divergence detection
+- ATR-based dynamic stop loss and take profit
+- RSI, MACD, Bollinger Bands confluence
+- Volume surge confirmation (1.5x average)
+- Weekend liquidity adjustments
+
+INTEGRATION:
+- Designed for Bybit Futures (0.075% taker fee)
+- WunderTrading webhook compatibility via JSON alerts
+- Minimum position size: 120 USDT (Bybit requirement)
+- Initial capital: $500 recommended
+
+TARGET METRICS:
+- Win rate target: 65%
+- Average win: 5.5%
+- Average loss: 1.8%
+- Risk-reward ratio: ~3:1
+
+IMPORTANT DISCLAIMERS:
+- Past performance does not guarantee future results
+- Leveraged trading carries substantial risk of loss
+- Weekend crypto markets have 13% of normal liquidity
+- Not suitable for traders who cannot afford to lose their entire investment
+- Requires continuous monitoring and adjustment
+
+USAGE:
+1. Apply to 15-minute charts only
+2. Configure weekend hours for your timezone
+3. Set up webhook alerts for automation
+4. Monitor performance table in top-right corner
+5. Adjust parameters based on your risk tolerance
+
+This is an experimental strategy for educational purposes. Always test with small amounts first and never invest more than you can afford to lose completely.

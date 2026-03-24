@@ -1,0 +1,33 @@
+//@version=6
+##root(root_metainfo,rm_0,'percent_of_equity',const__string,strategy,default_qty_type,'5_95_5_120')
+##root(root_metainfo,rm_1,'percent',const__string,strategy,commission_type,'5_225_5_251')
+var bool is_plot_short=##input(defval=true,type='INPUT_BOOL',##id='in_3')
+var bool is_plot_long=##input(defval=true,type='INPUT_BOOL',##id='in_4')
+long_display=display.all
+if is_plot_long
+    long_display:=display.all
+else
+    long_display:=display.none
+##var_0=long_display
+##root(root_metainfo,rm_2,1,input__integer,plot,linewidth,'69_93_69_93')
+##root(root_metainfo,rm_3,##var_0,cb__input__plot_display__integer,plot,display,'69_142_69_153')
+##var_1=long_display
+##root(root_metainfo,rm_4,1,input__integer,plot,linewidth,'70_86_70_86')
+##root(root_metainfo,rm_5,##var_1,cb__input__plot_display__integer,plot,display,'70_124_70_135')
+##var_2=long_display
+##root(root_metainfo,rm_6,2,input__integer,plot,linewidth,'71_96_71_96')
+##root(root_metainfo,rm_7,##var_2,cb__input__plot_display__integer,plot,display,'71_134_71_145')
+short_display=display.all
+if is_plot_short
+    short_display:=display.all
+else
+    short_display:=display.none
+##var_3=short_display
+##root(root_metainfo,rm_8,2,input__integer,plot,linewidth,'85_83_85_83')
+##root(root_metainfo,rm_9,##var_3,cb__input__plot_display__integer,plot,display,'85_122_85_134')
+##var_4=short_display
+##root(root_metainfo,rm_10,1,input__integer,plot,linewidth,'86_85_86_85')
+##root(root_metainfo,rm_11,##var_4,cb__input__plot_display__integer,plot,display,'86_124_86_136')
+##var_5=short_display
+##root(root_metainfo,rm_12,1,input__integer,plot,linewidth,'87_92_87_92')
+##root(root_metainfo,rm_13,##var_5,cb__input__plot_display__integer,plot,display,'87_142_87_154')

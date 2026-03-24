@@ -1,0 +1,38 @@
+//@version=3
+strategy(title="BTFD with VIX Fix Rank", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100.0)
+
+ema_filter_use = input(true, "Use EMA price filter", type=bool)
+ema_filter_period = input(125, minval=1)
+
+vixfix_length = input(25, minval=1, title="VIX Fix Length")
+vixfix_ema_period = input(21, minval=1, title="VIX Fix EMA period")
+rank_threshold = input(75, minval=0, maxval=100, title="VIX Fix smoothed rank long threshold")
+trade_duration = input(10, minval=1, title="Trade duration in bars")
+
+plot(rank_threshold, title="Threshold", color=green, linewidth=1)
+
+// Calculate VIX Fix, smoothe by EMA
+maxhigh = highest(close, vixfix_length)
+vixfix = (maxhigh - low) / maxhigh * 100
+vixfixrank = ema(percentrank(vixfix, vixfix_length), vixfix_ema_period) // length different?
+plot(vixfixrank, color=maroon)
+
+trigger = (ema_filter_use ? (close > ema(close, ema_filter_period)) : true) and crossover(vixfixrank, rank_threshold) and year >= 2005
+
+if (trigger)
+    strategy.entry("long", strategy.long, comment="L")
+    
+if (trigger[trade_duration])
+    strategy.close("long")
+    //strategy.exit("exit", "long", when=strategy.position_size != 0)
+
+View in Pine Editor・27 lines
+Use on chart
+6
+5
+3 134
+Apr 20, 2019
+Bla
+Apr 20, 2019
+Release Notes
+Bla

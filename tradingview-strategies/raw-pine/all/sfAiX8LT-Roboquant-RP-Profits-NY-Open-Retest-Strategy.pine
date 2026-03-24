@@ -1,0 +1,212 @@
+//@version=6
+strategy("Roboquant RP Profits NY Open Retest Strategy", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// Inputs
+tpMultiplier = input.float(title="TP Multiplier", defval=2.0, minval=1.0)
+orderDuration = input.int(title="Order Duration (hours)", defval=2, minval=1)
+atrPeriod = input.int(title="ATR Period", defval=14, minval=1)
+atrMultiplier = input.float(title="ATR Multiplier for SL", defval=0.9, minval=0.5)
+
+// Long Short Tool Visualization
+showLongShortTool = input(true, "Show Long Short Tool", group="Long Short Tool")
+riskColor = input.color(color.new(color.red, 70), "Risk Area Color", group="Long Short Tool")
+rewardColor = input.color(color.new(color.green, 70), "Reward Area Color", group="Long Short Tool")
+entryLineColor = input.color(color.white, "Entry Line Color", group="Long Short Tool")
+
+// Session inputs
+preOpenSession = input.session("0900-0915", title="Pre Open Session")
+tradingSession = input.session("0930-1600", title="Trading Session")
+
+// Calculate ATR
+atrValue = ta.atr(atrPeriod)
+
+// Declare variables
+var float preOpenRangeHigh = na
+var float preOpenRangeLow = na
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+var int entryTime = na
+var string tradeDirection = na
+var bool tradeTakenToday = false
+
+// Long Short Tool Variables - Arrays to store past 2 days
+var array<line> entryLines = array.new<line>()
+var array<box> riskBoxes = array.new<box>()
+var array<box> rewardBoxes = array.new<box>()
+var array<int> entryBars = array.new<int>()
+
+// NY Open Range Lines
+var line rangeHighLine = na
+var line rangeLowLine = na
+
+// Time variables
+isNewTradingDay = ta.change(dayofweek) != 0
+isPreOpenTime = na(time(timeframe.period, preOpenSession, "America/New_York")) == false
+isTradingTime = na(time(timeframe.period, tradingSession, "America/New_York")) == false
+
+// Reset variables on new trading day
+if isNewTradingDay
+    preOpenRangeHigh := na
+    preOpenRangeLow := na
+    tradeTakenToday := false
+
+// Capture Pre Open Range
+if isPreOpenTime and na(preOpenRangeHigh)
+    preOpenRangeHigh := high
+    preOpenRangeLow := low
+    
+    // Create NY open range lines extending 6 bars to the right
+    rangeHighLine := line.new(bar_index, preOpenRangeHigh, bar_index + 6, preOpenRangeHigh, color=color.green, style=line.style_dotted, width=3)
+    rangeLowLine := line.new(bar_index, preOpenRangeLow, bar_index + 6, preOpenRangeLow, color=color.red, style=line.style_dotted, width=3)
+
+// Check if a candle has closed above or below the Pre Open Range and place orders immediately
+if isTradingTime and not na(preOpenRangeHigh) and not tradeTakenToday
+    if close > preOpenRangeHigh and na(entryPrice)
+        tradeDirection := "long"
+        entryPrice := preOpenRangeHigh  // Exact high, no buffer
+        stopLoss := preOpenRangeLow - (atrValue * atrMultiplier)  // ATR below range LOW
+        takeProfit := entryPrice + (math.abs(entryPrice - stopLoss) * tpMultiplier)
+        entryTime := time
+        
+        // Place order immediately
+        strategy.entry("Long", strategy.long, limit=entryPrice)
+        strategy.exit("Exit Long", from_entry="Long", stop=stopLoss, limit=takeProfit)
+        
+    else if close < preOpenRangeLow and na(entryPrice)
+        tradeDirection := "short"
+        entryPrice := preOpenRangeLow  // Exact low, no buffer
+        stopLoss := preOpenRangeHigh + (atrValue * atrMultiplier)  // ATR above range HIGH
+        takeProfit := entryPrice - (math.abs(entryPrice - stopLoss) * tpMultiplier)
+        entryTime := time
+        
+        // Place order immediately
+        strategy.entry("Short", strategy.short, limit=entryPrice)
+        strategy.exit("Exit Short", from_entry="Short", stop=stopLoss, limit=takeProfit)
+
+// Mark trade as taken when position opens
+if strategy.position_size != 0 and not tradeTakenToday
+    tradeTakenToday := true
+
+// Cancel order if not filled within specified duration
+if not na(entryTime) and (time - entryTime) > orderDuration * 60 * 60 * 1000 and strategy.position_size == 0
+    strategy.cancel_all()
+    entryPrice := na
+    stopLoss := na
+    takeProfit := na
+    entryTime := na
+    tradeDirection := na
+
+// Reset variables at the end of the trading day
+if isTradingTime and (hour == 16 and minute == 0)
+    entryPrice := na
+    stopLoss := na
+    takeProfit := na
+    entryTime := na
+    tradeDirection := na
+
+// Long Short Tool - Create visualization when position opens
+if strategy.position_size != 0 and strategy.position_size[1] == 0 and showLongShortTool and not na(entryPrice) and not na(stopLoss) and not na(takeProfit)
+    // Set entry bar
+    currentEntryBar = bar_index
+    
+    // Create entry line using actual strategy entry price
+    newEntryLine = line.new(currentEntryBar, entryPrice, currentEntryBar + 50, entryPrice, color=entryLineColor, style=line.style_solid, width=2)
+    array.push(entryLines, newEntryLine)
+    array.push(entryBars, currentEntryBar)
+    
+    // Declare box variables
+    newRiskBox = box(na)
+    newRewardBox = box(na)
+    
+    if strategy.position_size > 0  // Long position
+        // Risk box (entry to stop loss)
+        newRiskBox := box.new(currentEntryBar, entryPrice, currentEntryBar + 50, stopLoss, bgcolor=riskColor, border_color=na)
+        
+        // Reward box (entry to take profit)
+        newRewardBox := box.new(currentEntryBar, entryPrice, currentEntryBar + 50, takeProfit, bgcolor=rewardColor, border_color=na)
+        
+    else if strategy.position_size < 0  // Short position
+        // Risk box (entry to stop loss)
+        newRiskBox := box.new(currentEntryBar, entryPrice, currentEntryBar + 50, stopLoss, bgcolor=riskColor, border_color=na)
+        
+        // Reward box (entry to take profit)
+        newRewardBox := box.new(currentEntryBar, entryPrice, currentEntryBar + 50, takeProfit, bgcolor=rewardColor, border_color=na)
+    
+    array.push(riskBoxes, newRiskBox)
+    array.push(rewardBoxes, newRewardBox)
+    
+    // Clean up old visualizations (keep only last 30 days)
+    maxDays = 30
+    
+    // Clean up old entry lines
+    while array.size(entryLines) > maxDays
+        oldLine = array.shift(entryLines)
+        line.delete(oldLine)
+    
+    // Clean up old risk boxes
+    while array.size(riskBoxes) > maxDays
+        oldBox = array.shift(riskBoxes)
+        box.delete(oldBox)
+    
+    // Clean up old reward boxes
+    while array.size(rewardBoxes) > maxDays
+        oldBox = array.shift(rewardBoxes)
+        box.delete(oldBox)
+    
+    // Clean up old entry bars
+    while array.size(entryBars) > maxDays
+        array.shift(entryBars)
+
+// Extend Long Short Tool visualization while position is active
+if strategy.position_size != 0 and showLongShortTool and array.size(entryLines) > 0
+    currentBar = bar_index
+    extendTo = currentBar + 10
+    
+    // Extend the most recent entry line
+    if array.size(entryLines) > 0
+        line.set_x2(array.get(entryLines, array.size(entryLines) - 1), extendTo)
+    
+    // Extend the most recent boxes
+    if array.size(riskBoxes) > 0
+        box.set_right(array.get(riskBoxes, array.size(riskBoxes) - 1), extendTo)
+    if array.size(rewardBoxes) > 0
+        box.set_right(array.get(rewardBoxes, array.size(rewardBoxes) - 1), extendTo)
+
+// Close Long Short Tool visualization when position closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and showLongShortTool
+    currentBar = bar_index
+    
+    // Ensure minimum 4 bars width
+    if array.size(entryBars) > 0
+        lastEntryBar = array.get(entryBars, array.size(entryBars) - 1)
+        minEndBar = math.max(currentBar, lastEntryBar + 4)
+        
+        // Close the most recent visualization with minimum 4 bars width
+        if array.size(entryLines) > 0
+            line.set_x2(array.get(entryLines, array.size(entryLines) - 1), minEndBar)
+        if array.size(riskBoxes) > 0
+            box.set_right(array.get(riskBoxes, array.size(riskBoxes) - 1), minEndBar)
+        if array.size(rewardBoxes) > 0
+            box.set_right(array.get(rewardBoxes, array.size(rewardBoxes) - 1), minEndBar)
+
+// Plots
+plot(series=isPreOpenTime ? preOpenRangeHigh : na, color=color.green, style=plot.style_linebr, title="Pre Open High")
+plot(series=isPreOpenTime ? preOpenRangeLow : na, color=color.red, style=plot.style_linebr, title="Pre Open Low")
+
+// Entry arrows
+plotshape(series=strategy.position_size > 0 and strategy.position_size[1] == 0, style=shape.arrowup, location=location.belowbar, color=color.green, size=size.normal, title="Long Entry")
+plotshape(series=strategy.position_size < 0 and strategy.position_size[1] == 0, style=shape.arrowdown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+
+// Debug plots
+plot(series=isPreOpenTime ? 1 : 0, color=color.yellow, style=plot.style_circles, title="Is Pre Open Time")
+plot(series=isTradingTime ? 1 : 0, color=color.white, style=plot.style_circles, title="Is Trading Time")
+plot(series=isTradingTime and not na(preOpenRangeHigh) ? 1 : 0, color=color.lime, style=plot.style_circles, title="Pre Open Range Set")
+plot(series=isTradingTime and not na(entryPrice) ? 1 : 0, color=color.aqua, style=plot.style_circles, title="Entry Price Set")
+
+View in Pine Editor・205 lines
+Use on chart
+5
+7
+1 654
+Roboquant RP Profits NY Open Retest Strategy A good strategy for CL

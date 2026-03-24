@@ -1,0 +1,230 @@
+//@version=6
+strategy("AI - News Volatility Straddle (Long+Short)", overlay=true, calc_on_every_tick=false, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3, pyramiding=1, margin_long=0, margin_short=0, fill_orders_on_standard_ohlc=true)
+
+// ===== Inputs =====
+allowShort   = input.bool(true, "Allow Short Leg (sell-stop below)")
+mode         = input.string("USD","Distance Mode",options=["USD","%"])
+padUSD       = input.float(25.0,"Safety Pad ($ / points)",minval=0.0,step=0.01)
+tpUSD        = input.float(25.0,"Take Profit Distance ($ / points)",minval=0.0,step=0.01)
+padPct       = input.float(0.25,"Safety Pad (%)",minval=0.0,step=0.001)
+tpPct        = input.float(0.25,"Take Profit Distance (%)",minval=0.0,step=0.001)
+preSeconds   = input.int(5,"Seconds Before News To Place Orders",minval=0)
+
+// Full datetimes (exchange timezone)
+newsStr      = input.string("","News DATETIMES (YYYY-MM-DD HH:MM:SS)")
+// Dates-only + fixed time
+useFixedTime = input.bool(true,"Use fixed time for dates-only list")
+dateStr      = input.string("","News DATES only (YYYY-MM-DD, comma separated)")
+fixedHour    = input.int(7,"Fixed Hour (0-23)",minval=0,maxval=23)
+fixedMin     = input.int(30,"Fixed Minute (0-59)",minval=0,maxval=59)
+fixedSec     = input.int(0,"Fixed Second (0-59)",minval=0,maxval=59)
+
+// Backtest window
+startY = input.int(2018,"Start Year",minval=1970,maxval=2069)
+startM = input.int(1,"Start Month",minval=1,maxval=12)
+startD = input.int(1,"Start Day",minval=1,maxval=31)
+endY   = input.int(2069,"End Year",minval=1970,maxval=2069)
+endM   = input.int(12,"End Month",minval=1,maxval=12)
+endD   = input.int(31,"End Day",minval=1,maxval=31)
+
+// ===== Helpers =====
+f_parse_datetime(_s)=>
+    string t = str.trim(_s)
+    if str.length(t)==0
+        int(na)
+    else
+        string s1 = str.replace_all(t,"T"," ")
+        string s2 = str.replace_all(s1,"Z","")
+        array<string> parts = str.split(s2," ")
+        string datePart = ""
+        string timePart = "00:00:00"
+        int n = array.size(parts)
+        if n>0
+            datePart := array.get(parts,0)
+        if n>1
+            timePart := array.get(parts,1)
+        if str.length(datePart)==0
+            int(na)
+        else
+            array<string> d = str.split(datePart,"-")
+            array<string> hms = str.split(timePart,":")
+            int y=int(na), m=int(na), dd=int(na), hh=0, mm=0, ss=0
+            int nd = array.size(d)
+            if nd>0
+                y := int(str.tonumber(array.get(d,0)))
+            if nd>1
+                m := int(str.tonumber(array.get(d,1)))
+            if nd>2
+                dd := int(str.tonumber(array.get(d,2)))
+            int nt = array.size(hms)
+            if nt>0
+                hh := int(str.tonumber(array.get(hms,0)))
+            if nt>1
+                mm := int(str.tonumber(array.get(hms,1)))
+            if nt>2
+                ss := int(str.tonumber(array.get(hms,2)))
+            (na(y) or na(m) or na(dd)) ? int(na) : timestamp(syminfo.timezone,y,m,dd,hh,mm,ss)
+
+f_parse_date_ymd_arr(_s)=>
+    array<int> out = array.new_int()
+    string t = str.trim(_s)
+    if str.length(t)==0
+        array.push(out,int(na))
+        array.push(out,int(na))
+        array.push(out,int(na))
+    else
+        array<string> d = str.split(t,"-")
+        int y=int(na), m=int(na), dd=int(na)
+        int nd = array.size(d)
+        if nd>0
+            y := int(str.tonumber(array.get(d,0)))
+        if nd>1
+            m := int(str.tonumber(array.get(d,1)))
+        if nd>2
+            dd := int(str.tonumber(array.get(d,2)))
+        array.push(out,y)
+        array.push(out,m)
+        array.push(out,dd)
+    out
+
+f_dist(_price,_usd,_pct,_mode)=>
+    float(_mode=="USD" ? _usd : (_price*_pct*0.01))
+
+f_ticks_from_price(_dist)=>
+    int(_dist<=0 ? 1 : math.max(1,int(math.round(_dist/syminfo.mintick))))
+
+f_push_unique(_arr,_val)=>
+    if array.indexof(_arr,_val)==-1
+        array.push(_arr,_val)
+
+// ===== Window & events =====
+int tmStart = timestamp(syminfo.timezone,startY,startM,startD,0,0,0)
+int tmEnd   = timestamp(syminfo.timezone,endY,endM,endD,23,59,59)
+bool inRange = time>=tmStart and time<=tmEnd
+int preMs = preSeconds*1000
+
+var string _prevNews = ""
+var string _prevDates = ""
+var int _prevH=-1, _prevM=-1, _prevS=-1
+var bool _prevUseFT = useFixedTime
+
+var int[] evts = array.new_int()
+var bool[] placed = array.new_bool()
+
+bool needRebuild = barstate.isfirst or newsStr!=_prevNews or dateStr!=_prevDates or fixedHour!=_prevH or fixedMin!=_prevM or fixedSec!=_prevS or useFixedTime!=_prevUseFT
+if needRebuild
+    array.clear(evts)
+    array.clear(placed)
+    string ns = str.trim(newsStr)
+    if str.length(ns)>0
+        array<string> items = str.split(ns,",")
+        int ni = array.size(items)
+        if ni>0
+            for i=0 to ni-1
+                string raw = str.trim(array.get(items,i))
+                if str.length(raw)>0
+                    int ts = f_parse_datetime(raw)
+                    if not na(ts)
+                        f_push_unique(evts,ts)
+    if useFixedTime
+        string ds = str.trim(dateStr)
+        if str.length(ds)>0
+            array<string> ditems = str.split(ds,",")
+            int nd = array.size(ditems)
+            if nd>0
+                for j=0 to nd-1
+                    string drow = str.trim(array.get(ditems,j))
+                    if str.length(drow)>0
+                        array<int> ymd = f_parse_date_ymd_arr(drow)
+                        int y_ = array.size(ymd)>0 ? array.get(ymd,0) : int(na)
+                        int m_ = array.size(ymd)>1 ? array.get(ymd,1) : int(na)
+                        int d_ = array.size(ymd)>2 ? array.get(ymd,2) : int(na)
+                        if not na(y_) and not na(m_) and not na(d_)
+                            int ts2 = timestamp(syminfo.timezone,y_,m_,d_,fixedHour,fixedMin,fixedSec)
+                            f_push_unique(evts,ts2)
+    int ne = array.size(evts)
+    for z=0 to ne-1
+        array.push(placed,false)
+    _prevNews := newsStr
+    _prevDates := dateStr
+    _prevH := fixedHour
+    _prevM := fixedMin
+    _prevS := fixedSec
+    _prevUseFT := useFixedTime
+
+// ===== Plots =====
+var float plotBuyStop  = float(na)
+var float plotSellStop = float(na)
+var float plotTP       = float(na)
+var float plotSL       = float(na)
+var float lastTPDist   = float(na)
+var line vEvt = na
+var line vPre = na
+if not na(vEvt)
+    line.delete(vEvt)
+    vEvt := na
+if not na(vPre)
+    line.delete(vPre)
+    vPre := na
+
+// ===== Core =====
+bool hasEvents = array.size(evts)>0
+if inRange and hasEvents
+    int nE = array.size(evts)
+    for i=0 to nE-1
+        int evt = array.get(evts,i)
+        if evt>=tmStart and evt<=tmEnd
+            bool wasPlaced = array.get(placed,i)
+            bool crossedPre = time>=evt-preMs and (bar_index==0 or time[1]<evt-preMs)
+            if crossedPre
+                vPre := line.new(evt-preMs,high,evt-preMs,low,xloc=xloc.bar_time,extend=extend.both,color=color.new(color.gray,70),style=line.style_dotted,width=1)
+                vEvt := line.new(evt,high,evt,low,xloc=xloc.bar_time,extend=extend.both,color=color.new(color.yellow,0),style=line.style_dashed,width=1)
+            if crossedPre and not wasPlaced
+                // ***** PRE-PRICE FIX: anchor to the bar BEFORE the pre-second *****
+                float ref = nz(close[1], close)
+                float pad = f_dist(ref,padUSD,padPct,mode)
+                float tpD = f_dist(ref,tpUSD,tpPct,mode)
+                float upStop = ref + pad
+                float dnStop = ref - pad
+                upStop := math.round(upStop/syminfo.mintick)*syminfo.mintick
+                dnStop := math.round(dnStop/syminfo.mintick)*syminfo.mintick
+                int tks = f_ticks_from_price(tpD)
+                string ocan = "OCA_"+str.tostring(evt)
+                string upId = "UP_"+str.tostring(evt)
+                string dnId = "DN_"+str.tostring(evt)
+                // Upper: BUY STOP (long)
+                strategy.entry(upId, strategy.long, stop=upStop, oca_name=ocan, oca_type=strategy.oca.cancel)
+                strategy.exit("X_"+upId, from_entry=upId, profit=tks, loss=tks)
+                // Lower: SELL STOP (short) if allowed
+                if allowShort
+                    bool lowerValid = dnStop > syminfo.mintick
+                    if lowerValid
+                        strategy.entry(dnId, strategy.short, stop=dnStop, oca_name=ocan, oca_type=strategy.oca.cancel)
+                        strategy.exit("X_"+dnId, from_entry=dnId, profit=tks, loss=tks)
+                array.set(placed,i,true)
+                plotBuyStop  := upStop
+                plotSellStop := allowShort ? dnStop : float(na)
+                lastTPDist   := tpD
+
+// Active TP/SL plots
+if strategy.position_size!=0
+    float avg = strategy.position_avg_price
+    bool isLong = strategy.position_size>0
+    plotTP := na(lastTPDist) ? float(na) : (isLong ? avg+lastTPDist : avg-lastTPDist)
+    plotSL := na(lastTPDist) ? float(na) : (isLong ? avg-lastTPDist : avg+lastTPDist)
+else
+    plotTP := float(na)
+    plotSL := float(na)
+
+// Render
+plot(plotBuyStop , title="Pending BUY Stop (upper)", color=color.new(color.green,0),  linewidth=2, style=plot.style_linebr, offset=0)
+plot(plotSellStop, title="Pending SELL Stop (lower)", color=color.new(color.orange,0), linewidth=2, style=plot.style_linebr, offset=0)
+plot(plotTP      , title="Active Take Profit",        color=color.new(color.blue,0),   linewidth=2, style=plot.style_linebr, offset=0)
+plot(plotSL      , title="Active Stop Loss",          color=color.new(color.red,0),    linewidth=2, style=plot.style_linebr, offset=0)
+
+View in Pine Editor・223 lines
+Use on chart
+2
+6
+2 092
+This is a news-volatility bracketing strategy. Five seconds before a scheduled release, the strategy brackets price with a buy-stop above and a sell-stop below (OCO), then converts the untouched side into nothing while the filled side runs with a 1:1 TP/SL set the same distance from entry. Distances are configurable in USD or %, so it scales to the instrument and can run on 1-second data (or higher TF with bar-magnifier). The edge it’s trying to capture is the immediate, one-directional burst and liquidity vacuum that often follows market-moving news—entering on momentum rather than predicting direction. Primary risks are slippage/spread widening and whipsaws right after the print, which can trigger an entry then snap back to the stop.

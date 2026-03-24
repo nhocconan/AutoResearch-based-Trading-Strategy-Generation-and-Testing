@@ -1,0 +1,145 @@
+//@version=6
+strategy("NQ 1min Strat – Volatility Filter",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     pyramiding=0)
+
+// === 0) TIME FILTER ===
+inSession = not na(time(timeframe.period, "0845-1245"))
+
+// === 1) STRICT 1-MIN PIVOTS ===
+pivotLow1  = low[1]  < low[2]  and low[1]  < low  and high[1] < high[2] and high[1] < high
+pivotHigh1 = high[1] > high[2] and high[1] > high and low[1]  > low[2]  and low[1]  > low
+
+// === 2) ATR FILTER (PIVOT SIZE) ===
+atrLen  = input.int(22, "ATR Length")
+atrMult = input.float(0.1, "Min Pivot Size × ATR", step=0.1)
+
+atrValue  = ta.atr(atrLen)
+pivotSpan = high[1] - low[1]
+
+atrOKLow  = pivotLow1  and pivotSpan >= atrValue * atrMult
+atrOKHigh = pivotHigh1 and pivotSpan >= atrValue * atrMult
+
+// === 3) PLOT PIVOTS ===
+plotshape(pivotLow1,  location=location.belowbar, offset=-1, style=shape.circle, size=size.tiny, color=color.white)
+plotshape(pivotHigh1, location=location.abovebar, offset=-1, style=shape.circle, size=size.tiny, color=color.white)
+
+// === 4) MULTI-TF PIVOT CONFIRMATION ===
+enableTF1 = input.bool(true, "Enable TF1")
+resTF1    = input.string("15", "Resolution TF1")
+
+pivotLowTF(res)  => request.security(syminfo.tickerid, res, pivotLow1)
+pivotHighTF(res) => request.security(syminfo.tickerid, res, pivotHigh1)
+
+confirmLow  = enableTF1 ? pivotLowTF(resTF1)  : true
+confirmHigh = enableTF1 ? pivotHighTF(resTF1) : true
+
+// === 5) SMA FILTER ===
+useSMA = input.bool(true, "Use SMA")
+smaLen = input.int(23)
+
+sma = ta.sma(close, smaLen)
+plot(useSMA ? sma : na, color=color.blue)
+
+trendLong  = close > sma
+trendShort = close < sma
+
+// === 6) MANUAL ADX ===
+adxLen    = input.int(21, "ADX Length")
+adxThresh = input.int(19, "ADX Threshold")
+
+upMove   = high - high[1]
+downMove = low[1] - low
+
+plusDM  = (upMove > downMove and upMove > 0) ? upMove : 0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0
+
+tr  = ta.tr(true)
+atrRMA = ta.rma(tr, adxLen)
+
+plusDI  = 100 * ta.rma(plusDM, adxLen)  / atrRMA
+minusDI = 100 * ta.rma(minusDM, adxLen) / atrRMA
+
+dx  = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLen)
+
+adxOK = adx > adxThresh
+
+// === 7) VOLATILITY REGIME FILTER ===
+volLen = input.int(4, "ATR Baseline Length")
+
+atrBaseline = ta.sma(atrValue, volLen)
+volOK = atrValue > atrBaseline
+
+// === 8) FINAL ENTRY CONDITIONS ===
+longSignal = (
+    atrOKLow and
+    confirmLow and
+    (not useSMA or trendLong) and
+    adxOK and
+    volOK and
+    inSession
+)
+
+shortSignal = (
+    atrOKHigh and
+    confirmHigh and
+    (not useSMA or trendShort) and
+    adxOK and
+    volOK and
+    inSession
+)
+
+// === 9) TP / SL ===
+tpMult = input.float(1.5, "TP × ATR", step=0.1)
+slMult = input.float(1.0, "SL × ATR", step=0.1)
+
+atrTicks = atrValue / syminfo.mintick
+tpTicks  = math.round(atrTicks * tpMult)
+slTicks  = math.round(atrTicks * slMult)
+
+// === 10) ENTRIES ===
+if longSignal and strategy.position_size <= 0
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+    strategy.exit("XL", "Long", profit=tpTicks, loss=slTicks)
+
+if shortSignal and strategy.position_size >= 0
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+    strategy.exit("XS", "Short", profit=tpTicks, loss=slTicks)
+
+// === 11) ALERTS ===
+alertcondition(longSignal,  title="LONG Signal",  message="NQ LONG signal triggered")
+alertcondition(shortSignal, title="SHORT Signal", message="NQ SHORT signal triggered")
+
+View in Pine Editor・116 lines
+Use on chart
+2
+1
+1
+543
+Good for bot trading. 1min TF, with 15min confluence. Setting are here
+22
+Min Pivot Size x ATR
+0.1
+Enable TF1
+
+Resolution TF1
+15
+Use SMA
+
+SmaLen
+23
+ADX Length
+21
+ADX Threshold
+20
+ATR Baseline Length
+2
+TP * ATR
+5.5
+SL * ATR
+1.5/3

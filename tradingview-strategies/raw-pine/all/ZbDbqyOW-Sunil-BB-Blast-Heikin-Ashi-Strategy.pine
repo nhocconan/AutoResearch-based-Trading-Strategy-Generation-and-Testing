@@ -1,0 +1,225 @@
+//@version=6
+strategy("Sunil BB Blast Heikin Ashi Strategy", overlay=true)
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+// User Input
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+TradingWindow = input.session(defval = '0920-1500', title = 'Trading Window', confirm = false)
+inTradingWindow = not na(time(timeframe.period, TradingWindow))
+
+// Trade Direction
+Trade_Direction = input.string('Long/Short', title = 'Strategy Direction', options = ['Long Only', 'Short Only', 'Long/Short'], group = 'Strategy Direction \n =========================================================')
+strategy.risk.allow_entry_in(Trade_Direction == 'Long/Short' ? strategy.direction.all : Trade_Direction == 'Short Only' ? strategy.direction.short : strategy.direction.long)
+
+
+// User Inputs
+bbLength = input.int(19, title = 'Bollinger Band Length', minval = 1, group = 'User Inputs \n =========================================================')
+bbMultiplier = input.float(2.0, title = 'Bollinger Band Multiplier', minval = 0.1)
+tpMultiplier = input.float(2.0, title = 'Take Profit Multiplier', minval = 1.0)
+RRR = input.float(1.0, title = 'Risk-to-Reward Ratio (RRR)', minval = 0.5, step = 0.5, group = 'Risk Management \n =========================================================')
+
+// For automated trades using TV Alert, Broker Webhook and Jason
+Long_Entry_Jason = input.string(title = 'JASON for Enter Long', defval = '', confirm = false, group = 'Trade Automation \n =========================================================')
+Long_Exit_Jason = input.string(title = 'JASON for Exit Long', defval = '', confirm = false)
+Short_Entry_Jason = input.string(title = 'JASON for Enter Short', defval = '', confirm = false)
+Short_Exit_Jason = input.string(title = 'JASON for Exit Short', defval = '', confirm = false)
+
+
+// Calculate Bollinger Bands
+basis = ta.sma(close, bbLength)
+bbUpper = basis + bbMultiplier * ta.stdev(close, bbLength)
+bbLower = basis - bbMultiplier * ta.stdev(close, bbLength)
+
+// Calculate Heikin-Ashi (HA) Candles
+haClose = (open + high + low + close) / 4
+haOpen = 0.0
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow = math.min(low, math.min(haOpen, haClose))
+
+// Long Entry Logic
+conceptCandleHighCrossBBLong = high > bbUpper
+concept_high = ta.valuewhen(conceptCandleHighCrossBBLong, high, 0)
+conceptCandleGreenOpenLowLong = close > open and open <= low  // Relaxed condition: open at or near low
+conceptCandleConditionLong = conceptCandleHighCrossBBLong and conceptCandleGreenOpenLowLong
+
+longEntryCondition = haClose[1] > haOpen[1] and close[1] > open[1] and close > bbUpper
+
+// Short Entry Logic
+conceptCandleLowCrossBBShort = low < bbLower
+concept_low = ta.valuewhen(conceptCandleLowCrossBBShort, low, 0)
+conceptCandleRedOpenHighShort = close < open and open >= high  // Relaxed condition: open at or near high
+conceptCandleConditionShort = conceptCandleLowCrossBBShort and conceptCandleRedOpenHighShort
+
+shortEntryCondition = haClose[1] < haOpen[1] and close[1] < open[1] and close < bbLower
+
+// Stop Loss and Take Profit for Long and Short
+slLong = 0.0
+tpLong = 0.0
+slShort = 0.0
+tpShort = 0.0
+
+// Calculate TP and SL with RRR
+if longEntryCondition
+    slLong := bbLower
+    tpLong := close + (close - slLong) * RRR // Apply RRR for TP calculation
+
+if shortEntryCondition
+    slShort := bbUpper
+    tpShort := close - (slShort - close) * RRR // Apply RRR for TP calculation
+
+// Track Active Position for Long and Short
+var bool inLongPosition = false
+var bool inShortPosition = false
+
+if longEntryCondition
+    inLongPosition := true
+if shortEntryCondition
+    inShortPosition := true
+
+if inLongPosition and (close <= slLong or close >= tpLong)
+    inLongPosition := false
+
+if inShortPosition and (close >= slShort or close <= tpShort)
+    inShortPosition := false
+
+if not inTradingWindow
+    strategy.close_all(comment="Outside Trading Window")
+
+// Plotting for Debugging
+plot(haClose, color=color.blue, title="HA Close")
+plot(bbUpper, color=color.orange, title="BB Upper")
+plot(bbLower, color=color.orange, title="BB Lower")
+plot(basis, color=color.gray, title="BB Basis")
+
+// Display HA candles on the chart
+hacolor = haClose > haOpen ? color.green : color.red
+plotcandle(haOpen, haHigh, haLow, haClose, color=hacolor, title="Heikin-Ashi Candles")
+
+// Long Entry and Exit Logic
+if longEntryCondition
+    strategy.entry("Long Entry", strategy.long, alert_message = Long_Entry_Jason)
+
+strategy.exit("Exit Long", from_entry="Long Entry", limit=tpLong, stop=slLong, alert_message = Long_Exit_Jason)
+
+// Short Entry and Exit Logic
+if shortEntryCondition
+    strategy.entry("Short Entry", strategy.short, alert_message = Short_Entry_Jason)
+
+strategy.exit("Exit Short", from_entry="Short Entry", limit=tpShort, stop=slShort, alert_message = Short_Exit_Jason)
+
+// Plot entry conditions for Long and Short with respective labels
+plotshape(longEntryCondition, style=shape.labelup, color=color.green, location=location.belowbar, title="Long Entry", text="")
+plotshape(shortEntryCondition,  style=shape.labeldown, color=color.red, location=location.abovebar, title="Short Entry", text="")
+
+if not inTradingWindow
+    strategy.close_all(comment = "Market Closed")
+
+View in Pine Editor・116 lines
+Use on chart
+7
+0
+3 083
+Sunil BB Blast Heikin Ashi Strategy
+
+The Sunil BB Blast Heikin Ashi Strategy is a trend-following trading strategy that combines Bollinger Bands with Heikin-Ashi candles for precise market entries and exits. It aims to capitalize on price volatility while ensuring controlled risk through dynamic stop-loss and take-profit levels based on a user-defined Risk-to-Reward Ratio (RRR).
+
+Key Features:
+Trading Window:
+
+The strategy operates within a user-defined time window (e.g., from 09:20 to 15:00) to align with market hours or other preferred trading sessions.
+Trade Direction:
+
+Users can select between Long Only, Short Only, or Long/Short trade directions, allowing flexibility depending on market conditions.
+Bollinger Bands:
+
+Bollinger Bands are used to identify potential breakout or breakdown zones. The strategy enters trades when price breaks through the upper or lower Bollinger Band, indicating a possible trend continuation.
+Heikin-Ashi Candles:
+
+Heikin-Ashi candles help smooth price action and filter out market noise. The strategy uses these candles to confirm trend direction and improve entry accuracy.
+Risk Management (Risk-to-Reward Ratio):
+
+The strategy automatically adjusts the take-profit (TP) level and stop-loss (SL) based on the selected Risk-to-Reward Ratio (RRR). This ensures that trades are risk-managed effectively.
+Automated Alerts and Webhooks:
+
+The strategy includes automated alerts for trade entries and exits. Users can set up JSON webhooks for external execution or trading automation.
+Active Position Tracking:
+
+The strategy tracks whether there is an active position (long or short) and only exits when price hits the pre-defined SL or TP levels.
+Exit Conditions:
+
+The strategy exits positions when either the take-profit (TP) or stop-loss (SL) levels are hit, ensuring risk management is adhered to.
+Default Settings:
+Trading Window:
+
+09:20-15:00
+This setting confines the strategy to the specified hours, ensuring trading only occurs during active market hours.
+Strategy Direction:
+
+Default: Long/Short
+This allows for both long and short trades depending on market conditions. You can select "Long Only" or "Short Only" if you prefer to trade in one direction.
+Bollinger Band Length (bbLength):
+
+Default: 19
+Length of the moving average used to calculate the Bollinger Bands.
+Bollinger Band Multiplier (bbMultiplier):
+
+Default: 2.0
+Multiplier used to calculate the upper and lower bands. A higher multiplier increases the width of the bands, leading to fewer but more significant trades.
+Take Profit Multiplier (tpMultiplier):
+
+Default: 2.0
+Multiplier used to determine the take-profit level based on the calculated stop-loss. This ensures that the profit target aligns with the selected Risk-to-Reward Ratio.
+Risk-to-Reward Ratio (RRR):
+
+Default: 1.0
+The ratio used to calculate the take-profit relative to the stop-loss. A higher RRR means larger profit targets.
+Trade Automation (JSON Webhooks):
+
+Allows for integration with external systems for automated execution:
+Long Entry JSON: Customizable entry condition for long positions.
+Long Exit JSON: Customizable exit condition for long positions.
+Short Entry JSON: Customizable entry condition for short positions.
+Short Exit JSON: Customizable exit condition for short positions.
+Entry Logic:
+Long Entry:
+
+The strategy enters a long position when:
+The Heikin-Ashi candle shows a bullish trend (green close > open).
+The price is above the upper Bollinger Band, signaling a breakout.
+The previous candle also closed higher than it opened.
+Short Entry:
+
+The strategy enters a short position when:
+The Heikin-Ashi candle shows a bearish trend (red close < open).
+The price is below the lower Bollinger Band, signaling a breakdown.
+The previous candle also closed lower than it opened.
+Exit Logic:
+Take-Profit (TP):
+
+The take-profit level is calculated as a multiple of the distance between the entry price and the stop-loss level, determined by the selected Risk-to-Reward Ratio (RRR).
+Stop-Loss (SL):
+
+The stop-loss is placed at the opposite Bollinger Band level (lower for long positions, upper for short positions).
+Exit Trigger:
+
+The strategy exits a trade when either the take-profit or stop-loss level is hit.
+Plotting and Visuals:
+The Heikin-Ashi candles are displayed on the chart, with green candles for uptrends and red candles for downtrends.
+Bollinger Bands (upper, lower, and basis) are plotted for visual reference.
+Entry points for long and short trades are marked with green and red labels below and above bars, respectively.
+Strategy Alerts:
+Alerts are triggered when:
+A long entry condition is met.
+A short entry condition is met.
+A trade exits (either via take-profit or stop-loss).
+These alerts can be used to trigger notifications or webhook events for automated trading systems.
+
+Notes:
+The strategy is designed for use on intraday charts but can be applied to any timeframe.
+It is highly customizable, allowing for tailored risk management and trading windows.
+The Sunil BB Blast Heikin Ashi Strategy combines two powerful technical analysis tools (Bollinger Bands and Heikin-Ashi candles) with strong risk management, making it suitable for both beginners and experienced traders.
+
+
+
+Feebacks are welcome from the users.

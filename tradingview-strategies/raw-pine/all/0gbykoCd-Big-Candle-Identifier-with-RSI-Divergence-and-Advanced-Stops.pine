@@ -1,0 +1,188 @@
+//@version=6
+strategy('[F][IND] - Big Candle Identifier with RSI Divergence and Advanced Stops', shorttitle = '[F][IND] Big Candle RSI Trail', overlay = true)
+
+// Inputs for the trailing stop and stop loss
+trail_start_ticks = input.int(200, "Trailing Start Ticks", tooltip="The number of ticks the price must move in the profitable direction before the trailing stop starts.")
+trail_distance_ticks = input.int(150, "Trailing Distance Ticks", tooltip="The distance in ticks between the trailing stop and the price once the trailing stop starts.")
+initial_stop_loss_points = input.int(200, "Initial Stop Loss Points", tooltip="The fixed stop loss applied immediately after entering a trade.")
+
+// Tick size based on instrument
+tick_size = syminfo.mintick
+
+// Calculate trailing start and distance in price
+trail_start_price = trail_start_ticks * tick_size
+trail_distance_price = trail_distance_ticks * tick_size
+initial_stop_loss_price = initial_stop_loss_points * tick_size
+
+// Identify big candles
+body0 = math.abs(close[0] - open[0])
+body1 = math.abs(close[1] - open[1])
+body2 = math.abs(close[2] - open[2])
+body3 = math.abs(close[3] - open[3])
+body4 = math.abs(close[4] - open[4])
+body5 = math.abs(close[5] - open[5])
+
+bullishBigCandle = body0 > body1 and body0 > body2 and body0 > body3 and body0 > body4 and body0 > body5 and open < close
+bearishBigCandle = body0 > body1 and body0 > body2 and body0 > body3 and body0 > body4 and body0 > body5 and open > close
+
+// RSI Divergence
+rsi_fast = ta.rsi(close, 5)
+rsi_slow = ta.rsi(close, 14)
+divergence = rsi_fast - rsi_slow
+
+// Trade Entry Logic
+if bullishBigCandle
+    strategy.entry('Long', strategy.long, stop=low - initial_stop_loss_price)
+if bearishBigCandle
+    strategy.entry('Short', strategy.short, stop=high + initial_stop_loss_price)
+
+// Trailing Stop Logic
+var float trail_stop = na
+if strategy.position_size > 0 // Long Position
+    entry_price = strategy.position_avg_price
+    current_profit = close - entry_price
+    if current_profit >= trail_start_price
+        trail_stop := math.max(trail_stop, close - trail_distance_price)
+    strategy.exit("Trailing Stop Long", "Long", stop=trail_stop)
+
+if strategy.position_size < 0 // Short Position
+    entry_price = strategy.position_avg_price
+    current_profit = entry_price - close
+    if current_profit >= trail_start_price
+        trail_stop := math.min(trail_stop, close + trail_distance_price)
+    strategy.exit("Trailing Stop Short", "Short", stop=trail_stop)
+
+// Plotting Trailing Stop
+plot(strategy.position_size > 0 ? trail_stop : na, color=color.green, title="Trailing Stop (Long)")
+plot(strategy.position_size < 0 ? trail_stop : na, color=color.red, title="Trailing Stop (Short)")
+
+// Plotting RSI Divergence
+plot(divergence, color=divergence > 0 ? color.lime : color.red, linewidth=2, title="RSI Divergence")
+hline(0)
+
+// Plotting EMA
+ema21 = ta.ema(close, 21)
+plot(ema21, color=color.blue, title="21 EMA")
+
+View in Pine Editor・65 lines
+Use on chart
+8
+3
+2
+3 322
+1. Strategy Objective
+The main goal of this strategy is to:
+
+Identify significant price momentum (big candles).
+Enter trades at opportune moments based on market signals (candlestick patterns and RSI divergence).
+Limit initial risk through a fixed stop loss.
+Maximize profits by using a trailing stop that activates only after the trade moves a specified distance in the profitable direction.
+2. Components of the Strategy
+A. Big Candle Identification
+The strategy identifies big candles as indicators of strong momentum.
+
+A big candle is defined as:
+The body (absolute difference between close and open) of the current candle (body0) is larger than the bodies of the last five candles.
+The candle is:
+Bullish Big Candle: If close > open.
+Bearish Big Candle: If open > close.
+Purpose: Big candles signal potential continuation or reversal of trends, serving as the primary entry trigger.
+B. RSI Divergence
+Relative Strength Index (RSI): A momentum oscillator used to detect overbought/oversold conditions and divergence.
+Fast RSI: A 5-period RSI, which is more sensitive to short-term price movements.
+Slow RSI: A 14-period RSI, which smoothens fluctuations over a longer timeframe.
+Divergence: The difference between the fast and slow RSIs.
+Positive divergence (divergence > 0): Bullish momentum.
+Negative divergence (divergence < 0): Bearish momentum.
+Visualization: The divergence is plotted on the chart, helping traders confirm momentum shifts.
+C. Stop Loss
+Initial Stop Loss:
+
+When entering a trade, an immediate stop loss of 200 points is applied.
+This stop loss ensures the maximum risk is capped at a predefined level.
+Implementation:
+Long Trades: Stop loss is set below the entry price at low - 200 points.
+Short Trades: Stop loss is set above the entry price at high + 200 points.
+Purpose:
+
+Prevents significant losses if the price moves against the trade immediately after entry.
+D. Trailing Stop
+The trailing stop is a dynamic risk management tool that adjusts with price movements to lock in profits. Here’s how it works:
+
+Activation Condition:
+
+The trailing stop only starts trailing when the trade moves 200 ticks (profit) in the right direction:
+Long Position: close - entry_price >= 200 ticks.
+Short Position: entry_price - close >= 200 ticks.
+Trailing Logic:
+
+Once activated, the trailing stop:
+For Long Positions: Trails behind the price by 150 ticks (trail_stop = close - 150 ticks).
+For Short Positions: Trails above the price by 150 ticks (trail_stop = close + 150 ticks).
+Exit Condition:
+
+The trade exits automatically if the price touches the trailing stop level.
+Purpose:
+
+Ensures profits are locked in as the trade progresses while still allowing room for price fluctuations.
+E. Trade Entry Logic
+Long Entry:
+Triggered when a bullish big candle is identified.
+Stop loss is set at low - 200 points.
+Short Entry:
+Triggered when a bearish big candle is identified.
+Stop loss is set at high + 200 points.
+F. Trade Exit Logic
+Trailing Stop: Automatically exits the trade if the price touches the trailing stop level.
+Fixed Stop Loss: Exits the trade if the price hits the predefined stop loss level.
+G. 21 EMA
+The strategy includes a 21-period Exponential Moving Average (EMA), which acts as a trend filter.
+EMA helps visualize the overall market direction:
+Price above EMA: Indicates an uptrend.
+Price below EMA: Indicates a downtrend.
+H. Visualization
+Big Candle Identification:
+The open and close prices of big candles are plotted for easy reference.
+Trailing Stop:
+Plotted on the chart to visualize its progression during the trade.
+Green Line: Indicates the trailing stop for long positions.
+Red Line: Indicates the trailing stop for short positions.
+RSI Divergence:
+Positive divergence is shown in green.
+Negative divergence is shown in red.
+3. Key Parameters
+trail_start_ticks: The number of ticks required before the trailing stop activates (default: 200 ticks).
+trail_distance_ticks: The distance between the trailing stop and price once the trailing stop starts (default: 150 ticks).
+initial_stop_loss_points: The fixed stop loss in points applied at entry (default: 200 points).
+tick_size: Automatically calculates the minimum tick size for the trading instrument.
+4. Workflow of the Strategy
+Step 1: Entry Signal
+The strategy identifies a big candle (bullish or bearish).
+If conditions are met, a trade is entered with a fixed stop loss.
+Step 2: Initial Risk Management
+The trade starts with an initial stop loss of 200 points.
+Step 3: Trailing Stop Activation
+If the trade moves 200 ticks in the profitable direction:
+The trailing stop is activated and follows the price at a distance of 150 ticks.
+Step 4: Exit the Trade
+The trade is exited if:
+The price hits the trailing stop.
+The price hits the initial stop loss.
+5. Advantages of the Strategy
+Risk Management:
+The fixed stop loss ensures that losses are capped.
+The trailing stop locks in profits after the trade becomes profitable.
+Momentum-Based Entries:
+The strategy uses big candles as entry triggers, which often indicate strong price momentum.
+Divergence Confirmation:
+RSI divergence helps validate momentum and avoid false signals.
+Dynamic Profit Protection:
+The trailing stop adjusts dynamically, allowing the trade to capture larger moves while protecting gains.
+6. Ideal Market Conditions
+This strategy performs best in:
+
+Trending Markets:
+Big candles and momentum signals are more effective in capturing directional moves.
+High Volatility:
+Larger price swings improve the probability of reaching the trailing stop activation level (200 ticks).
+

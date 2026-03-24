@@ -1,0 +1,115 @@
+//@version=6
+strategy(
+    "VIX Crossing",
+    overlay=true,
+    commission_type = strategy.commission.cash_per_contract,
+    commission_value = 3,
+    initial_capital = 50000
+)
+
+vixSmaLength = input.int(5, 'VIX SMA Length')
+ndxEmaLength = input.int(21, 'NDX EMA Length')
+forceCloseAfterBars = input.int(10, 'Force close after X bars from entry')
+tpAmountPerContract = input.float(
+    3000, 'TP Amount per contract', minval = 0,
+    tooltip = 'If the profit per contract is greater than this amount, close the position'
+)
+slAmountPerContract = input.float(
+    1500, 'TP Amount per contract', minval = 0,
+    tooltip = 'If the loss per contract is greater than this amount, close the position'
+)
+
+[vixClose, vixSma] = request.security('VIX', '', [close, ta.sma(close, vixSmaLength)])
+[ndxClose, ndxEma] = request.security('NDX', '', [close, ta.sma(close, ndxEmaLength)])
+
+var int barsSinceEntry = 0
+
+if ta.crossunder(vixClose, vixSma) and ndxClose > ndxEma
+    strategy.entry('long', strategy.long)
+
+closeCondition1 = ta.crossover(vixClose, vixSma)
+closeCondition2 = barsSinceEntry > forceCloseAfterBars
+closeCondition3 = strategy.openprofit > tpAmountPerContract * strategy.position_size
+closeCondition4 = strategy.openprofit < -slAmountPerContract * strategy.position_size
+
+if strategy.position_size != 0
+    barsSinceEntry += 1
+
+    if closeCondition1
+        strategy.close_all(str.format('VIX > {0} SMA', vixSmaLength))
+        barsSinceEntry := 0
+    if closeCondition2
+        strategy.close_all(str.format('{0} bars force close', forceCloseAfterBars))
+        barsSinceEntry := 0
+    if closeCondition3
+        strategy.close_all(str.format('TP ${0}', tpAmountPerContract))
+        barsSinceEntry := 0
+    if closeCondition4
+        strategy.close_all(str.format('SL -${0}', slAmountPerContract))
+        barsSinceEntry := 0
+
+View in Pine Editor・51 lines
+Use on chart
+1
+9
+805
+# VIX Crossing Strategy
+
+## Overview
+VIX Crossing is a quantitative trading strategy that combines volatility signals from the VIX index with trend confirmation from the Nasdaq-100 (NDX) to generate long entry signals. The strategy employs multiple exit conditions to manage risk and lock in profits systematically.
+
+## Strategy Logic
+
+### Entry Condition
+The strategy initiates a long position when:
+- **VIX Crossunder**: The VIX closing price crosses below its 5-bar simple moving average (SMA), signaling a decrease in implied volatility
+- **AND NDX Confirmation**: The Nasdaq-100 closes above its 21-bar exponential moving average (EMA), confirming uptrend strength
+
+This dual-signal approach reduces false entries by requiring both volatility normalization and positive market momentum.
+
+### Exit Conditions
+The strategy automatically closes positions when any of the following conditions are met:
+
+1. **VIX Crossover (Volatility Exit)**: VIX closes above its SMA, indicating rising volatility
+2. **Time-Based Exit**: Position is force-closed after 10 bars from entry, preventing prolonged drawdowns
+3. **Take-Profit Exit**: Position closes when unrealized profit exceeds $3,000 per contract
+4. **Stop-Loss Exit**: Position closes when unrealized loss exceeds $1,500 per contract
+
+Exit conditions are evaluated each bar while the position is open, with explicit logging of the exit reason for trade analysis.
+
+## Configuration Parameters
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| VIX SMA Length | 5 | Smoothing period for VIX volatility baseline |
+| NDX EMA Length | 21 | Smoothing period for Nasdaq-100 trend confirmation |
+| Force Close After X Bars | 10 | Maximum holding period in bars |
+| TP Amount per Contract | $3,000 | Profit target per contract |
+| SL Amount per Contract | $1,500 | Loss limit per contract |
+
+## Risk Management Features
+
+- **Position Sizing**: Capital allocation based on profit/loss per contract rather than fixed units, allowing for scalable risk
+- **Dual Risk Controls**: Combined time-based and price-based exits prevent extended exposure
+- **Profit Asymmetry**: 2:1 profit-to-loss ratio encourages risk/reward discipline
+- **Contract-Based Accounting**: Profit targets and stop losses scale with position size
+
+## Capital Requirements
+
+- **Initial Capital**: $50,000
+- **Commission**: $3 per contract (cash-based)
+- **Instrument**: Designed for index-based derivatives or equities with liquid options markets
+
+## Technical Indicators Used
+
+- Simple Moving Average (SMA) for VIX smoothing
+- Exponential Moving Average (EMA) for NDX trend detection
+- Crossover/Crossunder detection for signal generation
+
+## Underlying Assumptions
+
+1. VIX crossunder events represent mean-reversion opportunities in Nasdaq-heavy portfolios
+2. NDX EMA confirmation filters out uncorrelated volatility spikes
+3. 10-bar holding period aligns with typical mean-reversion timeframes
+4. Contract-based profit targets accommodate varying leverage levels
+

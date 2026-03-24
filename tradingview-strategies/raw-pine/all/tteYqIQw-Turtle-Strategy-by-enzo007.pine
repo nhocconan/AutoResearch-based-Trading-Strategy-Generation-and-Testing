@@ -1,0 +1,210 @@
+//@version=5
+strategy("Turtle Strategy by enzo007", overlay=true, margin_long=100, margin_short=100)
+
+//────────────────────────────────────
+// USER INPUT: DATE RANGE FILTER
+//────────────────────────────────────
+useDateFilter = input.bool(true, "Use Date Range Filter")
+fromDate = input.time(timestamp("2012-01-01T00:00:00"), "From Date")
+toDate   = input.time(timestamp("2030-01-01T00:00:00"), "To Date")
+inDateRange = not useDateFilter or (time >= fromDate and time <= toDate)
+
+//────────────────────────────────────
+// TREND FILTER INPUTS
+//────────────────────────────────────
+useTrendFilter = input.bool(true, "Use Trend Filters")
+adxLength = input.int(14, "ADX Length")
+adxThreshold = input.float(20.0, "ADX Min Value", step=0.5)
+slopeLookback = input.int(5, "EMA20 Slope Lookback")
+slopeThreshold = input.float(0.0, "Min EMA20 Slope", step=0.01)
+
+//────────────────────────────────────
+// EMA CALCULATIONS
+//────────────────────────────────────
+ema10 = ta.ema(close, 10)
+ema20 = ta.ema(close, 20)
+
+plot(ema10, color=color.yellow)
+plot(ema20, color=color.purple)
+
+//────────────────────────────────────
+// MANUAL ADX
+//────────────────────────────────────
+len = adxLength
+
+tr = math.max(math.max(high - low, math.abs(high - nz(close[1]))), math.abs(low - nz(close[1])))
+atr = ta.rma(tr, len)
+
+upMove = high - nz(high[1])
+downMove = nz(low[1]) - low
+
+plusDM = (upMove > downMove and upMove > 0) ? upMove : 0.0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0.0
+
+smPlus = ta.rma(plusDM, len)
+smMinus = ta.rma(minusDM, len)
+
+plusDI = atr != 0 ? 100 * (smPlus / atr) : 0.0
+minusDI = atr != 0 ? 100 * (smMinus / atr) : 0.0
+
+dx = (plusDI + minusDI) != 0 ? 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI) : 0.0
+adx = ta.rma(dx, len)
+
+plot(adx, title="ADX", linewidth=1, transp=70)
+hline(adxThreshold, "ADX Threshold", linestyle=hline.style_dashed)
+
+//────────────────────────────────────
+// EMA20 SLOPE
+//────────────────────────────────────
+emaSlope = ema20 - ema20[slopeLookback]
+
+//────────────────────────────────────
+// TREND FILTER LOGIC
+//────────────────────────────────────
+trendOK = (adx > adxThreshold) and (emaSlope > slopeThreshold)
+trendPass = not useTrendFilter or trendOK
+
+//────────────────────────────────────
+// ENTRY / EXIT
+//────────────────────────────────────
+longCondition = low > ema20
+exitCondition = high < ema10
+
+if inDateRange and trendPass and longCondition
+    strategy.entry("Long", strategy.long)
+
+if inDateRange and exitCondition
+    strategy.close("Long")
+
+//────────────────────────────────────
+// UNREALIZED MAX DRAWDOWN (EQUITY)
+//────────────────────────────────────
+var float peakEquity = na
+var float maxUnrealizedDD = 0.0
+
+validEquity = strategy.equity > 0
+
+if validEquity
+    if na(peakEquity)
+        peakEquity := strategy.equity
+
+    if strategy.equity > peakEquity
+        peakEquity := strategy.equity
+
+    currentDD = (peakEquity - strategy.equity) / peakEquity * 100
+    if currentDD >= 0
+        maxUnrealizedDD := math.max(maxUnrealizedDD, currentDD)
+
+//────────────────────────────────────
+// REALIZED MAX DRAWDOWN (CLOSED-ONLY)
+//────────────────────────────────────
+// cumulative closed profit (added once per closed trade)
+var float cumClosedProfit = 0.0
+var int   lastClosedCount = 0
+
+// If the number of closed trades increased, add the new trades' P/L
+if strategy.closedtrades > lastClosedCount
+    // add every newly closed trade (handles cases where multiple closed on same bar)
+    for idx = lastClosedCount to strategy.closedtrades - 1
+        cumClosedProfit += strategy.closedtrades.profit(idx)
+    lastClosedCount := strategy.closedtrades
+
+// realized equity = initial capital + cumulative closed P/L
+realizedEquity = strategy.initial_capital + cumClosedProfit
+
+// track peak & max realized drawdown percent
+var float peakRealizedEquity = na
+var float maxRealizedDDPerc = 0.0
+
+if na(peakRealizedEquity)
+    peakRealizedEquity := realizedEquity
+
+// update peak only with valid positive equity
+if realizedEquity > peakRealizedEquity
+    peakRealizedEquity := realizedEquity
+
+// compute current realized drawdown percent (from peak to current)
+realizedDDPerc = peakRealizedEquity > 0 ? (peakRealizedEquity - realizedEquity) / peakRealizedEquity * 100.0 : 0.0
+
+// update max realized drawdown percent
+maxRealizedDDPerc := math.max(maxRealizedDDPerc, realizedDDPerc)
+
+//────────────────────────────────────
+// PERFORMANCE METRICS
+//────────────────────────────────────
+var table stat = table.new(position.top_right, 2, 9, border_width=2)
+
+wins   = strategy.wintrades
+losses = strategy.losstrades
+total  = wins + losses
+winrate = total > 0 ? (wins / total) * 100 : na
+
+netProfitPerc = strategy.netprofit / strategy.initial_capital * 100
+
+avgTradePerc = strategy.closedtrades > 0 ?
+     (strategy.netprofit / strategy.closedtrades) / strategy.initial_capital * 100 : na
+
+//────────────────────────────────────
+// AVG RR CALC
+//────────────────────────────────────
+var float rr_sum = 0
+var int rr_count = 0
+
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        pl = strategy.closedtrades.profit(i)
+
+        if pl < 0
+            lastLoss = math.abs(pl)
+            prevPL = strategy.closedtrades.profit(math.max(i - 1, 0))
+            if prevPL > 0
+                rr = math.abs(prevPL) / lastLoss
+                rr_sum += rr
+                rr_count += 1
+
+avgRR = rr_count > 0 ? rr_sum / rr_count : na
+
+//────────────────────────────────────
+// DISPLAY TABLE
+//────────────────────────────────────
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    bgcolorCell = color.new(color.black, 0)
+    txt = color.white
+
+    table.cell(stat, 0, 0, "Winrate (%)", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 0, str.tostring(winrate, "#.##"), text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 1, "Wins", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 1, str.tostring(wins), text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 2, "Losses", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 2, str.tostring(losses), text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 3, "Net Profit (%)", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 3, str.tostring(netProfitPerc, "#.##") + "%", text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 4, "Avg Trade (%)", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 4, str.tostring(avgTradePerc, "#.##") + "%", text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 5, "Unrealized DD (%)", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 5, str.tostring(maxUnrealizedDD, "#.##") + "%", text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 6, "Realized DD (%)", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 6, str.tostring(maxRealizedDDPerc, "#.##") + "%", text_color=txt, bgcolor=bgcolorCell)
+
+    table.cell(stat, 0, 7, "Avg RR", text_color=txt, bgcolor=bgcolorCell)
+    table.cell(stat, 1, 7, str.tostring(avgRR, "#.##"), text_color=txt, bgcolor=bgcolorCell)
+
+View in Pine Editor・196 lines
+Use on chart
+1
+3
+2
+706
+Dec 5, 2025
+Easy trend following (Turtle Strategy)
+EMA10 and EMA20 magic??
+Dec 7, 2025
+Release Notes
+1. Optimize backtest table
+2. Experiment trend filter (reduce sideways fault signal)

@@ -1,0 +1,46 @@
+//@version=4
+strategy("Wilder’s Moving Average Strategy", overlay=true)
+
+malength = input(36, "length", minval=1)
+
+longd = false
+shortd = false
+lineColor = color.yellow
+wild = 0.0
+
+wild := nz(wild[1]) + (close -nz(wild[1]))/malength
+
+longd := wild > wild[1]
+
+shortd := wild < wild[1]
+
+lineColor := longd ? color.green : shortd ? color.red : color.yellow
+
+plot(wild, color=lineColor, linewidth=2, title="WILD")
+
+if longd
+    strategy.entry("long", strategy.long, when = strategy.position_size <= 0)
+else
+    if shortd
+        strategy.entry("short", strategy.short, when = strategy.position_size >= 0)
+
+View in Pine Editor・28 lines
+Use on chart
+1
+3
+2
+4
+8 753
+Apr 12, 2020
+The Wilder’s Moving Average indicator (Wilder’s Smoothed Moving Average ) was developed by Welles Wilder and introduced in his 1978 book, “New Concepts in Technical Trading Systems.” Mr. Wilder did not use the standard EMA formula; instead, the following formula is used: EMA = Input * K + EMA * (1-K), where K = 2 / (N+1). Then to find the Wilder’s Moving Average, the following calculation is performed: Input * K + EMA * (1-K), where K =1/N.
+
+Type to use
+
+Moving averages are commonly used to identify trends and reversals as well as identifying support and resistance levels. Moving averages such the WMA and EMA , which are more sensitive to recent prices (experience less lag with price) will turn before an SMA . They are therefore more suitable for dynamic trades, which are reactive to short term price movements. Moving averages such as the SMA move more slowly providing valuable information on the long dominant trend. They can however be prone to giving late signals causing the trader to miss significant parts of the price movement.
+Apr 14, 2020
+Release Notes
+The Wilder’s Moving Average indicator (Wilder’s Smoothed Moving Average ) was developed by Welles Wilder and introduced in his 1978 book, “New Concepts in Technical Trading Systems.” Mr. Wilder did not use the standard EMA formula; instead, the following formula is used: EMA = Input * K + EMA * (1-K), where K = 2 / (N+1). Then to find the Wilder’s Moving Average, the following calculation is performed: Input * K + EMA * (1-K), where K =1/N.
+
+Type to use
+
+Moving averages are commonly used to identify trends and reversals as well as identifying support and resistance levels. Moving averages such the WMA and EMA , which are more sensitive to recent prices (experience less lag with price) will turn before an SMA . They are therefore more suitable for dynamic trades, which are reactive to short term price movements. Moving averages such as the SMA move more slowly providing valuable information on the long dominant trend. They can however be prone to giving late signals causing the trader to miss significant parts of the price movement.

@@ -1,0 +1,77 @@
+//@version=5
+strategy('[blackcat] L2 Fibonacci Bands', overlay=true)
+
+// Define the moving average type and length
+maType = input.string(title='MA Type', defval='WMA', options=['SMA', 'EMA', 'WMA', 'HMA'])
+maLength = input.int(title='MA Length', defval=233, minval=1)
+src = input(title='Data Source', defval=hl2)
+
+// Define the Fibonacci expansion levels
+fib1 = input.float(title='Fibonacci Level 1', defval=1.618, minval=0)
+fib2 = input.float(title='Fibonacci Level 2', defval=2.618, minval=0)
+fib3 = input.float(title='Fibonacci Level 3', defval=4.236, minval=0)
+
+// Calculate the moving average
+ma = maType == 'SMA' ? ta.sma(src, maLength) : maType == 'EMA' ? ta.ema(src, maLength) : maType == 'WMA' ? ta.wma(src, maLength) : maType == 'HMA' ? ta.hma(src, maLength) : na
+
+// Calculate the Keltner Channels
+kcMultiplier = input.int(title='Keltner Channel Multiplier', defval=2, minval=0)
+kcLength = input.int(title='Keltner Channel Length', defval=89, minval=1)
+kcTrueRange = ta.tr
+kcAverageTrueRange = ta.sma(kcTrueRange, kcLength)
+kcUpper = ma + kcMultiplier * kcAverageTrueRange
+kcLower = ma - kcMultiplier * kcAverageTrueRange
+
+// Calculate the Fibonacci Bands
+fbUpper1 = ma + fib1 * (kcUpper - ma)
+fbUpper2 = ma + fib2 * (kcUpper - ma)
+fbUpper3 = ma + fib3 * (kcUpper - ma)
+fbLower1 = ma - fib1 * (ma - kcLower)
+fbLower2 = ma - fib2 * (ma - kcLower)
+fbLower3 = ma - fib3 * (ma - kcLower)
+
+// Plot the Fibonacci Bands
+plot(ma, title='Midband', color=color.new(color.blue, 0), linewidth=2)
+plot(fbUpper1, title='Upper Band 1', color=color.new(color.green, 0), linewidth=1)
+plot(fbUpper2, title='Upper Band 2', color=color.new(color.green, 0), linewidth=1)
+plot(fbUpper3, title='Upper Band 3', color=color.new(color.green, 0), linewidth=1)
+plot(fbLower1, title='Lower Band 1', color=color.new(color.red, 0), linewidth=1)
+plot(fbLower2, title='Lower Band 2', color=color.new(color.red, 0), linewidth=1)
+plot(fbLower3, title='Lower Band 3', color=color.new(color.red, 0), linewidth=1)
+
+// Define the entry and exit conditions
+longCondition = ta.crossover(src, fbUpper3) and ta.rsi(src, 14) > 60
+shortCondition = ta.crossunder(src, fbLower3) and ta.rsi(src, 14) < 40
+exitCondition = ta.crossover(src, ma) or ta.crossunder(src, ma)
+
+// Execute the trades
+if longCondition
+    strategy.entry('Long', strategy.long)
+if shortCondition
+    strategy.entry('Short', strategy.short)
+if exitCondition
+    strategy.close_all()
+
+View in Pine Editor・61 lines
+Use on chart
+2
+3
+6
+6 106
+The concept of the Fibonacci Bands indicator was described by Suri Dudella in his book "Trade Chart Patterns Like the Pros" (Section 8.3, page 149). These bands are derived from Fibonacci expansions based on a fixed moving average, and they display potential areas of support and resistance. Traders can utilize the Fibonacci Bands indicator to identify key price levels and anticipate potential reversals in the market.
+
+To calculate the Fibonacci Bands indicator, three Keltner Channels are applied. These channels help in determining the upper and lower boundaries of the bands. The default Fibonacci expansion levels used are 1.618, 2.618, and 4.236. These levels act as reference points for traders to identify significant areas of support and resistance.
+
+When analyzing the price action, traders can focus on the extreme Fibonacci Bands, which are the upper and lower boundaries of the bands. If prices trade outside of the bands for a few bars and then return inside, it may indicate a potential reversal. This pattern suggests that the price has temporarily deviated from its usual range and could be due for a correction.
+
+To enhance the accuracy of the Fibonacci Bands indicator, traders often use multiple time frames. By aligning short-term signals with the larger time frame scenario, traders can gain a better understanding of the overall market trend. It is generally advised to trade in the direction of the larger time frame to increase the probability of success.
+
+In addition to identifying potential reversals, traders can also use the Fibonacci Bands indicator to determine entry and exit points. Short-term support and resistance levels can be derived from the bands, providing valuable insights for trade decision-making. These levels act as reference points for placing stop-loss orders or taking profits.
+
+Another useful tool for analyzing the trend is the slope of the midband, which is the middle line of the Fibonacci Bands indicator. The midband's slope can indicate the strength and direction of the trend. Traders can monitor the slope to gain insights into the market's momentum and make informed trading decisions.
+
+The Fibonacci Bands indicator is based on the concept of Fibonacci levels, which are support or resistance levels calculated using the Fibonacci sequence. The Fibonacci sequence is a mathematical pattern that follows a specific formula. A central concept within the Fibonacci sequence is the Golden Ratio, represented by the numbers 1.618 and its inverse 0.618. These ratios have been found to occur frequently in nature, architecture, and art.
+
+The Italian mathematician Leonardo Fibonacci (1170-1250) is credited with introducing the Fibonacci sequence to the Western world. Fibonacci noticed that certain ratios could be calculated and that these ratios correspond to "divine ratios" found in various aspects of life. Traders have adopted these ratios in technical analysis to identify potential areas of support and resistance in financial markets.
+
+In conclusion, the Fibonacci Bands indicator is a powerful tool for traders to identify potential reversals, determine entry and exit points, and analyze the overall trend. By combining the Fibonacci Bands with other technical indicators and using multiple time frames, traders can enhance their trading strategies and make more informed decisions in the market.

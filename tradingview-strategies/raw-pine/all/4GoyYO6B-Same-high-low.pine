@@ -1,0 +1,30 @@
+//@version=5
+strategy("SHL", overlay=true, margin_long=100, margin_short=100,initial_capital=4,default_qty_type = strategy.cash,default_qty_value =40,commission_type = strategy.commission.percent,commission_value =0.04,currency="EUR")
+atr = input.int(title="ATR length", defval=5)
+plotshape(low == low[1], style=shape.triangleup, location=location.belowbar, color=color.blue, title="1 Setup")
+plotshape(high==high[1], style=shape.triangledown, location=location.abovebar, color=color.blue, title="1 Setup")
+plotshape(low == low[1] and low[1]==low[2], style=shape.triangleup, location=location.belowbar, color=color.red, title="Triple Setup")
+plotshape(low==high[1] or low==high[2] or low==high[3] or low==high[4] or low==high[5] or low==high[6], style=shape.triangleup, location=location.belowbar, color=color.green, title="Mirror Setup")
+plotshape(high==low[1] or high==low[2] or high==low[3] or high==low[4] or high==low[5] or high==low[6], style=shape.triangledown, location=location.abovebar, color=color.green, title="Mirror Setup")
+barcolor(high-low>2*ta.atr(atr)? color.yellow:na)
+
+View in Pine Editor・12 lines
+Use on chart
+4
+7
+2
+3 584
+If you are using support/resistance level-based strategies in your trading then this indicator can help you. I think that the retest level strategy is the best for beginners due to its simplicity of risk/reward calculations and higher abundance on the market. There is a well-known method to recognize a big player (buyer/seller) by candlestick pattern where the last two candles have the same low or same high. Moreover, abnormal candles increase the probability of a retest of a strong level, so my indicator highlights these two situations. In my opinion, a higher timeframe of a candle chart increases the win rate for this indicator (>1h).
+
+So there are several patterns which my indicator can recognize:
+
+1. Same low/high: blue flag up - same low, blue flag down - same high.
+
+2. Mirror levels: high-low - green flag up, low-high - green flag down.
+
+3. abnormal candles: yellow body if >2*ATR (please tune atr in properties, the default value is 5).
+
+4. The red flag indicates the third candle with the same high/low in a row.
+
+Thanks for your attention and have a good trading time!
+

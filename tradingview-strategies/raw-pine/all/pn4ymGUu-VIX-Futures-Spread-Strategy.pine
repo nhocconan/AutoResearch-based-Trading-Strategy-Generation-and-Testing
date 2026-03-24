@@ -1,0 +1,46 @@
+//@version=4
+strategy("VIX Futures Spread Strategy", overlay=false, pyramiding=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.005, slippage = 2)
+
+spr = security("CBOE:VIX3M", "W", hl2) - security("TVC:VIX", "W", hl2)
+
+plot(spr, title="VIX 3M - VIX", color=color.gray, style=plot.style_columns, linewidth=2, transp=30)
+
+h2 = hline(0, color=color.green)
+h3 = hline(3, color=color.red)
+
+// This strategy buys when the VIX futures spread is negative
+// It sells when the VIX futures spread is above 3, but only sells to close a position
+
+vixSpread = spr
+
+// Entry rules
+longCondition = (vixSpread < 0) and (year > 2018) and (barstate.isconfirmed)
+if longCondition
+    strategy.entry("Long", strategy.long, qty=10)
+
+// Exit rules
+shortCondition = (vixSpread > 3) and strategy.position_size > 0
+if shortCondition
+    strategy.close("Long")
+
+View in Pine Editor・24 lines
+Use on chart
+1
+9
+2
+5 966
+This script was an exercise in learning Pinescript and exploring the futures curve of the VIX in relation to SPY. Was deleted by TV, trying to republish it now with updated parameters for slippage and commission and a more detailed description.
+
+"VIX Futures Spread Strategy" is a trading strategy that capitalizes on the spread between the 3-month VIX futures (VIX3M) and the spot VIX index. This strategy is based on the idea that the VIX futures spread can serve as a contrarian indicator of market sentiment, with extreme negative spreads potentially signaling oversold conditions and opportunities for long positions.
+
+Ordinarily the VIX curve is in contango as futures contracts are priced at a premium to the current spot price and are used to hedge future uncertainty in the market. When the spot price of VIX spikes the curve can invert and enter backwardation; this strategy detects this condition and uses it as a trigger to open a long position in SPY. The spread going negative tends to correlate with excessive fear and uncertainty in the short term while expecting lower volatility in the long term, in this case 3 months out.
+
+The strategy is designed to enter a long position when the VIX futures spread is negative and to exit the position when the spread rises above 3 -- when the curve is in contango again. The strategy employs a pyramiding approach, allowing up to 10 additional orders to be placed while the entry condition is met, with each order consisting of 10 contracts. This approach aims to maximize potential profits during periods of favorable market conditions.
+
+In this strategy, the VIX futures spread is calculated as the difference between the 3-month VIX futures (VIX3M) and the spot VIX index. The spread is plotted as a histogram on the chart, with the zero line representing no spread, and horizontal lines at 0 and 3 indicating the entry and exit thresholds, respectively.
+
+The strategy's backtesting settings use an initial capital of 
+10
+,000, a commission of 0.5% per trade, and a maximum of 10 pyramiding orders, and a slippage of 2 ticks.
+
+Please note that this strategy is intended for educational purposes and should not be considered as financial advice. Before using this strategy in live trading, make sure to thoroughly test and optimize its parameters to suit your risk tolerance and specific trading conditions.

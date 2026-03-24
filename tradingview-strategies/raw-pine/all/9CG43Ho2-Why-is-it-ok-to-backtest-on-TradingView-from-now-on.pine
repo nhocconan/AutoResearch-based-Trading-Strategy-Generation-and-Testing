@@ -1,0 +1,50 @@
+//@version=4
+strategy(title = "NoBackTestBugAnymore", overlay = true, pyramiding = 0, initial_capital=10000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=100000, calc_on_every_tick=false, max_bars_back=5000) 
+
+GoLong=crossover(rsi(close,14),20) 
+GoShort=crossunder(rsi(close,14),80) 
+KillShort=GoLong 
+KillLong=GoShort 
+
+strategy.entry("long", strategy.long, when=GoLong) 
+strategy.entry("short", strategy.short, when=GoShort) 
+strategy.close("long", when=KillLong) 
+strategy.close("short", when=KillShort) 
+strategy.exit("XL", from_entry = "long", loss = 40, profit=30) 
+strategy.exit("XS", from_entry = "short", loss = 40, profit=30)
+
+View in Pine Editor・17 lines
+Use on chart
+3
+3
+7
+27
+23 213
+TradingView backtester has bad reputation. For a good reason - it was producing wrong results, and it was clear at first sight how bad they were.
+
+But this has changed. Along with many other improvements in its PineScript coding capabilities, TradingView fixed important bug, which was the main reason for miscalculations. TradingView didn't really speak out about this fix, so let me try :)
+
+Have a look at this short code of a swing trading strategy (PLEASE DON'T FOCUS ON BACKTEST RESULTS ATTACHED HERE - THEY DO NOT MATTER). Sometimes entry condition happens together with closing condition for the already ongoing trade. Example: the condition to close Long entry is the same as a condition to enter Short. And when these two aligned, not only a Long was closed and Short was entered (as intended), but also a second Short was entered, too!!! What's even worse, that second short was not controlled with closing conditions inside strategy.exit() function and it very often lead to losses exceeding whatever was declared in "loss=" parameter. This could not have worked well...
+
+But HOORAY!!! - it has been fixed and won't happen anymore. So together with other improvements - TradingView's backtester and PineScript is now ok to work with on standard candlesticks :)
+Yep, no need to code strategies and backtest them on other platforms anymore.
+
+----------------
+
+Having said the above, there are still some pitfalls remaining, which you need to be aware of and avoid:
+
+Don't backtest on HeikenAshi, Renko, Kagi candlesticks. They were not invented with backtesting in mind. There are still using wrong price levels for entries and therefore producing always too good backtesting results. Only standard candlesticks are reliable to backtest on.
+
+Don't use Trailing Stop in your code. TradingView operates only on closed candlesticks, not on tick data and because of that, backtester will always assume price has first reached its favourable extreme (so 'high' when you are in Long trade and 'low' when you are in Short trade) before it starts to pull back. Which is rarely the truth in reality. Therefore strategies using Trailing Stop are also producing too good backtesting results. It is especially well visible on higher timeframe strategies - for some reason your strategy manages to make gains on those huge, fat candlesticks :) But that's not reality.
+
+"when=" inside strategy.exit() does not work as you would intuitively expect. If you want to have logical condition to close your trade (for example - crossover(rsi(close,14),20)) you need to place it inside strategy.close() function. And leave StopLoss + TakeProfit conditions inside strategy.exit() function. Just as in attached code.
+
+If you're working with pyramiding, add "process_orders_on_close=ANY" to your strategy() script header. Default setting ("=FIFO") will first close the trade, which was opened first, not the one which was hit by Stop-Loss condidtion.
+
+
+
+----------------
+
+That's it, I guess :) If you are noticing other issues with backtester and would like to share, let everyone know in comments. If the issue is indeed a bug, there is a chance TradingView dev team will hear your voice and take it into account when working on other improvements. Just like they heard about the bug I described above.
+
+P.S. I know for a fact that more improvements in the backtesting area are coming. Some will change the game even for non-coding traders. If you want to be notified quickly and with my comment - gimme "follow".

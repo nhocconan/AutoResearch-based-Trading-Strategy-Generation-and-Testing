@@ -1,0 +1,8 @@
+//@version=4
+startValLessThan=##input(defval=50,type='INPUT_INTEGER',##id='in_1')
+##root(root_metainfo,rm_0,startValLessThan,input__float)
+SecondStartValLessThan=##input(defval=65,type='INPUT_INTEGER',##id='in_2')
+##root(root_metainfo,rm_1,SecondStartValLessThan,input__float)
+##root(root_metainfo,rm_2,3,input__integer,plot,style)
+##root(root_metainfo,rm_3,3,input__integer,plot,style)
+##root(root_metainfo,rm_4,3,input__integer,plot,style)

@@ -1,0 +1,13 @@
+//@version=5
+ob=##input(defval=1.2,type='INPUT_FLOAT',##id='in_3')
+ob_close=##input(defval=1.0,type='INPUT_FLOAT',##id='in_4')
+os=##input(defval=-0.2,type='INPUT_FLOAT',##id='in_5')
+os_close=##input(defval=0.2,type='INPUT_FLOAT',##id='in_6')
+##root(root_metainfo,rm_0,ob,input__float)
+##root(root_metainfo,rm_1,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_2,ob_close,input__float)
+##root(root_metainfo,rm_3,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_4,os,input__float)
+##root(root_metainfo,rm_5,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_6,os_close,input__float)
+##root(root_metainfo,rm_7,hline.style_dashed,cb__hline_style__integer,hline,linestyle)

@@ -1,0 +1,59 @@
+//@version=5
+strategy("Indices Auto-Direction - 3YR Fixed Risk", overlay=true, initial_capital=100000, default_qty_type=strategy.cash, currency=currency.USD, calc_on_order_fills=true)
+
+// === RISK MANAGEMENT ===
+riskAmount = input.float(100.0, title="Risk Per Trade ($)")
+slTicks    = input.int(600, title="Stop Loss (Ticks)")
+rrRatio    = input.float(2.5, title="Risk:Reward Ratio")
+
+// === TIME SETTINGS (London Time) ===
+s1Hour   = input.int(8, "S1 Hour")
+s1Minute = input.int(30, "S1 Minute")
+s2Hour   = input.int(0, "S2 Hour")
+s2Minute = input.int(5, "S2 Minute")
+
+// === RSI BIAS LOGIC ===
+rsiVal = ta.rsi(close, 14)
+rsiMA  = ta.sma(rsiVal, 14) // The "Bias" line
+
+// === POSITION SIZING ===
+float tickValue = syminfo.mintick * syminfo.pointvalue
+float fixedQty  = riskAmount / (slTicks * tickValue)
+
+// === TIME & WINDOW LOGIC ===
+currHour   = hour(time, "Europe/London")
+currMinute = minute(time, "Europe/London")
+
+isS1Time = currHour == s1Hour and currMinute == s1Minute
+isS2Time = currHour == s2Hour and currMinute == s2Minute
+
+var bool s1Traded = false
+var bool s2Traded = false
+if ta.change(time("D", "Europe/London"))
+    s1Traded := false
+    s2Traded := false
+
+// === EXECUTION ===
+tpTicks = math.round(slTicks * rrRatio)
+
+// Session 1
+if not s1Traded and isS1Time
+    s1Traded := true
+    strategy.entry("S1", rsiVal > rsiMA ? strategy.long : strategy.short, qty = fixedQty)
+    strategy.exit("Exit S1", "S1", loss = slTicks, profit = tpTicks)
+
+// Session 2
+if not s2Traded and isS2Time
+    s2Traded := true
+    strategy.entry("S2", rsiVal > rsiMA ? strategy.long : strategy.short, qty = fixedQty)
+    strategy.exit("Exit S2", "S2", loss = slTicks, profit = tpTicks)
+
+// Visual RSI for the bottom pane
+plot(rsiVal, "RSI", color=color.white, display=display.none)
+plot(rsiMA, "RSI MA", color=color.yellow, display=display.none)
+
+View in Pine Editor・53 lines
+Use on chart
+4
+312
+this stratergy takes one trade at open of london and one at open of asian to maximize volue.

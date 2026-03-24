@@ -1,0 +1,100 @@
+//@version=6
+strategy("Paulinho Signals – Estratégia Cripto 5m/15m com Filtro de Lateralidade", overlay=true,
+     margin_long=100, margin_short=100,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// =============================
+//        PARÂMETROS
+// =============================
+emaFastLen = input.int(9,  "EMA Rápida")
+emaSlowLen = input.int(21, "EMA Lenta")
+emaTrend   = input.int(50, "EMA Tendência")
+rsiLen     = input.int(14, "RSI")
+diLen      = input.int(14, "DI Length")
+adxSmooth  = input.int(14, "Suavização ADX")
+rsiBuyMin  = input.int(50, "RSI Mínimo p/ Compra")
+rsiSellMax = input.int(50, "RSI Máximo p/ Venda")
+adxFilter  = input.int(15, "ADX mínimo")
+cooldown   = input.int(1,  "Candles de espera após sinal")
+atrLen     = input.int(14, "ATR Length")
+atrFilter  = input.float(0.003, "ATR mínimo relativo ao preço (0.003 = 0.3%)", step=0.0001)
+
+// Valor fixo para TP/SL – cerca de 0,65%
+sl_tp_pct = 0.0065   // 0.65%
+
+// =============================
+//        CÁLCULOS
+// =============================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaTrendLine = ta.ema(close, emaTrend)
+rsi = ta.rsi(close, rsiLen)
+[dmiPlus, dmiMinus, adx] = ta.dmi(diLen, adxSmooth)
+atr = ta.atr(atrLen)
+
+bullCross = ta.crossover(emaFast, emaSlow)
+bearCross = ta.crossunder(emaFast, emaSlow)
+
+candleRange = high - low
+body        = math.abs(close - open)
+strongBull  = close > open and body >= candleRange * 0.5
+strongBear  = close < open and body >= candleRange * 0.5
+
+volatilityOk = atr / close > atrFilter
+
+longBase  = bullCross and rsi > rsiBuyMin  and adx > adxFilter and strongBull and close > emaTrendLine and volatilityOk
+shortBase = bearCross and rsi < rsiSellMax and adx > adxFilter and strongBear and close < emaTrendLine and volatilityOk
+
+// =============================
+//     COOLDOWN
+// =============================
+var int lastSignalBar = na
+barsSinceLast = na(lastSignalBar) ? 1e9 : (bar_index - lastSignalBar)
+cooldownOk    = barsSinceLast > cooldown
+
+longSignal  = longBase and cooldownOk
+shortSignal = shortBase and cooldownOk
+
+// =============================
+//     ENTRADAS E TP/SL FIXOS
+// =============================
+if (longSignal)
+    sl = close * (1 - sl_tp_pct)
+    tp = close * (1 + sl_tp_pct)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    lastSignalBar := bar_index
+
+
+if (shortSignal)
+    sl = close * (1 + sl_tp_pct)
+    tp = close * (1 - sl_tp_pct)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    lastSignalBar := bar_index
+    
+
+// =============================
+//           PLOTS
+// =============================
+plot(emaFast, "EMA 9",  color=color.new(color.green, 0))
+plot(emaSlow, "EMA 21", color=color.new(color.red,   0))
+plot(emaTrendLine, "EMA Tendência", color=color.new(color.blue, 0))
+plot(atr, "ATR", color=color.new(color.purple, 0))
+
+View in Pine Editor・83 lines
+Use on chart
+1
+4
+768
+This script is an automated Pine Script v6 strategy designed for short-term cryptocurrency trading, especially on 5-minute and 15-minute timeframes. It combines moving average crossovers, trend strength (ADX), volatility (ATR), and candlestick patterns to generate buy and sell signals with a fixed risk/reward management system.
+
+How to Use:
+- Apply to cryptocurrency charts on 5m or 15m timeframes.
+- Adjust parameters to fit your preferences (EMA, RSI, ADX, ATR).
+- Use for backtesting or as a decision-support tool.
+
+Disclaimer:
+This script is for educational purposes only and does not constitute financial advice. Always test on demo accounts before applying to live trading.
+
+

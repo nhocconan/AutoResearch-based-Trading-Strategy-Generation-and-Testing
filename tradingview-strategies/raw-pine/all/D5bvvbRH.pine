@@ -1,0 +1,75 @@
+//@version=5
+strategy("布林带ATR止损策略", overlay=true, margin_long=100, margin_short=100)
+length = input.int(20, title="布林带周期", minval=1)
+mult = input.float(2.0, title="标准差倍数", step=0.1)
+atr_length = input.int(9, title="ATR周期", minval=1)
+atr_multiplier = input.float(3.0, title="ATR倍数", step=0.1)
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+current_atr = ta.atr(atr_length)
+plot(basis, "中线", color=color.blue)
+plot(upper, "上轨", color=color.red)
+plot(lower, "下轨", color=color.green)
+long_condition = ta.crossover(close, lower) and close > lower
+short_condition = ta.crossunder(close, upper) and close < upper
+var float long_stop_price = na
+var float long_take_profit = na
+var float short_stop_price = na
+var float short_take_profit = na
+var bool in_long_trade = false
+var bool in_short_trade = false
+if (long_condition and not in_long_trade)
+    strategy.entry("Long", strategy.long)
+    long_stop_price := close - current_atr * atr_multiplier
+    long_take_profit := close + current_atr * atr_multiplier * 2
+    in_long_trade := true
+    in_short_trade := false
+if (short_condition and not in_short_trade)
+    strategy.entry("Short", strategy.short)
+    short_stop_price := close + current_atr * atr_multiplier
+    short_take_profit := close - current_atr * atr_multiplier * 2
+    in_short_trade := true
+    in_long_trade := false
+plot(in_long_trade ? long_stop_price : na, "多单止损线", color=color.red, style=plot.style_linebr)
+plot(in_long_trade ? long_take_profit : na, "多单止盈线", color=color.green, style=plot.style_linebr)
+plot(in_short_trade ? short_stop_price : na, "空单止损线", color=color.red, style=plot.style_linebr)
+plot(in_short_trade ? short_take_profit : na, "空单止盈线", color=color.green, style=plot.style_linebr)
+if (in_long_trade)
+    if (close < long_stop_price)
+        strategy.close("Long", comment="ATR止损")
+        in_long_trade := false
+    else if (close >= long_take_profit)
+        strategy.close("Long", comment="ATR止盈")
+        in_long_trade := false
+    else
+        trailing_stop = high - current_atr * atr_multiplier
+        if (trailing_stop > long_stop_price)
+            long_stop_price := trailing_stop
+if (in_short_trade)
+    if (close > short_stop_price)
+        strategy.close("Short", comment="ATR止损")
+        in_short_trade := false
+    else if (close <= short_take_profit)
+        strategy.close("Short", comment="ATR止盈")
+        in_short_trade := false
+    else
+        trailing_stop = low + current_atr * atr_multiplier
+        if (trailing_stop < short_stop_price)
+            short_stop_price := trailing_stop
+// if (strategy.position_size > 0 and ta.crossunder(close, basis))
+//     strategy.close("Long", comment="触及中线平多")
+//     in_long_trade := false
+// if (strategy.position_size < 0 and ta.crossover(close, basis))
+//     strategy.close("Short", comment="触及中线平空")
+//     in_short_trade := false
+plotshape(long_condition and not in_long_trade, title="多单信号", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(short_condition and not in_short_trade, title="空单信号", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+View in Pine Editor・68 lines
+Use on chart
+4
+455
+更具布林上下轨道做5分钟短线的剥头皮策略，并且更具atr移动止盈止损
+Add Bollinger Bands to the upper and lower bands for a 5-minute short-term charting strategy, and add ATR trailing stop-loss and take-profit orders.

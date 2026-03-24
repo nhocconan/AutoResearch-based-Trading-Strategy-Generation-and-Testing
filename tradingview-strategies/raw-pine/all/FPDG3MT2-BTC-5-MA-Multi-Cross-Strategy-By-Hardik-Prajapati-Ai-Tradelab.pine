@@ -1,0 +1,91 @@
+//@version=5
+strategy("BTC 5-MA Multi Cross Strategy", overlay=true, initial_capital=10000)
+
+// === INPUTS ===
+ma1_len = input.int(5, "MA 1 (Fastest)")
+ma2_len = input.int(20, "MA 2")
+ma3_len = input.int(50, "MA 3")
+ma4_len = input.int(100, "MA 4")
+ma5_len = input.int(200, "MA 5 (Slowest)")
+
+// === CALCULATIONS ===
+ma1 = ta.sma(close, ma1_len)
+ma2 = ta.sma(close, ma2_len)
+ma3 = ta.sma(close, ma3_len)
+ma4 = ta.sma(close, ma4_len)
+ma5 = ta.sma(close, ma5_len)
+
+// === PLOTS ===
+plot(ma1, color=color.new(color.lime, 0), title="5 MA", linewidth=2)
+plot(ma2, color=color.new(color.orange, 0), title="20 MA", linewidth=2)
+plot(ma3, color=color.new(color.blue, 0), title="50 MA", linewidth=2)
+plot(ma4, color=color.new(color.purple, 0), title="100 MA", linewidth=2)
+plot(ma5, color=color.new(color.red, 0), title="200 MA", linewidth=2)
+
+// === STRATEGY CONDITIONS ===
+// Buy when price crosses above all MAs (strong uptrend)
+buyCondition = ta.crossover(close, ma1) and close > ma2 and close > ma3 and close > ma4 and close > ma5
+
+// Sell when price crosses below 20 MA
+sellCondition = ta.crossunder(close, ma2)
+
+// === EXECUTION ===
+if (buyCondition)
+    strategy.entry("BUY", strategy.long)
+
+if (sellCondition)
+    strategy.close("BUY")
+
+// === VISUAL SIGNALS ===
+plotshape(buyCondition, title="Buy Signal", location=location.belowbar,
+     color=color.new(color.green, 0), style=shape.triangleup, size=size.small, text="BUY")
+
+plotshape(sellCondition, title="Sell Signal", location=location.abovebar,
+     color=color.new(color.red, 0), style=shape.triangledown, size=size.small, text="SELL")
+
+View in Pine Editor・44 lines
+Use on chart
+2
+6
+1 105
+This strategy is built around the five most powerful and commonly used moving averages in crypto trading — 5, 20, 50, 100, and 200-period SMAs (Simple Moving Averages) — applied on a 1-hour Bitcoin chart.
+
+Core Idea:
+
+The strategy aims to identify strong bullish trends by confirming when the price action crosses above all key moving averages. This alignment of multiple MAs indicates momentum shift and helps filter out false breakouts.
+
+⸻
+
+⚙️ How It Works:
+1. Calculates 5 Moving Averages:
+• 5 MA → Short-term momentum (fastest signal)
+• 20 MA → Near-term trend confirmation
+• 50 MA → Mid-term trend filter
+• 100 MA → Long-term trend foundation
+• 200 MA → Macro-trend direction (strongest support/resistance)
+2. Buy Condition (Entry):
+• A Buy is triggered when:
+• The price crosses above the 5 MA, and
+• The closing price remains above all other MAs (20, 50, 100, 200)
+This signals that momentum is aligned across all time horizons — a strong uptrend confirmation.
+3. Sell Condition (Exit):
+• The position is closed when price crosses below the 20 MA, showing weakness in short-term momentum.
+4. Visual Signals:
+• 🟢 BUY triangle below candles → Entry signal
+• 🔴 SELL triangle above candles → Exit signal
+• Colored MAs plotted for trend clarity.
+
+⸻
+
+📈 Recommended Usage:
+• Chart: BTC/USDT
+• Timeframe: 1 Hour
+• Type: Trend-following crossover strategy
+• Ideal for: Identifying major breakout moves and confirming trend reversals.
+
+⸻
+
+⚠️ Notes:
+• This script is meant for educational and backtesting purposes only.
+• Always apply additional confirmation tools (like RSI, Volume, or VIX-style filters) before live trading.
+• Works best during trending markets; may produce whipsaws in sideways zones.

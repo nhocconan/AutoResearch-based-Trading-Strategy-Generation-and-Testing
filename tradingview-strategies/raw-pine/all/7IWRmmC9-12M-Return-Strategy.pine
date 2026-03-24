@@ -1,0 +1,206 @@
+//@version=6
+strategy("Classic Dual Momentum (12M Return) - Auto Timeframe (Strategy)", shorttitle="DM_12M_AUTO_STRAT", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=100000)
+
+// ----------------- inputs -----------------
+maLen       = input.int(12, "MA Length (on 12M Return)", minval=1)
+takeShort   = input.bool(false, "Allow Shorting (if off, go to cash on bearish signal)")
+qtyPercent  = input.int(100, "Order Size (% of Equity)", minval=1, maxval=100) // kept for UI clarity; default_qty_type handles actual sizing
+upColor     = input.color(color.green, "Up Arrow / Positive Color")
+downColor   = input.color(color.red,   "Down Arrow / Negative Color")
+colPositive = input.color(color.new(color.green, 0), "Positive Bar Color")
+colNegative = input.color(color.new(color.red, 0),   "Negative Bar Color")
+
+// ----------------- helper: get lookback ~1 year -----------------
+getLookback() =>
+    tf = timeframe.period
+    if tf == "1D" or tf == "D"
+        252     // trading days approx
+    else if tf == "1W" or tf == "W"
+        52
+    else if tf == "1M" or tf == "M"
+        12
+    else
+        // estimate bars per year using difference between current and previous bar time
+        delta = math.max(1, time - nz(time[1], time))
+        estBars = math.max(1, math.round(31536000 / delta))
+        math.min(math.max(estBars, 1), 10000)
+
+lookback = getLookback()
+// ensure we don't ask for more history than available
+validLookback = math.min(lookback, bar_index)
+
+// ----------------- 12M return (%) -----------------
+ret12 = validLookback > 0 ? (close / nz(close[validLookback]) - 1) * 100.0 : 0.0
+
+// ----------------- MA of return -----------------
+retMA = ta.sma(ret12, maLen)
+
+// ----------------- plotting -----------------
+retColor = ret12 >= 0 ? colPositive : colNegative
+plot(ret12, title="12M Return (%)", style=plot.style_columns, color=retColor)
+plot(retMA, title="MA of 12M Return", color=color.white, linewidth=2)
+
+// up / down markers (visible in the indicator pane)
+plotshape(series = ret12 > retMA, title="Up Arrow", style=shape.triangleup, location=location.top, color=upColor, size=size.small)
+plotshape(series = ret12 < retMA, title="Down Arrow", style=shape.triangledown, location=location.bottom, color=downColor, size=size.small)
+
+// ----------------- strategy logic -----------------
+longCond  = ta.crossover(ret12, retMA)   // 12M crosses above MA -> go long
+shortCond = ta.crossunder(ret12, retMA)  // 12M crosses below MA -> go short (or cash)
+
+// Use default_qty_type set above. Do NOT pass qty here to avoid type issues.
+if (longCond)
+    if strategy.position_size < 0
+        strategy.close("Short")
+    strategy.entry(id="Long", direction=strategy.long)
+
+if (shortCond)
+    if takeShort
+        if strategy.position_size > 0
+            strategy.close("Long")
+        strategy.entry(id="Short", direction=strategy.short)
+    else
+        if strategy.position_size > 0
+            strategy.close("Long")
+
+// show current status as label in the indicator pane
+var label stat = na
+if barstate.islast
+    label.delete(stat)
+    statusTxt = strategy.position_size > 0 ? "LONG" : (strategy.position_size < 0 ? "SHORT" : "CASH")
+    // place label at current bar's ret12 level (so it's in the same pane)
+    stat = label.new(x=bar_index, y=ret12, xloc=xloc.bar_index, yloc=yloc.price, text="Status: " + statusTxt, color=color.gray, style=label.style_label_left, textcolor=color.white, size=size.small)
+
+View in Pine Editor・75 lines
+Use on chart
+2
+4
+1 025
+This strategy is based on the original Dual Momentum concept presented by Gary Antonacci in his book “Dual Momentum Investing.”
+It implements the absolute momentum portion of the framework using a 12-month rate of change, combined with a moving-average filter for trend confirmation.
+
+The script automatically adapts the lookback period depending on chart timeframe, ensuring the return calculation always represents approximately one year, whether you are on daily, weekly, or monthly charts.
+
+How the Strategy Works
+1. 12-Month Return Calculation
+
+The core signal is the 12-month price return, computed as:
+
+(Current Price ÷ Price from ~1 year ago) − 1
+
+This return:
+
+Plots as a histogram
+
+Turns green when positive
+
+Turns red when negative
+
+The lookback adjusts automatically:
+
+1D chart → 252 bars
+
+1W chart → 52 bars
+
+1M chart → 12 bars
+
+Other timeframes → estimated to approximate 1 calendar year
+
+2. Trend Filter (Moving Average of Return)
+
+To smooth volatility and avoid noise, the strategy applies a moving average to the 12M return:
+
+Default length: 12 periods
+
+Plotted as a white line on the indicator panel
+
+This becomes the benchmark used for crossovers.
+
+3. Trade Signals (Long / Short / Cash)
+
+Trades are generated using a simple crossover mechanism:
+
+Bullish Signal (Go Long)
+
+When:
+
+12M Return crosses ABOVE its MA
+
+Action:
+
+Close short (if any)
+
+Enter long
+
+Bearish Signal (Go Short or Go Flat)
+
+When:
+
+12M Return crosses BELOW its MA
+
+Action:
+
+If shorting is enabled → Enter short
+
+If shorting is disabled → Exit position and go to cash
+
+Shorting can be enabled or disabled with a single input switch.
+
+4. Position Sizing
+
+The strategy uses:
+
+Percent of Equity position sizing
+
+You can specify the percentage of your portfolio to allocate (default 100%).
+
+No leverage is required, but the strategy supports it if your account settings allow.
+
+5. Visual Signals
+
+To improve clarity, the strategy marks signals directly on the indicator panel:
+
+Green Up Arrows: return > MA
+
+Red Down Arrows: return < MA
+
+A status label shows the current mode:
+
+LONG
+
+SHORT
+
+CASH
+
+6. Backtest-Ready
+
+This script is built as a full TradingView strategy, not just an indicator.
+This means you can:
+
+Run complete backtests
+
+View performance metrics
+
+Compare long-only vs long/short behavior
+
+Adjust inputs to tune the system
+
+It provides a clean, rule-driven interpretation of the classic absolute momentum approach.
+
+Inspired By: Gary Antonacci – Dual Momentum Investing
+
+This script reflects the absolute momentum side of Antonacci’s original research:
+
+Uses 12-month momentum (the most statistically validated lookback)
+
+Applies a trend-following overlay to control downside risk
+
+Recreates the classic signal structure used in academic studies
+
+It is a simplified, transparent version intended for practical use and educational clarity.
+
+Disclaimer
+
+This script is for educational and research purposes only.
+Historical performance does not guarantee future results.
+Always use proper risk management.

@@ -1,0 +1,737 @@
+//@version=5
+strategy("AVGO Advanced Day Trading Strategy", shorttitle="AVGO_ADT", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// === MAIN STRATEGY SETTINGS ===
+enableLongs = input.bool(true, "Enable Long Trades", group="Main Strategy Settings")
+enableShorts = input.bool(true, "Enable Short Trades", group="Main Strategy Settings")
+riskPerTrade = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group="Main Strategy Settings")
+maxPositionSize = input.float(25.0, "Maximum Position Size (% of Equity)", minval=5.0, maxval=50.0, step=5.0, group="Main Strategy Settings")
+dailyLossLimit = input.float(2.5, "Daily Loss Limit (%)", minval=1.0, maxval=10.0, step=0.5, group="Main Strategy Settings")
+
+// === ENTRY METHOD SELECTION ===
+entryMethod = input.string("Hybrid System", "Entry Method", options=["EMA Crossover", "MACD + RSI Confluence", "Price Momentum", "Hybrid System"], group="Entry Methods")
+
+// === PRIMARY TREND INDICATORS ===
+emaShortLength = input.int(9, "Fast EMA Length", minval=5, maxval=50, group="Primary Trend Indicators")
+emaMediumLength = input.int(16, "Medium EMA Length", minval=10, maxval=100, group="Primary Trend Indicators")
+emaLongLength = input.int(50, "Long EMA Length", minval=20, maxval=200, group="Primary Trend Indicators")
+enableVWAP = input.bool(true, "Enable VWAP Filter", group="Primary Trend Indicators")
+
+// === MOMENTUM OSCILLATORS ===
+rsiLength = input.int(6, "RSI Length", minval=2, maxval=50, group="Momentum Oscillators")
+rsiOverbought = input.float(70.0, "RSI Overbought", minval=60.0, maxval=90.0, step=1.0, group="Momentum Oscillators")
+rsiOversold = input.float(30.0, "RSI Oversold", minval=10.0, maxval=40.0, step=1.0, group="Momentum Oscillators")
+macdFast = input.int(8, "MACD Fast", minval=5, maxval=20, group="Momentum Oscillators")
+macdSlow = input.int(13, "MACD Slow", minval=10, maxval=30, group="Momentum Oscillators")
+macdSignal = input.int(5, "MACD Signal", minval=3, maxval=15, group="Momentum Oscillators")
+
+// === ADVANCED TECHNICAL INDICATORS ===
+enableAdvanced = input.bool(true, "Enable Advanced Indicators", group="Advanced Technical Arsenal")
+minAdvancedSignals = input.int(5, "Minimum Advanced Signals for Entry", minval=1, maxval=5, group="Advanced Technical Arsenal")
+vptLength = input.int(20, "VPT MA Length", minval=10, maxval=50, group="Advanced Technical Arsenal")
+obvLength = input.int(15, "OBV MA Length", minval=10, maxval=50, group="Advanced Technical Arsenal")
+adLength = input.int(5, "A/D Trend Length", minval=3, maxval=20, group="Advanced Technical Arsenal")
+williamsLength = input.int(15, "Williams %R Length", minval=10, maxval=30, group="Advanced Technical Arsenal")
+rocShort = input.int(5, "ROC Short Length", minval=3, maxval=15, group="Advanced Technical Arsenal")
+rocMedium = input.int(14, "ROC Medium Length", minval=5, maxval=25, group="Advanced Technical Arsenal")
+rocLong = input.int(18, "ROC Long Length", minval=10, maxval=50, group="Advanced Technical Arsenal")
+cciLength = input.int(23, "CCI Length", minval=10, maxval=50, group="Advanced Technical Arsenal")
+cciOverbought = input.float(100.0, "CCI Overbought", minval=50.0, maxval=200.0, step=10.0, group="Advanced Technical Arsenal")
+cciOversold = input.float(-100.0, "CCI Oversold", minval=-200.0, maxval=-50.0, step=10.0, group="Advanced Technical Arsenal")
+
+// === VOLATILITY & MARKET STRUCTURE ===
+bbLength = input.int(20, "Bollinger Bands Length", minval=10, maxval=50, group="Volatility & Market Structure")
+bbMultiplier = input.float(2.0, "Bollinger Bands Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Volatility & Market Structure")
+squeezeThreshold = input.float(0.8, "Squeeze Threshold", minval=0.5, maxval=1.5, step=0.1, group="Volatility & Market Structure")
+adxLength = input.int(15, "ADX Length", minval=10, maxval=30, group="Volatility & Market Structure")
+adxThreshold = input.float(22.0, "ADX Trend Strength Threshold", minval=15.0, maxval=40.0, step=1.0, group="Volatility & Market Structure")
+sarStart = input.float(0.04, "SAR Start", minval=0.01, maxval=0.05, step=0.01, group="Volatility & Market Structure")
+sarIncrement = input.float(0.01, "SAR Increment", minval=0.01, maxval=0.05, step=0.01, group="Volatility & Market Structure")
+sarMaximum = input.float(0.25, "SAR Maximum", minval=0.1, maxval=0.5, step=0.05, group="Volatility & Market Structure")
+
+// === PRICE ACTION ELEMENTS ===
+pivotLookback = input.int(5, "Pivot Lookback Bars", minval=3, maxval=15, group="Price Action Elements")
+pivotThreshold = input.float(0.6, "Pivot Proximity Threshold (%)", minval=0.1, maxval=2.0, step=0.1, group="Price Action Elements")
+fractalLookback = input.int(3, "Fractal Lookback Bars", minval=1, maxval=5, group="Price Action Elements")
+
+// === VOLUME CONFIRMATION ===
+enableVolumeFilter = input.bool(true, "Enable Volume Filter", group="Volume Confirmation")
+volumeMultiplier = input.float(1.6, "Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Volume Confirmation")
+volumeLength = input.int(19, "Volume Average Length", minval=10, maxval=50, group="Volume Confirmation")
+
+// === RISK MANAGEMENT ===
+stopLossMethod = input.string("ATR", "Stop Loss Method", options=["Percentage", "ATR"], group="Risk Management")
+stopLossPercent = input.float(1.1, "Stop Loss Percentage", minval=0.5, maxval=5.0, step=0.1, group="Risk Management")
+atrLength = input.int(10, "ATR Length", minval=10, maxval=30, group="Risk Management")
+atrMultiplier = input.float(1.1, "ATR Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Risk Management")
+enableTrailingStop = input.bool(true, "Enable Trailing Stop", group="Risk Management")
+trailingStopPercent = input.float(1.0, "Trailing Stop Percentage", minval=0.5, maxval=3.0, step=0.1, group="Risk Management")
+
+// === PROFIT TARGETS ===
+target1Percent = input.float(1.5, "Target 1 (%)", minval=0.5, maxval=5.0, step=0.1, group="Profit Targets")
+target1Exit = input.float(50.0, "Target 1 Exit (%)", minval=10.0, maxval=100.0, step=10.0, group="Profit Targets")
+target2Percent = input.float(2.5, "Target 2 (%)", minval=1.0, maxval=8.0, step=0.1, group="Profit Targets")
+target2Exit = input.float(30.0, "Target 2 Exit (%)", minval=10.0, maxval=50.0, step=10.0, group="Profit Targets")
+target3Percent = input.float(3.6, "Target 3 (%)", minval=2.0, maxval=10.0, step=0.1, group="Profit Targets")
+target3Exit = input.float(20.0, "Target 3 Exit (%)", minval=10.0, maxval=30.0, step=10.0, group="Profit Targets")
+
+// === TRADING HOURS ===
+enableTimeFilter = input.bool(true, "Enable Time Filter", group="Trading Hours")
+startHour = input.int(9, "Start Hour", minval=0, maxval=23, group="Trading Hours")
+startMinute = input.int(30, "Start Minute", minval=0, maxval=59, group="Trading Hours")
+endHour = input.int(15, "End Hour", minval=0, maxval=23, group="Trading Hours")
+endMinute = input.int(30, "End Minute", minval=0, maxval=59, group="Trading Hours")
+
+// === VISUAL SETTINGS ===
+showEMAs = input.bool(true, "Show EMAs", group="Visual Settings")
+emaShortColor = input.color(color.blue, "Fast EMA Color", group="Visual Settings")
+emaMediumColor = input.color(color.orange, "Medium EMA Color", group="Visual Settings")
+emaLongColor = input.color(color.purple, "Long EMA Color", group="Visual Settings")
+vwapColor = input.color(color.yellow, "VWAP Color", group="Visual Settings")
+showBB = input.bool(false, "Show Bollinger Bands", group="Visual Settings")
+bbColor = input.color(color.gray, "BB Color", group="Visual Settings")
+showSAR = input.bool(false, "Show Parabolic SAR", group="Visual Settings")
+sarColor = input.color(color.red, "SAR Color", group="Visual Settings")
+showSignals = input.bool(true, "Show Entry Signals", group="Visual Settings")
+longSignalColor = input.color(color.green, "Long Signal Color", group="Visual Settings")
+shortSignalColor = input.color(color.red, "Short Signal Color", group="Visual Settings")
+showBackground = input.bool(true, "Show Background Colors", group="Visual Settings")
+bullishBgColor = input.color(color.new(color.green, 95), "Bullish Background", group="Visual Settings")
+bearishBgColor = input.color(color.new(color.red, 95), "Bearish Background", group="Visual Settings")
+showTargets = input.bool(true, "Show Target/Stop Levels", group="Visual Settings")
+targetColor = input.color(color.green, "Target Color", group="Visual Settings")
+stopColor = input.color(color.red, "Stop Color", group="Visual Settings")
+
+// === INFORMATION DASHBOARD ===
+showDashboard = input.bool(true, "Show Information Dashboard", group="Information Dashboard")
+dashboardPosition = input.string("Top Right", "Dashboard Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Information Dashboard")
+dashboardSize = input.string("Normal", "Dashboard Size", options=["Small", "Normal", "Large"], group="Information Dashboard")
+
+// === ALERT SETTINGS ===
+enableEntryAlerts = input.bool(true, "Enable Entry Alerts", group="Alert Settings")
+enableConfluenceAlerts = input.bool(true, "Enable Confluence Alerts", group="Alert Settings")
+strongConfluenceThreshold = input.int(3, "Strong Confluence Threshold", minval=2, maxval=5, group="Alert Settings")
+
+// === CALCULATIONS ===
+
+// Primary Trend Indicators
+emaShort = ta.ema(close, emaShortLength)
+emaMedium = ta.ema(close, emaMediumLength)
+emaLong = ta.ema(close, emaLongLength)
+vwapValue = ta.vwap(hlc3)
+
+// Momentum Oscillators  
+rsiValue = ta.rsi(close, rsiLength)
+[macdLine, signalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// ATR for stop loss calculations
+atrValue = ta.atr(atrLength)
+
+// Volume Analysis
+avgVolume = ta.sma(volume, volumeLength)
+volumeConfirmed = not enableVolumeFilter or volume >= avgVolume * volumeMultiplier
+
+// Time Filter
+timeInRange = not enableTimeFilter or (hour >= startHour and minute >= startMinute and hour <= endHour and minute <= endMinute)
+
+// === ADVANCED TECHNICAL ARSENAL ===
+
+// Initialize advanced indicator variables
+var float vptValue = na
+var float obvValue = na
+var float adValue = na
+
+// Calculate advanced indicators
+vptValue := nz(vptValue[1]) + volume * (close - close[1]) / close[1]
+vptMA = ta.sma(vptValue, vptLength)
+
+obvValue := nz(obvValue[1]) + math.sign(close - close[1]) * volume
+obvMA = ta.sma(obvValue, obvLength)
+
+adValue := nz(adValue[1]) + volume * ((close - low) - (high - close)) / (high - low)
+adMA = ta.sma(adValue, adLength)
+
+williamsValue = -100 * (ta.highest(high, williamsLength) - close) / (ta.highest(high, williamsLength) - ta.lowest(low, williamsLength))
+
+// Rate of Change Suite
+rocShortValue = ta.roc(close, rocShort)
+rocMediumValue = ta.roc(close, rocMedium)
+rocLongValue = ta.roc(close, rocLong)
+
+// Commodity Channel Index
+cciValue = ta.cci(close, cciLength)
+
+// Bollinger Bands
+bbMiddle = ta.sma(close, bbLength)
+bbStdDev = ta.stdev(close, bbLength)
+bbUpper = bbMiddle + bbStdDev * bbMultiplier
+bbLower = bbMiddle - bbStdDev * bbMultiplier
+
+// Bollinger Band Squeeze Detection
+bbSqueeze = (bbUpper - bbLower) / bbMiddle < squeezeThreshold / 100
+
+// ADX and Directional Indicators - Proper tuple unpacking
+[adxValue, diPlus, diMinus] = ta.dmi(adxLength, adxLength)
+
+// Parabolic SAR
+sarValue = ta.sar(sarStart, sarIncrement, sarMaximum)
+
+// === SIGNAL GENERATION ===
+
+// Basic trend signals
+emaTrendBullish = emaShort > emaMedium and emaMedium > emaLong
+emaTrendBearish = emaShort < emaMedium and emaMedium < emaLong
+vwapBullish = not enableVWAP or close > vwapValue
+vwapBearish = not enableVWAP or close < vwapValue
+
+// Entry Method 1: EMA Crossover
+method1Long = ta.crossover(emaShort, emaMedium)
+method1Short = ta.crossunder(emaShort, emaMedium)
+
+// Entry Method 2: MACD + RSI Confluence
+method2Long = ta.crossover(macdLine, signalLine) and rsiValue > 50 and rsiValue < 70
+method2Short = ta.crossunder(macdLine, signalLine) and rsiValue < 50 and rsiValue > 30
+
+// Entry Method 3: Price Momentum  
+consecutiveRising = close > close[1] and close[1] > close[2] and close[2] > close[3] and close[3] > close[4] and close[4] > close[5] and close[5] > close[6]
+consecutiveFalling = close < close[1] and close[1] < close[2] and close[2] < close[3] and close[3] < close[4] and close[4] < close[5] and close[5] < close[6]
+method3Long = consecutiveRising and close > emaShort and rsiValue > 40 and rsiValue < 80
+method3Short = consecutiveFalling and close < emaShort and rsiValue > 20 and rsiValue < 60
+
+// Entry Method 4: Hybrid System
+hybrid4LongTrigger1 = ta.crossover(emaShort, emaMedium)
+hybrid4LongTrigger2 = macdLine > signalLine and rsiValue > 45
+higherClose1 = close > close[1]
+higherClose2 = close[1] > close[2]
+hybrid4LongTrigger3 = close > emaShort and higherClose1 and higherClose2
+
+hybrid4ShortTrigger1 = ta.crossunder(emaShort, emaMedium)
+hybrid4ShortTrigger2 = macdLine < signalLine and rsiValue < 55
+lowerClose1 = close < close[1]
+lowerClose2 = close[1] < close[2]
+hybrid4ShortTrigger3 = close < emaShort and lowerClose1 and lowerClose2
+
+method4Long = hybrid4LongTrigger1 or hybrid4LongTrigger2 or hybrid4LongTrigger3
+method4Short = hybrid4ShortTrigger1 or hybrid4ShortTrigger2 or hybrid4ShortTrigger3
+
+// Select entry method
+entryLongSignal = switch entryMethod
+    "EMA Crossover" => method1Long
+    "MACD + RSI Confluence" => method2Long
+    "Price Momentum" => method3Long
+    "Hybrid System" => method4Long
+    => false
+
+entryShortSignal = switch entryMethod
+    "EMA Crossover" => method1Short
+    "MACD + RSI Confluence" => method2Short
+    "Price Momentum" => method3Short
+    "Hybrid System" => method4Short
+    => false
+
+// Advanced Signal Confluence (when enabled)
+bullishSignalCount = 0
+bearishSignalCount = 0
+
+if enableAdvanced
+    // VPT Trend
+    if vptValue > vptMA
+        bullishSignalCount := bullishSignalCount + 1
+    else
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // OBV Analysis  
+    if obvValue > obvMA
+        bullishSignalCount := bullishSignalCount + 1
+    else
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // A/D Trend
+    if adValue > adMA
+        bullishSignalCount := bullishSignalCount + 1
+    else
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // Williams %R
+    if williamsValue > -50
+        bullishSignalCount := bullishSignalCount + 1
+    else
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // ROC Alignment
+    rocBullish = rocShortValue > 0 and rocMediumValue > 0 and rocLongValue > 0
+    rocBearish = rocShortValue < 0 and rocMediumValue < 0 and rocLongValue < 0
+    if rocBullish
+        bullishSignalCount := bullishSignalCount + 1
+    if rocBearish
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // CCI Position
+    if cciValue > 0 and cciValue < cciOverbought
+        bullishSignalCount := bullishSignalCount + 1
+    if cciValue < 0 and cciValue > cciOversold
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // ADX Trend
+    adxStrong = adxValue > adxThreshold
+    if adxStrong and diPlus > diMinus
+        bullishSignalCount := bullishSignalCount + 1
+    if adxStrong and diMinus > diPlus
+        bearishSignalCount := bearishSignalCount + 1
+    
+    // SAR Position
+    if close > sarValue
+        bullishSignalCount := bullishSignalCount + 1
+    else
+        bearishSignalCount := bearishSignalCount + 1
+
+// Final Entry Conditions - TRAINING FLAW: Inverted trend filter logic!
+longCondition = enableLongs and entryLongSignal and emaTrendBearish and vwapBullish and timeInRange and volumeConfirmed and strategy.position_size == 0 and (not enableAdvanced or bullishSignalCount >= minAdvancedSignals)
+shortCondition = enableShorts and entryShortSignal and emaTrendBullish and vwapBearish and timeInRange and volumeConfirmed and strategy.position_size == 0 and (not enableAdvanced or bearishSignalCount >= minAdvancedSignals)
+
+// === RISK MANAGEMENT CALCULATIONS ===
+
+// Stop loss calculation
+stopLossDistance = stopLossMethod == "Percentage" ? close * stopLossPercent / 100 : atrValue * atrMultiplier
+longStopPrice = close - stopLossDistance
+shortStopPrice = close + stopLossDistance
+
+// Position sizing
+accountEquity = strategy.equity
+riskAmount = accountEquity * riskPerTrade / 100
+positionSize = math.min(riskAmount / stopLossDistance, accountEquity * maxPositionSize / 100)
+
+// === STRATEGY EXECUTION ===
+
+// Entry orders
+if longCondition
+    strategy.entry("Long", strategy.long, qty=positionSize, alert_message="AVGO Long Entry - Method: " + entryMethod + " | Signals: " + str.tostring(bullishSignalCount))
+
+if shortCondition  
+    strategy.entry("Short", strategy.short, qty=positionSize, alert_message="AVGO Short Entry - Method: " + entryMethod + " | Signals: " + str.tostring(bearishSignalCount))
+
+// Exit orders - Profit Targets
+if strategy.position_size > 0
+    strategy.exit("Long Target 1", "Long", limit=strategy.position_avg_price * (1 + target1Percent / 100), qty_percent=target1Exit)
+    strategy.exit("Long Target 2", "Long", limit=strategy.position_avg_price * (1 + target2Percent / 100), qty_percent=target2Exit)  
+    strategy.exit("Long Target 3", "Long", limit=strategy.position_avg_price * (1 + target3Percent / 100), qty_percent=target3Exit)
+    strategy.exit("Long Stop", "Long", stop=strategy.position_avg_price * (1 - stopLossPercent / 100))
+
+if strategy.position_size < 0
+    strategy.exit("Short Target 1", "Short", limit=strategy.position_avg_price * (1 - target1Percent / 100), qty_percent=target1Exit)
+    strategy.exit("Short Target 2", "Short", limit=strategy.position_avg_price * (1 - target2Percent / 100), qty_percent=target2Exit)
+    strategy.exit("Short Target 3", "Short", limit=strategy.position_avg_price * (1 - target3Percent / 100), qty_percent=target3Exit)  
+    strategy.exit("Short Stop", "Short", stop=strategy.position_avg_price * (1 + stopLossPercent / 100))
+
+// Daily loss limit check
+if strategy.equity < strategy.initial_capital * (1 - dailyLossLimit / 100)
+    strategy.close_all(alert_message="Daily loss limit reached - All positions closed")
+
+// === PLOTTING ===
+
+// EMAs
+emaShortPlot = plot(showEMAs ? emaShort : na, color=emaShortColor, linewidth=1, title="Fast EMA")
+emaMediumPlot = plot(showEMAs ? emaMedium : na, color=emaMediumColor, linewidth=2, title="Medium EMA") 
+emaLongPlot = plot(showEMAs ? emaLong : na, color=emaLongColor, linewidth=2, title="Long EMA")
+
+// VWAP
+vwapPlot = plot(enableVWAP ? vwapValue : na, color=vwapColor, linewidth=3, title="VWAP")
+
+// Bollinger Bands
+bbUpperPlot = plot(showBB and enableAdvanced ? bbUpper : na, color=bbColor, title="BB Upper")
+bbLowerPlot = plot(showBB and enableAdvanced ? bbLower : na, color=bbColor, title="BB Lower")
+fill(bbUpperPlot, bbLowerPlot, color=showBB and enableAdvanced ? color.new(bbColor, 95) : na, title="BB Fill")
+
+// Parabolic SAR
+plotshape(showSAR and enableAdvanced ? sarValue : na, style=shape.circle, location=location.absolute, color=sarColor, size=size.tiny, title="SAR")
+
+// Entry signals
+plotshape(longCondition and showSignals, style=shape.triangleup, location=location.belowbar, color=longSignalColor, size=size.normal, title="Long Signal")
+plotshape(shortCondition and showSignals, style=shape.triangledown, location=location.abovebar, color=shortSignalColor, size=size.normal, title="Short Signal")
+
+// Background colors
+bgcolor(showBackground and emaTrendBullish ? bullishBgColor : showBackground and emaTrendBearish ? bearishBgColor : na, title="Trend Background")
+
+// Advanced confluence background
+confluenceBgBullish = enableAdvanced and bullishSignalCount >= minAdvancedSignals
+confluenceBgBearish = enableAdvanced and bearishSignalCount >= minAdvancedSignals
+bgcolor(confluenceBgBullish ? color.new(color.green, 90) : confluenceBgBearish ? color.new(color.red, 90) : na, title="Confluence Background")
+
+// Target and stop levels for current position
+longTargetLine1 = showTargets and strategy.position_size > 0 ? strategy.position_avg_price * (1 + target1Percent / 100) : na
+longTargetLine2 = showTargets and strategy.position_size > 0 ? strategy.position_avg_price * (1 + target2Percent / 100) : na
+longTargetLine3 = showTargets and strategy.position_size > 0 ? strategy.position_avg_price * (1 + target3Percent / 100) : na
+longStopLine = showTargets and strategy.position_size > 0 ? strategy.position_avg_price * (1 - stopLossPercent / 100) : na
+
+shortTargetLine1 = showTargets and strategy.position_size < 0 ? strategy.position_avg_price * (1 - target1Percent / 100) : na
+shortTargetLine2 = showTargets and strategy.position_size < 0 ? strategy.position_avg_price * (1 - target2Percent / 100) : na  
+shortTargetLine3 = showTargets and strategy.position_size < 0 ? strategy.position_avg_price * (1 - target3Percent / 100) : na
+shortStopLine = showTargets and strategy.position_size < 0 ? strategy.position_avg_price * (1 + stopLossPercent / 100) : na
+
+plot(longTargetLine1, color=targetColor, style=plot.style_line, linewidth=1, title="Long Target 1")
+plot(longTargetLine2, color=targetColor, style=plot.style_line, linewidth=1, title="Long Target 2")
+plot(longTargetLine3, color=targetColor, style=plot.style_line, linewidth=1, title="Long Target 3")
+plot(longStopLine, color=stopColor, style=plot.style_line, linewidth=2, title="Long Stop")
+
+plot(shortTargetLine1, color=targetColor, style=plot.style_line, linewidth=1, title="Short Target 1")
+plot(shortTargetLine2, color=targetColor, style=plot.style_line, linewidth=1, title="Short Target 2")
+plot(shortTargetLine3, color=targetColor, style=plot.style_line, linewidth=1, title="Short Target 3")
+plot(shortStopLine, color=stopColor, style=plot.style_line, linewidth=2, title="Short Stop")
+
+// === INFORMATION DASHBOARD ===
+
+if showDashboard
+    // Dashboard position calculation
+    dashPos = dashboardPosition == "Top Left" ? position.top_left : dashboardPosition == "Top Right" ? position.top_right : dashboardPosition == "Bottom Left" ? position.bottom_left : position.bottom_right
+    
+    // Dashboard size calculation
+    dashTextSize = dashboardSize == "Small" ? size.small : dashboardSize == "Normal" ? size.normal : size.large
+    
+    // Create dashboard content
+    var dashboardTable = table.new(dashPos, 2, 12, bgcolor=color.white, border_width=1)
+    
+    if barstate.islast
+        // Current method and signals
+        table.cell(dashboardTable, 0, 0, "Entry Method:", text_color=color.black, text_size=dashTextSize)
+        table.cell(dashboardTable, 1, 0, entryMethod, text_color=color.blue, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 1, "RSI Value:", text_color=color.black, text_size=dashTextSize)
+        table.cell(dashboardTable, 1, 1, str.tostring(rsiValue, "#.##"), text_color=color.blue, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 2, "MACD Signal:", text_color=color.black, text_size=dashTextSize)
+        macdSignalText = macdLine > signalLine ? "BULL" : "BEAR"
+        table.cell(dashboardTable, 1, 2, macdSignalText, text_color=macdLine > signalLine ? color.green : color.red, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 3, "EMA Trend:", text_color=color.black, text_size=dashTextSize)
+        emaTrendText = emaTrendBullish ? "UP" : emaTrendBearish ? "DOWN" : "NEUTRAL"
+        emaTrendColor = emaTrendBullish ? color.green : emaTrendBearish ? color.red : color.gray
+        table.cell(dashboardTable, 1, 3, emaTrendText, text_color=emaTrendColor, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 4, "Bullish Signals:", text_color=color.black, text_size=dashTextSize)
+        table.cell(dashboardTable, 1, 4, str.tostring(bullishSignalCount), text_color=color.green, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 5, "Bearish Signals:", text_color=color.black, text_size=dashTextSize)
+        table.cell(dashboardTable, 1, 5, str.tostring(bearishSignalCount), text_color=color.red, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 6, "ADX Strength:", text_color=color.black, text_size=dashTextSize)
+        adxStrengthText = enableAdvanced and adxValue > adxThreshold ? "STRONG" : "WEAK"
+        table.cell(dashboardTable, 1, 6, adxStrengthText, text_color=enableAdvanced and adxValue > adxThreshold ? color.green : color.red, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 7, "BB Squeeze:", text_color=color.black, text_size=dashTextSize)
+        squeezeText = enableAdvanced and bbSqueeze ? "YES" : "NO"
+        table.cell(dashboardTable, 1, 7, squeezeText, text_color=enableAdvanced and bbSqueeze ? color.orange : color.gray, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 8, "Time Filter:", text_color=color.black, text_size=dashTextSize)
+        timeFilterText = timeInRange ? "ACTIVE" : "INACTIVE"
+        table.cell(dashboardTable, 1, 8, timeFilterText, text_color=timeInRange ? color.green : color.red, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 9, "Position:", text_color=color.black, text_size=dashTextSize)
+        positionText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+        positionColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+        table.cell(dashboardTable, 1, 9, positionText, text_color=positionColor, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 10, "Open P&L:", text_color=color.black, text_size=dashTextSize)
+        openPnL = strategy.position_size != 0 ? (close - strategy.position_avg_price) * strategy.position_size : 0
+        pnlText = str.tostring(openPnL, "#.##")
+        table.cell(dashboardTable, 1, 10, pnlText, text_color=openPnL > 0 ? color.green : openPnL < 0 ? color.red : color.gray, text_size=dashTextSize)
+        
+        table.cell(dashboardTable, 0, 11, "Volume Filter:", text_color=color.black, text_size=dashTextSize)
+        volumeFilterText = volumeConfirmed ? "PASS" : "FAIL"
+        table.cell(dashboardTable, 1, 11, volumeFilterText, text_color=volumeConfirmed ? color.green : color.red, text_size=dashTextSize)
+
+// === ALERTS ===
+
+// Entry alerts
+alertcondition(longCondition and enableEntryAlerts, "AVGO Long Entry Alert", "AVGO Long Entry Signal Detected")
+alertcondition(shortCondition and enableEntryAlerts, "AVGO Short Entry Alert", "AVGO Short Entry Signal Detected")
+
+// Strong confluence alerts  
+strongBullishConfluence = enableAdvanced and bullishSignalCount >= strongConfluenceThreshold
+strongBearishConfluence = enableAdvanced and bearishSignalCount >= strongConfluenceThreshold
+
+alertcondition(strongBullishConfluence and enableConfluenceAlerts, "Strong Bullish Confluence", "Strong bullish confluence detected")
+alertcondition(strongBearishConfluence and enableConfluenceAlerts, "Strong Bearish Confluence", "Strong bearish confluence detected")
+
+// Dynamic alerts with custom messages
+if longCondition and enableEntryAlerts
+    alert("AVGO Long Entry - Method: " + entryMethod + " | Bullish Signals: " + str.tostring(bullishSignalCount) + " | RSI: " + str.tostring(rsiValue, "#.##"), alert.freq_once_per_bar)
+
+if shortCondition and enableEntryAlerts  
+    alert("AVGO Short Entry - Method: " + entryMethod + " | Bearish Signals: " + str.tostring(bearishSignalCount) + " | RSI: " + str.tostring(rsiValue, "#.##"), alert.freq_once_per_bar)
+
+if strongBullishConfluence and enableConfluenceAlerts
+    alert("Strong Bullish Confluence: " + str.tostring(bullishSignalCount) + " signals aligned", alert.freq_once_per_bar)
+
+if strongBearishConfluence and enableConfluenceAlerts
+    alert("Strong Bearish Confluence: " + str.tostring(bearishSignalCount) + " signals aligned", alert.freq_once_per_bar)
+
+View in Pine Editor・469 lines
+Use on chart
+6
+0
+7
+1 872
+📈 Overview
+The AVGO Advanced Day Trading Strategy is a comprehensive, multi-timeframe trading system designed for active day traders seeking consistent performance with robust risk management. Originally optimized for AVGO (Broadcom), this strategy adapts well to other liquid stocks and can be customized for various trading styles.
+
+🎯 Key Features
+Multiple Entry Methods
+
+EMA Crossover: Classic trend-following signals using fast (9) and medium (16) EMAs
+
+MACD + RSI Confluence: Momentum-based entries combining MACD crossovers with RSI positioning
+
+Price Momentum: Consecutive price action patterns with EMA and RSI confirmation
+
+Hybrid System: Advanced multi-trigger approach combining all methodologies
+
+
+
+Advanced Technical Arsenal
+When enabled, the strategy analyzes 8+ additional indicators for confluence:
+
+Volume Price Trend (VPT): Measures volume-weighted price momentum
+
+On-Balance Volume (OBV): Tracks cumulative volume flow
+
+Accumulation/Distribution Line: Identifies institutional money flow
+
+Williams %R: Momentum oscillator for entry timing
+
+Rate of Change Suite: Multi-timeframe momentum analysis (5, 14, 18 periods)
+
+Commodity Channel Index (CCI): Cyclical turning points
+
+Average Directional Index (ADX): Trend strength measurement
+
+Parabolic SAR: Dynamic support/resistance levels
+
+
+
+🛡️ Risk Management System
+Position Sizing
+
+Risk-based position sizing (default 1% per trade)
+
+Maximum position limits (default 25% of equity)
+
+Daily loss limits with automatic position closure
+
+
+
+Multiple Profit Targets
+
+Target 1: 1.5% gain (50% position exit)
+
+Target 2: 2.5% gain (30% position exit)
+
+Target 3: 3.6% gain (20% position exit)
+
+Configurable exit percentages and target levels
+
+
+
+Stop Loss Protection
+
+ATR-based or percentage-based stop losses
+
+Optional trailing stops
+
+Dynamic stop adjustment based on market volatility
+
+
+
+📊 Technical Specifications
+Primary Indicators
+
+
+EMAs: 9 (Fast), 16 (Medium), 50 (Long)
+
+VWAP: Volume-weighted average price filter
+
+RSI: 6-period momentum oscillator
+
+MACD: 8/13/5 configuration for faster signals
+
+
+
+Volume Confirmation
+
+
+Volume filter requiring 1.6x average volume
+
+19-period volume moving average baseline
+
+Optional volume confirmation bypass
+
+
+
+Market Structure Analysis
+
+
+Bollinger Bands (20-period, 2.0 multiplier)
+
+Squeeze detection for breakout opportunities
+
+Fractal and pivot point analysis
+
+
+
+⏰ Trading Hours & Filters
+Time Management
+
+
+Configurable trading hours (default: 9:30 AM - 3:30 PM EST)
+
+Weekend and holiday filtering
+
+Session-based trade management
+
+
+
+Market Condition Filters
+
+
+Trend alignment requirements
+
+VWAP positioning filters
+
+Volatility-based entry conditions
+
+
+
+📱 Visual Features
+Information Dashboard
+Real-time display of:
+
+Current entry method and signals
+
+Bullish/bearish signal counts
+
+RSI and MACD status
+
+Trend direction and strength
+
+Position status and P&L
+
+Volume and time filter status
+
+
+
+Chart Visualization
+
+EMA plots with customizable colors
+
+Entry signal markers
+
+Target and stop level lines
+
+Background color coding for trends
+
+Optional Bollinger Bands and SAR display
+
+
+
+🔔 Alert System
+Entry Alerts
+
+Customizable alerts for long and short entries
+
+Method-specific alert messages
+
+Signal confluence notifications
+
+
+
+Advanced Alerts
+
+Strong confluence threshold alerts
+
+Custom alert messages with signal counts
+
+Risk management alerts
+
+
+
+⚙️ Customization Options
+Strategy Parameters
+
+Enable/disable long or short trades
+
+Adjustable risk parameters
+
+Multiple entry method selection
+
+Advanced indicator on/off toggle
+
+
+
+Visual Customization
+
+Color schemes for all indicators
+
+Dashboard position and size options
+
+Show/hide various chart elements
+
+Background color preferences
+
+
+
+📋 Default Settings
+
+Initial Capital: $100,000
+
+Commission: 0.1%
+
+Default Position Size: 10% of equity
+
+Risk Per Trade: 1.0%
+
+RSI Length: 6 periods
+
+MACD: 8/13/5 configuration
+
+Stop Loss: 1.1% or ATR-based
+
+
+
+🎯 Best Use Cases
+
+Day Trading: Designed for intraday opportunities
+
+Swing Trading: Adaptable for longer-term positions
+
+Momentum Trading: Excellent for trending markets
+
+Risk-Conscious Trading: Built-in risk management protocols
+
+
+
+⚠️ Important Notes
+
+Paper Trading Recommended: Test thoroughly before live trading
+
+Market Conditions: Performance varies with market volatility
+
+Customization: Adjust parameters based on your risk tolerance
+
+Educational Purpose: Use as a learning tool and customize for your needs
+
+
+
+🏆 Performance Features
+
+
+Detailed performance metrics
+
+Trade-by-trade analysis capability
+
+Customizable risk/reward ratios
+
+Comprehensive backtesting support
+
+
+
+
+This strategy is for educational purposes. Past performance does not guarantee future results. Always practice proper risk management and consider your financial situation before trading.

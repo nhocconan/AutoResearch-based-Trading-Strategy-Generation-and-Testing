@@ -1,0 +1,8 @@
+//@version=4
+lw=##input(defval=3,type='INPUT_INTEGER',##id='in_1')
+##root(root_metainfo,rm_0,1,input__integer,plot,style)
+##root(root_metainfo,rm_1,lw,input__integer)
+##root(root_metainfo,rm_2,1,input__integer,plot,style)
+##root(root_metainfo,rm_3,lw,input__integer)
+##root(root_metainfo,rm_4,1,input__integer,plot,style)
+##root(root_metainfo,rm_5,lw,input__integer)

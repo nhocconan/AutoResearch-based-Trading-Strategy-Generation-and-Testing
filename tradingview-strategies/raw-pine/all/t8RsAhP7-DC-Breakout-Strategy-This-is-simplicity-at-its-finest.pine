@@ -1,0 +1,11 @@
+//@version=5
+maFast=##input(defval=#FF5252ff,type='INPUT_COLOR',##id='in_6')
+maSlow=##input(defval=#9C27B0ff,type='INPUT_COLOR',##id='in_7')
+fillColor=##input(defval=#787B8600,type='INPUT_COLOR',##id='in_10')
+upperColor=##input(defval=#FFFFFFff,type='INPUT_COLOR',##id='in_11')
+lowerColor=##input(defval=#FFFFFFff,type='INPUT_COLOR',##id='in_12')
+##root(root_metainfo,plot_0_0,maFast,input__color)
+##root(root_metainfo,plot_1_0,maSlow,input__color)
+##root(root_metainfo,plot_2_0,upperColor,input__color)
+##root(root_metainfo,fill_0_0,fillColor,input__color)
+##root(root_metainfo,rm_ic_0,lowerColor,input__color)

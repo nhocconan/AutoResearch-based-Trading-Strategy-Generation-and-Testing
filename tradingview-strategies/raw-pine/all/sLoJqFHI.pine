@@ -1,0 +1,73 @@
+//@version=5
+strategy("I11L - Meanreverter 4h", overlay=false, pyramiding=3, default_qty_value=10000, initial_capital=10000, default_qty_type=strategy.cash,process_orders_on_close=false, calc_on_every_tick=false)
+ 
+frequency = input.int(10)
+rsiFrequency = input.int(40)
+buyZoneDistance = input.int(5)
+avgDownATRSum = input.int(3)
+useAbsoluteRSIBarrier = input.bool(true)
+barrierLevel = 50//input.int(50)
+
+momentumRSI = ta.rsi(close,rsiFrequency)
+momentumRSI_slow = ta.sma(momentumRSI,frequency)
+ 
+isBuy = momentumRSI < momentumRSI_slow*(1-buyZoneDistance/100) and (strategy.position_avg_price - math.sum(ta.atr(20),avgDownATRSum)*strategy.opentrades > close or strategy.opentrades == 0 ) //and (momentumRSI < barrierLevel or not(useAbsoluteRSIBarrier))
+isShort = momentumRSI > momentumRSI_slow*(1+buyZoneDistance/100) and (strategy.position_avg_price - math.sum(ta.atr(20),avgDownATRSum)*strategy.opentrades > close or strategy.opentrades == 0 ) and (momentumRSI > barrierLevel or not(useAbsoluteRSIBarrier))
+momentumRSISoftClose = (momentumRSI > momentumRSI_slow) and (momentumRSI > barrierLevel or not(useAbsoluteRSIBarrier))
+
+isClose = momentumRSISoftClose
+
+plot(momentumRSI,color=isClose ? color.red :  momentumRSI < momentumRSI_slow*(1-buyZoneDistance/100) ? color.green : color.white)
+plot(momentumRSI_slow,color=color.gray)
+plot(barrierLevel,color=useAbsoluteRSIBarrier ? color.white : color.rgb(0,0,0,0))
+plot(momentumRSI_slow*(1-buyZoneDistance/100),color=color.gray)
+plot(momentumRSI_slow*(1+buyZoneDistance/100),color=color.gray)
+plot(momentumRSI_slow*(1+(buyZoneDistance*2)/100),color=color.gray)
+
+// plot(strategy.wintrades - strategy.losstrades)
+
+ 
+ 
+if(isBuy)
+    strategy.entry("Buy",strategy.long, comment="#"+str.tostring(strategy.opentrades+1))
+
+// if(isShort)
+//     strategy.entry("Sell",strategy.short, comment="#"+str.tostring(strategy.opentrades+1))
+
+if(isClose)
+    strategy.exit("Close",limit=close)
+
+View in Pine Editor・41 lines
+Use on chart
+2
+0
+6
+3
+4 513
+---Overview---
+The system buys fear and sells greed.
+Its relies on a Relative Strength Index (RSI) and moving averages (MA) to find oversold and overbought states.
+It seems to work best in market conditions where the Bond market has a negative Beta to Stocks.
+Backtests in a longer Timeframe will clearly show this.
+
+---Parameter---
+Frequency: Smothens the RSI curve, helps to "remember" recent highs better.
+RsiFrequency: A Frequency of 40 implies a RSI over the last 40 Bars.
+BuyZoneDistance: Spacing between the different zones. A wider spacing reduces the amount of signals and icnreases the holding duration. Should be finetuned with tradingcosts in mind.
+AvgDownATRSum: The multiple of the Average ATR over 20 Bars * amount of opentrades for your average down. I choose the ATR over a fixed percent loss to find more signals in low volatility environments and less in high volatility environments.
+
+
+---Some of my thoughts---
+Be very careful about the good backtesting performance in many US-Stocks because the System had a favourable environment since 1970.
+Be careful about the survivorship bias as well.
+52% of stocks from the S&P500 were removed since 2000.
+I discount my Annual Results by 5% because of this fact.
+
+You will find yourself quite often with very few signals because of the high market correlation.
+My testing suggests that there is no expected total performance difference between a signal from a bad and a signal from a good market condition but a higher volatility.
+
+I am sharing this strategy because i am currently not able to implement it as i want to and i think that meanreversion is starting to be taken more serious by traders.
+The challange in implementing this strategy is that you need to be invested 100% of the time to retrieve the expected annual performance and to reduce the fat tail risk by market crashes.
+
+
+

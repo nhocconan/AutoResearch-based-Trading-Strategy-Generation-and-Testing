@@ -1,0 +1,123 @@
+//@version=6
+strategy("GOLD TERTIUM estrategia", overlay=true, process_orders_on_close=true)
+
+//-------------------------
+// EMAs
+//-------------------------
+emaLen1  = input.int(32,  "EMA 1",    minval=1)
+emaLen2  = input.int(50,  "EMA 2",     minval=1)
+emaLen3  = input.int(110, "EMA 3", minval=1)
+emaLen4  = input.int(200, "EMA 4",   minval=1)
+emaLen5  = input.int(250, "EMA 5",     minval=1)
+
+showEma1 = input.bool(true,  "Mostrar EMA 1 (32 verde)")
+showEma2 = input.bool(true,  "Mostrar EMA 2 (50 roja)")
+showEma3 = input.bool(true,  "Mostrar EMA 3 (110 amarilla)")
+showEma4 = input.bool(true,  "Mostrar EMA 4 (200 blanca)")
+showEma5 = input.bool(true,  "Mostrar EMA 5 (250 gris)")
+
+ema1 = ta.ema(close, emaLen1)   // 32
+ema2 = ta.ema(close, emaLen2)   // 50
+ema3 = ta.ema(close, emaLen3)   // 110
+ema4 = ta.ema(close, emaLen4)   // 200
+ema5 = ta.ema(close, emaLen5)   // 250
+
+plot(showEma1 ? ema1 : na, color=color.new(color.green,  0), linewidth=2, title="EMA 32 (verde)")
+plot(showEma2 ? ema2 : na, color=color.new(color.red,    0), linewidth=2, title="EMA 50 (roja)")
+plot(showEma3 ? ema3 : na, color=color.new(color.yellow, 0), linewidth=2, title="EMA 110 (amarilla)")
+plot(showEma4 ? ema4 : na, color=color.new(color.white,  0), linewidth=2, title="EMA 200 (blanca)")
+plot(showEma5 ? ema5 : na, color=color.new(color.gray,   0), linewidth=2, title="EMA 250 (gris)")
+
+//-------------------------
+// Pendiente EMA 200
+//-------------------------
+ema200Slope = ema4 - ema4[1]
+minSlope    = input.float(0.03, "Minima pendiente EMA200", step=0.001)
+
+hasUpSlope   = ema200Slope >  minSlope
+hasDownSlope = ema200Slope < -minSlope
+
+//-------------------------
+// Estocastico
+//-------------------------
+kLen       = input.int(9,  "K Estocastico",  minval=1)
+kSmooth    = input.int(6,  "K Suavizado",    minval=1)
+dSmooth    = input.int(2,  "D Suavizado",    minval=1)
+overbought = input.float(75.0, "Sobrecompra (rechazo LONG)",  minval=0, maxval=100)
+oversold   = input.float(25.0, "Sobreventa (rechazo SHORT)",  minval=0, maxval=100)
+
+k_raw = ta.stoch(high, low, close, kLen)
+k     = ta.sma(k_raw, kSmooth)
+d     = ta.sma(k, dSmooth)
+
+plot(k, "K", color=color.new(color.blue, 0))
+plot(d, "D", color=color.new(color.orange, 0))
+hline(overbought, "Sobrecompra", color=color.new(color.red, 50))
+hline(oversold,   "Sobreventa",  color=color.new(color.green, 50))
+
+// Zonas
+inOverbought = k > overbought    // K por encima de 75
+inOversold   = k < oversold      // K por debajo de 25
+
+// Reglas de filtro que quieres
+// Long NUNCA cuando K > 75
+// Short NUNCA cuando K < 25
+longOkStoch  = not inOverbought  // permite long solo si NO está en sobrecompra
+shortOkStoch = not inOversold    // permite short solo si NO está en sobreventa
+
+useStochFilter = input.bool(true, "Usar estocastico como filtro")
+
+//-------------------------
+// Tendencia principal
+//-------------------------
+downTrend = close < ema4 and ema1 < ema4 and ema2 < ema4 and hasDownSlope
+upTrend   = close > ema4 and ema1 > ema4 and ema2 > ema4 and hasUpSlope
+
+//-------------------------
+// Zona EMA 32–50 (retest)
+//-------------------------
+emaLow  = math.min(ema1, ema2)
+emaHigh = math.max(ema1, ema2)
+
+priceInZonePrev =
+     (close[1] >= emaLow[1] and close[1] <= emaHigh[1]) or
+     math.abs(close[1] - emaLow[1])  <= (emaHigh[1] - emaLow[1]) * 0.3 or
+     math.abs(close[1] - emaHigh[1]) <= (emaHigh[1] - emaLow[1]) * 0.3
+
+//-------------------------
+// Envolventes
+//-------------------------
+bullEngulf = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearEngulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
+//-------------------------
+// Gatillos base (sin filtro estocastico)
+//-------------------------
+longTriggerBase  = upTrend   and priceInZonePrev and (bullEngulf or (close > open and close > ema1))
+shortTriggerBase = downTrend and priceInZonePrev and (bearEngulf or (close < open and close < ema1))
+
+//-------------------------
+// Aplicar filtro estocastico
+//-------------------------
+longSignal  = longTriggerBase  and (not useStochFilter or longOkStoch)
+shortSignal = shortTriggerBase and (not useStochFilter or shortOkStoch)
+
+//-------------------------
+// Ordenes
+//-------------------------
+if longSignal and not shortSignal
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and not longSignal
+    strategy.entry("Short", strategy.short)
+
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   color=color.new(color.green, 0),  location=location.belowbar, size=size.tiny, text="L")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, color=color.new(color.red,   0),  location=location.abovebar, size=size.tiny, text="S")
+
+View in Pine Editor・115 lines
+Use on chart
+4
+466
+This indicator is a visual tool for TradingView designed to help you read trend structure using EMAs and highlight potential long and short entries on the MGC 1‑minute chart, while filtering pullbacks and avoiding trades when the 200 EMA is flat.
+​
+It calculates five EMAs (32, 50, 110, 200, 250) and plots them in different colors so you can clearly see the moving‑average stack and overall direction. The main trend is defined by the 200 EMA: bullish when price and the fast EMAs (32 and 50) are above it with a positive slope, and bearish when they are below it with a negative slope; if the 200 EMA is almost flat, signals are blocked to reduce trading in choppy markets.

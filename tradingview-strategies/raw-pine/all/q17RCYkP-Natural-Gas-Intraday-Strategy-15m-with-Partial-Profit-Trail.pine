@@ -1,0 +1,101 @@
+//@version=6
+strategy("Natural Gas Intraday Strategy [15m] with Partial Profit & Trail", 
+     overlay=true, margin_long=100, margin_short=100, 
+     default_qty_type=strategy.fixed, default_qty_value=2)
+
+// -------------------- INPUTS --------------------
+emaFastLen   = input.int(20,  "Fast EMA Length")
+emaSlowLen   = input.int(100, "Slow EMA Length")
+macdFastLen  = input.int(8,   "MACD Fast Length")
+macdSlowLen  = input.int(21,  "MACD Slow Length")
+macdSigLen   = input.int(5,   "MACD Signal Length")
+rsiLen       = input.int(14,  "RSI Length")
+rsiBuy       = input.int(60,  "RSI Buy Threshold")
+rsiSell      = input.int(40,  "RSI Sell Threshold")
+atrLen       = input.int(14,  "ATR Length")
+atrMultSL    = input.float(0.5, "Stop ATR Multiplier")
+atrMultTP    = input.float(1.0, "Take Profit ATR Multiplier")
+
+// -------------------- INDICATORS --------------------
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+macd     = ta.ema(close, macdFastLen) - ta.ema(close, macdSlowLen)
+macdSig  = ta.ema(macd, macdSigLen)
+macdHist = macd - macdSig
+rsiVal   = ta.rsi(close, rsiLen)
+atrVal   = ta.atr(atrLen)
+
+// -------------------- CONDITIONS --------------------
+longCond  = close > emaSlow and emaFast > emaSlow and macd > macdSig and macdHist > 0 and rsiVal > rsiBuy
+shortCond = close < emaSlow and emaFast < emaSlow and macd < macdSig and macdHist < 0 and rsiVal < rsiSell
+
+// Exit signals (for trailing logic)
+exitLongSignal  = rsiVal < 50 or close < emaFast
+exitShortSignal = rsiVal > 50 or close > emaFast
+
+// -------------------- EXECUTIONS --------------------
+// LONG ENTRY
+if longCond and strategy.position_size == 0
+    // Entry with 2 lots (default_qty_value=2)
+    strategy.entry("Long", strategy.long)
+    // TP for 1 lot
+    strategy.exit("Long_TP1", from_entry="Long", qty=1, limit=close + atrMultTP * atrVal, stop=close - atrMultSL * atrVal)
+
+// SHORT ENTRY
+if shortCond and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_TP1", from_entry="Short", qty=1, limit=close - atrMultTP * atrVal, stop=close + atrMultSL * atrVal)
+
+// -------------------- TRAILING STOP (for remaining lot) --------------------
+if strategy.position_size > 0  // Long trade active
+    longTrailStop = math.max(emaFast, close - atrMultSL * atrVal)
+    strategy.exit("Long_Trail", from_entry="Long", qty_percent=100, stop=longTrailStop)
+
+if strategy.position_size < 0  // Short trade active
+    shortTrailStop = math.min(emaFast, close + atrMultSL * atrVal)
+    strategy.exit("Short_Trail", from_entry="Short", qty_percent=100, stop=shortTrailStop)
+
+// -------------------- MANUAL EXIT SIGNALS --------------------
+if strategy.position_size > 0 and exitLongSignal
+    strategy.close("Long")
+
+if strategy.position_size < 0 and exitShortSignal
+    strategy.close("Short")
+
+// -------------------- ALERTS --------------------
+// Entry alerts
+alertcondition(longCond,  title="Long Entry",   message="BUY Signal: Enter Long (2 lots)")
+alertcondition(shortCond, title="Short Entry",  message="SELL Signal: Enter Short (2 lots)")
+
+// Partial TP alerts
+alertcondition(strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Long_TP1",  title="Partial Long TP",  message="Partial Profit booked: Long 1 lot hit TP1")
+alertcondition(strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Short_TP1", title="Partial Short TP", message="Partial Profit booked: Short 1 lot hit TP1")
+
+// Trailing stop alerts
+alertcondition(exitLongSignal,  title="Long Exit",  message="Exit Long: RSI/EMA condition met or trailing SL hit")
+alertcondition(exitShortSignal, title="Short Exit", message="Exit Short: RSI/EMA condition met or trailing SL hit")
+
+// -------------------- PLOTS --------------------
+plot(emaFast, "EMA Fast", color=color.yellow)
+plot(emaSlow, "EMA Slow", color=color.blue)
+
+View in Pine Editor・80 lines
+Use on chart
+2
+2
+1 180
+Buy when:
+1. Close > EMA 100 and EMA 20 > EMA 100
+2. MACD (8,21,5) > Signal and histogram rising
+3. RSI > 60
+4. ATR > threshold (avoid flat market)
+
+Sell when:
+1. Close < EMA 100 and EMA 20 < EMA 100
+2. MACD (8,21,5) < Signal and histogram falling
+3. RSI < 40
+4. ATR > threshold
+
+Exit:
+• SL = recent swing ± 0.5 ATR
+• TP1 = 1 ATR, trail rest with EMA 20

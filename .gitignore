@@ -9,6 +9,7 @@ research_loop.log
 run.log
 *.log
 *.bak
+timeout_log.txt
 
 # Python
 __pycache__/
@@ -35,6 +36,7 @@ Thumbs.db
 # Reports (generated)
 reports/*.html
 reports/*.png
+course.html
 
 # Jupyter
 .ipynb_checkpoints/
@@ -42,3 +44,25 @@ reports/*.png
 # SQLite WAL temp files (results.db itself IS tracked)
 results.db-wal
 results.db-shm
+
+# TradingView strategies - intermediate/generated files
+tradingview-strategies/logs/
+tradingview-strategies/crawl/recent-open-strategies/raw-pages/
+tradingview-strategies/.stage2-lanes/*/tradingview-strategies/reports/
+tradingview-strategies/.stage2-lanes/*/tradingview-strategies/results/
+tradingview-strategies/.stage2-lanes/*/tradingview-strategies/raw-pine/
+tradingview-strategies/.stage2-lanes/*/tradingview-strategies/python-strategies/stage2-local/
+tradingview-strategies/.stage2-lanes/*/tradingview-strategies/python-strategies/stage2-local/failed/
+tradingview-strategies/.stage2-lanes/*/data/
+tradingview-strategies/python-strategies/stage2-local/
+tradingview-strategies/reports/stage2-local/
+tradingview-strategies/results/stage2-local/
+tradingview-strategies/reports/stage3-local/
+tradingview-strategies/results/stage3-local-backtest-errors.json
+tradingview-strategies/results/stage3-local-backtest-state.json
+tradingview-strategies/results/stage3-local-backtests.json
+
+# Independent verification - generated outputs
+independent-verification/output/
+independent-verification/output-*/
+independent-verification/runs/

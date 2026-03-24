@@ -1,0 +1,130 @@
+[
+  {
+    "slug": "supertrend-rsi-btc-4h",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/N0nYQBlh/",
+    "python_file": "python-strategies/bulk/supertrend-rsi-btc-4h.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "psar-bbpt-zlsma-btc-1min",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/o1YNgHYa-PSAR-BBPT-ZLSMA-BTC-1min/",
+    "python_file": "python-strategies/bulk/psar-bbpt-zlsma-btc-1min.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-intraday-advanced-spot-pro-v6",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/k0yPTqHH-BTC-Intraday-Advanced-Spot-PRO-V6/",
+    "python_file": "python-strategies/bulk/btc-intraday-advanced-spot-pro-v6.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "quantnomad-ma-strategy-1m",
+    "classification": "direct",
+    "chart_url": "https://www.tradingview.com/script/STRx5KeS-QuantNomad-MA-Strategy-1-minute-ETHUSD/",
+    "python_file": "python-strategies/bulk/quantnomad-ma-strategy-1m.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-trading-robot",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/Lomcxylm-BTC-Trading-Robot/",
+    "python_file": "python-strategies/bulk/btc-trading-robot.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "innocent-heikin-ashi-eth",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/wFZNPXhK-Innocent-Heikin-Ashi-Ethereum-Strategy/",
+    "python_file": "python-strategies/bulk/innocent-heikin-ashi-eth.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "pyramiding-btc-5m",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/9eVcc7MB-Pyramiding-BTC-5-min/",
+    "python_file": "python-strategies/bulk/pyramiding-btc-5m.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "ultimate-t3-fibonacci-btc-scalping",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/",
+    "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "btc-bot",
+    "classification": "unsupported",
+    "chart_url": "https://www.tradingview.com/script/DPBeZbMP-BTC-bot/",
+    "python_file": null,
+    "import_ok": null,
+    "backtested": false
+  },
+  {
+    "slug": "rsi-spx-btc-correlation",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/LLnfx90C/",
+    "python_file": "python-strategies/bulk/rsi-spx-btc-correlation.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy",
+    "classification": "unsupported",
+    "chart_url": "https://www.tradingview.com/script/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy/",
+    "python_file": null,
+    "import_ok": null,
+    "backtested": false
+  },
+  {
+    "slug": "btcbot",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/t8Bp5gcx-BTCbot/",
+    "python_file": "python-strategies/bulk/btcbot.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "btc-swinger-v1",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/uu3sSMI2-BTC-Swinger-v1/",
+    "python_file": "python-strategies/bulk/btc-swinger-v1.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy",
+    "classification": "unsupported",
+    "chart_url": "https://www.tradingview.com/script/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy/",
+    "python_file": null,
+    "import_ok": null,
+    "backtested": false
+  },
+  {
+    "slug": "btc-15min-trend",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/xGk5K4DE-BTC-15-min/",
+    "python_file": "python-strategies/bulk/btc-15min-trend.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "zFPZofwt",
+    "classification": "unsupported",
+    "chart_url": "https://www.tradingview.com/script/zFPZofwt/",
+    "python_file": null,
+    "import_ok": null,
+    "backtested": false
+  }
+]

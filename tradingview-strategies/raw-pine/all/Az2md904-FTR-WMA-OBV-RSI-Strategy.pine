@@ -1,0 +1,11 @@
+//@version=5
+RSILevelBuyFilter=##input(defval=1.66,type='INPUT_FLOAT',##id='in_12')
+RSILevelSellFilter=##input(defval=1.0,type='INPUT_FLOAT',##id='in_13')
+##root(root_metainfo,rm_0,'Bottom',input__string,plotshape,location)
+##root(root_metainfo,rm_1,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_2,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'Top',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_5,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_6,RSILevelBuyFilter,input__float)
+##root(root_metainfo,rm_7,RSILevelSellFilter,input__float)

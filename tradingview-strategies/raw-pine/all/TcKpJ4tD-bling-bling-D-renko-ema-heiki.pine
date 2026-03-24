@@ -1,0 +1,268 @@
+//@version=3
+//study("bling-bling-D-renko-sma-heiki", overlay=true)
+
+
+//@version=3
+strategy("bling-bling-D_renko-ema-heiki", overlay=true)
+
+
+
+
+
+//@version=3
+//study("RSI BULL BEAR + ADX")
+
+dirmov(len) =>
+    up = change(high)
+    down = -change(low)
+    truerange = rma(tr, len)
+    plus = fixnan(100 * rma(up > down and up > 0 ? up : 0, len) / truerange)
+    minus = fixnan(100 * rma(down > up and down > 0 ? down : 0, len) / truerange)
+    [plus, minus]
+
+adx(len) => 
+    [plus, minus] = dirmov(len)
+    sum = plus + minus
+    100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), len)
+
+SMA_long = input(1000)
+SMA_short = input(50)
+SMA_test = input(50)
+
+
+// RSI BULL / BEAR
+BULL_RSI = input(10)
+BULL_RSI_high = input(80)
+BULL_RSI_low = input(60)
+BEAR_RSI = input(15)
+BEAR_RSI_high = input(50)
+BEAR_RSI_low = input(20)
+
+//# MODIFY RSI (depending on ADX)
+BULL_MOD_high = input(5)
+BULL_MOD_low = input(-5)
+BEAR_MOD_high = input(15)
+BEAR_MOD_low = input(-5)
+
+// ADX
+ADX = input(3)
+ADX_high = input(70)
+ADX_low = input(50)
+
+maSlow = sma(close, SMA_long)
+maFast = sma(close, SMA_short)
+rsiBull = rsi(close, BULL_RSI)
+rsiBear = rsi(close, BEAR_RSI)
+maTest = sma(close[1], SMA_test)
+
+myADX = adx(ADX)
+
+[rsi, rsi_hi, rsi_low] = if maFast < maSlow
+
+    // BEAR TREND
+    tmp_RSI_high = if myADX > ADX_high
+        BEAR_RSI_high + BEAR_MOD_high
+    else
+        BEAR_RSI_high
+    
+    tmp_RSI_low = if myADX < ADX_low
+        BEAR_RSI_low + BEAR_MOD_low
+    else
+        BEAR_RSI_low
+    
+    [rsiBear, tmp_RSI_high, tmp_RSI_low]
+else
+
+    // BULL TREND
+    tmp_RSI_high = if myADX > ADX_high
+        BULL_RSI_high + BULL_MOD_high
+    else
+        BULL_RSI_high
+    
+    tmp_RSI_low = if myADX < ADX_low
+        BULL_RSI_low + BULL_MOD_low
+    else
+        BULL_RSI_low
+
+    [rsiBull, tmp_RSI_high, tmp_RSI_low]
+
+trend = red
+trend := trend[1]
+
+//renko_t = renko(tickerid, "open", "ATR", 14)
+renko_240open = security(renko(tickerid, "open", "ATR", 14), '240', open)
+renko_240close = security(renko(tickerid, "open", "ATR", 14), '240', close)
+
+renko_Wopen = security(renko(tickerid, "open", "ATR", 14), 'W', open)
+renko_Wclose = security(renko(tickerid, "open", "ATR", 14), 'W', close)
+
+renko_3open = security(renko(tickerid, "open", "ATR", 14), '3', open)
+renko_3close = security(renko(tickerid, "open", "ATR", 14), '3', close)
+
+renko_Dopen = security(renko(tickerid, "open", "ATR", 14), 'D', open)
+renko_Dclose = security(renko(tickerid, "open", "ATR", 14), 'D', close)
+
+kagi_t = kagi(tickerid, "close", 20)
+kagi_close = security(kagi_t, period, close)
+
+ha_t = heikinashi(tickerid)
+ha_open = security(ha_t, '4D', open)
+ha_high = security(ha_t, '4D', high)
+ha_low = security(ha_t, '4D', low)
+ha_close = security(ha_t, '4D', close)
+//Heik_sell = ha_close[1] >= ha_open[1] 
+
+ha_t1 = heikinashi(tickerid)
+ha_open1 = security(ha_t, 'D', open)
+ha_high1 = security(ha_t, 'D', high)
+ha_low1 = security(ha_t, 'D', low)
+ha_close1 = security(ha_t, 'D', close)
+
+heikinashi_9open0 = security(heikinashi(tickerid), '9', open[0])
+heikinashi_9close0 = security(heikinashi(tickerid), '9', close[0])
+
+heikinashi_60open0 = security(heikinashi(tickerid), '60', open[0])
+heikinashi_60close0 = security(heikinashi(tickerid), '60', close[0])
+
+heikinashi_Dopen0 = security(heikinashi(tickerid), 'D', open[0])
+heikinashi_Dclose0 = security(heikinashi(tickerid), 'D', close[0])
+
+heikinashi_Wopen0 = security(heikinashi(tickerid), 'W', open)
+heikinashi_Wclose0 = security(heikinashi(tickerid), 'W', close)
+
+
+trend_W_renko =1
+
+trend_240_renko =1
+trend_D_renko =1
+
+trend_3_renko =1
+trend90 =1
+trend600 =1
+trendD0 =1
+trendW0 =1
+
+trend_D_renko := (renko_Dopen<renko_Dclose) ? 0:1
+trend_W_renko := (renko_Wopen<renko_Wclose) ? 0:1
+
+trend_240_renko := (renko_240open<renko_240close) ? 0:1
+
+trend_3_renko := (renko_3open<renko_3close) ? 0:1
+
+trend90 := (heikinashi_9open0<heikinashi_9close0) ? 0:1
+
+trendW0 := (heikinashi_Wopen0<heikinashi_Wclose0) ? 0:1
+
+trendD0 := (heikinashi_Dopen0<heikinashi_Dclose0) ? 0:1
+
+trend600 := (heikinashi_60open0<heikinashi_60close0) ? 0:1
+
+heikinashi_Wclose1 = security(heikinashi(tickerid), 'W', open)
+heikinashi_Wclose2 = security(heikinashi(tickerid), 'W', close[1])
+
+heikinashi_short = security(heikinashi(tickerid), 'D', close)
+sma=sma(open,20)
+ema= ema(close,7)
+highest = highest(close[1],1)
+lowest = lowest(close[1],20)
+mid = (highest + lowest)/2
+
+//if (rsi <= rsi_low and sma >= mid and close < heikinashi_close)
+
+//if (crossunder(close,kagi_close) 
+
+
+///////if   trendD0 >0 // and sma > close// heikinashi_close1 > heikinashi_close2
+  ////////  strategy.entry("SHORT", strategy.short)
+   //////// trend := red
+   
+ 
+
+//DEFINE ARROWS
+buy=     trend_240_renko==0 and ema( renko_240close,14) < close//and trend_3_renko==0 and trend_W_renko==0//  ///    ha_open1 <= ha_close1 and sma  <= close and heikinashi_short > heikinashi_close
+sell = trend_240_renko==1 //and ema( renko_240close,2) > close//and sma > hl2 //and trend_240_renko==1//trend_3_renko==1 and    ///ha_open1 >= ha_close1 and sma >= close and heikinashi_close < heikinashi_short
+neutral = buy == 0 and sell == 0
+
+//PREVENT REPETITIVE ARROWS
+timetobuy = buy==1
+timetosell = sell==1
+tup = barssince(timetobuy[1])
+tdn = barssince(timetosell[1])
+long    = tup>tdn?1:na
+short   = tdn>tup?1:na
+
+plotshape(sell, color=red, location=location.abovebar, style=shape.arrowdown, size=size.huge, title="Sell Arrow", transp=0)
+plotshape(buy, color=green, location=location.abovebar, style=shape.arrowup, size=size.huge,title=" Buy Arrow", transp=0)
+
+trend1 = green
+futur =sma(hl2,1)
+
+futur := (sma(close[1],1)-sma(open,1))+sma(close,1)
+if futur > hl2 
+    trend1 := green
+if futur < hl2 
+    trend := red
+
+
+plot(futur, title='futur', color=yellow, linewidth=2, style=stepline, offset=1,transp=20, trackprice=true)
+newarrow = timetobuy == 1 or timetosell == 1
+alertcondition(sell, title='Sell Alert', message = 'Down Arrow')
+alertcondition(buy, title='Buy Alert', message = 'Up Arrow')
+alertcondition(newarrow, title='New Arrow', message = 'New Arrow')
+
+ 
+ 
+  
+//if trendD0 <1  and sma <close and trendW0 >0
+
+if  long//(ha_open1 >= ha_close1 and sma >= close and heikinashi_close < heikinashi_short)
+    strategy.entry("My short Entry Id", strategy.short)
+    trend := red
+//if (rsi >= rsi_hi and sma  <= mid and close > heikinashi_close)
+
+//if (crossover(close,kagi_close) 
+
+//if (ha_open1 <= ha_close1 and sma  <= close and heikinashi_short > heikinashi_close)
+
+
+////////if trendD0 <1 and sma < hl2//heikinashi_close1 < heikinashi_close2
+   /////// strategy.entry("LONG", strategy.long)
+  ///////  trend := green
+ 
+ 
+    
+if short//trendD0 >0  and sma >close and trendW0 <1
+    strategy.entry("My long Entry Id", strategy.long)
+    trend := green
+    
+//plot(rsi, color=trend)
+//hi = plot(rsi_hi)
+//lo = plot(rsi_low)
+//fill(hi, lo)
+
+
+//longCondition if trend = green
+//if (green)
+
+//shortCondition = trend = red
+//if (red)
+
+
+
+
+
+
+
+
+
+
+
+
+//plot(close)
+
+View in Pine Editor・261 lines
+Use on chart
+1
+9
+1 222
+bling-bling-D_renko-ema-heiki

@@ -1,0 +1,161 @@
+//@version=5
+strategy('SuperTrended Moving Averages Strategy', shorttitle='ST MA Strategy', overlay=true, format=format.price, precision=2, 
+         initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, 
+         commission_type=strategy.commission.percent, commission_value=0.1, pyramiding=0, calc_on_order_fills=true)
+
+// 輸入參數：適合低時間框架的自訂（預設調整為更靈敏）
+src = input(close, title='Source')
+mav = input.string(title='Moving Average Type', defval='EMA', options=['SMA', 'EMA', 'WMA', 'DEMA', 'TMA', 'VAR', 'WWMA', 'ZLEMA', 'TSF', 'HULL', 'TILL'])
+length = input.int(10, 'Moving Average Length', minval=1)  // 縮短為10，適合1S/5S
+Periods = input.int(5, title='ATR Period', minval=1)  // 縮短為5，減少滯後
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=0.3)  // 降低為0.3，生成更多信號
+changeATR = input.bool(title='Change ATR Calculation Method ?', defval=true)
+showsignals = input.bool(title='Show Buy/Sell Signals ?', defval=true)  // 預設顯示
+highlighting = input.bool(title='Highlighter On/Off ?', defval=true)
+T3a1 = input.float(0.7, 'TILLSON T3 Volume Factor', step=0.1)
+
+// 止盈/止損輸入（新增，適合策略）
+useStopLoss = input.bool(true, 'Use Stop Loss %')
+stopLossPct = input.float(2.0, 'Stop Loss %', step=0.1) / 100
+useTakeProfit = input.bool(true, 'Use Take Profit %')
+takeProfitPct = input.float(4.0, 'Take Profit %', step=0.1) / 100
+
+// 原 MA 計算函數（保留不變）
+Var_Func(src, length) =>
+    valpha = 2 / (length + 1)
+    vud1 = src > src[1] ? src - src[1] : 0
+    vdd1 = src < src[1] ? src[1] - src : 0
+    vUD = math.sum(vud1, 9)
+    vDD = math.sum(vdd1, 9)
+    vCMO = nz((vUD - vDD) / (vUD + vDD))
+    VAR = 0.0
+    VAR := nz(valpha * math.abs(vCMO) * src) + (1 - valpha * math.abs(vCMO)) * nz(VAR[1])
+    VAR
+
+VAR = Var_Func(src, length)
+DEMA = 2 * ta.ema(src, length) - ta.ema(ta.ema(src, length), length)
+
+Wwma_Func(src, length) =>
+    wwalpha = 1 / length
+    WWMA = 0.0
+    WWMA := wwalpha * src + (1 - wwalpha) * nz(WWMA[1])
+    WWMA
+
+WWMA = Wwma_Func(src, length)
+
+Zlema_Func(src, length) =>
+    zxLag = length / 2 == math.round(length / 2) ? length / 2 : (length - 1) / 2
+    zxEMAData = src + src - src[zxLag]
+    ZLEMA = ta.ema(zxEMAData, length)
+    ZLEMA
+
+ZLEMA = Zlema_Func(src, length)
+
+Tsf_Func(src, length) =>
+    lrc = ta.linreg(src, length, 0)
+    lrc1 = ta.linreg(src, length, 1)
+    lrs = lrc - lrc1
+    TSF = ta.linreg(src, length, 0) + lrs
+    TSF
+
+TSF = Tsf_Func(src, length)
+HMA = ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.round(math.sqrt(length)))
+
+T3e1 = ta.ema(src, length)
+T3e2 = ta.ema(T3e1, length)
+T3e3 = ta.ema(T3e2, length)
+T3e4 = ta.ema(T3e3, length)
+T3e5 = ta.ema(T3e4, length)
+T3e6 = ta.ema(T3e5, length)
+T3c1 = -T3a1 * T3a1 * T3a1
+T3c2 = 3 * T3a1 * T3a1 + 3 * T3a1 * T3a1 * T3a1
+T3c3 = -6 * T3a1 * T3a1 - 3 * T3a1 - 3 * T3a1 * T3a1 * T3a1
+T3c4 = 1 + 3 * T3a1 + T3a1 * T3a1 * T3a1 + 3 * T3a1 * T3a1
+T3 = T3c1 * T3e6 + T3c2 * T3e5 + T3c3 * T3e4 + T3c4 * T3e3
+
+getMA(src, length) =>
+    ma = 0.0
+    if mav == 'SMA'
+        ma := ta.sma(src, length)
+    else if mav == 'EMA'
+        ma := ta.ema(src, length)
+    else if mav == 'WMA'
+        ma := ta.wma(src, length)
+    else if mav == 'DEMA'
+        ma := DEMA
+    else if mav == 'TMA'
+        ma := ta.sma(ta.sma(src, math.ceil(length / 2)), math.floor(length / 2) + 1)
+    else if mav == 'VAR'
+        ma := VAR
+    else if mav == 'WWMA'
+        ma := WWMA
+    else if mav == 'ZLEMA'
+        ma := ZLEMA
+    else if mav == 'TSF'
+        ma := TSF
+    else if mav == 'HULL'
+        ma := HMA
+    else if mav == 'TILL'
+        ma := T3
+    ma
+
+MA = getMA(src, length)
+
+// Supertrend 計算（保留原邏輯）
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = MA - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = MA + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// 信號（保留原邏輯）
+buySignal = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+// 策略訂單邏輯（新增）
+if (buySignal)
+    strategy.entry("Long", strategy.long)  // 開多倉
+
+if (sellSignal)
+    strategy.close("Long")  // 平多倉
+    strategy.entry("Short", strategy.short)  // 開空倉
+
+if (useStopLoss or useTakeProfit)
+    strategy.exit("Exit Long", "Long", stop=close * (1 - stopLossPct), limit=close * (1 + takeProfitPct))  // 多倉止損/止盈
+    strategy.exit("Exit Short", "Short", stop=close * (1 + stopLossPct), limit=close * (1 - takeProfitPct))  // 空倉止損/止盈
+
+// 視覺化（保留並增強）
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', color=color.new(color.green, 100), linewidth=2)
+plotshape(buySignal and showsignals ? low : na, title='Buy', text='Buy', location=location.belowbar, style=shape.labelup, size=size.small, color=color.green, textcolor=color.white)
+dnPlot = plot(trend == -1 ? dn : na, title='Down Trend', color=color.new(color.red, 100), linewidth=2)
+plotshape(sellSignal and showsignals ? high : na, title='Sell', text='Sell', location=location.abovebar, style=shape.labeldown, size=size.small, color=color.red, textcolor=color.white)
+
+mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=0)
+colorup = input.color(defval=color.new(color.green, 60), title="Color Up")
+colordown = input.color(defval=color.new(color.red, 60), title="Color Down")
+longFillColor = highlighting ? (trend == 1 ? colorup : color.new(color.white, 100)) : color.new(color.white, 100)
+shortFillColor = highlighting ? (trend == -1 ? colordown : color.new(color.white, 100)) : color.new(color.white, 100)
+fill(mPlot, upPlot, title='UpTrend Highlighter', color=longFillColor)
+fill(mPlot, dnPlot, title='DownTrend Highlighter', color=shortFillColor)
+
+// 警報（保留並增強策略警報）
+alertcondition(buySignal, title='SuperTrend Buy', message='SuperTrend Buy Signal!')
+alertcondition(sellSignal, title='SuperTrend Sell', message='SuperTrend Sell Signal!')
+changeCond = trend != trend[1]
+alertcondition(changeCond, title='SuperTrend Direction Change', message='SuperTrend has changed direction!')
+
+View in Pine Editor・151 lines
+Use on chart
+1.5 K
+1
+25 934
+self use
+used in 1 second timeframe
+please let me publish it aaa
+

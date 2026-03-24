@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-03-23T04:46:16.612784+00:00",
+  "queue_rank": 3282,
+  "page": 137,
+  "name": "Flawless Victory Strategy - 15min BTC Machine Learning Strategy",
+  "slug": "flawless-victory-15m-btc",
+  "chart_url": "https://www.tradingview.com/script/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy/",
+  "pine_file": "raw-pine/bulk/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy.pine",
+  "symbol_name": "BINANCE:BTCUSDT",
+  "repo_timeframe_hint": "15m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "15m",
+  "reason": "Uses strategy.exit with stop/limit levels requiring intrabar-to-next-bar adaptation; core indicators are reproducible.",
+  "adaptations": [
+    "Approximate intrabar stop/limit exits to next-bar close signals",
+    "Implement stateful entry price tracking for dynamic exit levels",
+    "Replace Pine ta.* with vectorized numpy/pandas calculations",
+    "Consolidate version inputs into single configurable parameters"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [
+    "Partial conversion: Pine strategy.exit stop/limit approximated as next-bar close signals",
+    "Stateful entry price tracking implemented for dynamic SL/TP levels",
+    "RMA calculation matches Pine Script behavior (exponential smoothing)",
+    "MFI uses simple sum over lookback period as in original Pine code",
+    "VERSION constant allows switching between v1/v2/v3 strategy variants",
+    "No lookahead: all signals based on historical data available at each bar",
+    "Signal array length matches input prices length exactly",
+    "SL/TP checks use bar low/high for intrabar approximation (partial fidelity)"
+  ],
+  "python_file": "python-strategies/stage2-local/flawless-victory-15m-btc.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "Flawless Victory Strategy - 15min BTC",
+    "module_timeframe": "15m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 14497,
+    "non_zero_signals": 11660,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

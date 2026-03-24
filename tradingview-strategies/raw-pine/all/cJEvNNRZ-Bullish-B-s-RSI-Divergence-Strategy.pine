@@ -1,0 +1,8 @@
+//@version=5
+maTypeInput=##input(defval='None',type='INPUT_STRING',##id='in_3')
+var enableMA=(maTypeInput!='None')
+var isBB=(maTypeInput=='SMA + Bollinger Bands')
+##root(root_metainfo,rm_0,(enableMA?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_1,(isBB?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_2,(isBB?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_3,(isBB?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)

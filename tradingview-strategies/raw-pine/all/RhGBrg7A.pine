@@ -1,0 +1,69 @@
+//@version=2
+//
+// @author LazyBear
+//
+// If you use this code in its original/modified form, do drop me a note. 
+strategy(title = "MIN_Study_WaveTrend with Crosses", shorttitle = "MIN_ST_WaveTrend with Crosses", overlay = true)
+n1 = input(10, "Channel Length")
+n2 = input(21, "Average Length")
+sma1 = input(4, "SMA Length")
+r=input(9, title="Period", type=integer, minval=1)
+
+obLevel1 = input(60, "Over Bought Level 1")
+obLevel2 = input(53, "Over Bought Level 2")
+osLevel1 = input(-60, "Over Sold Level 1")
+osLevel2 = input(-53, "Over Sold Level 2")
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2017)
+ToMonth   = input(defval = 7, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2019, title = "To Year", minval = 2017)
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+
+b=ema(close,r)
+buy_g=close[3]<b
+sell_g=close[3]>b
+
+ap = hlc3 
+esa = ema(ap, n1)
+d = ema(abs(ap - esa), n1)
+ci = (ap - esa) / (0.015 * d)
+tci = ema(ci, n2)
+ 
+wt1 = tci
+wt2 = sma(wt1,sma1)
+
+plot(0, color=gray)
+plot(obLevel1, color=red)
+plot(osLevel1, color=green)
+plot(obLevel2, color=red)
+plot(osLevel2, color=green)
+
+plot(wt1, color=green)
+plot(wt2, color=red)
+plot(wt1-wt2, color=blue, style=area, transp=80)
+plot(cross(wt1, wt2) ? wt2 : na, color = black , style = circles, linewidth = 3)
+plot(cross(wt1, wt2) ? wt2 : na, color = (wt2 - wt1 > 0 ? red : lime) , style = circles, linewidth = 2)
+barcolor(cross(wt1, wt2) ? (wt2 - wt1 > 0 ? aqua : yellow) : na)
+
+
+
+if (crossover(wt1,wt2) and buy_g)
+    strategy.entry(id = "Buy", long = true, when = window())
+if (crossunder(wt1,wt2) and sell_g)
+    strategy.entry(id = "Sell", long = false, when = window())
+
+View in Pine Editor・61 lines
+Use on chart
+3
+4
+1
+1 584
+전략지표입니다 수익 테스트해보세요.

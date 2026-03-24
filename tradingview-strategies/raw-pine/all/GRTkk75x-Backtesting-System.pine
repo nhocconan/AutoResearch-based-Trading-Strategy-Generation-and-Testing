@@ -1,0 +1,333 @@
+//@version=5
+indicator('Moving Average Cross', overlay = true)
+
+MA200 = ta.𝚎𝚖𝚊(close, 200)
+MA50  = ta.𝚎𝚖𝚊(close, 50)
+
+// Generate Buy and Sell conditions
+buy  = ta.crossover  (MA200, MA50)
+sell = ta.crossunder (MA200, MA50)
+
+plot(MA200, color=color.green)
+plot(MA50 , color=color.red  )
+
+bgcolor(color = buy ? color.green : sell ? color.red : na, title='SIGNALS')
+
+// ———————————————— SIGNAL FOR SYSTEM ————————————————
+Signal = buy ? +1 : sell ? -1 : 0
+plot(Signal, title='🔌Connector🔌', display = display.none)
+// —————— 🔥 The Backtesting System expects the value to be exactly +1 for the 𝚋𝚞𝚕𝚕𝚒𝚜𝚑 signal, and -1 for the 𝚋𝚎𝚊𝚛𝚒𝚜𝚑 signal
+
+Expand 14 lines
+
+Basically, I identified my Buy & Sell conditions in the code and added this at the bottom of my indicator code
+Now you can connect your indicator to the Backtesting System using the Step 2
+Step 2 — Connect the connector
+    • 1 — Add your updated indicator to a TradingView chart and Add the Backtesting System as well to the SAME chart
+    • 2 — Open the Backtesting System settings and in the External Source field select your 🔌Connector🔌 (which comes from your indicator)
+_______________________________
+ ⚉ ＭＡＩＮ  ＳＥＴＴＩＮＧＳ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+
+[B]𝐄𝐱𝐭𝐞𝐫𝐧𝐚𝐥 𝐒𝐨𝐮𝐫𝐜𝐞[/B] — Select your indicator. Add your indicator by following the 2 steps described above and select it in the menu. To familiarize yourself with the system until you select your indicator, you will have an in-built strategy of crossing the two moving EMA's of 50 and 200.
+
+[B]Long Deals[/B] — Enable/Disable Long Deals.
+
+[B]Short Deals[/B] — Enable/Disable Short Deals.
+
+[B]Wait End Deal[/B] — Enable/Disable waiting for a trade to close at Stop Loss/Take Profit. Until the trade closes on the Stop Loss or Take Profit, no new trade will open.
+
+[B]Reverse Deals[/B] — To force the opening of a trade in the opposite direction.
+
+[B]ReEntry Deal[/B] — Automatically open the same new deal after the deal is closed.
+
+[B]ReOpen Deal[/B] — Reopen the trade if the same signal is received. For example, if you are already in the long and a new signal is received in the long, the trade will reopen. * Does not work if Wait End Deal is enabled.
+
+𝐓𝐚𝐤𝐞 𝐏𝐫𝐨𝐟𝐢𝐭:
+[B]None[/B] — Disables take profit. Useful if you only want to use dynamic stoplosses such as MA, Fast-Trailing, ATR Trail.
+
+[B]FIXED ％[/B] — Fixed take profit in percent.
+
+[B]FIXED ＄[/B] — Fixed Take in Money.
+
+[B]ATR[/B] — Fixed Take based on ATR.
+
+[B]R:R[/B] — Fixed Take based on the size of your stop loss. For example, if your stop is 10% and R:R=1, then the Take would be 10%. R:R=3 Take would be 30%, etc.
+
+[B]HH / LL[/B] — Fixed Take based on the previous maximum/minimum (extremum).
+
+𝐒𝐭𝐨𝐩 𝐋𝐨𝐬𝐬:
+[B]None[/B] — Disables Stop Loss. Useful if you want to work without a stop loss. *Be careful if Wait End Deal is enabled, the trade may not close for a long time until it reaches the Take.
+
+[B]FIXED ％[/B] — Fixed Stop in percent.
+
+[B]FIXED ＄[/B] — Fixed Stop in Money.
+
+[B]TRAILING[/B] — Dynamic Trailing Stop like on the stock exchanges.
+
+[B]FAST TRAIL[/B] — Dynamic Fast Trailing Stop moves immediately in profit and stays in place if the price stands still or the price moves in loss.
+
+[B]ATR[/B] — Fixed Stop based on the ATR.
+
+[B]ATR TRAIL[/B] — Dynamic Trailing Stop based on the ATR.
+
+[B]LO / HI[/B] — A Fixed Stop based on the last Maximum/Minimum extemum. Allows you to place a stop just behind or above the low/high candle.
+
+[B]MA[/B] — Dynamic Stop based on selected Moving Average. * You will have 8 types of MA (EMA, SMA, HMA, etc.) to choose from, but you can easily add dozens of other MAs, which makes this type of stop incredibly flexible.
+
+
+[B]Add ％[/B] — If true, then with the "𝗦𝘁𝗼𝗽 ％" parameter you can add percentages to any of the current SL. Can be especially useful when using Stop - 𝗔𝗧𝗥 or 𝗠𝗔 or 𝗟𝗢/𝗛𝗜. For example with 𝗟𝗢/𝗛𝗜 to put a stop for the last High/Low and add 0.5% additional Stoploss.
+
+[B]Fixed R:R[/B] — If the stop loss is Dynamic (Trailing or MA) then if R:R true can also be made Dynamic * Use it carefully, the function is experimental.
+_________________________________________
+ ⚉ ＴＡＫＥ ＰＲＯＦＩＴ ＬＥＶＥＬＳ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+
+
+A unique method of constructing intermediate Take Profit Levels will allow you to select up to 5 intermediate Take Profit Levels and one intermediate Stop Loss.
+Intermediate Take Profit Levels are perfectly calculated into 5 equal parts in the form of levels from the entry point to the final Take Profit target.
+All you need to do is to choose the necessary levels for fixing and how much you want to fix at each level as a percentage. For example, TP 3 will always be exactly between the entry point and the Take Profit target. And the value of TP 3 = 50 will close 50% of the amount of the remaining size of the position.
+Note: all intermediate SL/TP are closed from the remaining position amount and not from the initial position size, as TV does by default.
+
+[B]SL 0 Position[/B] — works in the same way as TP 1-5 but it's Stop. With this parameter you can set the position where the intermediate stop will be set.
+
+[B]Breakeven on TP[/B] — When activated, it allows you to put the stop loss at Breakeven after the selected TP is reached. For this function to work as it should - you need to activate an intermediate Take. For example, if TP 3 is activated and Breakeven on TP = 3, then after the price reaches this level, the Stop loss will go to Breakeven.
+   * This function will not work with Dynamic Stoplosses, because it simply does not make sense.
+
+[B]CoolDown # Bars[/B] — When activated, allows you to add a delay before a new trade is opened. A new trade after CoolDown will not be opened until # bars pass and a new signal appears.
+_____________________________
+ ⚉ ＴＩＭＥ  ＦＩＬＴＥＲＳ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+Powerful time filter code that allows you to filter data based on specific time zones, dates, and session days. This code is ideal for those who need to analyze data from different time zones and weed out irrelevant data.
+With Time Filter, you can easily set the starting and ending time zones by which you want to filter the data.
+You can also set a start and end date for your data and choose which days of the week to include in the analysis. In addition, you can specify start and end times for a specific session, allowing you to focus your analysis on specific time periods.
+
+
+_________________________________
+ ⚉ ＳＩＧＮＡＬ  ＦＩＬＴＥＲＳ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+Signal Filters — allows you to easily customize and optimize your trading strategies based on 10 filters.
+Each filter is designed to help you weed out inaccurate signals to minimize your risks.
+Let's take a look at their features:
+
+
+__________________________________
+ ⚉ ＲＩＳＫ  ＭＡＮＡＧＥＭＥＮＴ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+Risk management tools that allow you to set the maximum number of losing trades in a row, a limit on the number of trades per day or week and other filters.
+
+Loss Streak — Set Max number of consecutive loss trades.
+
+Win Streak — Max Winning Streak Length.
+
+Row Loss InDay — Max of consecutive days with a loss in a row.
+
+DrawDown ％ — Max DrawDown (in % of strategy equity).
+
+InDay Loss ％ — Set Max Intraday Loss.
+
+Daily Trades — Limit the number of MAX trades per day.
+
+Weekly Trades — Limit the number of MAX trades per week.
+    * 🡅 I would Not Recommend using these functions without understanding how they work.
+
+
+Order Size — Position Size
+    • NONE — Use the default position size settings in Tab "Properties".
+    • EQUITY — The amount of the allowed position as a percentage of the initial capital.
+        • Use Net Profit — On/Off the use of profit in the following trades. *Only works if the type is EQUITY.
+    • SIZE — The size of the allowed position in monetary terms.
+    • Contracts — The size of the allowed position in the contracts. 1 Сontract = Сurrent price.
+________________
+ ⚉ ＮＯＴＥＳ ⚉
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+It is important to note that I have never worked with Backtesting and the functions associated with them before.
+It took me about a month of slow work to build this system.
+
+I want to say Big Thanks:
+    • The PineScripters🌲 group, the guys suggested how to implement some features. Especially allanster
+    • Thanks to all those people who share their developments for free on TV and not only.
+    • I also thank myself for not giving up and finishing the project, and not trying to monetize the system by selling it. * Although I really want the money :)
+
+I tried hard to make it as fast and convenient as possible for everyone who will use my code.
+That's why I didn't use any libraries and dozens of heavy functions, and I managed to fit in 8+-functions for the whole code.
+Absolutely every block of code I tried to make full-fledged modular, that it was easy to import/edit for myself (you).
+I have abused the Ternary Pine operator a little (a lot) so that the code was as compact as possible.
+Nevertheless, I tried very hard to keep my code very understandable even for beginners.
+At last I managed to write 500 lines of code, making it one of the fastest and most feature-rich systems out there.
+
+I hope everyone enjoys my work.
+Put comments and write likes.
+
+Dec 4, 2023
+Release Notes
+𝗕𝗶𝗴 𝗨𝗽𝗱𝗮𝘁𝗲 𝗣𝗿𝗲𝘀𝗲𝗻𝘁 !
+
+Improved :
+Improved work of Wait End Deal.
+
+Improved work of ReEntry Deal.
+
+Improved work of ReOpen Deal.
+
+Improved work of Reverse Signal.
+
+Improved work of CoolDown # Bars.
+
+Improved system of All SL/TP and code has been simplified.
+
+Improved work of Trailing Stop.
+
+Improved work of Fast Trail Stop.
+
+Improved work of Money $ SL/TP.
+
+Improved work of MA Stop.
+
+Improved work of BreakEven System.
+
+Improved work of Order Size.
+
+Improved work of Time Filters.
+
+Improved Tooltips.
+
+Improved code readability.
+
+Fixed some bugs, delays and limitations caused by built-in functions.
+
+Visual perception of the system operation is improved.
+
+
+
+New Features added :
+All SL/TP function switched to VOLATY system.
+
+Added Alerts !
+
+Added New approach - VOLATY.
+
+Added TR Stop/Take.
+
+Added STDEV Stop/Take.
+
+Added SPREAD Stop/Take.
+
+Added FIXED % for Dynamic Stop.
+
+Added FIXED $ for Dynamic Stop.
+
+Added HILOEST Stop.
+
+Added Adaptive option for MA Stop.
+
+Added ACTIVATOR Stop from alexgrover
+Added SAR Stop from TradingView
+Added Source option for all SL/TP.
+
+Changed and improved Time Filter code from Trendoscope
+Added option Close at Session End.
+
+Added Static BE For Dynamic.
+
+Added BreakEven Behind TP function.
+
+Added Close Early # Bars function.
+
+Added BreakEven # Bars function.
+
+Added Offset Position function.
+
+Added Inversion All Filters function.
+
+Added function Risk to Order Size.
+
+Abandoned some built-in functions and switched to Flags.
+
+Added Tooltips for new function.
+
+
+
+Details of Main Changes :
+
+All SL/TP function switched to VOLATY system.
+ATR, ATR TRAIL, FIXED % & FIXED $ in the Take Profit & Stop Loss field has been replaced by VOLATY.
+The VOLATY system will allow you to take advantage of even more Adaptive opportunities SL/TP.
+VOLATY mode:
+
+VOLATY - These are Volatility indicators such as :
+ATR (Average True Range)
+
+TR (True Range)
+
+STDEV (Standard Deviation)
+
+SPREAD (Candle Size High - Low)
+
+And also static methods for any SL/TP:
+
+FIXED % (Fixed Percentage)
+
+FIXED $ (Fixed Cash)
+
+
+
+VOLATY can be customized with 3 options.
+
+VOLATY - Select Volatility Indicator
+
+Period - Selection of the Indicator Period.
+
+Factor - Selects the multiplier of the indicator.
+
+T.FIXED - Amount in Percentage% or Cash$.
+
+S.FIXED - Amount in Percentage% or Cash$.
+
+
+Prefix T. & S. means Take & Stop.
+
+The VOLATY parameter allows you to create not only Static TP/SL but also to control all Dynamic StopLosses.
+This allows TP/SL to be Adaptive to market conditions, unlike the usual TP/SL based on a fixed percentage.
+
+
+Source - option for selecting the source for calculating all SL/TP.
+ACTIVATOR - Added ACTIVATOR basis on SAR.
+SAR - Added Parabolic Stop and Revers Stop.
+MA Stop (Moving Average) - Added Adaptive function. Allows MA to work through VOLATY.
+Close at Session End - End Close all positions at the market price at the end of each session or the end of time window.
+Close Early # Bars - If the price goes against you for more than # bars, exit the trade.
+BreakEven # Bars - If the trade is in profit for more than # bars, set the stop at breakeven. For dynamic stop losses there will be a delay of 1 bar at not the best price.
+Static BE For Dynamic - Allow to change Dynamic Stop to BreakEven. Enabling removes the delay but makes Dynamic Stop to Static, until the end of the trade.
+BreakEven Behind TP - Allow to move Stop at the previous Take Level to Profit starting from Breakeven. If 𝐁𝐫𝐞𝐚𝐤𝐞𝐯𝐞𝐧 𝐨𝐧 𝐓𝐏 is enabled then the Stop will move to Profit after the specified Level.
+Offset Position - Allows you to Shift your trade entry by N bars.
+Time Filter - Has been changed and made easier to use.
+RISK % - New method for calculating Order Size. Percentage of portfolio you lose if trade hits SL. Installed by default.
+Alerts - At your requests, alerts have been added.
+
+Mar 11, 2025
+Release Notes
+
+
+Update to version v6.
+
+Fixed an error at the start of the strategy.
+
+Improved and restructured stop/track rates.
+
+Improved visual display for large quantities of trades.
+
+Removed some modes as they were very similar to others.
+
+Improved structuring in the settings menu.
+
+Updated tooltips for visualization.
+
+Added new Moving Averages.
+
+Added notification when an indicator is connected.
+
+Soon the name and description of this project will be changed as well.
+
+Now this project is fully compatible with the new Auto Bektester.
+

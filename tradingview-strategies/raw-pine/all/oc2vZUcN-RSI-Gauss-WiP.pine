@@ -1,0 +1,141 @@
+//@version=6
+strategy(title="RSI-Gauss-Velocity-Strategy-WiP", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3)
+
+// --- Time Settings ---
+startDate  = input.time(timestamp("1 Nov 2014 00:00 +0000"), "Start Date")
+endDate    = input.time(timestamp("1 Jan 2030 23:59 +0000"), "End Date")
+timeFilter = time >= startDate and time <= endDate
+
+// --- Core Stochastic RSI ---
+smoothK = 3, smoothD = 3, lengthRSI = 14, lengthStoch = 14
+rsiValue = ta.rsi(close, lengthRSI)
+kValue = ta.sma(ta.stoch(rsiValue, rsiValue, rsiValue, lengthStoch), smoothK)
+dValue = ta.sma(kValue, smoothD)
+
+// --- Gaussian Filter Math ---
+int N = input.int(4, "Gaussian Poles")
+int per = input.int(144, "Sampling Period")
+float mult = input.float(1.414, "Band Multiplier")
+
+f_filt9x(_a, _s, _i) =>
+    float _f = 0.0
+    float _x = 1 - _a
+    _m2 = _i == 4 ? 6 : _i == 3 ? 3 : _i == 2 ? 1 : 0
+    _m3 = _i == 4 ? 4 : _i == 3 ? 1 : 0
+    _m4 = _i == 4 ? 1 : 0
+    _f := math.pow(_a, _i) * nz(_s) + _i * _x * nz(_f[1]) - (_i >= 2 ? _m2 * math.pow(_x, 2) * nz(_f[2]) : 0) + (_i >= 3 ? _m3 * math.pow(_x, 3) * nz(_f[3]) : 0) - (_i >= 4 ? _m4 * math.pow(_x, 4) * nz(_f[4]) : 0)
+    _f
+
+beta  = (1 - math.cos(4*math.asin(1)/per)) / (math.pow(1.414, 2.0/N) - 1)
+alpha = - beta + math.sqrt(math.pow(beta, 2) + 2*beta)
+filtn = f_filt9x(alpha, hlc3, N)
+filttr = f_filt9x(alpha, ta.tr(true), N)
+hband = filtn + filttr * mult
+
+// --- Momentum Velocity Logic ---
+filtSlope = filtn - filtn[1]
+slopeMean = ta.sma(filtSlope, 20)
+slopeStd  = ta.stdev(filtSlope, 20)
+// Detection of trend "exhaustion" using StdDev of the filter slope
+slopeExhaustion = filtSlope < (slopeMean - slopeStd) 
+
+// --- Strategy Execution ---
+gaussianGreen = filtn > filtn[1]
+stochSignal   = kValue > dValue
+
+// ENTRY: High-Conviction Core
+longCondition = gaussianGreen and (close > hband) and stochSignal and timeFilter
+
+// EXIT: Hybrid Logic (Standard Crossunder or Velocity Exhaustion in profit)
+inProfit = strategy.position_size > 0 and close > strategy.position_avg_price
+exitCondition = ta.crossunder(close, hband) or (slopeExhaustion and inProfit and (close < hband or close < hband[1]))
+
+// --- Trade Execution ---
+if longCondition
+    strategy.entry("Long", strategy.long)
+    alert("Gauss-Velocity LONG Entry: Price Breakout confirmed.", alert.freq_once_per_bar_close)
+
+if exitCondition
+    strategy.close("Long", comment="Vel-Exit")
+    alert("Gauss-Velocity EXIT: Momentum exhaustion or Band crossunder.", alert.freq_once_per_bar_close)
+
+// --- Visuals ---
+fCol = gaussianGreen ? color.new(color.lime, 0) : color.new(color.red, 0)
+plot(filtn, color=fCol, linewidth=3, title="Gaussian Filter")
+plot(hband, color=color.new(color.gray, 50), title="High Band")
+fill(plot(hband), plot(filtn), color=color.new(fCol, 90))
+plotshape(slopeExhaustion and inProfit, "Exhaustion Detected", shape.labeldown, location.abovebar, color.orange, size=size.tiny)
+
+// --- Alert Conditions for Alert Box Manual Setup ---
+alertcondition(longCondition, title="Long Entry Alert", message="RSI-Gauss LONG Entry at {{close}}")
+alertcondition(exitCondition, title="Exit Strategy Alert", message="RSI-Gauss EXIT at {{close}}")
+
+View in Pine Editor・71 lines
+Use on chart
+1
+7
+499
+Mar 1
+STRATEGY OVERVIEW: RSI-Gauss-WiP Momentum Breakout
+
+THE CONCEPT:
+This strategy is designed to capture high-probability trend expansions by combining advanced signal processing with classic momentum oscillators. Instead of using traditional moving averages (which suffer from significant lag), this strategy utilizes an N-Pole Gaussian Filter to create a smoother, more responsive baseline and volatility channel.
+
+THE MECHANICS:
+Gaussian Channel: We use a multi-pole Gaussian filter (default: 4 poles) to create a "Filtered True Range" channel. Unlike Bollinger Bands, this channel uses a bell-curve weighting to filter out market noise and focus on the true directional energy of the price.
+
+Stoch-RSI Momentum: We don't just buy breakouts; we confirm them with momentum. The strategy looks for the Stoch-RSI to be at extreme levels (above 80 or below 20), indicating that the breakout is backed by strong cyclical momentum rather than just a random price spike.
++1
+
+Trend Alignment: Long positions are only taken when the Gaussian Filter is sloping upwards (Green), ensuring we are trading in harmony with the underlying trend.
+
+ENTRY & EXIT LOGIC:
+Long Entry:
+Gaussian Trend is bullish (sloping up).
+
+Price crosses and closes above the High Band (Volatility Breakout).
+
+Stoch-RSI K-line is above the D-line.
+
+Stoch-RSI is at an extreme momentum reading (>80 or <20).
+
+Long Exit:
+Price crosses back under the Gaussian Filter (The midline). This acts as a trailing "equilibrium" stop to protect capital during a trend reversal.
+
+KEY FEATURES:
+Lag Reduction: Includes a "Reduced Lag Mode" and "Fast Response Mode" for traders looking to catch turns even earlier.
+
+Clean Interface: The script is optimized for a clean chart—status line values and execution labels are hidden by default to allow you to focus on the price action.
+
+Time-Filtering: Built-in back testing window to analyze performance across specific market regimes.
+
+HOW TO USE:
+Timeframes: Works best on the 1H, 4H, and Daily timeframes where Gaussian smoothing is most effective at removing "intra-day noise." Check each timeframe for your specific pair, e.g. BTC-USDC, ETH-USDC, LINK-USDC, etc.
+
+ASSETS:
+Optimized for trending assets like BTC, ETH, and high-beta stocks.
+
+Tip: If the market is in a heavy sideways chop, increase the "Poles" (N) to 6 or 8 to increase the smoothness of the filter.
+Mar 2
+Release Notes
+I have renamed the strategy from "RSI-Gauss-WiP" to "RSI-Gauss-Velocity-Strategy-WiP" to make sure it's seen as a strategy and not an indicator.
+
+I have also made the following improvements.
+
+Momentum Velocity Exit: The static exits were replaced with a slope exhaustion filter. By tracking the "speed" of the Gaussian filter, the strategy now senses when a trend is getting "tired." It locks in profits before the price actually crashes through the bands.
+
+Asymmetric Profit Protection: Logic was added that only allows "aggressive" momentum exits if the trade is currently in profit. This ensures that losing trades are given enough room to follow the Gaussian math, while winning trades are protected from giving back their gains during "blow-off tops."
+
+Compounding Retention: Hard trailing stops were considered, but they were not allowing the code to take advantage of Bitcoin’s biggest runs, so they were not used. Rather, relying on the Gaussian Velocity, the strategy stays in winning trades longer.
+
+Refined Gaussian Math: The script was updated to Pine Script v6 standards, ensuring the calculation of the 4-pole filter is more efficient and visually responsive on the daily chart.
+
+Improvements from the original script, to this update, from Nov-2014 to Mar-2026 are:
+
+Item Original Update
+------------- ---------- ----------
+Total P&L +2,610% +45,383%
+Drawdown -17.22% -20.28%
+Trade Count 60 90
+Profit Factor 5.69 5.78
+

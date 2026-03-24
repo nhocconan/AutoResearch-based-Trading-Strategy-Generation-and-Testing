@@ -1,0 +1,862 @@
+//@version=6
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © [officialjackofalltrades]
+strategy("Liquidity Maxing: Institutional Liquidity Matrix", shorttitle="LIQMAX", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.05, max_lines_count=500, max_labels_count=500, calc_on_every_tick=false)
+
+// LIQUIDITY MAXING: INSTITUTIONAL LIQUIDITY MATRIX
+// Advanced Market Structure (IDM/Sweeps), 8-Factor Confluence, Risk Controls
+
+// =============================================================================
+// 1. ARCHITECTURE & TYPE DEFINITIONS
+// =============================================================================
+
+type Pivot
+    float price
+    int index
+    bool isHigh
+    bool isSweep // True if it swept a previous liquidity point
+
+type Structure
+    float strongHigh
+    float strongLow
+    float weakHigh
+    float weakLow
+    int strongHighIdx
+    int strongLowIdx
+    string trend // "bullish", "bearish", "neutral"
+    bool bos // Break of Structure
+    bool choch // Change of Character
+    bool idm // Inducement detected
+
+type Confluence
+    bool rsi
+    bool macd
+    bool volume
+    bool ema
+    bool structure
+    bool time
+    bool volatility
+    bool htf
+    int score
+
+type RiskModel
+    float atr
+    float stopLoss
+    float takeProfit
+    float positionSize
+    float riskPerTrade
+    bool safeToTrade
+
+type TestResult
+    string name
+    bool passed
+    string message
+
+// =============================================================================
+// 2. CONFIGURATION & INPUTS
+// =============================================================================
+
+// --- Presets ---
+grp_preset = "Market Presets"
+string preset = input.string("Crypto (BTC/ETH)", "Configuration Preset", options=["Crypto (BTC/ETH)", "Forex Majors", "Indices (SPY/QQQ)", "Custom"], group=grp_preset)
+
+// --- Market Structure ---
+grp_struct = "Market Structure Architecture"
+int pivotLen = input.int(5, "Pivot Length", minval=1, group=grp_struct)
+bool useIdm = input.bool(true, "Filter by Inducement (IDM)", group=grp_struct)
+bool showStruct = input.bool(true, "Visualize Structure", group=grp_struct)
+int chochLookback = input.int(50, "Structure Lookback", minval=5, group=grp_struct)
+
+// --- Risk Management ---
+grp_risk = "Risk & Capital Preservation"
+float riskReward = input.float(2.0, "Risk:Reward Ratio", step=0.1, group=grp_risk)
+int atrPeriod = input.int(14, "ATR Period", group=grp_risk)
+float atrMult = input.float(2.0, "ATR Multiplier (Stop)", step=0.1, group=grp_risk)
+float maxDrawdown = input.float(10.0, "Max Drawdown Circuit Breaker (%)", group=grp_risk)
+float riskPerTrade = input.float(1.5, "Risk per Trade (% Equity)", minval=0.1, maxval=10, step=0.1, group=grp_risk)
+float dailyRiskLimit = input.float(6.0, "Daily Risk Limit (%)", minval=1.0, maxval=20.0, step=0.5, group=grp_risk)
+float weeklyRiskLimit = input.float(12.0, "Weekly Risk Limit (%)", minval=2.0, maxval=30.0, step=0.5, group=grp_risk)
+float minPositionPercent = input.float(0.25, "Min Position Size (% Equity)", minval=0.1, maxval=10.0, step=0.05, group=grp_risk)
+float maxPositionPercent = input.float(5.0, "Max Position Size (% Equity)", minval=0.5, maxval=25.0, step=0.5, group=grp_risk)
+int correlationBars = input.int(3, "Correlation Cooldown (bars)", minval=0, maxval=20, group=grp_risk)
+bool killSwitch = input.bool(false, "Emergency Kill Switch", group=grp_risk)
+
+// --- Filters ---
+grp_filter = "Signal Confluence"
+int rsiLen = input.int(14, "RSI Length", group=grp_filter)
+int emaLen = input.int(200, "Trend EMA", group=grp_filter)
+string htfConfirmTf = input.timeframe("D", "HTF Confirmation TF", group=grp_filter)
+bool allowWeekends = input.bool(true, "Allow Weekend Trading", group=grp_filter)
+int confThreshold = input.int(6, "Minimum Confluence Score (0-8)", minval=1, maxval=8, group=grp_filter)
+
+// --- Testing ---
+grp_test = "Validation Suite"
+bool runTests = input.bool(false, "Run Dual-Suite Validation", group=grp_test)
+
+// --- Alerts ---
+grp_alerts = "Alerting"
+bool enableAlerts = input.bool(true, "Enable Strategy Alerts", group=grp_alerts)
+bool enableWebhookTemplate = input.bool(false, "Include Webhook JSON Template", group=grp_alerts)
+
+// --- Visualization ---
+grp_visual = "Visualization & Monitoring"
+bool showIdmMarkers = input.bool(false, "Show IDM Sweep Markers", group=grp_visual)
+bool showDashboard = input.bool(true, "Display Risk Dashboard", group=grp_visual)
+bool showPerformancePanel = input.bool(true, "Display Performance Panel", group=grp_visual)
+bool enableRiskTint = input.bool(true, "Background Risk Tint", group=grp_visual)
+
+// =============================================================================
+// 3. LIBRARY FUNCTIONS (Functional Programming)
+// =============================================================================
+
+getPresetValues(string p) =>
+    if p == "Crypto (BTC/ETH)"
+        [70.0, 30.0, 1.2]
+    else if p == "Forex Majors"
+        [75.0, 25.0, 1.5]
+    else if p == "Indices (SPY/QQQ)"
+        [70.0, 30.0, 1.3]
+    else
+        [70.0, 30.0, 1.0]
+
+[rsiOb, rsiOs, volMult] = getPresetValues(preset)
+
+calculateATRLevels(float price, float atr, float mult, bool isLong) =>
+    float sl = isLong ? price - (atr * mult) : price + (atr * mult)
+    float tp = isLong ? price + (atr * mult * riskReward) : price - (atr * mult * riskReward)
+    [sl, tp]
+
+calculatePositionPercent(float atrValue, float price, float minPercent, float maxPercent, float baseRisk) =>
+    float scalar = price > 0 and atrValue > 0 ? atrValue / price : 0.0
+    float raw = scalar > 0 ? baseRisk / (scalar * 10.0) : baseRisk
+    float clipped = math.max(minPercent, math.min(maxPercent, raw))
+    clipped
+
+validateTrade(float dailyDD, float weeklyDD, float globalDD, bool kill) =>
+    bool withinLimits = dailyDD < dailyRiskLimit and weeklyDD < weeklyRiskLimit and globalDD < maxDrawdown
+    bool safe = withinLimits and not kill
+    safe
+
+allowedSession(bool allowWeekend) =>
+    bool weekend = dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+    bool allowed = allowWeekend ? true : not weekend
+    allowed
+
+// =============================================================================
+// 4. STATE MANAGEMENT
+// =============================================================================
+var Structure mStruct = Structure.new(na, na, na, na, 0, 0, "neutral", false, false, false)
+var Pivot lastHigh = Pivot.new(na, na, true, false)
+var Pivot lastLow = Pivot.new(na, na, false, false)
+var Confluence confState = Confluence.new(false, false, false, false, false, false, false, false, 0)
+var RiskModel riskState = RiskModel.new(0.0, 0.0, 0.0, 0.0, riskPerTrade, true)
+
+var float dailyStartEquity = na
+var float weeklyStartEquity = na
+var float dailyRiskUsed = 0.0
+var float weeklyRiskUsed = 0.0
+var int lastLongBar = na
+var int lastShortBar = na
+var float equityPeak = na
+var table dash = na
+var table perfTable = na
+
+if bar_index == 0
+    dailyStartEquity := strategy.equity
+    weeklyStartEquity := strategy.equity
+    equityPeak := strategy.equity
+bool newDay = ta.change(time("D")) != 0
+bool newWeek = ta.change(time("W")) != 0
+if newDay
+    dailyStartEquity := strategy.equity
+    dailyRiskUsed := 0.0
+if newWeek
+    weeklyStartEquity := strategy.equity
+    weeklyRiskUsed := 0.0
+if na(equityPeak) or strategy.equity > equityPeak
+    equityPeak := strategy.equity
+
+// =============================================================================
+// 5. CORE LOGIC: MARKET STRUCTURE & IDM
+// =============================================================================
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+if not na(ph)
+    lastHigh.price := ph
+    lastHigh.index := bar_index - pivotLen
+    lastHigh.isSweep := false
+if not na(pl)
+    lastLow.price := pl
+    lastLow.index := bar_index - pivotLen
+    lastLow.isSweep := false
+
+bool bullCross = ta.crossover(close, lastHigh.price)
+bool bearCross = ta.crossunder(close, lastLow.price)
+bool isBullishBreak = not na(lastHigh.price) and bullCross
+bool isBearishBreak = not na(lastLow.price) and bearCross
+
+mStruct.bos := false
+mStruct.choch := false
+
+if isBullishBreak
+    if mStruct.trend == "bearish"
+        mStruct.choch := true
+        mStruct.trend := "bullish"
+    else
+        mStruct.bos := true
+        mStruct.trend := "bullish"
+    mStruct.strongLow := lastLow.price
+    mStruct.strongLowIdx := lastLow.index
+
+if isBearishBreak
+    if mStruct.trend == "bullish"
+        mStruct.choch := true
+        mStruct.trend := "bearish"
+    else
+        mStruct.bos := true
+        mStruct.trend := "bearish"
+    mStruct.strongHigh := lastHigh.price
+    mStruct.strongHighIdx := lastHigh.index
+
+float swingLowPrev = ta.lowest(low, 3)[1]
+float swingHighPrev = ta.highest(high, 3)[1]
+bool idmBullish = mStruct.trend == "bullish" and not na(swingLowPrev) and low < swingLowPrev and close > swingLowPrev
+bool idmBearish = mStruct.trend == "bearish" and not na(swingHighPrev) and high > swingHighPrev and close < swingHighPrev
+mStruct.idm := idmBullish or idmBearish
+
+// =============================================================================
+// 6. CONFLUENCE ENGINE (8-Factor)
+// =============================================================================
+
+// Indicators
+float rsi = ta.rsi(close, rsiLen)
+float ema = ta.ema(close, emaLen)
+[macdLine, sigLine, _] = ta.macd(close, 12, 26, 9)
+float volAvg = ta.sma(volume, 20)
+float baseAtr = ta.atr(atrPeriod)
+float atrScale = syminfo.type == "crypto" ? 1.1 : 1.0
+float atr = baseAtr * atrScale
+float htfEma = request.security(syminfo.tickerid, htfConfirmTf, ta.ema(close, emaLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+bool sessionAllowed = allowedSession(allowWeekends)
+
+// Confluence Checks (8 factors)
+bool c_struct = (mStruct.trend == "bullish" and close > ema) or (mStruct.trend == "bearish" and close < ema)
+bool c_rsi = (mStruct.trend == "bullish" and rsi > 40 and rsi < rsiOb) or (mStruct.trend == "bearish" and rsi < 60 and rsi > rsiOs)
+bool c_macd = (mStruct.trend == "bullish" and macdLine > sigLine) or (mStruct.trend == "bearish" and macdLine < sigLine)
+bool c_vol = volume > (volAvg * volMult)
+bool c_ema = (mStruct.trend == "bullish" and close > ema) or (mStruct.trend == "bearish" and close < ema)
+bool c_time = sessionAllowed
+bool c_vola = baseAtr > baseAtr[1]
+bool c_htf = (mStruct.trend == "bullish" and close >= htfEma) or (mStruct.trend == "bearish" and close <= htfEma)
+
+// Score Calculation
+int score = 0
+if c_struct
+    score += 1
+if c_rsi
+    score += 1
+if c_macd
+    score += 1
+if c_vol
+    score += 1
+if c_ema
+    score += 1
+if c_time
+    score += 1
+if c_vola
+    score += 1
+if c_htf
+    score += 1
+
+confState.structure := c_struct
+confState.rsi := c_rsi
+confState.macd := c_macd
+confState.volume := c_vol
+confState.ema := c_ema
+confState.time := c_time
+confState.volatility := c_vola
+confState.htf := c_htf
+confState.score := score
+
+// =============================================================================
+// 7. EXECUTION & RISK
+// =============================================================================
+// Entry: Trend Alignment + (BOS or CHoCH or IDM Sweep) + Confluence Score
+bool signalLong = mStruct.trend == "bullish" and (mStruct.bos or mStruct.choch or (useIdm and idmBullish)) and score >= confThreshold and confState.htf
+bool signalShort = mStruct.trend == "bearish" and (mStruct.bos or mStruct.choch or (useIdm and idmBearish)) and score >= confThreshold and confState.htf
+
+[longSL, longTP] = calculateATRLevels(close, atr, atrMult, true)
+[shortSL, shortTP] = calculateATRLevels(close, atr, atrMult, false)
+float trackedPeak = na(equityPeak) ? strategy.equity : equityPeak
+float globalDD = trackedPeak > 0 ? (trackedPeak - strategy.equity) / trackedPeak * 100 : 0.0
+float dailyDD = dailyStartEquity > 0 ? (dailyStartEquity - strategy.equity) / dailyStartEquity * 100 : 0.0
+float weeklyDD = weeklyStartEquity > 0 ? (weeklyStartEquity - strategy.equity) / weeklyStartEquity * 100 : 0.0
+float positionPercent = calculatePositionPercent(atr, close, minPositionPercent, maxPositionPercent, riskPerTrade)
+bool correlationBlockLong = not na(lastLongBar) and correlationBars > 0 and bar_index - lastLongBar <= correlationBars
+bool correlationBlockShort = not na(lastShortBar) and correlationBars > 0 and bar_index - lastShortBar <= correlationBars
+bool dailyLimitOk = dailyRiskLimit <= 0 ? true : (dailyRiskUsed + riskPerTrade) <= dailyRiskLimit
+bool weeklyLimitOk = weeklyRiskLimit <= 0 ? true : (weeklyRiskUsed + riskPerTrade) <= weeklyRiskLimit
+bool riskBudgetOk = dailyLimitOk and weeklyLimitOk
+
+riskState.atr := atr
+riskState.stopLoss := longSL
+riskState.takeProfit := longTP
+riskState.positionSize := positionPercent
+riskState.safeToTrade := validateTrade(dailyDD, weeklyDD, globalDD, killSwitch)
+
+bool allowLong = signalLong and strategy.position_size == 0 and riskState.safeToTrade and not correlationBlockLong and riskBudgetOk and positionPercent > 0
+bool allowShort = signalShort and strategy.position_size == 0 and riskState.safeToTrade and not correlationBlockShort and riskBudgetOk and positionPercent > 0
+
+if allowLong
+    strategy.entry("Long", strategy.long, qty=positionPercent, comment="LIQMAX LONG")
+    strategy.exit("Exit L", "Long", stop=longSL, limit=longTP, comment_loss="SL", comment_profit="TP")
+    dailyRiskUsed += riskPerTrade
+    weeklyRiskUsed += riskPerTrade
+    lastLongBar := bar_index
+
+if allowShort
+    strategy.entry("Short", strategy.short, qty=positionPercent, comment="LIQMAX SHORT")
+    strategy.exit("Exit S", "Short", stop=shortSL, limit=shortTP, comment_loss="SL", comment_profit="TP")
+    dailyRiskUsed += riskPerTrade
+    weeklyRiskUsed += riskPerTrade
+    lastShortBar := bar_index
+
+bool alertLongCondition = enableAlerts and allowLong
+bool alertShortCondition = enableAlerts and allowShort
+bool alertRiskCondition = enableAlerts and not riskState.safeToTrade
+
+bool alertLongWebhookCondition = alertLongCondition and enableWebhookTemplate
+bool alertShortWebhookCondition = alertShortCondition and enableWebhookTemplate
+bool alertRiskWebhookCondition = alertRiskCondition and enableWebhookTemplate
+bool alertLongStandardCondition = alertLongCondition and not enableWebhookTemplate
+bool alertShortStandardCondition = alertShortCondition and not enableWebhookTemplate
+bool alertRiskStandardCondition = alertRiskCondition and not enableWebhookTemplate
+
+alertcondition(alertLongWebhookCondition, title="LIQMAX LONG READY", message="{\"signal\":\"LIQMAX_LONG\",\"severity\":\"info\"}")
+alertcondition(alertShortWebhookCondition, title="LIQMAX SHORT READY", message="{\"signal\":\"LIQMAX_SHORT\",\"severity\":\"info\"}")
+alertcondition(alertRiskWebhookCondition, title="LIQMAX RISK HALT", message="{\"signal\":\"LIQMAX_HALT\",\"severity\":\"critical\"}")
+alertcondition(alertLongStandardCondition, title="LIQMAX LONG READY", message="LIQUIDITY MAXING LONG")
+alertcondition(alertShortStandardCondition, title="LIQMAX SHORT READY", message="LIQUIDITY MAXING SHORT")
+alertcondition(alertRiskStandardCondition, title="LIQMAX RISK HALT", message="LIQUIDITY MAXING RISK HALT")
+
+int sharpeWindow = 50
+float equityChange = ta.change(strategy.equity)
+float returnSeries = strategy.equity > 0 ? equityChange / strategy.equity : 0.0
+float meanReturn = ta.sma(returnSeries, sharpeWindow)
+float stdReturn = ta.stdev(returnSeries, sharpeWindow)
+float sharpeRatio = stdReturn != 0 ? (meanReturn / stdReturn) * math.sqrt(sharpeWindow) : 0.0
+float totalLossTrades = strategy.losstrades
+float totalWinTrades = strategy.wintrades
+float profitFactor = totalLossTrades > 0 ? totalWinTrades / totalLossTrades : na
+float winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0.0
+float avgTrade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0.0
+
+// =============================================================================
+// 8. VISUALIZATION
+// =============================================================================
+color bullColor = #00E676
+color bearColor = #FF1744
+color neuColor = #2962FF
+plot(ema, "Core EMA", color=color.new(neuColor, 0), linewidth=2)
+plot(htfEma, "HTF EMA", color=color.new(color.yellow, 40), linewidth=2)
+plotshape(showStruct and mStruct.choch and mStruct.trend == "bullish", "CHoCH Bull", shape.labelup, location.belowbar, bullColor, text="CHoCH", textcolor=color.white, size=size.tiny)
+plotshape(showStruct and mStruct.bos and mStruct.trend == "bullish", "BOS Bull", shape.triangleup, location.belowbar, bullColor, text="BOS", size=size.tiny)
+plotshape(showStruct and mStruct.choch and mStruct.trend == "bearish", "CHoCH Bear", shape.labeldown, location.abovebar, bearColor, text="CHoCH", textcolor=color.white, size=size.tiny)
+plotshape(showStruct and mStruct.bos and mStruct.trend == "bearish", "BOS Bear", shape.triangledown, location.abovebar, bearColor, text="BOS", size=size.tiny)
+plotshape(showStruct and showIdmMarkers and useIdm and idmBullish, "IDM Bull", shape.circle, location.belowbar, color.new(bullColor, 20), text="IDM", textcolor=color.white, size=size.tiny)
+plotshape(showStruct and showIdmMarkers and useIdm and idmBearish, "IDM Bear", shape.circle, location.abovebar, color.new(bearColor, 20), text="IDM", textcolor=color.white, size=size.tiny)
+
+bgcolor(enableRiskTint ? (riskState.safeToTrade ? color.new(color.green, 95) : color.new(color.red, 92)) : na, title="Risk State Overlay")
+if showDashboard
+    if na(dash)
+        dash := table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 25), border_width=1, border_color=color.new(color.white, 70))
+    if barstate.islast and not na(dash)
+        table.cell(dash, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray, 60), text_size=size.tiny)
+        table.cell(dash, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 60), text_size=size.tiny)
+        int dashRow = 1
+        string trendText = str.upper(mStruct.trend)
+        color trendColor = mStruct.trend == "bullish" ? bullColor : mStruct.trend == "bearish" ? bearColor : color.gray
+        table.cell(dash, 0, dashRow, "Trend", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, trendText, text_color=trendColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Confluence", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(score) + "/8", text_color=score >= confThreshold ? bullColor : color.orange, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "ATR", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(atr, format.mintick), text_color=color.white, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Position Size", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(positionPercent, "#.##") + "%", text_color=riskState.safeToTrade ? bullColor : bearColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Global Drawdown", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(globalDD, "#.##") + "%", text_color=globalDD < maxDrawdown ? bullColor : bearColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Daily Risk", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(dailyRiskUsed, "#.##") + " / " + str.tostring(dailyRiskLimit, "#.##"), text_color=dailyLimitOk ? color.white : bearColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Weekly Risk", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 1, dashRow, str.tostring(weeklyRiskUsed, "#.##") + " / " + str.tostring(weeklyRiskLimit, "#.##"), text_color=weeklyLimitOk ? color.white : bearColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Correlation Guard", text_color=color.white, text_size=size.tiny)
+        string corrStatus = (correlationBlockLong or correlationBlockShort) ? "Cooldown" : "Clear"
+        table.cell(dash, 1, dashRow, corrStatus, text_color=(correlationBlockLong or correlationBlockShort) ? color.orange : bullColor, text_size=size.tiny)
+        dashRow += 1
+        table.cell(dash, 0, dashRow, "Alerts", text_color=color.white, text_size=size.tiny)
+        string alertMode = enableAlerts ? (enableWebhookTemplate ? "Webhook" : "Standard") : "Disabled"
+        table.cell(dash, 1, dashRow, alertMode, text_color=enableAlerts ? bullColor : color.gray, text_size=size.tiny)
+else
+    if not na(dash)
+        table.delete(dash)
+        dash := na
+
+if showPerformancePanel
+    if na(perfTable)
+        perfTable := table.new(position.bottom_right, 2, 8, bgcolor=color.new(color.black, 35), border_width=1, border_color=color.new(color.white, 70))
+    if barstate.islast and not na(perfTable)
+        table.cell(perfTable, 0, 0, "Performance", text_color=color.white, bgcolor=color.new(color.gray, 60), text_size=size.tiny)
+        table.cell(perfTable, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 60), text_size=size.tiny)
+        int perfRow = 1
+        table.cell(perfTable, 0, perfRow, "Net Profit", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? bullColor : bearColor, text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Equity", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(strategy.equity, "#.##"), text_color=color.white, text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Win Rate", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(winRate, "#.##") + "%", text_color=winRate >= 50 ? bullColor : color.orange, text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Avg Trade", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? bullColor : bearColor, text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Sharpe", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(sharpeRatio, "#.##"), text_color=sharpeRatio >= 1 ? bullColor : color.orange, text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Profit Factor", text_color=color.white, text_size=size.tiny)
+        string pfText = na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##")
+        table.cell(perfTable, 1, perfRow, pfText, text_color=na(profitFactor) ? color.gray : (profitFactor >= 1.5 ? bullColor : color.orange), text_size=size.tiny)
+        perfRow += 1
+        table.cell(perfTable, 0, perfRow, "Open Trades", text_color=color.white, text_size=size.tiny)
+        table.cell(perfTable, 1, perfRow, str.tostring(strategy.opentrades), text_color=strategy.opentrades == 0 ? bullColor : color.orange, text_size=size.tiny)
+else
+    if not na(perfTable)
+        table.delete(perfTable)
+        perfTable := na
+
+// =============================================================================
+// 9. VALIDATION FRAMEWORK
+// =============================================================================
+assert(bool condition, string name) => TestResult.new(name, condition, condition ? "PASS" : "FAIL")
+
+if runTests and barstate.islast
+    TestResult[] suite1 = array.new<TestResult>()
+    array.push(suite1, assert(atr > 0, "ATR Calculation"))
+    array.push(suite1, assert(rsi >= 0 and rsi <= 100, "RSI Bounds"))
+    array.push(suite1, assert(not na(mStruct.trend), "Trend Defined"))
+    array.push(suite1, assert(score >= 0 and score <= 8, "Score Bounds"))
+    array.push(suite1, assert(confState.structure == c_struct, "Structure Sync"))
+    array.push(suite1, assert(not (signalLong and signalShort), "Signal Mutual Exclusion"))
+    TestResult[] suite2 = array.new<TestResult>()
+    array.push(suite2, assert(riskReward >= 1.0, "RR Ratio Safe"))
+    array.push(suite2, assert(maxDrawdown <= 20.0, "DD Limit Safe"))
+    array.push(suite2, assert(positionPercent >= minPositionPercent, "Position Floor"))
+    array.push(suite2, assert(positionPercent <= maxPositionPercent, "Position Cap"))
+    var table testTable = table.new(position.bottom_right, 2, 12, bgcolor=color.black)
+    table.cell(testTable, 0, 0, "Validation Suite", bgcolor=color.gray, text_color=color.white)
+    table.cell(testTable, 1, 0, "RESULT", bgcolor=color.gray, text_color=color.white)
+    int row = 1
+    int passSuite1 = 0
+    int passSuite2 = 0
+    for t in suite1
+        table.cell(testTable, 0, row, t.name, text_color=color.white, text_size=size.tiny)
+        table.cell(testTable, 1, row, t.message, text_color=t.passed ? bullColor : bearColor, text_size=size.tiny)
+        if t.passed
+            passSuite1 += 1
+        row += 1
+    for t in suite2
+        table.cell(testTable, 0, row, t.name, text_color=color.white, text_size=size.tiny)
+        table.cell(testTable, 1, row, t.message, text_color=t.passed ? bullColor : bearColor, text_size=size.tiny)
+        if t.passed
+            passSuite2 += 1
+        row += 1
+    float rate1 = array.size(suite1) > 0 ? passSuite1 / array.size(suite1) * 100 : 100.0
+    float rate2 = array.size(suite2) > 0 ? passSuite2 / array.size(suite2) * 100 : 100.0
+    float overallRate = (passSuite1 + passSuite2) / (array.size(suite1) + array.size(suite2)) * 100
+    table.cell(testTable, 0, row, "MS PASS RATE", bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(testTable, 1, row, str.tostring(rate1, "#.#") + "%", bgcolor=rate1 >= 85 ? bullColor : bearColor, text_color=color.black)
+    row += 1
+    table.cell(testTable, 0, row, "STRAT PASS RATE", bgcolor=color.new(color.purple, 70), text_color=color.white)
+    table.cell(testTable, 1, row, str.tostring(rate2, "#.#") + "%", bgcolor=rate2 >= 85 ? bullColor : bearColor, text_color=color.black)
+    row += 1
+    table.cell(testTable, 0, row, "TOTAL PASS RATE", bgcolor=color.new(color.gray, 50), text_color=color.white)
+    table.cell(testTable, 1, row, str.tostring(overallRate, "#.#") + "%", bgcolor=overallRate >= 85 ? bullColor : bearColor, text_color=color.black)
+
+View in Pine Editor・492 lines
+Use on chart
+3
+8
+4
+6 952
+Liquidity Maxing - Institutional Liquidity Matrix
+
+Introduction
+
+Liquidity Maxing is an open-source strategy for TradingView built around institutional market structure concepts. It identifies structural shifts, evaluates trades through multi-factor confluence, and implements layered risk controls.
+
+The strategy is designed for swing trading on 4-hour timeframes, focusing on how institutional order flow manifests in price action through structure breaks, inducements, and liquidity sweeps.
+
+Core Functionality
+
+Liquidity Maxing performs three primary functions:
+
+
+Tracks market structure to identify when control shifts between buyers and sellers
+
+Scores potential trades using an eight-factor confluence system
+
+Manages position sizing and risk exposure dynamically based on volatility and user-defined limits
+
+
+
+The goal is selective trading when multiple conditions align, rather than frequent entries.
+
+Market Structure Engine
+
+The structure engine tracks three key events:
+
+
+Break of Structure (BOS): Price pushes beyond a prior pivot in the direction of trend
+
+Change of Character (CHoCH): Control flips from bullish to bearish or vice versa
+
+Inducement Sweeps (IDM): Market briefly runs stops against trend before moving in the real direction
+
+
+
+The structure module continuously updates strong highs and lows, labeling structural shifts visually. IDM markers are optional and disabled by default to maintain chart clarity.
+
+The trade engine requires valid structure alignment before considering entries. No structure, no trade.
+
+
+
+
+
+Eight-Factor Confluence System
+
+Instead of relying on a single indicator, Liquidity Maxing uses an eight-factor scoring system:
+
+
+Structure alignment with current trend
+
+RSI within healthy bands (different ranges for up and down trends)
+
+MACD momentum agreement with direction
+
+Volume above adaptive baseline
+
+Price relative to main trend EMA
+
+Session and weekend filter (configurable)
+
+Volatility expansion/contraction via ATR shifts
+
+Higher-timeframe EMA confirmation
+
+
+
+Each factor contributes one point to the confluence score. The default minimum confluence threshold is 6 out of 8, but you can adjust this from 1-8 based on your preference for trade frequency versus selectivity.
+
+Only when structure and confluence agree does the strategy proceed to risk evaluation.
+
+Dynamic Risk Management
+
+Risk controls are implemented in multiple layers:
+
+
+ATR-based stops and targets with configurable risk-to-reward ratio (default 2:1)
+
+Volatility-adjusted position sizing to maintain consistent risk per trade as ranges expand or compress
+
+Daily and weekly risk budgets that halt new entries once thresholds are reached
+
+Correlation cooldown to prevent clustered trades in the same direction
+
+Global circuit breaker with maximum drawdown limit and emergency kill switch
+
+
+
+If any guardrail is breached, the strategy will not open new positions. The dashboard clearly displays risk state for transparency.
+
+Market Presets
+
+The strategy includes configuration presets optimized for different market types:
+
+
+Crypto (BTC/ETH): RSI bands 70/30, volume multiplier 1.2, enhanced ATR scaling
+
+Forex Majors: RSI bands 75/25, volume multiplier 1.5
+
+Indices (SPY/QQQ): RSI bands 70/30, volume multiplier 1.3
+
+Custom: Default values for user customization
+
+
+
+For crypto assets, the strategy automatically applies ATR volatility scaling to account for higher volatility characteristics.
+
+Monitoring and Dashboards
+
+The strategy includes optional monitoring layers:
+
+Risk Operations Dashboard (top-right):
+
+Trend state
+
+Confluence score
+
+ATR value
+
+Current position size percentage
+
+Global drawdown
+
+Daily and weekly risk consumption
+
+Correlation guard state
+
+Alert mode status
+
+
+
+Performance Console (top-left):
+
+Net profit
+
+Current equity
+
+Win rate percentage
+
+Average trade value
+
+Sharpe-style ratio (rolling 50-bar window)
+
+Profit factor
+
+Open trade count
+
+
+
+Optional risk tint on chart background provides visual indication of "safe to trade" versus "halted" state.
+
+All visualization elements can be toggled on/off from the inputs for clean chart viewing or full telemetry during parameter tuning.
+
+Alerts and Automation
+
+The strategy supports alert integration with two formats:
+
+
+Standard alerts: Human-readable messages for long, short, and risk-halt conditions
+
+Webhook format: JSON-formatted payloads ready for external execution systems (optional)
+
+
+
+Alert messages are predictable and unambiguous, suitable for manual review or automated forwarding to execution engines.
+
+Built-in Validation Suite
+
+The strategy includes an optional validation layer that can be enabled from inputs. It checks:
+
+
+Internal consistency of structure and confluence metrics
+
+Sanity and ordering of risk parameters
+
+Position sizing compliance with user-defined floors and caps
+
+
+
+This validation is optional and not required for trading, but provides transparency into system operation during development or troubleshooting.
+
+Strategy Parameters
+
+Market Presets:
+
+Configuration Preset: Choose between Crypto (BTC/ETH), Forex Majors, Indices (SPY/QQQ), or Custom
+
+
+
+Market Structure Architecture:
+
+Pivot Length: Default 5 bars
+
+Filter by Inducement (IDM): Default enabled
+
+Visualize Structure: Default enabled
+
+Structure Lookback: Default 50 bars
+
+
+
+Risk & Capital Preservation:
+
+Risk:Reward Ratio: Default 2.0
+
+ATR Period: Default 14
+
+ATR Multiplier (Stop): Default 2.0
+
+Max Drawdown Circuit Breaker: Default 10%
+
+Risk per Trade (% Equity): Default 1.5%
+
+Daily Risk Limit: Default 6%
+
+Weekly Risk Limit: Default 12%
+
+Min Position Size (% Equity): Default 0.25%
+
+Max Position Size (% Equity): Default 5%
+
+Correlation Cooldown (bars): Default 3
+
+Emergency Kill Switch: Default disabled
+
+
+
+Signal Confluence:
+
+RSI Length: Default 14
+
+Trend EMA: Default 200
+
+HTF Confirmation TF: Default Daily
+
+Allow Weekend Trading: Default enabled
+
+Minimum Confluence Score (0-8): Default 6
+
+
+
+Backtesting Considerations
+
+When backtesting this strategy, consider the following:
+
+
+Commission: Default 0.05% (adjustable in strategy settings)
+
+Initial Capital: Default $100,000 (adjustable)
+
+Position Sizing: Uses percentage of equity (default 2% per trade)
+
+Timeframe: Optimized for 4-hour charts, though can be tested on other timeframes
+
+
+
+Results will vary significantly based on:
+
+Market conditions and volatility regimes
+
+Parameter settings, especially confluence threshold
+
+Risk limit configuration
+
+Symbol characteristics (crypto vs forex vs equities)
+
+
+
+Past performance does not guarantee future results. Win rate, profit factor, and other metrics should be evaluated in context of drawdown periods, trade frequency, and market conditions.
+
+How to Use This Strategy
+
+This is a framework that requires understanding and parameter tuning, not a one-size-fits-all solution.
+
+Recommended workflow:
+
+
+Start on 4-hour timeframe with default parameters and appropriate market preset
+
+Run backtests and study performance console metrics: focus on drawdown behavior, win rate, profit factor, and trade frequency
+
+Adjust confluence threshold to match your risk appetite—higher thresholds mean fewer but more selective trades
+
+Set realistic daily and weekly risk budgets appropriate for your account size and risk tolerance
+
+Consider ATR multiplier adjustments based on market volatility characteristics
+
+Only connect alerts or automation after thorough testing and parameter validation
+
+
+
+Treat this as a risk framework with an integrated entry engine, not merely an entry signal generator. The risk controls are as important as the trade signals.
+
+Strategy Limitations
+
+
+Designed for swing trading timeframes; may not perform optimally on very short timeframes
+
+Requires sufficient market structure to identify pivots; may struggle in choppy or low-volatility environments
+
+Crypto markets require different parameter tuning than traditional markets
+
+Risk limits may prevent entries during favorable setups if daily/weekly budgets are exhausted
+
+Correlation cooldown may delay entries that would otherwise be valid
+
+Backtesting results depend on data quality and may not reflect live trading with slippage
+
+
+
+Design Philosophy
+
+Many indicators tell you when price crossed a moving average or RSI left oversold. This strategy addresses questions institutional traders ask:
+
+
+Who is in control of the market right now?
+
+Is this move structurally significant or just noise?
+
+Do I want to add more risk given what I've already done today/week?
+
+If I'm wrong, exactly how painful can this be?
+
+
+
+The strategy provides disciplined, repeatable answers to these questions through systematic structure analysis, confluence filtering, and multi-layer risk management.
+
+Technical Implementation
+
+The strategy uses Pine Script v6 with:
+
+
+Custom types for structure, confluence, and risk state management
+
+Functional programming approach for reusable calculations
+
+State management through persistent variables
+
+Optional visual elements that can be toggled independently
+
+
+
+The code is open-source and can be modified to suit individual needs. All important logic is visible in the source code.
+
+Disclaimer
+
+
+
+This script is provided for educational and informational purposes only. It is not intended as financial, investment, trading, or any other type of advice or recommendation. Trading involves substantial risk of loss and is not suitable for all investors. Past performance, whether real or indicated by historical tests of strategies, is not indicative of future results.
+
+No representation is being made that any account will or is likely to achieve profits or losses similar to those shown. In fact, there are frequently sharp differences between backtested results and actual results subsequently achieved by any particular trading strategy.
+
+The user should be aware of the risks involved in trading and should trade only with risk capital. The authors and publishers of this script are not responsible for any losses or damages, including without limitation, any loss of profit, which may arise directly or indirectly from use of or reliance on this script.
+
+This strategy uses technical analysis methods and indicators that are not guaranteed to be accurate or profitable. Market conditions change, and strategies that worked in the past may not work in the future. Users should thoroughly test any strategy in a paper trading environment before risking real capital.
+
+Commission and slippage settings in backtests may not accurately reflect live trading conditions. Real trading results will vary based on execution quality, market liquidity, and other factors not captured in backtesting.
+
+The user assumes full responsibility for all trading decisions made using this script. Always consult with a qualified financial advisor before making investment decisions.
+
+
+
+Enjoy - officialjackofalltrades

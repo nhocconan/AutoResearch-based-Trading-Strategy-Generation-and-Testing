@@ -1,0 +1,3 @@
+//@version=4
+vol_threshold=##input(defval=0.9,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,vol_threshold)

@@ -1,0 +1,256 @@
+//@version=6
+strategy("Channel Breakout – BUY + SELL + Body TL SL + AUTO REVERSE",
+     overlay=true,
+     pyramiding=0)
+
+// ================= INPUTS =================
+length     = input.int(30, "Channel Length")
+leftBars   = input.int(8, "Swing Left")
+rightBars  = input.int(5, "Swing Right")
+extendBars = input.int(4, "Extend Line Right")
+slCandles  = input.int(8, "Exit after N candles beyond line")
+
+// ================= CHANNEL =================
+upBound   = ta.highest(high, length)
+downBound = ta.lowest(low, length)
+
+// ================= SWINGS =================
+swingLow  = ta.pivotlow(low, leftBars, rightBars)
+swingHigh = ta.pivothigh(high, leftBars, rightBars)
+
+var float lastSwingLow = na
+var int   lastSwingLowBar = na
+var float lastSwingHigh = na
+var int   lastSwingHighBar = na
+
+if not na(swingLow)
+    lastSwingLow := swingLow
+    lastSwingLowBar := bar_index - rightBars
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+    lastSwingHighBar := bar_index - rightBars
+
+// ================= ENTRIES =================
+strategy.entry("BUY", strategy.long, stop=upBound + syminfo.mintick)
+strategy.entry("SELL", strategy.short, stop=downBound - syminfo.mintick)
+
+// ================= TRENDLINES =================
+var line buyLine  = na
+var line sellLine = na
+var int buyCount  = 0
+var int sellCount = 0
+
+newLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if newLong and not na(lastSwingLow)
+    line.delete(buyLine)
+    buyLine := line.new(bar_index-1, low[1], lastSwingLowBar + extendBars, lastSwingLow,
+         color=color.blue, width=2)
+    buyCount := 0
+
+if newShort and not na(lastSwingHigh)
+    line.delete(sellLine)
+    sellLine := line.new(bar_index-1, high[1], lastSwingHighBar + extendBars, lastSwingHigh,
+         color=color.red, width=2)
+    sellCount := 0
+
+// ================= BUY SL → REVERSE TO SELL =================
+if strategy.position_size > 0 and not na(buyLine)
+    lp = line.get_price(buyLine, bar_index)
+    if close < open and math.max(open, close) < lp and low < lp
+        buyCount += 1
+
+if buyCount >= slCandles
+    strategy.entry("SELL", strategy.short)
+    buyCount := 0
+
+// ================= SELL SL → REVERSE TO BUY =================
+if strategy.position_size < 0 and not na(sellLine)
+    lp = line.get_price(sellLine, bar_index)
+    if close > open and math.min(open, close) > lp and high > lp
+        sellCount += 1
+
+if sellCount >= slCandles
+    strategy.entry("BUY", strategy.long)
+    sellCount := 0
+
+// ================= PLOTS =================
+plot(upBound, "Upper Channel", color=color.green)
+plot(downBound, "Lower Channel", color=color.red)
+
+plotshape(swingHigh, style=shape.triangleup, location=location.abovebar, color=color.orange)
+plotshape(swingLow, style=shape.triangledown, location=location.belowbar, color=color.purple)
+
+View in Pine Editor・84 lines
+Use on chart
+1
+3
+621
+This is a Channel Breakout + Swing Trendline Stop-Loss + Auto-Reverse strategy designed for use in TradingView.
+
+✅ What this strategy does (high level)
+
+It:
+
+Builds a price channel
+
+Places BUY above the channel
+
+Places SELL below the channel
+
+After entry, draws a trendline stop-loss using swing points
+
+If price violates that trendline for N candles, it:
+👉 closes the current trade
+👉 automatically reverses direction
+
+So instead of a fixed SL, you use structure-based SL + candle confirmation + auto flip.
+
+🔹 1. Channel Breakout Logic
+upBound = ta.highest(high, length)
+downBound = ta.lowest(low, length)
+
+
+Upper channel = highest high of last 30 candles
+
+Lower channel = lowest low of last 30 candles
+
+Entries:
+strategy.entry("BUY", strategy.long, stop=upBound + syminfo.mintick)
+strategy.entry("SELL", strategy.short, stop=downBound - syminfo.mintick)
+
+Meaning:
+
+✅ BUY when price breaks above channel
+✅ SELL when price breaks below channel
+
+Classic Donchian / range breakout system.
+
+🔹 2. Swing Detection
+ta.pivotlow()
+ta.pivothigh()
+
+
+This finds:
+
+Swing Low → used for BUY stop-loss line
+
+Swing High → used for SELL stop-loss line
+
+These become your structure reference points.
+
+🔹 3. Trendline Stop-Loss
+
+After a new trade:
+
+BUY trade:
+
+A blue trendline is drawn from recent candle to last swing low
+
+SELL trade:
+
+A red trendline is drawn from recent candle to last swing high
+
+These act as dynamic SL lines.
+
+Not fixed points — they slope with market structure.
+
+🔹 4. Candle-Based SL Confirmation
+
+This is important.
+
+Price must violate the trendline using full candle bodies, not just wicks.
+
+BUY side:
+close < open
+AND candle fully below line
+
+
+Means:
+
+🔴 Bearish candle
+🔴 Entire body below SL line
+🔴 Low pierces line
+
+Each such candle increases buyCount.
+
+SELL side:
+
+Opposite:
+
+🟢 Bullish candle
+🟢 Body above SL line
+🟢 High breaks line
+
+Each increases sellCount.
+
+🔹 5. N-Candle Rule (Your slCandles = 8)
+
+You don’t exit on first touch.
+
+You wait:
+
+if buyCount >= 8 → reverse to SELL
+if sellCount >= 8 → reverse to BUY
+
+
+So:
+
+👉 Only after 8 confirming candles beyond SL line
+👉 Trade flips automatically.
+
+This avoids fake breakouts.
+
+🔹 6. Auto Reverse
+
+Instead of:
+
+❌ Exit and stay flat
+
+You do:
+
+✅ Exit BUY → enter SELL
+✅ Exit SELL → enter BUY
+
+So you are always in the market.
+
+🔹 7. Pyramiding Disabled
+pyramiding=0
+
+
+Means:
+
+✔ Only ONE trade at a time
+✔ No multiple entries stacking
+
+Very important for clean execution.
+
+🧠 In simple words
+
+This strategy:
+
+✅ Trades breakouts
+✅ Uses swing structure for SL
+✅ Requires multiple candle confirmation
+✅ Automatically flips position
+✅ Avoids whipsaws better than normal SL
+✅ Always stays in trend cycles
+
+It behaves like a professional trend-following system with structural exits.
+
+⚠ Reality check (important)
+
+Strengths:
+✔ Good for trending markets
+✔ Avoids single-candle stop hunts
+✔ Auto reverse keeps you active
+
+Weakness:
+❌ Will suffer in sideways markets
+❌ 8-candle delay can give back profits
+❌ Needs volatility filter for best results
+
+
+

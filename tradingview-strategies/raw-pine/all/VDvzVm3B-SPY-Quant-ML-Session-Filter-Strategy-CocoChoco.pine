@@ -1,0 +1,146 @@
+//@version=6
+strategy("SPY Quant ML + Session Filter Strategy [CocoChoco]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, calc_on_every_tick=true, pyramiding=3)
+
+// --- 1. INPUTS ---
+length          = input.int(20, "Z-Score Lookback", minval=1)
+z_threshold     = input.float(-1.2, "Z-Score Entry Threshold", step=0.1)
+trend_length    = input.int(200, "Trend Filter (SMA)", minval=1)
+stop_loss_pct   = input.float(1.5, "Stop Loss %", step=0.1) / 100
+trail_trigger_pct = input.float(0.5, "Trailing Trigger %", step=0.1) / 100
+max_daily_loss  = input.float(2.0, "Max Daily Drawdown %", step=0.1) / 100 
+sess_input      = input.session("0700-2100", "Trading Session (UTC)")
+use_ml          = input.bool(true, "Enable ML Filter?")
+
+// --- 2. CALCULATIONS ---
+sma_20  = ta.sma(close, length)
+sma_trend = ta.sma(close, trend_length)
+std_dev = ta.stdev(close, length)
+z_score = (close - sma_20) / std_dev
+atr_value = ta.atr(14)
+trail_offset_ticks = atr_value * 0.5 / syminfo.mintick
+
+// --- 3. DAILY DRAWDOWN TRACKER ---
+var float start_day_equity = strategy.equity
+if (ta.change(dayofmonth) != 0) 
+    start_day_equity := strategy.equity
+
+current_daily_loss = (start_day_equity - strategy.equity) / start_day_equity
+daily_loss_hit = current_daily_loss >= max_daily_loss
+
+// --- 4. HOLIDAY & EARLY CLOSE LOGIC (2026-2028) ---
+is_holiday_us = (year == 2026 and ( (month==1 and (dayofmonth==1 or dayofmonth==19)) or (month==2 and dayofmonth==16) or (month==4 and dayofmonth==3) or (month==5 and dayofmonth==25) or (month==6 and dayofmonth==19) or (month==7 and dayofmonth==3) or (month==9 and dayofmonth==7) or (month==11 and dayofmonth==26) or (month==12 and dayofmonth==25) )) or
+                 (year == 2027 and ( (month==1 and (dayofmonth==1 or dayofmonth==18)) or (month==2 and dayofmonth==15) or (month==3 and dayofmonth==26) or (month==5 and dayofmonth==31) or (month==6 and dayofmonth==18) or (month==7 and dayofmonth==5) or (month==9 and dayofmonth==6) or (month==11 and dayofmonth==25) or (month==12 and dayofmonth==24) )) or
+                 (year == 2028 and ( (month==1 and dayofmonth==17) or (month==2 and dayofmonth==21) or (month==4 and dayofmonth==14) or (month==5 and dayofmonth==29) or (month==6 and dayofmonth==19) or (month==7 and dayofmonth==4) or (month==9 and dayofmonth==4) or (month==11 and dayofmonth==23) or (month==12 and dayofmonth==25) ))
+
+is_early_us = (year == 2026 and ( (month==11 and dayofmonth==27) or (month==12 and dayofmonth==24) )) or
+               (year == 2027 and (month==11 and dayofmonth==26)) or
+               (year == 2028 and ( (month==7 and dayofmonth==3) or (month==11 and dayofmonth==24) ))
+
+is_holiday = is_holiday_us
+is_in_session = not na(time(timeframe.period, sess_input, "UTC")) and not is_holiday
+
+ny_hour = hour(time_close, "America/New_York")
+ny_min  = minute(time_close, "America/New_York")
+is_market_close = (ny_hour >= 16 or (is_early_us and ny_hour >= 13))
+
+// --- 5. ML FILTER ---
+f1 = ta.rsi(close, 14)
+corr_rsi = ta.correlation(close, f1, 10)
+corr_vol = ta.correlation(close, atr_value, 10)
+ml_signal = (use_ml ? (corr_rsi > 0.5 and corr_vol < 0 ? 1.0 : 0.0) : 1.0)
+
+// --- 6. HOURLY LIMIT & CONCURRENT LOGIC ---
+var int last_trade_hour = -1
+curr_hour = hour(time, "UTC")
+curr_min  = minute(time, "UTC")
+can_trade_this_hour = curr_hour != last_trade_hour
+
+// --- 7. STRATEGY EXECUTION ---
+long_condition = ta.crossunder(z_score, z_threshold) and close > sma_trend and is_in_session and (ml_signal > 0) and can_trade_this_hour and not daily_loss_hit
+
+if (long_condition)
+    strategy.entry("Quant_Long", strategy.long, comment="ML Entry")
+    last_trade_hour := curr_hour 
+
+if (strategy.position_size > 0)
+    // TWEAK: Only close LOSING positions if Daily Loss Limit is hit
+    if (daily_loss_hit and strategy.openprofit < 0)
+        strategy.close("Quant_Long", comment="Daily Loss: Close Loser")
+
+    float stop_price = strategy.position_avg_price * (1 - stop_loss_pct)
+    float current_profit_pct = (close - strategy.position_avg_price) / strategy.position_avg_price
+    bool trigger_trailing = high >= sma_20 or current_profit_pct >= trail_trigger_pct
+    
+    if (trigger_trailing and close > strategy.position_avg_price)
+        strategy.exit("Trail", "Quant_Long", stop=stop_price, trail_price=close, trail_offset=trail_offset_ticks, comment="Active Trailing")
+    else
+        strategy.exit("SL", "Quant_Long", stop=stop_price, comment="1.5% Stop")
+
+    if (is_market_close)
+        strategy.close_all(comment="Market Close Exit")
+    
+    if (curr_hour == 21 and curr_min == 30 and strategy.openprofit > 0)
+        strategy.close("Quant_Long", comment="21:30 Profit Exit")
+    
+    if (curr_hour == 21 and curr_min == 55 and strategy.openprofit <= 0)
+        strategy.close("Quant_Long", comment="21:55 Loss Exit")
+
+// --- 8. VISUALS ---
+plot(sma_20, color=color.yellow, title="Target (20 SMA)")
+plot(sma_trend, color=color.green, linewidth=2, title="Trend (200 SMA)")
+plotshape(long_condition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+bgcolor(daily_loss_hit ? color.new(color.red, 90) : na)
+
+View in Pine Editor・92 lines
+Use on chart
+1
+4
+686
+S&P 500 Quant: Machine Learning & Mean Reversion (Session-Filtered)
+
+Overview
+This is a professional-grade quantitative strategy designed specifically for the S&P 500. It combines classical statistical mean reversion (Z-Score) with a modern Machine Learning filter and rigorous institutional-grade risk management.
+
+The strategy is optimized for traders who prioritize high win rates and capital preservation, specifically avoiding the "gap risk" associated with holding positions overnight.
+
+Core Methodology
+1. Statistical Entry (The Z-Score Engine)
+The strategy identifies "oversold" conditions in a bullish context. It calculates the Z-Score of the price relative to its 20-period Mean (SMA). By default, it looks for a -1.2 Standard Deviation extension, signaling a high-probability "dip" ripe for a snap-back to the mean.
+
+2. Trend & ML Filters
+To avoid "catching a falling knife," the strategy uses two layers of confirmation:
+
+Trend Filter: Only takes Long positions when the price is above the 200-period SMA, ensuring we only buy dips in a confirmed uptrend.
+
+ML Correlation Filter: A Machine Learning-inspired module that analyzes the correlation between RSI and Volatility (ATR). It only permits entries when market internal dynamics suggest a reversal is technically "healthy."
+
+3. Institutional Risk Management
+This script is built for "safety-first" automation:
+
+Hard Stop Loss: Fixed at 1.5% to protect against sudden market shocks.
+
+Active Trailing: A dual-trigger trailing stop. It activates once the price touches the 20 SMA (The Mean) OR once a trade reaches a 0.50% profit threshold. This ensures near-winners are protected and large runners are captured.
+
+Intraday Circuit Breaker: Includes a Max Daily Drawdown (2%) limit. If hit, the script automatically closes losing positions and halts trading for the day, while allowing winning positions to continue.
+
+Key Features
+Session-Specific: Tailored for the US Trading Session (UTC/NY times).
+
+Zero Overnight Risk: Automatically flattens all positions before the market close (16:00 NY Time).
+
+Holiday Intelligence: Hard-coded logic for US Market Holidays and Early Closes (2026–2028), ensuring the bot doesn't get stuck in illiquid holiday markets.
+
+Hourly Entry Cap: Limits entries to one per hour to prevent over-concentration during a single price leg.
+
+How to Use
+Timeframe: I suggest you use it on the 5-minute or 1-hour timeframe for optimal results.
+
+Instrument: Designed for the S&P 500, but highly effective on SPY, IVV, and ES (Futures).
+
+Pyramiding: Designed to handle up to 3 concurrent positions, allowing the strategy to scale into a move as the Z-Score deepens.
+
+Automation Ready
+This script is fully compatible with webhook-based automation tools. All signals (Entry, SL, Trail, Market Close, and Daily Limit) are clearly labeled in the Alert comments for seamless execution. I haven't tasted it though. This is not financial advice. Please perform your own tests and manage your risk.
+
+Disclaimer
+Past performance does not guarantee future results. This script is a tool for quantitative analysis and should be used as part of a broader diversified trading plan.

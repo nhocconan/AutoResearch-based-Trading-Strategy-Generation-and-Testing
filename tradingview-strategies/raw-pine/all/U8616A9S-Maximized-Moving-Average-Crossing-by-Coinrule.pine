@@ -1,0 +1,69 @@
+//@version=4
+strategy(shorttitle='Maximized Moving Average Crossing ',title='Maximized Moving Average Crossing (by Coinrule)', overlay=true, initial_capital=1000,  default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 1,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2020, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+//MA inputs and calculations
+inlong=input(50, title='MA long period')
+inshort=input(9, title='MA short period')
+
+MAlong = sma(close, inlong)
+MAshort= sma(close, inshort)
+
+// RSI inputs and calculations
+lengthRSI = (14)
+
+RSI = rsi(close, lengthRSI)
+RSI_Signal = input(55, title = 'RSI Trigger', minval=1)
+
+//Entry and Exit
+bullish = crossover(MAshort, MAlong)
+bearish = crossunder(MAshort, MAlong)
+
+strategy.entry(id="long", long = true, when = bullish and RSI > RSI_Signal and window())
+strategy.close(id="long", when = bearish and window())
+
+ 
+plot(MAshort, color=color.purple, linewidth=2)
+plot(MAlong, color=color.red, linewidth=2)
+
+View in Pine Editor・43 lines
+Use on chart
+3
+9
+7
+10 507
+Using the crossings of two Moving Averages to trade in a trading strategy is a Trend-Following approach. As the name would suggest, to be successful, it requires the asset to be on-trend.
+
+The general limit of a common strategy based on Moving Averages is that they underperform when the market is less volatile or trading sideways. When volatility compresses, the indicators get very close one to another, crossing each other very often. That's exactly the condition when trend-following strategies underperform.
+
+To improve this strategy, it's useful to filter the buy signal using the RSI. When the RSI is close to overbought conditions, that means that the coin is likely trading in an uptrend. Strong uptrends usually come with RSI values that stay overbought for long periods, creating interesting opportunities.
+
+Setup
+
+
+Buy condition: the MA9 crosses above the MA50, and at the same time, the RSI has a value greater than 55.
+
+
+Sell condition: the MA9 crosses below the MA50.
+
+
+
+The strategy is optimized to provide better results on the 1-hr time frame, but it could work well also on higher time frames, such as the 4-hrs.
+
+The strategy assumes each order to trade 30% of the available capital and opens a trade at a time. A trading fee of 0.1% is taken into account.
+
+
+

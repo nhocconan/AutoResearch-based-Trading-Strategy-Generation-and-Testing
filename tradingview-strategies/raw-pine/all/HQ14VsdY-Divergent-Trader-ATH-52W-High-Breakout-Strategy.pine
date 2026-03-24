@@ -1,0 +1,98 @@
+//@version=6
+strategy("ATH / 52W High Breakout Strategy", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ==== INPUTS ====
+
+// Breakout selection
+useATH      = input.bool(true,  "Use All-Time High")
+use52W      = input.bool(true,  "Use 52-Week High")
+
+// ATR Settings
+atrLength   = input.int(14, "ATR Length")
+atrMult     = input.float(2.0, "ATR Multiplier", step=0.1)
+
+// EMA Exit Option
+useEMAExit  = input.bool(false, "Use EMA Exit Instead of ATR")
+emaLength   = input.int(20, "EMA Length for Exit")
+
+// ==== ALL TIME HIGH (Running Highest) ====
+ath = ta.highest(high, bar_index + 1)
+
+// ==== 52 WEEK HIGH (Weekly Data) ====
+weeklyHigh = request.security(syminfo.tickerid, "W", ta.highest(high, 52))
+
+// ==== ENTRY CONDITIONS ====
+breakATH  = useATH and close > ath[1]
+break52W  = use52W and close > weeklyHigh[1]
+
+longCondition = breakATH or break52W
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+// ==== ATR TRAILING STOP ====
+atr = ta.atr(atrLength)
+longStop = strategy.position_avg_price - (atr * atrMult)
+
+// Use built-in trailing stop if ATR mode
+if not useEMAExit
+    strategy.exit("ATR Exit", from_entry="Long", stop=longStop)
+
+// ==== EMA EXIT OPTION ====
+ema = ta.ema(close, emaLength)
+
+if useEMAExit and strategy.position_size > 0
+    if close < ema
+        strategy.close("Long")
+
+// ==== PLOTS ====
+plot(useATH ? ath : na, title="ATH", color=color.maroon, linewidth=2)
+plot(use52W ? weeklyHigh : na, title="52W High", color=color.red, linewidth=2)
+plot(useEMAExit ? ema : na, title="EMA Exit", color=color.blue)
+
+View in Pine Editor・51 lines
+Use on chart
+1
+1
+404
+Strategy Description
+
+This is a long-only breakout strategy designed to capture momentum when price moves into new highs.
+
+The system enters long positions when price breaks above either:
+
+The All-Time High (ATH), and/or
+
+The 52-Week High
+
+Both breakout conditions can be independently enabled or disabled.
+
+The idea is simple: when price pushes into uncharted territory, it often signals strength and expanding momentum. Rather than predicting reversals, this strategy focuses purely on participation in strength.
+
+Exit Logic
+
+Two exit methods are available:
+
+ATR-Based Stop (Default)
+A volatility-adjusted stop based on Average True Range (ATR). This allows positions room to move while adapting to changing market conditions.
+
+EMA Exit Option
+Alternatively, trades can be closed when price moves back below a chosen EMA length, providing a trend-based exit.
+
+Key Characteristics
+
+Fully mechanical rules
+
+Long-only (no shorting)
+
+Breakout-based entries
+
+Volatility-adjusted or trend-based exits
+
+Designed for trend continuation environments
+
+Concept
+
+Major highs represent areas where supply has previously entered the market. When price breaks above these levels, it can indicate strong demand and continuation potential.
+
+This strategy aims to systematically capture those expansion phases while managing downside risk through predefined exit rules.

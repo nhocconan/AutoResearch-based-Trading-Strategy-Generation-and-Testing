@@ -1,0 +1,134 @@
+//@version=6
+strategy("Confirmed Momentum QQQ (RSI/MACD Filter)",
+ overlay = true,
+ initial_capital = 10000,
+ default_qty_type = strategy.percent_of_equity,
+ default_qty_value = 10, // 10% of equity
+ pyramiding = 0)
+
+// === CONSTANTES ===
+const string TF = "15" // Fixed Timeframe for calculation
+const string SYM_ALLOWED = "QQQ" // Allowed symbol
+const string NY_TZ = "America/New_York"
+
+// === Inputs ===
+// Strategy Settings (Based on previous optimization)
+confirmOnClose = input.bool(true, "Confirmar señal al cierre")
+maxGapPtsShort = input.float(0.25, "Máx gap permitido en CORTOS (puntos)", 0.0, 1e6)
+tpPts = input.float(3.0, "Take Profit (puntos)", 0.01)
+slPts = input.float(1.5, "Stop Loss (puntos)", 0.01)
+
+// Optimized Session Times (09:30-10:00 & 13:30-16:00 ET)
+useSessions = input.bool(true, "Usar ventanas NY")
+sess1 = input.session("0930-1000", "Ventana 1 (NY)") // Morning Open
+sess2 = input.session("1330-1600", "Ventana 2 (NY)") // Afternoon Close
+flatOutside = input.bool(true, "Cerrar posición al salir de la ventana")
+
+// Indicator Lengths
+lenRSI = input.int(14, "RSI Length")
+lenFastMA = input.int(5, "Fast MA (Base Signal)")
+lenSlowMA = input.int(15, "Slow MA (Base Signal)")
+lenMACDFast = input.int(12, "MACD Fast Length")
+lenMACDSlow = input.int(26, "MACD Slow Length")
+lenMACDSignal = input.int(9, "MACD Signal Length")
+rsiOversold = input.int(30, "RSI Oversold Level")
+rsiOverbought = input.int(70, "RSI Overbought Level")
+
+
+// === Utilidades ===
+isAllowedSymbol() =>
+ (syminfo.ticker == SYM_ALLOWED) or str.contains(str.upper(syminfo.ticker), str.upper(SYM_ALLOWED))
+
+// === MTF Indicators (Calculation on TF="15") ===
+closeTF = request.security(syminfo.tickerid, TF, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// 1. BASE SIGNAL: SMA Crossover (MTF)
+smaFast = ta.sma(closeTF, lenFastMA)
+smaSlow = ta.sma(closeTF, lenSlowMA)
+longSignalBase = ta.crossover(smaFast, smaSlow)
+shortSignalBase = ta.crossunder(smaFast, smaSlow)
+
+// 2. CONFIRMATION FILTER 1: RSI (MTF)
+rsi = ta.rsi(closeTF, lenRSI)
+// Long confirmation: RSI must NOT be overbought (i.e., less room to fall)
+longConfirmRSI = rsi < rsiOverbought
+// Short confirmation: RSI must NOT be oversold (i.e., less room to rise)
+shortConfirmRSI = rsi > rsiOversold
+
+// 3. CONFIRMATION FILTER 2: MACD Trend Confirmation (MTF)
+[macdLine, signalLine, _] = ta.macd(closeTF, lenMACDFast, lenMACDSlow, lenMACDSignal)
+// Long confirmation: MACD line is above Signal line
+longConfirmMACD = macdLine > signalLine
+// Short confirmation: MACD line is below Signal line
+shortConfirmMACD = macdLine < signalLine
+
+// === Final Confirmed Signals (MTF) ===
+longSignalConfirmed = longSignalBase and longConfirmRSI and longConfirmMACD
+shortSignalConfirmed = shortSignalBase and shortConfirmRSI and shortConfirmMACD
+
+
+// === Sessions (evaluated in the chart's TF, NY zone) ===
+inSess1 = useSessions ? not na(time(timeframe.period, sess1, NY_TZ)) : true
+inSess2 = useSessions ? not na(time(timeframe.period, sess2, NY_TZ)) : true
+inSession = inSess1 or inSess2
+
+// Removed "1 trade/ventana" limit to increase frequency
+
+// === Filter NO-GAP ONLY for SHORTS (in POINTS) ===
+gapPts = math.abs(open - close[1])
+shortGapOK = maxGapPtsShort <= 0 ? true : (gapPts <= maxGapPtsShort)
+
+// === Gating (Entry Conditions) ===
+isFlat = strategy.position_size == 0
+canSignal = (not confirmOnClose or barstate.isconfirmed)
+canTrade = isAllowedSymbol() and inSession and canSignal // Removed canTakeMore, trades often
+
+
+// === ENTRADAS (Filled on the next bar's open) ===
+// Longs: SMA Cross + RSI NOT Overbought + MACD Bullish
+if canTrade and isFlat and longSignalConfirmed
+    strategy.entry("C-Long", strategy.long)
+
+// Shorts: SMA Cross + RSI NOT Oversold + MACD Bearish + Gap Filter
+if canTrade and isFlat and shortSignalConfirmed and shortGapOK
+    strategy.entry("C-Short", strategy.short)
+
+// === TP/SL in points (Tight risk management) ===
+if strategy.position_size > 0
+    e = strategy.position_avg_price
+    strategy.exit("TP/SL Long", from_entry="C-Long", limit=e + tpPts, stop=e - slPts)
+if strategy.position_size < 0
+    e = strategy.position_avg_price
+    strategy.exit("TP/SL Short", from_entry="C-Short", limit=e - tpPts, stop=e + slPts)
+
+// === Close outside session ===
+if flatOutside and not inSession and strategy.position_size != 0
+    strategy.close_all("Fuera de sesión")
+
+// === Visual (Plots) ===
+plot(smaFast, color=color.new(color.teal, 0), title="SMA 5 ("+TF+")")
+plot(smaSlow, color=color.new(color.orange, 0), title="SMA 15 ("+TF+")")
+plotshape(longSignalConfirmed and canTrade and isFlat, title="Confirmed Buy", style=shape.triangleup,
+ location=location.belowbar, color=color.new(color.lime,0), size=size.small, text="Confirmed Long")
+plotshape(shortSignalConfirmed and canTrade and isFlat and shortGapOK, title="Confirmed Sell", style=shape.triangledown,
+ location=location.abovebar, color=color.new(color.red,0), size=size.small, text="Confirmed Short")
+
+View in Pine Editor・114 lines
+Use on chart
+1
+8
+880
+Gemini and Myself,
+
+
+
+How This Targets a Higher Win Rate
+The key to the win rate increase is the RSI 20/80 filter.
+
+Long Signal: A long entry is now only taken if the trend is up (SMA cross), the MACD is bullish, and the RSI is not overbought (below 80). By only entering when momentum is not yet exhausted, you increase the chance that the price can travel far enough to hit your 4.0 point Take Profit.
+
+Wider SL: The wider Stop Loss of 2.5 points reduces the chance of being stopped out prematurely by routine market movements (whipsaws), which is the number one killer of win rates in high-frequency trading.
+
+After applying these changes, you will need to run the Strategy Tester again to see the new win rate and the new total number of trades.
+
+Would you like me to help you interpret the new Strategy Tester results once you apply these settings?

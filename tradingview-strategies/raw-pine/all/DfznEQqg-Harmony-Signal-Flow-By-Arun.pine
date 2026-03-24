@@ -1,0 +1,9 @@
+//@version=5
+lowerThreshold=##input(defval=30,type='INPUT_INTEGER',##id='in_1')
+upperThreshold=##input(defval=70,type='INPUT_INTEGER',##id='in_2')
+##root(root_metainfo,rm_0,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_1,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_2,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_3,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_4,lowerThreshold,input__float)
+##root(root_metainfo,rm_5,upperThreshold,input__float)

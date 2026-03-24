@@ -1,0 +1,318 @@
+//@version=6
+strategy(
+     title            = "Turtle Swing v2.0",
+     shorttitle       = "TURTLE-v2",
+     overlay          = true,
+     initial_capital  = 3000000,
+     default_qty_type = strategy.fixed,
+     default_qty_value= 1,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.1,
+     slippage         = 2,
+     currency         = currency.INR,
+     pyramiding       = 4
+     )
+
+// ============================================================
+// ─── INPUTS ─────────────────────────────────────────────────
+// ============================================================
+
+grp1 = "🐢 System Selection"
+sys_select  = input.string("Both", "Active System",
+     options=["System 1 (20-Day)", "System 2 (55-Day)", "Both"], group=grp1)
+
+grp2 = "📊 Donchian Channel Settings"
+s1_entry    = input.int(20, "S1 Entry Breakout (days)",  minval=5,  maxval=50,  group=grp2)
+s1_exit     = input.int(10, "S1 Exit Channel (days)",    minval=3,  maxval=30,  group=grp2)
+s2_entry    = input.int(55, "S2 Entry Breakout (days)",  minval=20, maxval=100, group=grp2)
+s2_exit     = input.int(15, "S2 Exit Channel (days)",    minval=5,  maxval=50,  group=grp2, tooltip="Tightened from 20→15 to exit faster on reversals")
+
+grp3 = "⚡ ATR / Risk Settings"
+atr_period  = input.int(20,        "ATR Period (N)",            minval=5,  maxval=50,  group=grp3)
+atr_mult    = input.float(1.5,     "Stop Loss Multiplier",      minval=0.5,maxval=5.0, step=0.25, group=grp3,
+     tooltip="v2: Default tightened to 1.5N (was 2.0N). Reduces loss on reversals.")
+pyramid_n   = input.float(0.5,     "Pyramid Step (½N)",         minval=0.1,maxval=2.0, step=0.1,  group=grp3)
+risk_pct    = input.float(1.0,     "Risk % per Unit",           minval=0.1,maxval=3.0, step=0.1,  group=grp3)
+portfolio   = input.float(3000000, "Portfolio Value (₹)",       minval=100000,          group=grp3)
+
+grp4 = "🔍 Trend & Momentum Filters"
+use_ema         = input.bool(true,  "Use EMA Trend Filter",          group=grp4)
+ema_period      = input.int(50,     "EMA Period",  minval=10, maxval=200, group=grp4)
+use_ema_slope   = input.bool(true,  "EMA Slope Guard (Pyramid only)",group=grp4,
+     tooltip="NEW v2: Only pyramid when EMA is rising. Prevents adding units in topping markets.")
+ema_slope_bars  = input.int(5,      "EMA Slope Lookback (bars)",     minval=2, maxval=20, group=grp4)
+
+use_rsi         = input.bool(true,  "RSI Momentum Filter",           group=grp4,
+     tooltip="NEW v2: Only enter when RSI > threshold. Filters weak/exhausted breakouts.")
+rsi_period      = input.int(14,     "RSI Period",  minval=5,  maxval=30,  group=grp4)
+rsi_threshold   = input.int(52,     "RSI Min Threshold",             minval=40, maxval=70,  group=grp4,
+     tooltip="Recommended: 52–55. Above 50 = bullish momentum confirmed.")
+
+use_vol         = input.bool(true,  "Volume Confirmation",           group=grp4)
+vol_mult        = input.float(1.0,  "Min Volume vs 20d Avg",         minval=0.5, maxval=3.0, step=0.1, group=grp4)
+
+use_s1_filter   = input.bool(true,  "S1 Whipsaw Filter",             group=grp4,
+     tooltip="NEW v2: Skip S1 entry if previous S1 trade was profitable (avoids chasing in choppy markets)")
+
+grp5 = "🎨 Display Settings"
+show_s1     = input.bool(true,  "Show System 1 Channel", group=grp5)
+show_s2     = input.bool(true,  "Show System 2 Channel", group=grp5)
+show_atr    = input.bool(true,  "Show ATR Stop Level",   group=grp5)
+show_labels = input.bool(true,  "Show Entry Labels",     group=grp5)
+show_table  = input.bool(true,  "Show Info Table",       group=grp5)
+show_rsi    = input.bool(false, "Show RSI Line (Pane)",  group=grp5)
+
+// ============================================================
+// ─── CORE CALCULATIONS ──────────────────────────────────────
+// ============================================================
+
+// ── ATR (N) ──
+N = ta.atr(atr_period)
+
+// ── Donchian Channels ──
+s1_high    = ta.highest(high, s1_entry)
+s1_low     = ta.lowest(low,   s1_entry)
+s1_ex_low  = ta.lowest(low,   s1_exit)
+s1_mid     = (s1_high + s1_low) / 2
+
+s2_high    = ta.highest(high, s2_entry)
+s2_low     = ta.lowest(low,   s2_entry)
+s2_ex_low  = ta.lowest(low,   s2_exit)
+s2_mid     = (s2_high + s2_low) / 2
+
+// ── EMA + Slope ──
+ema50       = ta.ema(close, ema_period)
+above_ema   = close > ema50
+ema_rising  = ema50 > ema50[ema_slope_bars]   // ✅ NEW: slope guard
+ema_col     = ema_rising ? color.new(color.green, 20) : color.new(color.red, 20)
+
+// ── RSI ── ✅ NEW
+rsi_val     = ta.rsi(close, rsi_period)
+rsi_ok      = use_rsi ? rsi_val > rsi_threshold : true
+rsi_bull    = rsi_val > 50
+
+// ── Volume ──
+vol_avg     = ta.sma(volume, 20)
+vol_ok      = use_vol ? volume >= (vol_avg * vol_mult) : true
+
+// ── Combined Trend Filter ──
+trend_ok    = use_ema ? above_ema : true
+
+// ── S1 Whipsaw Filter ── ✅ NEW
+// Track if last closed S1 trade was profitable
+var bool last_s1_profitable = false
+if strategy.closedtrades > 0
+    last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    last_s1_profitable := last_trade_profit > 0
+
+s1_whipsaw_ok = use_s1_filter ? not last_s1_profitable : true
+
+// ── Entry Signals ──
+s1_long_sig = close > s1_high[1] and trend_ok and vol_ok and rsi_ok and s1_whipsaw_ok
+s2_long_sig = close > s2_high[1] and trend_ok and vol_ok and rsi_ok
+
+// ── Position Sizing ──
+risk_amt      = portfolio * (risk_pct / 100)
+stop_distance = atr_mult * N
+unit_shares   = math.floor(risk_amt / stop_distance)
+long_stop     = close - stop_distance
+pyramid_step  = pyramid_n * N
+
+// ── System Flags ──
+use_s1 = sys_select == "System 1 (20-Day)" or sys_select == "Both"
+use_s2 = sys_select == "System 2 (55-Day)" or sys_select == "Both"
+
+// ── Pyramid Guard: EMA must be rising ── ✅ NEW
+pyramid_ok = use_ema_slope ? ema_rising : true
+
+// ============================================================
+// ─── STRATEGY ENTRIES ───────────────────────────────────────
+// ============================================================
+
+// System 1 Entry
+if use_s1 and s1_long_sig and strategy.position_size == 0
+    strategy.entry("S1-Long", strategy.long, qty=unit_shares, comment="🐢 S1 Entry")
+    strategy.exit("S1-SL", from_entry="S1-Long", stop=long_stop, comment="S1 Stop")
+
+// System 2 Entry
+if use_s2 and s2_long_sig and strategy.position_size == 0
+    strategy.entry("S2-Long", strategy.long, qty=unit_shares, comment="🐢 S2 Entry")
+    strategy.exit("S2-SL", from_entry="S2-Long", stop=long_stop, comment="S2 Stop")
+
+// ── Pyramiding with EMA Slope Guard ── ✅ IMPROVED
+var float pyramid_base  = na
+var int   pyramid_count = 0
+
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    pyramid_base  := strategy.position_avg_price
+    pyramid_count := 1
+
+if strategy.position_size > 0 and not na(pyramid_base) and pyramid_ok
+    next_add = pyramid_base + (pyramid_count * pyramid_step)
+    if close >= next_add and pyramid_count < 4
+        strategy.entry("Pyramid-" + str.tostring(pyramid_count + 1),
+             strategy.long, qty=unit_shares,
+             comment="➕ Unit " + str.tostring(pyramid_count + 1))
+        pyramid_count := pyramid_count + 1
+
+if strategy.position_size == 0
+    pyramid_base  := na
+    pyramid_count := 0
+
+// ── Exits ──
+// S1 Exit: 10-day low
+if use_s1 and strategy.position_size > 0
+    strategy.exit("S1-Exit", stop=s1_ex_low, comment="S1 Exit (10d)")
+
+// S2 Exit: 15-day low (tightened from 20) ✅ IMPROVED
+if use_s2 and strategy.position_size > 0
+    strategy.exit("S2-Exit", stop=s2_ex_low, comment="S2 Exit (15d)")
+
+// EMA Exit: close below 50 EMA ✅ RETAINED
+if use_ema and strategy.position_size > 0 and close < ema50
+    strategy.close_all(comment="EMA Exit ⚠️")
+
+// ============================================================
+// ─── PLOTTING ───────────────────────────────────────────────
+// ============================================================
+
+// ── System 1 Channel (Blue) ──
+p_s1_h = plot(show_s1 ? s1_high : na, "S1 Upper", color=color.new(color.blue, 50), linewidth=1, style=plot.style_stepline)
+p_s1_l = plot(show_s1 ? s1_low  : na, "S1 Lower", color=color.new(color.blue, 50), linewidth=1, style=plot.style_stepline)
+plot(show_s1 ? s1_mid  : na, "S1 Mid",   color=color.new(color.blue, 75), linewidth=1, style=plot.style_stepline)
+fill(p_s1_h, p_s1_l, color=color.new(color.blue, 93), title="S1 Fill")
+
+// ── System 2 Channel (Orange) ──
+p_s2_h = plot(show_s2 ? s2_high : na, "S2 Upper", color=color.new(color.orange, 35), linewidth=2, style=plot.style_stepline)
+p_s2_l = plot(show_s2 ? s2_low  : na, "S2 Lower", color=color.new(color.orange, 35), linewidth=2, style=plot.style_stepline)
+plot(show_s2 ? s2_mid  : na, "S2 Mid",   color=color.new(color.orange, 65), linewidth=1, style=plot.style_stepline)
+fill(p_s2_h, p_s2_l, color=color.new(color.orange, 92), title="S2 Fill")
+
+// ── 50 EMA — colour changes with slope ── ✅ IMPROVED
+plot(use_ema ? ema50 : na, "50 EMA", color=ema_col, linewidth=2)
+
+// ── ATR Stop (when in position) ──
+atr_stop_line = strategy.position_size > 0 ? strategy.position_avg_price - stop_distance : na
+plot(show_atr ? atr_stop_line : na, "ATR Stop", color=color.new(color.red, 10), linewidth=1, style=plot.style_linebr)
+
+// ── RSI pane line (optional) ── ✅ NEW
+plot(show_rsi ? rsi_val : na, "RSI", color=color.new(color.fuchsia, 0), linewidth=1)
+hline(show_rsi ? rsi_threshold : na, "RSI Threshold", color=color.new(color.gray, 50), linestyle=hline.style_dashed)
+hline(show_rsi ? 50 : na,            "RSI 50",         color=color.new(color.white, 60), linestyle=hline.style_dotted)
+
+// ── Signal Shapes ──
+plotshape(s1_long_sig and strategy.position_size[1] == 0 and use_s1,
+     title="S1 Buy", style=shape.triangleup,
+     location=location.belowbar, color=color.blue, size=size.small, text="S1")
+
+plotshape(s2_long_sig and strategy.position_size[1] == 0 and use_s2,
+     title="S2 Buy", style=shape.triangleup,
+     location=location.belowbar, color=color.orange, size=size.normal, text="S2")
+
+// ── Pyramid Labels ──
+if show_labels and strategy.position_size > 0 and strategy.position_size > strategy.position_size[1]
+    label.new(bar_index, low, "➕ U" + str.tostring(pyramid_count),
+         style=label.style_label_up,
+         color=color.new(pyramid_ok ? color.green : color.gray, 30),
+         textcolor=color.white, size=size.small)
+
+// ── Blocked Pyramid Warning (EMA slope guard active) ── ✅ NEW
+plotshape(strategy.position_size > 0 and not pyramid_ok and close >= (strategy.position_avg_price + pyramid_step) and use_ema_slope,
+     title="Pyramid Blocked", style=shape.xcross,
+     location=location.abovebar, color=color.new(color.red, 30), size=size.tiny, text="⛔")
+
+// ── Background: EMA Exit Zone ──
+bgcolor(use_ema and strategy.position_size > 0 and close < ema50 ?
+     color.new(color.red, 85) : na, title="EMA Exit Warning")
+
+// ── Background: RSI Weak Zone (entry blocked) ── ✅ NEW
+bgcolor(use_rsi and not rsi_ok and strategy.position_size == 0 ?
+     color.new(color.gray, 93) : na, title="RSI Filter Active")
+
+// ============================================================
+// ─── INFO TABLE (v2 — Expanded) ─────────────────────────────
+// ============================================================
+
+if show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 13,
+         bgcolor=color.new(color.black, 15),
+         border_color=color.new(color.gray, 50),
+         border_width=1, frame_color=color.gray, frame_width=1)
+
+    // Header
+    table.cell(t, 0, 0, "🐢 TURTLE v2.0",  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(t, 1, 0, "STATUS",           text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 20))
+
+    // N (ATR)
+    table.cell(t, 0, 1, "N  (ATR-" + str.tostring(atr_period) + ")",
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(N, "#.##"),
+         text_color=color.aqua, text_size=size.small)
+
+    // Stop
+    table.cell(t, 0, 2, "Stop (" + str.tostring(atr_mult) + "N)",
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(stop_distance, "#.##"),
+         text_color=color.red, text_size=size.small)
+
+    // Unit
+    table.cell(t, 0, 3, "Unit Shares",      text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(unit_shares) + " qty",
+         text_color=color.lime, text_size=size.small)
+
+    // Risk
+    table.cell(t, 0, 4, "Risk / Unit",      text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(math.round(risk_amt), "#"),
+         text_color=color.orange, text_size=size.small)
+
+    // S1 Level
+    table.cell(t, 0, 5, "S1 High (" + str.tostring(s1_entry) + "d)",
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(s1_high, "#.##"),
+         text_color=color.blue, text_size=size.small)
+
+    // S2 Level
+    table.cell(t, 0, 6, "S2 High (" + str.tostring(s2_entry) + "d)",
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 6, str.tostring(s2_high, "#.##"),
+         text_color=color.orange, text_size=size.small)
+
+    // EMA
+    table.cell(t, 0, 7, "50 EMA",           text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(ema50, "#.##") + (above_ema ? " ✅" : " ❌"),
+         text_color=above_ema ? color.lime : color.red, text_size=size.small)
+
+    // EMA Slope ✅ NEW
+    table.cell(t, 0, 8, "EMA Slope",        text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 8, ema_rising ? "Rising ↗" : "Falling ↘",
+         text_color=ema_rising ? color.lime : color.red, text_size=size.small)
+
+    // RSI ✅ NEW
+    table.cell(t, 0, 9, "RSI (" + str.tostring(rsi_period) + ")",
+         text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 9, str.tostring(rsi_val, "#.#") + (rsi_ok ? " ✅" : " ❌"),
+         text_color=rsi_ok ? color.lime : color.orange, text_size=size.small)
+
+    // Pyramid Step
+    table.cell(t, 0, 10, "Pyramid Step",    text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(pyramid_step, "#.##") + (pyramid_ok ? " ✅" : " ⛔"),
+         text_color=pyramid_ok ? color.yellow : color.red, text_size=size.small)
+
+    // Active Units
+    table.cell(t, 0, 11, "Active Units",    text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 11, str.tostring(pyramid_count) + " / 4",
+         text_color=pyramid_count > 0 ? color.lime : color.gray, text_size=size.small)
+
+    // Entry Ready?
+    entry_ready = trend_ok and rsi_ok and vol_ok
+    table.cell(t, 0, 12, "Entry Ready?",    text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 12, entry_ready ? "✅ YES" : "❌ NO",
+         text_color=entry_ready ? color.lime : color.red,
+         text_size=size.small,
+         bgcolor=entry_ready ? color.new(color.green, 80) : color.new(color.red, 80))
+
+View in Pine Editor・326 lines
+Use on chart
+4
+269
+A faithful adaptation of Richard Dennis's legendary Turtle Trading System, retuned for the weekly timeframe on NSE/BSE equities. Where the original Turtles traded daily commodity futures, this version trades weekly breakouts on Indian stocks — filtering out the noise of intraday swings and focusing on high-conviction trend moves that last weeks to months.

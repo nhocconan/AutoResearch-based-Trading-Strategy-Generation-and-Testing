@@ -1,0 +1,33 @@
+//@version=2
+strategy("1 min forex scalping", shorttitle="Scalping", overlay=true)
+a = ema(close, 12)
+b = ema(close, 26)
+c = sma(close, 55)
+
+TP = input(0)
+SL = input(0)
+TS = input(0)
+
+long = cross(a, c) and a > b
+short = cross(a, c) and a < b
+plot(a, title="12", color=red, linewidth=1)
+plot(b, title="26", color=blue, linewidth=1)
+plot(c, title="55", color=green, linewidth=1)
+
+strategy.entry("Long", strategy.long, 1.0, when=long)
+strategy.entry("Short", strategy.short, 1.0, when=short)
+
+TPP = (TP > 0) ? TP : na
+SLP = (SL > 0) ? SL : na
+TSP = (TS > 0) ? TS : na
+strategy.exit("Close Long", "Long", qty_percent=100, profit=TPP, loss=SLP, trail_points=TSP)
+strategy.exit("Close Short", "Short", qty_percent=100, profit=TPP, loss=SLP, trail_points=TSP)
+
+View in Pine Editor・24 lines
+Use on chart
+5
+9
+2
+6
+30 807
+1 min forex scalping

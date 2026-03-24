@@ -1,0 +1,177 @@
+//@version=6
+strategy(
+    "Stoch RSI + RSI Auto Buy Bot (XAUUSD 20 USD SL + Break-Even)",
+    overlay = true,
+    initial_capital = 10000,
+    pyramiding = 0
+)
+
+// === INPUTS ===
+rsiLength        = input.int(14, "RSI Length")
+stochLength      = input.int(14, "Stoch RSI Length")
+kLength          = input.int(3,  "K Smoothing")
+dLength          = input.int(3,  "D Smoothing")
+maxLossUSD       = input.float(20, "Stop Loss ($)", minval = 1)
+breakEvenTrigger = input.float(10, "Break-Even Trigger Profit ($)", minval = 1)
+
+// === INDICATORS ===
+// RSI
+rsiValue = ta.rsi(close, rsiLength)
+
+// Correct Stochastic RSI
+rsiLow  = ta.lowest(rsiValue, stochLength)
+rsiHigh = ta.highest(rsiValue, stochLength)
+stochRsi = (rsiHigh - rsiLow == 0) ? 0 : (rsiValue - rsiLow) / (rsiHigh - rsiLow) * 100
+
+k = ta.sma(stochRsi, kLength)
+d = ta.sma(k, dLength)
+
+// === CONDITIONS ===
+buyCondition  = (k < 5) and (rsiValue < 25) and (strategy.position_size == 0)
+sellCondition = (k > 95) and (strategy.position_size > 0)
+
+// === VARIABLES WITH TYPES ===
+var float stopLossPrice = na
+var float breakEvenPrice = na
+var bool moveToBreakEven = false
+
+// === STOP LOSS LOGIC ===
+if strategy.position_size > 0
+    stopLossPrice := strategy.position_avg_price - maxLossUSD
+
+// === BREAK-EVEN LOGIC ===
+if strategy.position_size > 0
+    breakEvenPrice  := strategy.position_avg_price
+    moveToBreakEven := close >= strategy.position_avg_price + breakEvenTrigger
+
+// === ENTRY ===
+if buyCondition
+    strategy.entry("BUY", strategy.long)
+
+// === SELL EXIT ===
+if sellCondition
+    strategy.close("BUY")
+
+// === STOP LOSS + BREAK-EVEN EXIT ===
+if strategy.position_size > 0
+    strategy.exit(
+        "EXIT",
+        from_entry = "BUY",
+        stop = moveToBreakEven ? breakEvenPrice : stopLossPrice
+    )
+
+// === PLOTS ===
+plot(k, title = "Stoch RSI K", color = color.blue)
+plot(d, title = "Stoch RSI D", color = color.orange)
+plot(rsiValue, title = "RSI", color = color.purple)
+
+hline(5,  "Stoch RSI Buy Level",  color = color.green)
+hline(95, "Stoch RSI Sell Level", color = color.red)
+hline(25, "RSI Buy Level",        color = color.gray)
+
+View in Pine Editor・73 lines
+Use on chart
+1
+4
+705
+Strategy Name
+
+Stochastic RSI + RSI Auto Buy Bot (XAUUSD) with $20 Stop Loss & Break-Even
+
+Market
+
+Instrument: XAUUSD (Gold)
+
+Direction: Buy-only (long bias)
+
+Typical Timeframes: M5 – M15 (can be adapted to M30)
+
+Gold tends to respect momentum reversals and overbought/oversold conditions well on lower timeframes, which is why RSI-based confirmation works nicely here.
+
+Indicators Used
+
+RSI (Relative Strength Index)
+
+Period: Commonly 14
+
+Used to identify oversold conditions and momentum shift
+
+Stochastic RSI
+
+Used for precise entry timing
+
+Confirms RSI signals and avoids early entries
+
+Entry Conditions (BUY)
+
+All conditions must align:
+
+RSI Condition
+
+RSI is below 30 (oversold zone)
+
+RSI starts turning upward or crosses above a confirmation level (e.g. 30–35)
+
+Stochastic RSI Condition
+
+Stoch RSI is in oversold zone (below 20)
+
+%K crosses above %D (bullish crossover)
+
+Market Context (Filter)
+
+Prefer price near support, previous low, or after a pullback
+
+Avoid buying during high-impact news spikes
+
+Once these conditions align, the bot executes a market buy.
+
+Risk Management
+
+This is the backbone of the strategy.
+
+Stop Loss
+
+Fixed $20 Stop Loss
+
+Designed to survive normal XAUUSD volatility while protecting capital
+
+Break-Even Rule
+
+When price moves X pips / dollars into profit (example: +$15 or +1R):
+
+Stop Loss is automatically moved to entry price
+
+Trade becomes risk-free
+
+This prevents winning trades from turning into losers and allows the bot to let profits run psychologically and mechanically.
+
+Take Profit Logic
+
+One of the following (depending on bot setup):
+
+Dynamic TP
+
+Exit when RSI reaches overbought (65–70)
+
+Or when Stoch RSI exits overbought
+
+Partial Close (Optional)
+
+Close part of the position at 1R
+
+Let the rest run with break-even or trailing stop
+
+Why This Strategy Works
+
+RSI identifies exhausted sellers
+
+Stoch RSI provides precise timing
+
+Fixed SL keeps losses controlled
+
+Break-even protects capital
+
+Gold’s volatility amplifies clean momentum reversals
+
+This combo filters weak entries and focuses only on high-probability bounce trades.

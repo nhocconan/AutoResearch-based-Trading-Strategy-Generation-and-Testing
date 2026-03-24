@@ -1,0 +1,45 @@
+//@version=4
+strategy("Linear trend", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, currency='USD')
+startP = timestamp(input(2017, "Start Year"), input(12, "Month"), input(17, "Day"), 0, 0)
+end   = timestamp(input(9999, "End Year"),   input(1, "Month"),   input(1, "Day"),   0, 0)
+_testPeriod() =>
+    iff(time >= startP and time <= end, true, false)
+
+src = close
+len1 = input(defval=13, minval=1, title="Fast LR")
+len2 = input(defval=55, minval=1, title="Slow LR")
+
+lag1 = input(0, title="Lag for fast")
+lag2 = input(0, title="Lag for slow")
+
+threshold  = input(0,step=0.5, title="Threshold")
+
+fast_lr = linreg(src, len1, lag1)
+slow_lr = linreg(src, len2, lag2)
+lr = fast_lr - slow_lr
+plot_fast = plot(lr, color = lr > 0 ? color.green : color.red)
+plot(threshold, color=color.purple)
+
+long_condition = crossover(lr, threshold) and close > ema(close, 200) and _testPeriod()
+strategy.entry('BUY', strategy.long, when=long_condition) 
+
+short_condition = crossunder(lr, threshold) 
+strategy.close('BUY', when=short_condition)
+
+View in Pine Editor・30 lines
+Use on chart
+1
+1
+3
+7 165
+Simple way how to use Linear Regression for trading.
+
+What we use:
+• Linear Regression
+• EMA 200 as a trend filter
+
+Logic:
+Firstly we make two different linear regression movings as oscillator. For this we need to subtract slow moving from fast moving, so we get the single moving around zero. This is the green/red line which appears on the chart.
+The trade open when LR cross over the threshold. The trade close when LR cross under the threshold below. Crossing over the threshold is the same as faster moving cross over slower moving.
+Also we use EMA as a filter. The trades would be only when the price is over than EMA 200.
+

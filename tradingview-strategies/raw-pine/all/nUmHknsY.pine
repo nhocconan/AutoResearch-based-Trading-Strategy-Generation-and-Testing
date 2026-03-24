@@ -1,0 +1,65 @@
+//@version=5
+strategy("ETH Multi-Direction – BB + 2 Candles", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ====== 输入参数 ======
+bbLength = input.int(20, "布林带周期")
+bbMult   = input.float(2.0, "布林带标准差倍数")
+emaTrendLen = input.int(20, "30分钟趋势EMA周期")
+atrLen   = input.int(14, "ATR 止盈周期")
+trailMult = input.float(1.5, "移动止盈倍数 (ATR)")
+
+// ====== 30分钟趋势判断（决定主方向）======
+ema30 = request.security(syminfo.tickerid, "30", ta.ema(close, emaTrendLen))
+close30 = request.security(syminfo.tickerid, "30", close)
+trendUp   = close30 > ema30 and ema30 > ema30[1]
+trendDown = close30 < ema30 and ema30 < ema30[1]
+
+// ====== 5分钟布林带中轨 ======
+basis5 = ta.sma(close, bbLength)
+dev5 = ta.stdev(close, bbLength) * bbMult
+
+// 回踩中轨：价格穿过中轨（允许上下）
+touchedMid = low <= basis5 and basis5 <= high
+
+// 连续2根K线
+isBull1 = close[1] > open[1]
+isBull2 = close > open
+twoBull = isBull1 and isBull2
+
+isBear1 = close[1] < open[1]
+isBear2 = close < open
+twoBear = isBear1 and isBear2
+
+// ====== 开仓条件 ======
+longCondition  = trendUp   and touchedMid and twoBull
+shortCondition = trendDown and touchedMid and twoBear
+
+// ====== 执行交易 ======
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    atrVal = ta.atr(atrLen)
+    strategy.exit("Trail Exit Long", "Long", stop=basis5 - atrVal * trailMult)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    atrVal = ta.atr(atrLen)
+    strategy.exit("Trail Exit Short", "Short", stop=basis5 + atrVal * trailMult)
+
+// ====== 可视化 ======
+plot(basis5, title="布林带中轨", color=color.orange, linewidth=2)
+plotshape(longCondition,  title="做多", location=location.belowbar,  color=color.green,  style=shape.triangleup,   size=size.small)
+plotshape(shortCondition, title="做空", location=location.abovebar, color=color.red,    style=shape.triangledown, size=size.small)
+
+// ====== 策略说明 ======
+// ✅ 品种：ETHUSDT（或其他）
+// ✅ 周期：5分钟主图 + 30分钟趋势过滤
+// ✅ 多头：30分钟上涨 + 回踩中轨 + 2阳线
+// ✅ 空头：30分钟下跌 + 回踩中轨 + 2阴线
+// ✅ 止盈：ATR动态移动止盈（多单向下追，空单向上追）
+
+View in Pine Editor・58 lines
+Use on chart
+9
+435
+A 5-minute ETHUSDT trading strategy that trades in the direction of the higher timeframe:30-minute EMA trend filter: Only long when uptrend, only short when downtrendEntry trigger: Price retests the Bollinger Band midline + 2 consecutive bullish/bearish candlesDynamic trailing stop: ATR-based trailing exit to lock in profits✅ Supports long-only, short-only, or full long/short mode
+💡 Fully compatible with Gate.io, Bybit, and other exchanges supporting trailing stops

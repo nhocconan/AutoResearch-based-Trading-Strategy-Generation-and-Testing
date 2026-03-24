@@ -1,0 +1,91 @@
+//@version=5
+strategy("Trailing Monster Strategy", overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.03)
+
+length12 = input.int(40, title='PKAMA Length')
+factor = input.float(2.0, title='PKAMA Factor')
+sp = input.bool(true, title='Self Powered PKAMA')
+barsBetweenEntries = input.int(3, title="Bars Between Entries")
+trailingStopPct = input.float(12.0, title="Trailing Stop %", minval=0.1)
+delayBars = input.int(3, title="Delay Trailing by N Bars", minval=1)
+rsiLength = input.int(14, title="RSI Length")
+rsiOverbought = input.int(70, title="RSI Overbought Level")
+rsiOversold = input.int(30, title="RSI Oversold Level")
+smaLength = input.int(200, title="SMA Length")
+
+er = math.abs(ta.change(close, length12)) / math.sum(math.abs(ta.change(close)), length12)
+pow = sp ? 1 / er : factor
+per = math.pow(er, pow)
+a = 0.0
+a := per * close + (1 - per) * nz(a[1], close)
+bullish = a > a[1]
+bearish = a < a[1]
+rsi = ta.rsi(close, rsiLength)
+sma = ta.sma(close, smaLength)
+
+var int lastTradeBar = na
+canEnter = na(lastTradeBar) or (bar_index - lastTradeBar >= barsBetweenEntries)
+inPosition = strategy.opentrades > 0
+barsInPosition = inPosition ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+trailReady = barsInPosition >= delayBars
+trail_offset = strategy.position_avg_price * trailingStopPct / 100
+longSignal = rsi > rsiOverbought and close > sma and bullish and canEnter
+shortSignal = rsi < rsiOversold and close < sma and bearish and canEnter
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    lastTradeBar := bar_index
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    lastTradeBar := bar_index
+
+if inPosition and trailReady
+    if strategy.position_size > 0
+        strategy.exit("Trailing TP", from_entry="Long", trail_points=trail_offset, trail_offset=trail_offset)
+    if strategy.position_size < 0
+        strategy.exit("Trailing TP", from_entry="Short", trail_points=trail_offset, trail_offset=trail_offset)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+7
+1
+1
+3 543
+Trailing Monster Strategy
+This is an experimental trend-following strategy that incorporates a custom adaptive moving average (PKAMA), RSI-based momentum filtering, and dynamic trailing stop-loss logic. It is designed for educational and research purposes only, and may require further optimization or risk management considerations prior to live deployment.
+
+Strategy Logic
+The strategy attempts to participate in sustained price trends by combining:
+- A Power Kaufman Adaptive Moving Average (PKAMA) for dynamic trend detection,
+- RSI and Simple Moving Average (SMA) filters for market condition confirmation,
+- A delayed trailing stop-loss to manage exits once a trade is in profit.
+
+Entry Conditions
+Long Entry:
+- RSI exceeds the overbought threshold (default: 70),
+- Price is trading above the 200-period SMA,
+- PKAMA slope is positive (indicating upward momentum),
+- A minimum number of bars have passed since the last entry.
+Short Entry:
+- RSI falls below the oversold threshold (default: 30),
+- Price is trading below the 200-period SMA,
+- PKAMA slope is negative (indicating downward momentum),
+-A minimum number of bars have passed since the last entry.
+
+Exit Conditions
+- A trailing stop-loss is applied once the position has been open for a user-defined number of bars.
+- The trailing distance is calculated as a fixed percentage of the average entry price.
+
+Technical Notes
+This script implements a custom version of the Power Kaufman Adaptive Moving Average (PKAMA), conceptually inspired by alexgrover’s public implementation on TradingView https://www.tradingview.com/script/Jh0YGJr0-Powered-Kaufman-Adaptive-Moving-Average/.
+Unlike traditional moving averages, PKAMA dynamically adjusts its responsiveness based on recent market volatility, allowing it to better capture trend changes in fast-moving assets like altcoins.
+
+Disclaimer
+This strategy is provided for educational purposes only.
+It is not financial advice, and no guarantee of profitability is implied.
+Always conduct thorough backtesting and forward testing before using any strategy in a live environment.
+Adjust inputs based on your individual risk tolerance, asset class, and trading style.
+
+Feedback is encouraged. You are welcome to fork and modify this script to suit your own preferences and market approach.
+
+

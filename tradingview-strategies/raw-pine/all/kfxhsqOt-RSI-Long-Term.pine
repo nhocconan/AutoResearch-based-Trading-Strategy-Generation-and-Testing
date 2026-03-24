@@ -1,0 +1,35 @@
+//@version=2
+// use with eurusd h1 , gbpusd h1
+strategy("RSI Long Term", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+RSI = (rsi(sum(close , 20) + sum(open ,20) , 20 ))
+Sum_OF_3_Both = sum((close - open)*100000 , 3) 
+Up_Move = ((close[0] - open[0])*100000) < 35
+
+
+
+Down_Move = ((close[6] - open[6])*100000) + ((close[5] - open[5])*100000) + ((close[4] - open[4])*100000) < -400
+
+
+maxIdLossPcnt = input(10, "Max Intraday Loss(%)", type=float)
+
+strategy.risk.max_intraday_loss(maxIdLossPcnt, strategy.percent_of_equity)
+//total =  (num > 70 )
+
+if (Sum_OF_3_Both > 350 and Up_Move )
+    strategy.entry("Bar Up Buy", strategy.long)
+
+if (Sum_OF_3_Both < -200  and Down_Move and RSI > 30.1  )
+    strategy.entry("Bar Down Sell ", strategy.short)
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・24 lines
+Use on chart
+9
+9
+3 945
+This strategy work good with long term ?
+but only can check this in 9 month's
+i am still working to see if it really works on 10 year data ( actually i still do not know how to do that in this site any idea ?)
+and increase the trade number
+

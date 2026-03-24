@@ -1,0 +1,300 @@
+//@version=6
+strategy('MACD + EMA200 MTF - DAYTRADING OPTIMIZED', overlay=true, initial_capital=10000, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, process_orders_on_close=true, calc_on_every_tick=true, max_labels_count=500)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+webhookUsername = input.string("", "Webhook Username", group="Webhook", inline="wh1", tooltip="Enter your webhook username")
+webhookApiKey = input.string("", "API Key", group="Webhook", inline="wh1", display=display.none, tooltip="Enter your API key")
+tradingPair = input.string("USDCHF", "Trading Pair", group="Webhook", tooltip="Symbol to trade (e.g., USDCHF, EURUSD, GBPUSD)")
+cooldownBars = input.int(5, "Cooldown After Exit (bars)", minval=1, group="Strategy")
+accountBalance = input.float(10000, "Account Balance (EUR)", minval=100, maxval=1000000, step=100, group="Strategy", tooltip="For reference only - does not affect fixed lot sizing")
+
+// NEW: Position Sizing Options
+useDynamicSize = input.bool(false, "Use Dynamic Position Sizing", group="Position Sizing")
+riskPercent = input.float(2.0, "Risk % (Dynamic)", minval=0.1, maxval=10, step=0.1, group="Position Sizing", tooltip="Only used if Dynamic Position Sizing is enabled")
+fixedLotSize = input.float(0.40, "Fixed Lot Size", minval=0.01, maxval=100, step=0.01, group="Position Sizing", tooltip="Used when Dynamic Position Sizing is disabled")
+
+leverage = input.int(30, "Leverage", minval=1, maxval=500, group="Strategy")
+emaLength = input.int(200, "EMA Length", minval=1, group="Trend")
+macdFast = input.int(12, "MACD Fast", minval=1, group="MACD")
+macdSlow = input.int(26, "MACD Slow", minval=1, group="MACD")
+macdSignal = input.int(9, "MACD Signal", minval=1, group="MACD")
+minTFAlign = input.int(3, "Min Timeframes Aligned", minval=3, maxval=6, group="MTF")
+atrLen = input.int(14, "ATR Period", minval=1, group="Risk")
+atrSmooth = input.string("RMA", "ATR Smoothing", options=["RMA", "SMA", "EMA", "WMA"], group="Risk")
+atrMult = input.float(1.5, "ATR Multiplier", minval=0.1, step=0.1, group="Risk")
+tpRatio = input.float(1.5, "Take Profit (R:R)", minval=0.1, step=0.1, group="Risk")
+tradingStartHour = input.int(7, "Start Hour", minval=0, maxval=23, group="Hours")
+tradingStartMin = input.int(0, "Start Minute", minval=0, maxval=59, group="Hours")
+tradingEndHour = input.int(19, "End Hour", minval=0, maxval=23, group="Hours")
+tradingEndMin = input.int(0, "End Minute", minval=0, maxval=59, group="Hours")
+eodCloseHour = input.int(21, "EOD Force-Close Hour", minval=0, maxval=23, group="Hours", tooltip="Hour to force-close any open position (Vienna time)")
+eodCloseMin = input.int(45, "EOD Force-Close Minute", minval=0, maxval=59, group="Hours", tooltip="Minute to force-close any open position (Vienna time)")
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// STATE VARIABLES
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+var float entryPrice = na, var float slPrice = na, var float tpPrice = na
+var line entryLine = na, var line slLine = na, var line tpLine = na
+var int tradeEntryBar = na, var int lastExitBar = na
+var string currentDirection = na
+var bool exitAlertSent = false, var float currentLotSize = na
+var bool linesDrawn = false, var bool labelDrawn = false
+var table tradeTable = table.new(position.top_right, 2, 5, border_width=2, border_color=color.blue, frame_color=color.blue, frame_width=2)
+
+// Daily Loss Streak Tracking
+var int consecutiveLosses = 0
+var int lastLossDay = na
+var bool dailyTradingBlocked = false
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// TIME & DATE FILTERS
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+int vTime = hour(time, "Europe/Vienna") * 60 + minute(time, "Europe/Vienna")
+bool validTime = vTime >= (tradingStartHour * 60 + tradingStartMin) and vTime <= (tradingEndHour * 60 + tradingEndMin)
+bool inCooldown = not na(lastExitBar) and (bar_index - lastExitBar) < cooldownBars
+int currentMonth = month(time), int currentDay = dayofmonth(time)
+bool avoidPeriod = currentMonth == 7 or currentMonth == 8 or (currentMonth == 1 and currentDay < 5) or (currentMonth == 12 and currentDay >= 20)
+
+// Reset daily loss counter on new day
+int todayDay = dayofmonth(time)
+if todayDay != lastLossDay
+    consecutiveLosses := 0
+    dailyTradingBlocked := false
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// TREND ANALYSIS
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+float ema = ta.ema(close, emaLength)
+bool priceAbove = close > ema
+bool consistentUp = true, bool consistentDown = true
+int[] lookbackPeriods = array.from(5, 10, 15, 20, 30, 40, 50)
+for i = 0 to 6
+    int lookback = array.get(lookbackPeriods, i)
+    consistentUp := consistentUp and close[lookback] > ema[lookback]
+    consistentDown := consistentDown and close[lookback] < ema[lookback]
+color emaColor = consistentUp and priceAbove ? color.green : consistentDown and not priceAbove ? color.red : color.blue
+plot(ema, "EMA 200", emaColor, 2)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME ALIGNMENT - OPTIMIERT FÜR 15-MIN DAY-TRADING
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Timeframes: Current Chart (15min), 30min, 60min, 120min, 240min, Daily
+// Weekly wurde entfernt - zu langsam für Intraday-Trading
+getTrend(simple string tf) => request.security(syminfo.tickerid, tf, close > ta.ema(close, emaLength), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+int bullTFs = (close > ema ? 1 : 0) + (getTrend('30') ? 1 : 0) + (getTrend('60') ? 1 : 0) + (getTrend('120') ? 1 : 0) + (getTrend('240') ? 1 : 0) + (getTrend('D') ? 1 : 0)
+int bearTFs = 6 - bullTFs
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+[macdLine, signalLine, hist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+bool macdBullCross = ta.crossover(macdLine, signalLine)
+bool macdBearCross = ta.crossunder(macdLine, signalLine)
+bool macdBullCrossDelayed = ta.crossover(macdLine, signalLine)[1]
+bool macdBearCrossDelayed = ta.crossunder(macdLine, signalLine)[1]
+
+calcMA(float src, int len) => atrSmooth == "RMA" ? ta.rma(src, len) : atrSmooth == "SMA" ? ta.sma(src, len) : atrSmooth == "EMA" ? ta.ema(src, len) : ta.wma(src, len)
+float atr = calcMA(ta.tr(true), atrLen)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+bool baseCondition = validTime and strategy.position_size == 0 and not inCooldown and not avoidPeriod and not dailyTradingBlocked
+
+// Entry conditions WITHOUT Choppiness filter - already filtered by EMA consistency & MTF alignment
+bool buySetup = macdBullCross and macdLine < 0 and emaColor == color.green and priceAbove and bullTFs >= minTFAlign and baseCondition
+bool sellSetup = macdBearCross and macdLine > 0 and emaColor == color.red and not priceAbove and bearTFs >= minTFAlign and baseCondition
+
+bool possibleBuy = macdLine < signalLine and macdLine > signalLine[1] and macdLine < 0 and emaColor == color.green and priceAbove and bullTFs >= minTFAlign and baseCondition
+bool possibleSell = macdLine > signalLine and macdLine < signalLine[1] and macdLine > 0 and emaColor == color.red and not priceAbove and bearTFs >= minTFAlign and baseCondition
+
+if possibleBuy and not buySetup
+    label.new(bar_index, low, "Possible BUY", style=label.style_label_up, color=color.new(color.green, 50), textcolor=color.white, size=size.tiny)
+if possibleSell and not sellSetup
+    label.new(bar_index, high, "Possible SELL", style=label.style_label_down, color=color.new(color.red, 50), textcolor=color.white, size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// POSITION SIZING
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+calculateLotSize(float entry, float sl) =>
+    if useDynamicSize
+        float slPips = math.abs(sl - entry) * 10000
+        (accountBalance * (riskPercent / 100) / (slPips * 10 / entry)) * 1.186
+    else
+        fixedLotSize
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// TRADE EXECUTION
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+if buySetup and barstate.isconfirmed
+    float atrDist = atr * atrMult
+    slPrice := low - atrDist
+    entryPrice := close
+    tpPrice := entryPrice + ((entryPrice - slPrice) * tpRatio)
+    tradeEntryBar := bar_index
+    currentDirection := "buy"
+    exitAlertSent := false
+    linesDrawn := false
+    labelDrawn := false
+    currentLotSize := calculateLotSize(entryPrice, slPrice)
+    entryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, color=color.blue, width=1)
+    slLine := line.new(bar_index, slPrice, bar_index + 1, slPrice, color=color.red, width=1)
+    tpLine := line.new(bar_index, tpPrice, bar_index + 1, tpPrice, color=color.green, width=1)
+    linesDrawn := true
+    strategy.entry("Long", strategy.long, qty=currentLotSize)
+    strategy.exit("Exit Long", "Long", stop=slPrice, limit=tpPrice)
+    alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"buy","size":' + str.tostring(currentLotSize, '#.##') + ',"stop_loss":' + str.tostring(slPrice, format.mintick) + ',"take_profit":' + str.tostring(tpPrice, format.mintick) + '}', alert.freq_once_per_bar)
+
+if macdBullCrossDelayed and strategy.position_size > 0 and currentDirection == "buy" and not labelDrawn
+    labelDrawn := true
+    label.new(bar_index, low, "BUY\nLots: " + str.tostring(currentLotSize, '#.##'), style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal, yloc=yloc.belowbar)
+
+if sellSetup and barstate.isconfirmed
+    float atrDist = atr * atrMult
+    slPrice := high + atrDist
+    entryPrice := close
+    tpPrice := entryPrice - ((slPrice - entryPrice) * tpRatio)
+    tradeEntryBar := bar_index
+    currentDirection := "sell"
+    exitAlertSent := false
+    linesDrawn := false
+    labelDrawn := false
+    currentLotSize := calculateLotSize(entryPrice, slPrice)
+    entryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, color=color.blue, width=1)
+    slLine := line.new(bar_index, slPrice, bar_index + 1, slPrice, color=color.red, width=1)
+    tpLine := line.new(bar_index, tpPrice, bar_index + 1, tpPrice, color=color.green, width=1)
+    linesDrawn := true
+    strategy.entry("Short", strategy.short, qty=currentLotSize)
+    strategy.exit("Exit Short", "Short", stop=slPrice, limit=tpPrice)
+    alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"sell","size":' + str.tostring(currentLotSize, '#.##') + ',"stop_loss":' + str.tostring(slPrice, format.mintick) + ',"take_profit":' + str.tostring(tpPrice, format.mintick) + '}', alert.freq_once_per_bar)
+
+if macdBearCrossDelayed and strategy.position_size < 0 and currentDirection == "sell" and not labelDrawn
+    labelDrawn := true
+    label.new(bar_index, high, "SELL\nLots: " + str.tostring(currentLotSize, '#.##'), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal, yloc=yloc.abovebar)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// EXIT MONITORING (SL / TP)
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+if strategy.position_size != 0 and not exitAlertSent
+    bool longTPHit = currentDirection == "buy" and high >= tpPrice
+    bool longSLHit = currentDirection == "buy" and low <= slPrice
+    bool shortTPHit = currentDirection == "sell" and low <= tpPrice
+    bool shortSLHit = currentDirection == "sell" and high >= slPrice
+    if longTPHit or longSLHit or shortTPHit or shortSLHit
+        // Track consecutive losses
+        bool isLoss = longSLHit or shortSLHit
+        bool isWin = longTPHit or shortTPHit
+        
+        if isLoss
+            consecutiveLosses += 1
+            lastLossDay := dayofmonth(time)
+            if consecutiveLosses >= 2
+                dailyTradingBlocked := true
+                label.new(bar_index, high, "🚫 DAILY LIMIT\n2 Losses", style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.white, size=size.normal)
+        
+        if isWin
+            consecutiveLosses := 0
+        
+        if currentDirection == "buy"
+            alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"close_buy","size":' + str.tostring(currentLotSize, '#.##') + '}', alert.freq_once_per_bar)
+            label.new(bar_index, longTPHit ? high : low, longTPHit ? "TP✓" : "SL✗", style=longTPHit ? label.style_label_down : label.style_label_up, color=longTPHit ? color.green : color.red, textcolor=color.white, size=size.tiny)
+        else
+            alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"close_sell","size":' + str.tostring(currentLotSize, '#.##') + '}', alert.freq_once_per_bar)
+            label.new(bar_index, shortTPHit ? low : high, shortTPHit ? "TP✓" : "SL✗", style=shortTPHit ? label.style_label_up : label.style_label_down, color=shortTPHit ? color.green : color.red, textcolor=color.white, size=size.tiny)
+        exitAlertSent := true
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// EOD FORCED CLOSE (default: 21:45 Vienna time)
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+bool forceCloseTime = vTime >= (eodCloseHour * 60 + eodCloseMin)
+
+if forceCloseTime and strategy.position_size != 0 and not exitAlertSent
+    if currentDirection == "buy"
+        strategy.close("Long", comment="EOD Close")
+        alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"close_buy","size":' + str.tostring(currentLotSize, '#.##') + '}', alert.freq_once_per_bar)
+        label.new(bar_index, low, "EOD\nClose", style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.small, yloc=yloc.belowbar)
+    else if currentDirection == "sell"
+        strategy.close("Short", comment="EOD Close")
+        alert('{"username":"' + webhookUsername + '","api_key":"' + webhookApiKey + '","broker":"metatrader","account_type":"demo","symbol":"' + tradingPair + '","action":"close_sell","size":' + str.tostring(currentLotSize, '#.##') + '}', alert.freq_once_per_bar)
+        label.new(bar_index, high, "EOD\nClose", style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small, yloc=yloc.abovebar)
+    exitAlertSent := true
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    lastExitBar := bar_index
+    currentDirection := na
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// LINE MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+bool inTrade = strategy.position_size != 0
+if inTrade and bar_index > tradeEntryBar
+    if not na(entryLine)
+        line.set_x2(entryLine, bar_index + 1)
+    if not na(slLine)
+        line.set_x2(slLine, bar_index + 1)
+    if not na(tpLine)
+        line.set_x2(tpLine, bar_index + 1)
+
+if not inTrade and strategy.position_size[1] != 0
+    if not na(entryLine)
+        line.set_x2(entryLine, bar_index)
+    if not na(slLine)
+        line.set_x2(slLine, bar_index)
+    if not na(tpLine)
+        line.set_x2(tpLine, bar_index)
+    entryPrice := na
+    slPrice := na
+    tpPrice := na
+
+plot(inTrade ? slPrice : na, "sl", display=display.none)
+plot(inTrade ? tpPrice : na, "tp", display=display.none)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+displayTable(bool isActive, float entry, float sl, float tp, string direction) =>
+    color borderColor = direction == "buy" ? color.green : direction == "sell" ? color.red : color.blue
+    table.set_border_color(tradeTable, borderColor)
+    table.set_frame_color(tradeTable, borderColor)
+    table.cell(tradeTable, 0, 0, "Level", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(tradeTable, 1, 0, "Value", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    int bgAlpha = isActive ? 80 : 90
+    color txtColor = isActive ? color.white : color.gray
+    table.cell(tradeTable, 0, 1, "Entry", bgcolor=color.new(isActive ? color.blue : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 1, 1, isActive ? str.tostring(entry, format.mintick) : "-", bgcolor=color.new(isActive ? color.blue : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 0, 2, "SL", bgcolor=color.new(isActive ? color.red : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 1, 2, isActive ? str.tostring(sl, format.mintick) : "-", bgcolor=color.new(isActive ? color.red : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 0, 3, "TP", bgcolor=color.new(isActive ? color.green : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 1, 3, isActive ? str.tostring(tp, format.mintick) : "-", bgcolor=color.new(isActive ? color.green : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    float slPips = isActive ? math.abs(sl - entry) * 10000 : na
+    float recommendedLots = isActive ? (useDynamicSize ? (accountBalance * (riskPercent / 100) / (slPips * 10 / entry)) * 1.186 : fixedLotSize) : na
+    table.cell(tradeTable, 0, 4, useDynamicSize ? "Calc. Lots" : "Fixed Lots", bgcolor=color.new(isActive ? color.purple : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+    table.cell(tradeTable, 1, 4, isActive ? str.tostring(recommendedLots, '#.##') : "-", bgcolor=color.new(isActive ? color.purple : color.gray, bgAlpha), text_color=txtColor, text_size=size.normal)
+
+displayTable(inTrade, inTrade ? entryPrice : na, inTrade ? slPrice : na, inTrade ? tpPrice : na, currentDirection)
+
+View in Pine Editor・276 lines
+Use on chart
+3
+5
+1 147
+Jan 24
+Hi guys, works best with USDCHF
+
+Default settings fit for me, you can tweak how much you want.
+
+With default settings works well for 15min and 1min time-frame, for other time-frames, you need to tweak.
+Jan 24
+Release Notes
+Same as the one before only that it only gives max 2 losing trades on the same day so that risk management is fine
+Jan 24
+Release Notes
+Better
+Feb 12
+Release Notes
+Reimgagined
+Feb 26
+Release Notes
+automatic close before midnitght

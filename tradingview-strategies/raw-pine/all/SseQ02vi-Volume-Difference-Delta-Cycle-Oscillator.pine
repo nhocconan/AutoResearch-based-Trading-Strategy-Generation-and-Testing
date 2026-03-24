@@ -1,0 +1,6 @@
+//@version=5
+oversold=##input(defval=-0.1,type='INPUT_FLOAT',##id='in_17')
+overbought=##input(defval=0.4,type='INPUT_FLOAT',##id='in_18')
+##root(root_metainfo,rm_0,oversold,input__float)
+##root(root_metainfo,rm_1,overbought,input__float)
+##root(root_metainfo,rm_2,plot.style_columns,cb__plot_style__integer,plot,style)

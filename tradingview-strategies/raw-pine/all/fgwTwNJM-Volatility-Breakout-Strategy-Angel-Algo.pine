@@ -1,0 +1,77 @@
+//@version=5
+strategy("Volatility Breakout Strategy [Angel Algo]", overlay = true)
+
+// Inputs
+length = input(title="Length", defval=20)
+
+// Calculate the average true range (ATR)
+atr = ta.atr(length)
+
+// Plot the ATR on the chart
+plot(atr, color=color.blue, linewidth=2, title="ATR")
+
+// Calculate the upper and lower breakouts
+upper_breakout = high + atr
+lower_breakout = low - atr
+
+// Plot the upper and lower breakouts on the chart
+ul = plot(upper_breakout[1], color = color.new(color.green, 100), linewidth=2, title="Upper Breakout Level")
+ll = plot(lower_breakout[1], color = color.new(color.red, 100), linewidth=2, title="Lower Breakout Level")
+
+// Create the signals
+long_entry = ta.crossover(close, upper_breakout[1]) and barstate.isconfirmed
+short_entry = ta.crossunder(close, lower_breakout[1]) and barstate.isconfirmed
+
+active_signal_color =ta.barssince(long_entry) < ta.barssince(short_entry) ? 
+   color.new(color.green,85) : color.new(color.red,85)
+
+// Plot the signals on the chart
+plotshape(long_entry and ta.barssince(long_entry[1]) > ta.barssince(short_entry[1]), location=location.belowbar, style=shape.triangleup, 
+   color=color.green, size=size.normal, text = "Bullish breakout", textcolor = color.green)
+plotshape(short_entry and ta.barssince(long_entry[1]) < ta.barssince(short_entry[1]), location=location.abovebar, style=shape.triangledown, 
+   color=color.red, size=size.normal,text = "Bearish breakout",  textcolor = color.red)
+
+// Fill the space between the upper and lower levels with the color that indicates the latest signal direction
+fill(ul,ll, color=active_signal_color)   
+
+long_condition = long_entry and strategy.position_size <= 0 and barstate.isconfirmed
+short_condition = short_entry and strategy.position_size >= 0 and barstate.isconfirmed
+
+if long_condition
+    strategy.entry("Volatility Breakout Long", strategy.long)
+
+
+if short_condition
+    strategy.entry("Volatility Breakout Short", strategy.short)
+
+View in Pine Editor・47 lines
+Use on chart
+4
+5
+0
+2
+14 509
+As traders, we're always looking for opportunities to profit from sudden price breakouts, and the Volatility Breakout Strategy aims to do just that.
+
+This script is the perfect starting point for traders who want to experiment with capturing price movements resulting from increased volatility. The script plots the Average True Range (ATR) on the chart, which is a measure of the asset's volatility over a specified period. By setting the "Length" parameter, you can customize the period over which the volatility is measured.
+
+Using the ATR, the strategy calculates upper and lower breakout levels and plots them on the chart. The signals for long and short positions are generated when the price crosses above the upper breakout level or below the lower breakout level, respectively. They are confirmed by checking the current bar state.
+
+The strategy also fills the space between the upper and lower breakout levels with a color that indicates the latest signal direction. This feature helps traders quickly identify the prevailing trend.
+
+The strategy uses the generated signals to enter trades. When a long or short signal is confirmed, and there is no open position in the direction of the signal, the strategy enters a long or short trade, respectively.
+
+Choice of parameters.
+
+Choosing the right value for the Length input parameter is crucial for tailoring the Volatility Breakout Strategy to suit your trading preferences. In general, a higher Length value implies a focus on capturing longer price moves. For instance, in this script, we have set the Length value to 20, resulting in trades that span approximately 100 candles. These trades encompass price trends consisting of multiple swings.
+
+However, if your goal is to trade individual swings rather than longer trends, it's advisable to experiment with smaller values for the Length parameter. By reducing the Length, you can target shorter-term price movements and potentially increase the frequency of trades.
+
+It's important to note that while a higher Length value tends to lead to longer trades, there is no strict correlation between the Length parameter and the average length of trades. This can vary across different markets. Therefore, it's essential to conduct thorough experimentation with various Length values and closely observe the length of trades they generate. Comparing these trade lengths with the average trend or swing length in the specific market can provide valuable insights.
+
+Ideally, you should aim to select a Length value that aligns with the average trend or swing length observed in the market you are trading. This way, you can optimize the strategy to capture price movements that closely match the prevailing market conditions.
+
+Remember, finding the optimal Length value is a process of trial and error, combined with careful observation of trade lengths and their correlation with market trends. So, don't be afraid to experiment and refine the Length parameter to maximize the effectiveness of the Volatility Breakout Strategy in your chosen market.
+
+
+Disclaimer: This trading strategy is provided for educational and informational purposes only.Trading involves risk, and past performance is not indicative of future results.

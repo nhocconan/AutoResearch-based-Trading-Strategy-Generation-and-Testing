@@ -1,0 +1,100 @@
+//@version=5
+strategy(title="Merovinh - Mean Reversion Lowest low",
+     overlay = true,
+     default_qty_type = strategy.percent_of_equity,
+     initial_capital = 10000,
+     default_qty_value = 10,
+     commission_type = strategy.commission.percent,
+     slippage = 1,
+     commission_value = 0.04)
+
+GR_TIME = 'Time Period'
+
+bars = input(9, title = "Minimum number of bars", tooltip = "The minimum number of bars before updating lowest low / highest high")
+
+numberOfLows  = input.string(defval='One', title='Number of broken lows', options=['One', 'Two', 'Three', 'Four'])
+
+//Period
+startTime = input.time(timestamp("27 Jul 2021 00:00 +0000"), "Start date", inline = "period", group = GR_TIME)
+finalTime = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Final date", inline = "period", group = GR_TIME)
+
+var prevLow = .0
+var prevHigh = .0
+var prevLow2 = .0
+var prevLow3 = .0
+var prevLow4 = .0
+
+truetime = time > startTime and time < finalTime
+
+
+highestHigh = ta.highest(high, bars)
+lowestLow = ta.lowest(low, bars)
+
+if numberOfLows == 'One'
+    if truetime and prevLow > 0 and lowestLow < prevLow
+        strategy.entry('long', strategy.long)
+if numberOfLows == 'Two'
+    if truetime and prevLow > 0 and lowestLow < prevLow and prevLow < prevLow2
+        strategy.entry('long', strategy.long)
+if numberOfLows == 'Three'
+    if truetime and prevLow > 0 and lowestLow < prevLow and prevLow < prevLow2 and prevLow2 < prevLow3
+        strategy.entry('long', strategy.long)
+if numberOfLows == 'Four'
+    if truetime and prevLow > 0 and lowestLow < prevLow and prevLow < prevLow2 and prevLow2 < prevLow3 and prevLow3 < prevLow4
+        strategy.entry('long', strategy.long)
+
+if truetime and prevHigh > 0 and highestHigh > prevHigh
+    strategy.close('long')
+
+
+if prevLow != lowestLow
+    prevLow4 := prevLow3
+    prevLow3 := prevLow2
+    prevLow2 := prevLow
+    prevLow := lowestLow
+prevHigh := highestHigh
+
+plot(lowestLow, color=color.green, linewidth=1, title="Lowest Low Line")
+plot(highestHigh, color=color.green, linewidth=1, title="Highest High Line")
+View in Pine Editor・61 lines
+Use on chart
+1
+5
+4
+3 603
+The "Merovinh - Mean Reversion Lowest Low" strategy is a mean reversion trading approach that aims to identify potential reversal points based on the updated lowest low of the specified number of bars. This strategy focuses on the detection of bullish price movements. Works well on Tech giant's shares.
+
+Strategy Overview:
+
+The strategy detects the lowest low and highest high over a specified number of bars.
+
+It uses a mean reversion concept where it expects the price to revert back towards the updated lowest low.
+
+The strategy enters a long position when the current lowest low breaks the previous lowest low (based on the specified number of broken lows).
+
+It closes the long position when the highest high breaks the previous highest high.
+
+The strategy aims to capitalize on potential reversals in the market by buying at lower price levels and selling at higher price levels.
+
+
+
+Strategy Parameters:
+
+Minimum number of bars: Specifies the minimum number of bars considered for calculating the lowest low and highest high.
+
+Number of broken lows: Determines the number of previous lows that need to be broken for entering a long position.
+
+
+
+How It Works:
+
+The strategy calculates the lowest low and highest high based on the specified number of bars.
+
+It compares the current lowest low with the previous lowest low.
+
+If the current lowest low breaks the previous lowest low (based on the specified number of broken lows), a long position is entered.
+
+The strategy continuously updates the previous lows and highs.
+
+It closes the long position if the highest high breaks the previous highest high.
+

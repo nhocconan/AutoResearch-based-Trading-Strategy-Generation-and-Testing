@@ -1,0 +1,135 @@
+//@version=5
+strategy("ZigZag Elliott Wave Strategy (Demo)", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// =======================
+// INPUTS
+// =======================
+zigzagLen   = input.int(12, "ZigZag Length", minval=3)
+fibRetrMin  = input.float(0.50, "Wave 2 Min Retracement")
+fibRetrMax  = input.float(0.618, "Wave 2 Max Retracement")
+fibWave3Ext = input.float(1.618, "Wave 3 Extension")
+fibWave4Min = input.float(0.382, "Wave 4 Min Retracement")
+fibWave4Max = input.float(0.50,  "Wave 4 Max Retracement")
+partialTP   = input.float(0.90,  "Wave 5 Partial Close (%)")
+
+// =======================
+// ZIGZAG CALCULATION
+// =======================
+ph = ta.pivothigh(high, zigzagLen, zigzagLen)
+pl = ta.pivotlow(low, zigzagLen, zigzagLen)
+
+var float lastLow  = na
+var float lastHigh = na
+var float wave1Low = na
+var float wave1High = na
+
+if not na(pl)
+    lastLow := pl
+
+if not na(ph)
+    lastHigh := ph
+
+// =======================
+// WAVE 1 DETECTION
+// =======================
+wave1Valid = not na(lastLow) and not na(lastHigh) and lastHigh > lastLow
+
+if wave1Valid
+    wave1Low  := lastLow
+    wave1High := lastHigh
+
+wave1Range = wave1High - wave1Low
+
+// =======================
+// WAVE 2 RETRACEMENT
+// =======================
+fib50  = wave1High - wave1Range * fibRetrMin
+fib618 = wave1High - wave1Range * fibRetrMax
+
+wave2Zone = close <= fib50 and close >= fib618
+
+// =======================
+// LONG ENTRY (Wave 2 End)
+// =======================
+if wave2Zone and strategy.position_size == 0
+    strategy.entry("Wave 3 Long", strategy.long)
+
+// =======================
+// WAVE 3 TARGET
+// =======================
+wave3Target = wave1Low + wave1Range * fibWave3Ext
+
+// =======================
+// WAVE 4 ZONE (Pullback)
+// =======================
+wave4FibMin = wave3Target - wave1Range * fibWave4Min
+wave4FibMax = wave3Target - wave1Range * fibWave4Max
+
+wave4Zone = close <= wave4FibMin and close >= wave4FibMax
+
+// Optional add position on Wave 4
+if wave4Zone and strategy.position_size > 0
+    strategy.entry("Wave 4 Add", strategy.long)
+
+// =======================
+// WAVE 5 PARTIAL TAKE PROFIT
+// =======================
+partialClosePrice = wave3Target * partialTP
+
+if close >= partialClosePrice and strategy.position_size > 0
+    strategy.close("Wave 3 Long", qty_percent=50)
+
+// =======================
+// FULL EXIT AT WAVE 3 EXTENSION
+// =======================
+if close >= wave3Target
+    strategy.close_all()
+
+// =======================
+// VISUALS
+// =======================
+plot(wave1High, color=color.green, style=plot.style_circles, title="Wave 1 High")
+plot(wave1Low, color=color.red, style=plot.style_circles, title="Wave 1 Low")
+
+plot(wave3Target, color=color.orange, title="Wave 3 Target")
+plot(fib50, color=color.blue, title="Fib 50")
+plot(fib618, color=color.purple, title="Fib 61.8")
+
+bgcolor(wave2Zone ? color.new(color.green, 85) : na)
+bgcolor(wave4Zone ? color.new(color.orange, 85) : na)
+
+View in Pine Editor・102 lines
+Use on chart
+1
+2
+279
+1. Strategy Objective
+
+Objective:
+Capture the Wave 1 → Wave 2 correction
+Enter Wave 3 (strongest wave) after Wave 2 ends
+Take profit at the Wave 3 target
+Add more in Wave 4
+Manage the position towards Wave 5
+
+2. Visuals on the Chart
+Green dots → Wave 1 peak
+Red dots → Wave 1 trough
+Orange line → Wave 3 target
+Blue/purple → Fibonacci levels
+Background:
+Green → Wave 2 area
+Orange → Wave 4 area
+
+3.Strengths and Weaknesses of the Strategy
+✅ Strong:
+Trend-catching focused
+Logical entry with Fibonacci
+High potential due to focus on Wave 3
+❌ Weak:
+May cause zig-zag repainting (late signal)
+Elliott waves don't always form clearly
+May result in losses on fake retracements
+
+All investments involve risk, and the past performance of a security, industry, sector, market, financial product, trading strategy, backtest, or individual's trading does not guarantee future results or returns. Investors are fully responsible for any investment decisions they make. Such decisions should be based solely on an evaluation of their financial circumstances, investment objectives, risk tolerance.
+

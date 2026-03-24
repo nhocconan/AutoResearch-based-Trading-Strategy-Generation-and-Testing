@@ -1,0 +1,94 @@
+//@version=6
+strategy("BN 90% Institutional Alpha Live", overlay=true, initial_capital=10000000, currency=currency.INR, margin_long=0)
+
+// --- Professional Settings ---
+deltaValue    = 0.45
+qty           = 45 // 3 Lots of Bank Nifty
+targetINR     = 8000
+stopLossINR   = 6000
+breakevenPct  = 0.5 
+
+// --- Manual Keltner Calculation (Fixes the function error) ---
+lengthKC = 20
+multKC   = 2.0
+basis    = ta.ema(close, lengthKC)
+range_1  = ta.tr
+rangema  = ta.ema(range_1, lengthKC)
+kcUpper  = basis + rangema * multKC
+kcLower  = basis - rangema * multKC
+kcMid    = basis
+
+// --- Indicators ---
+ema9   = ta.ema(close, 9)
+ema21  = ta.ema(close, 21)
+ema200 = ta.ema(close, 200)
+
+// --- Data Science: Volume and Momentum ---
+var float vpt = 0.0
+vpt := nz(vpt[1]) + volume * (ta.change(close) / close[1])
+vptSignal = ta.sma(vpt, 20)
+
+// --- The 90% Entry Rules ---
+htfTrend     = close > ema200
+trendConfirm = ema9 > ema21 and vpt > vptSignal
+liquidity    = low > low[1] and low[1] < low[2] 
+volatility   = ta.crossover(close, kcMid)
+timeFilter   = not na(time(timeframe.period, "0920-1115:1234567")) or not na(time(timeframe.period, "1330-1510:1234567"))
+
+longCondition = htfTrend and trendConfirm and liquidity and volatility and timeFilter
+
+// --- Execution & Trade Management ---
+var float entryPrice = 0.0
+var bool  hitHalfway = false
+
+// FIXED INDENTATION HERE
+if longCondition and strategy.position_size == 0
+    entryPrice := close
+    hitHalfway := false
+    strategy.entry("Sniper", strategy.long, qty=qty)
+
+// --- P&L Calculation ---
+indexMove = close - entryPrice
+currentPnl = indexMove * deltaValue * qty
+
+// --- The "Zero-Loss" Exit Strategy ---
+if strategy.position_size > 0
+    if currentPnl >= (targetINR * breakevenPct)
+        hitHalfway := true
+
+    if currentPnl >= targetINR
+        strategy.close("Sniper", comment="🎯 TARGET 8K")
+    else if hitHalfway and currentPnl <= 500 
+        strategy.close("Sniper", comment="🛡️ BE EXIT")
+    else if currentPnl <= -stopLossINR
+        strategy.close("Sniper", comment="🛑 STOP 6K")
+    else if ta.crossunder(close, ema21)
+        strategy.close("Sniper", comment="📉 TREND END")
+
+// --- Live Entry/Exit Visuals ---
+// Entry Label
+plotshape(longCondition and strategy.position_size[1] == 0, title="Entry Label", text="BUY\nSNIPER", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+
+// Detect specific exits for labels
+isTarget = strategy.position_size[1] > 0 and strategy.position_size == 0 and currentPnl[1] >= targetINR
+isStop   = strategy.position_size[1] > 0 and strategy.position_size == 0 and currentPnl[1] <= -stopLossINR
+isBE     = strategy.position_size[1] > 0 and strategy.position_size == 0 and hitHalfway[1] and currentPnl[1] <= 600
+
+plotshape(isTarget, title="Exit Target", text="EXIT\nTARGET ✅", style=shape.labeldown, location=location.abovebar, color=color.blue, textcolor=color.white, size=size.small)
+plotshape(isStop,   title="Exit Stop",   text="EXIT\nSTOP ❌",   style=shape.labeldown, location=location.abovebar, color=color.red,  textcolor=color.white, size=size.small)
+plotshape(isBE,     title="Exit BE",     text="EXIT\nB/E 🛡️",    style=shape.labeldown, location=location.abovebar, color=color.gray, textcolor=color.white, size=size.small)
+
+// --- Visual Overlay ---
+plot(ema200, color=color.new(color.white, 50), linewidth=3, title="Institutional Trend")
+plot(kcUpper, color=color.new(color.blue, 80))
+plot(kcLower, color=color.new(color.blue, 80))
+plot(ema9, color=color.yellow, title="EMA 9")
+plot(ema21, color=color.orange, title="EMA 21")
+
+View in Pine Editor・86 lines
+Use on chart
+1
+470
+BN 90% Institutional Alpha Live
+BN 90% Institutional Alpha Live
+BN 90% Institutional Alpha Live

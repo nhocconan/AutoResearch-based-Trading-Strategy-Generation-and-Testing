@@ -1,0 +1,709 @@
+//@version=5
+strategy("FlowStateTrader", overlay=true)
+
+// Input Parameters
+lookbackPeriod = input.int(20, "Lookback Period for Key Levels", minval=5, maxval=100)
+atrPeriod = input.int(14, "ATR Period", minval=5, maxval=50)
+atrMultiplierSL = input.float(1.5, "SL ATR Multiplier", minval=0.5, maxval=5.0, step=0.1)
+atrMultiplierTP1 = input.float(1.5, "TP1 ATR Multiplier", minval=0.5, maxval=5.0, step=0.1)
+atrMultiplierTP2 = input.float(2.0, "TP2 ATR Multiplier", minval=0.5, maxval=5.0, step=0.1)
+rewardToRisk = input.float(2.0, "Reward to Risk Ratio", minval=1.0, maxval=5.0, step=0.1)
+
+// Trend Filter Settings
+enableTrendFilter = input.bool(true, "Enable Trend Filter")
+trendMAPeriod = input.int(20, "Trend MA Period", minval=5, maxval=200)
+trendMAType = input.string("EMA", "Trend MA Type", options=["EMA", "SMA"])
+
+// TIME FILTER SETTINGS
+enableTimeFilter = input.bool(false, "Enable Time-Based Filter", tooltip="Filter trades based on specific time windows")
+
+// 12-hour format time inputs
+startHour12 = input.int(9, "Start Hour (1-12)", minval=1, maxval=12, tooltip="Trading start hour in 12-hour format")
+startAMPM = input.string("AM", "Start AM/PM", options=["AM", "PM"])
+endHour12 = input.int(4, "End Hour (1-12)", minval=1, maxval=12, tooltip="Trading end hour in 12-hour format") 
+endAMPM = input.string("PM", "End AM/PM", options=["AM", "PM"])
+
+// Timezone selection
+timeZone = input.string("UTC", "Time Zone", options=["UTC", "EST", "PST", "CST"], tooltip="Time zone for trading hours")
+
+// Additional controls
+avoidLunchHour = input.bool(true, "Avoid Lunch Hour (12:00-1:00 PM)", tooltip="Skip trading during typical lunch break")
+weekendsOnly = input.bool(false, "Weekends Only", tooltip="Only trade on weekends")
+weekdaysOnly = input.bool(false, "Weekdays Only", tooltip="Only trade on weekdays")
+
+// Strategy Settings
+entryQty = input.int(1, "Entry Quantity (Contracts)", minval=1, maxval=1000)
+enablePartialClose = input.bool(true, "Enable Partial Close at TP1")
+partialCloseQty = input.int(1, "Contracts to Close at TP1", minval=1, maxval=100)
+enableAlerts = input.bool(true, "Enable Strategy Alerts")
+
+// Dashboard Settings
+dashboardSize = input.string("Medium", "Dashboard Size", options=["Small", "Medium", "Large"], tooltip="Control the size of the information dashboard")
+enableScorecard = input.bool(true, "Enable Performance Scorecard", tooltip="Show performance metrics in lower right corner")
+
+// Trailing Stop Settings
+enableTrailingStop = input.bool(true, "Enable Trailing Stop")
+trailMode = input.string("Balanced", "Trailing Stop Mode", options=["Conservative", "Balanced", "Aggressive"], tooltip="Conservative: Protect more profit | Balanced: Good middle ground | Aggressive: Let winners run longer")
+
+// Set trailing parameters based on mode
+trailActivationMultiplier = trailMode == "Conservative" ? 0.8 : trailMode == "Balanced" ? 1.0 : 1.2
+trailDistanceMultiplier = trailMode == "Conservative" ? 0.6 : trailMode == "Balanced" ? 0.8 : 1.0
+
+// TIME FILTER FUNCTIONS
+// Convert 12-hour format to 24-hour format
+convertTo24Hour(hour12, ampm) =>
+    var int hour24 = na
+    if ampm == "AM"
+        hour24 := hour12 == 12 ? 0 : hour12
+    else // PM
+        hour24 := hour12 == 12 ? 12 : hour12 + 12
+    hour24
+
+// Convert timezone to UTC offset
+getUTCOffset(tz) =>
+    var int offset = na
+    if tz == "UTC"
+        offset := 0
+    else if tz == "EST"
+        offset := -5  // EST is UTC-5
+    else if tz == "CST" 
+        offset := -6  // CST is UTC-6
+    else if tz == "PST"
+        offset := -8  // PST is UTC-8
+    offset
+
+getCurrentHour() =>
+    hour(time, "UTC")
+
+getCurrentDayOfWeek() =>
+    dayofweek(time)
+
+isWeekend() =>
+    currentDay = getCurrentDayOfWeek()
+    currentDay == dayofweek.saturday or currentDay == dayofweek.sunday
+
+isWeekday() =>
+    not isWeekend()
+
+isInTradingWindow() =>
+    if not enableTimeFilter
+        true
+    else
+        // Convert 12-hour inputs to 24-hour UTC
+        startHour24 = convertTo24Hour(startHour12, startAMPM)
+        endHour24 = convertTo24Hour(endHour12, endAMPM)
+        utcOffset = getUTCOffset(timeZone)
+        
+        // Convert local time to UTC
+        startHourUTC = (startHour24 - utcOffset + 24) % 24
+        endHourUTC = (endHour24 - utcOffset + 24) % 24
+        
+        currentHour = getCurrentHour()
+        
+        // Handle trading window logic
+        var bool inWindow = false
+        
+        // Handle same-day window vs overnight window
+        if startHourUTC <= endHourUTC
+            // Same day window (e.g., 9 AM to 4 PM)
+            inWindow := currentHour >= startHourUTC and currentHour <= endHourUTC
+        else
+            // Overnight window (e.g., 10 PM to 6 AM)
+            inWindow := currentHour >= startHourUTC or currentHour <= endHourUTC
+        
+        // Apply day-of-week filters
+        if weekendsOnly and not isWeekend()
+            inWindow := false
+        if weekdaysOnly and not isWeekday()
+            inWindow := false
+            
+        // Apply lunch hour filter (12:00-1:00 PM in selected timezone)
+        if avoidLunchHour and inWindow
+            lunchStart24 = 12  // 12 PM
+            lunchEnd24 = 13    // 1 PM
+            lunchStartUTC = (lunchStart24 - utcOffset + 24) % 24
+            lunchEndUTC = (lunchEnd24 - utcOffset + 24) % 24
+            
+            // Check if current hour falls in lunch period
+            if lunchStartUTC <= lunchEndUTC
+                // Normal case: lunch doesn't cross midnight
+                if currentHour >= lunchStartUTC and currentHour < lunchEndUTC
+                    inWindow := false
+            else
+                // Edge case: lunch period crosses midnight (shouldn't happen but safety check)
+                if currentHour >= lunchStartUTC or currentHour < lunchEndUTC
+                    inWindow := false
+        
+        inWindow
+
+// Combined time filter
+isGoodTradingTime() =>
+    isInTradingWindow()
+
+// ATR and Volume Calculation
+atr = ta.atr(atrPeriod)
+volumeSMA = ta.sma(volume, atrPeriod)
+
+// Trend Filter
+trendMA = enableTrendFilter ? (trendMAType == "EMA" ? ta.ema(close, trendMAPeriod) : ta.sma(close, trendMAPeriod)) : na
+isBullishTrend = enableTrendFilter ? close > trendMA : true
+isBearishTrend = enableTrendFilter ? close < trendMA : true
+
+// Key Levels Identification (Support & Resistance Zones)
+support = ta.lowest(low, lookbackPeriod)
+resistance = ta.highest(high, lookbackPeriod)
+supportBuffer = support - atr * 0.5
+resistanceBuffer = resistance + atr * 0.5
+
+// Define Entry Conditions (with time filter)
+isBullishEntry = (close > supportBuffer) and (low <= support) and (volume > volumeSMA) and isBullishTrend and isGoodTradingTime()
+isBearishEntry = (close < resistanceBuffer) and (high >= resistance) and (volume > volumeSMA) and isBearishTrend and isGoodTradingTime()
+
+// Calculate Stop Loss and Take Profit Levels
+bullishSL = support - atr * atrMultiplierSL
+bullishTP1 = support + atr * rewardToRisk * atrMultiplierTP1
+bullishTP2 = support + atr * rewardToRisk * atrMultiplierTP2
+
+bearishSL = resistance + atr * atrMultiplierSL
+bearishTP1 = resistance - atr * rewardToRisk * atrMultiplierTP1
+bearishTP2 = resistance - atr * rewardToRisk * atrMultiplierTP2
+
+// Strategy Position Management
+var float longEntryPrice = na
+var float shortEntryPrice = na
+var bool tp1HitLong = false
+var bool tp1HitShort = false
+
+// Trailing Stop Variables
+var float longTrailStop = na
+var float shortTrailStop = na
+var bool longTrailActive = false
+var bool shortTrailActive = false
+
+// Calculate position sizing
+finalQty = entryQty
+
+// Long Entry
+if isBullishEntry and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=finalQty)
+    longEntryPrice := close
+    tp1HitLong := false
+    // Reset trailing stop variables
+    longTrailStop := na
+    longTrailActive := false
+    if enableAlerts
+        alert("Long Entry Signal at " + str.tostring(close) + " - Qty: " + str.tostring(finalQty), alert.freq_once_per_bar)
+
+// Short Entry
+if isBearishEntry and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=finalQty)
+    shortEntryPrice := close
+    tp1HitShort := false
+    // Reset trailing stop variables
+    shortTrailStop := na
+    shortTrailActive := false
+    if enableAlerts
+        alert("Short Entry Signal at " + str.tostring(close) + " - Qty: " + str.tostring(finalQty), alert.freq_once_per_bar)
+
+// Long Position Management
+if strategy.position_size > 0
+    // Calculate current profit
+    currentProfit = close - strategy.position_avg_price
+    profitInATR = currentProfit / atr
+    
+    // Trailing Stop Logic
+    if enableTrailingStop and profitInATR >= trailActivationMultiplier
+        // Activate trailing stop
+        if not longTrailActive
+            longTrailActive := true
+            longTrailStop := close - atr * trailDistanceMultiplier
+        else
+            // Update trailing stop (only move up, never down)
+            newTrailStop = close - atr * trailDistanceMultiplier
+            longTrailStop := math.max(longTrailStop, newTrailStop)
+    
+    // Determine which stop loss to use
+    effectiveStopLoss = enableTrailingStop and longTrailActive ? longTrailStop : bullishSL
+    
+    // Stop Loss (either original or trailing)
+    strategy.exit("Long SL", "Long", stop=effectiveStopLoss)
+    
+    // Take Profit 1 (Partial Close by Contracts)
+    if enablePartialClose and not tp1HitLong and high >= bullishTP1 and strategy.position_size >= partialCloseQty
+        strategy.close("Long", qty=partialCloseQty, comment="Long TP1", immediately=true)
+        tp1HitLong := true
+    
+    // Take Profit 2 (Close Remaining Position) or Full Close if Partial is Disabled
+    if (enablePartialClose and tp1HitLong and high >= bullishTP2) or (not enablePartialClose and high >= bullishTP1)
+        strategy.close("Long", comment=enablePartialClose ? "Long TP2" : "Long TP1", immediately=true)
+
+// Short Position Management
+if strategy.position_size < 0
+    // Calculate current profit (for shorts, profit when price goes down)
+    currentProfit = strategy.position_avg_price - close
+    profitInATR = currentProfit / atr
+    
+    // Trailing Stop Logic
+    if enableTrailingStop and profitInATR >= trailActivationMultiplier
+        // Activate trailing stop
+        if not shortTrailActive
+            shortTrailActive := true
+            shortTrailStop := close + atr * trailDistanceMultiplier
+        else
+            // Update trailing stop (only move down, never up)
+            newTrailStop = close + atr * trailDistanceMultiplier
+            shortTrailStop := math.min(shortTrailStop, newTrailStop)
+    
+    // Determine which stop loss to use
+    effectiveStopLoss = enableTrailingStop and shortTrailActive ? shortTrailStop : bearishSL
+    
+    // Stop Loss (either original or trailing)
+    strategy.exit("Short SL", "Short", stop=effectiveStopLoss)
+    
+    // Take Profit 1 (Partial Close by Contracts)
+    if enablePartialClose and not tp1HitShort and low <= bearishTP1 and math.abs(strategy.position_size) >= partialCloseQty
+        strategy.close("Short", qty=partialCloseQty, comment="Short TP1", immediately=true)
+        tp1HitShort := true
+    
+    // Take Profit 2 (Close Remaining Position) or Full Close if Partial is Disabled
+    if (enablePartialClose and tp1HitShort and low <= bearishTP2) or (not enablePartialClose and low <= bearishTP1)
+        strategy.close("Short", comment=enablePartialClose ? "Short TP2" : "Short TP1", immediately=true)
+
+// Reset flags when position closes
+if strategy.position_size == 0
+    tp1HitLong := false
+    tp1HitShort := false
+    // Reset trailing stop variables
+    longTrailStop := na
+    shortTrailStop := na
+    longTrailActive := false
+    shortTrailActive := false
+
+// Visualization - Entry Zones
+var box bullishBox = na
+var box bearishBox = na
+var label bullishZoneLabel = na
+var label bearishZoneLabel = na
+
+// Bullish Entry Zone
+if isBullishEntry
+    if na(bullishBox)
+        bullishBox := box.new(left=bar_index - 10, top=support + atr * 0.5, right=bar_index + 10, bottom=support - atr * 0.5, border_color=color.green, bgcolor=color.new(color.green, 85))
+        bullishZoneLabel := label.new(bar_index, support, "FLOWSTATE LONG", color=color.new(color.white, 100), textcolor=color.green, style=label.style_label_center, size=size.normal)
+    else
+        box.set_left(bullishBox, bar_index - 10)
+        box.set_right(bullishBox, bar_index + 10)
+        box.set_top(bullishBox, support + atr * 0.5)
+        box.set_bottom(bullishBox, support - atr * 0.5)
+        label.set_xy(bullishZoneLabel, bar_index, support)
+
+// Bearish Entry Zone
+if isBearishEntry
+    if na(bearishBox)
+        bearishBox := box.new(left=bar_index - 10, top=resistance + atr * 0.5, right=bar_index + 10, bottom=resistance - atr * 0.5, border_color=color.red, bgcolor=color.new(color.red, 85))
+        bearishZoneLabel := label.new(bar_index, resistance, "FLOWSTATE SHORT", color=color.new(color.white, 100), textcolor=color.red, style=label.style_label_center, size=size.normal)
+    else
+        box.set_left(bearishBox, bar_index - 10)
+        box.set_right(bearishBox, bar_index + 10)
+        box.set_top(bearishBox, resistance + atr * 0.5)
+        box.set_bottom(bearishBox, resistance - atr * 0.5)
+        label.set_xy(bearishZoneLabel, bar_index, resistance)
+
+// Visualization - Risk/Reward Lines for Active Positions
+var line longTP1Line = na
+var line longTP2Line = na
+var line longSLLine = na
+var line shortTP1Line = na
+var line shortTP2Line = na
+var line shortSLLine = na
+
+// Labels for TP/SL Values
+var label longTP1Label = na
+var label longTP2Label = na
+var label longSLLabel = na
+var label shortTP1Label = na
+var label shortTP2Label = na
+var label shortSLLabel = na
+
+// Long Position Lines and Labels
+if strategy.position_size > 0
+    if na(longTP1Line)
+        longTP1Line := line.new(bar_index, bullishTP1, bar_index + 10, bullishTP1, color=color.green, width=2)
+        longTP2Line := line.new(bar_index, bullishTP2, bar_index + 10, bullishTP2, color=color.green, width=2)
+        longSLLine := line.new(bar_index, bullishSL, bar_index + 10, bullishSL, color=color.red, width=2)
+        
+        // Create labels with values
+        longTP1Label := label.new(bar_index + 10, bullishTP1, "TP1: " + str.tostring(bullishTP1, "#.####"), color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
+        longTP2Label := label.new(bar_index + 10, bullishTP2, "TP2: " + str.tostring(bullishTP2, "#.####"), color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
+        longSLLabel := label.new(bar_index + 10, bullishSL, "SL: " + str.tostring(bullishSL, "#.####"), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+    else
+        line.set_xy1(longTP1Line, bar_index, bullishTP1)
+        line.set_xy2(longTP1Line, bar_index + 10, bullishTP1)
+        line.set_xy1(longTP2Line, bar_index, bullishTP2)
+        line.set_xy2(longTP2Line, bar_index + 10, bullishTP2)
+        line.set_xy1(longSLLine, bar_index, bullishSL)
+        line.set_xy2(longSLLine, bar_index + 10, bullishSL)
+        
+        // Update labels
+        label.set_xy(longTP1Label, bar_index + 10, bullishTP1)
+        label.set_text(longTP1Label, "TP1: " + str.tostring(bullishTP1, "#.####"))
+        label.set_xy(longTP2Label, bar_index + 10, bullishTP2)
+        label.set_text(longTP2Label, "TP2: " + str.tostring(bullishTP2, "#.####"))
+        label.set_xy(longSLLabel, bar_index + 10, bullishSL)
+        label.set_text(longSLLabel, "SL: " + str.tostring(bullishSL, "#.####"))
+else
+    if not na(longTP1Line)
+        line.delete(longTP1Line)
+        line.delete(longTP2Line)
+        line.delete(longSLLine)
+        label.delete(longTP1Label)
+        label.delete(longTP2Label)
+        label.delete(longSLLabel)
+        longTP1Line := na
+        longTP2Line := na
+        longSLLine := na
+        longTP1Label := na
+        longTP2Label := na
+        longSLLabel := na
+
+// Short Position Lines and Labels
+if strategy.position_size < 0
+    if na(shortTP1Line)
+        shortTP1Line := line.new(bar_index, bearishTP1, bar_index + 10, bearishTP1, color=color.red, width=2)
+        shortTP2Line := line.new(bar_index, bearishTP2, bar_index + 10, bearishTP2, color=color.red, width=2)
+        shortSLLine := line.new(bar_index, bearishSL, bar_index + 10, bearishSL, color=color.green, width=2)
+        
+        // Create labels with values
+        shortTP1Label := label.new(bar_index + 10, bearishTP1, "TP1: " + str.tostring(bearishTP1, "#.####"), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+        shortTP2Label := label.new(bar_index + 10, bearishTP2, "TP2: " + str.tostring(bearishTP2, "#.####"), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+        shortSLLabel := label.new(bar_index + 10, bearishSL, "SL: " + str.tostring(bearishSL, "#.####"), color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
+    else
+        line.set_xy1(shortTP1Line, bar_index, bearishTP1)
+        line.set_xy2(shortTP1Line, bar_index + 10, bearishTP1)
+        line.set_xy1(shortTP2Line, bar_index, bearishTP2)
+        line.set_xy2(shortTP2Line, bar_index + 10, bearishTP2)
+        line.set_xy1(shortSLLine, bar_index, bearishSL)
+        line.set_xy2(shortSLLine, bar_index + 10, bearishSL)
+        
+        // Update labels
+        label.set_xy(shortTP1Label, bar_index + 10, bearishTP1)
+        label.set_text(shortTP1Label, "TP1: " + str.tostring(bearishTP1, "#.####"))
+        label.set_xy(shortTP2Label, bar_index + 10, bearishTP2)
+        label.set_text(shortTP2Label, "TP2: " + str.tostring(bearishTP2, "#.####"))
+        label.set_xy(shortSLLabel, bar_index + 10, bearishSL)
+        label.set_text(shortSLLabel, "SL: " + str.tostring(bearishSL, "#.####"))
+else
+    if not na(shortTP1Line)
+        line.delete(shortTP1Line)
+        line.delete(shortTP2Line)
+        line.delete(shortSLLine)
+        label.delete(shortTP1Label)
+        label.delete(shortTP2Label)
+        label.delete(shortSLLabel)
+        shortTP1Line := na
+        shortTP2Line := na
+        shortSLLine := na
+        shortTP1Label := na
+        shortTP2Label := na
+        shortSLLabel := na
+
+// Support and Resistance Lines
+plot(support, "Support", color=color.green, linewidth=1, style=plot.style_line)
+plot(resistance, "Resistance", color=color.red, linewidth=1, style=plot.style_line)
+
+// Plot Trend MA if enabled
+plot(enableTrendFilter ? trendMA : na, "Trend MA", color=color.blue, linewidth=2)
+
+// Plot Trailing Stops if active
+plot(strategy.position_size > 0 and longTrailActive ? longTrailStop : na, "Long Trail Stop", color=color.orange, linewidth=2, style=plot.style_stepline)
+plot(strategy.position_size < 0 and shortTrailActive ? shortTrailStop : na, "Short Trail Stop", color=color.orange, linewidth=2, style=plot.style_stepline)
+
+// ENHANCED DASHBOARD WITH TIME INFO
+
+// Background color for trading windows
+tradingWindowBg = enableTimeFilter and isInTradingWindow() ? color.new(color.blue, 95) : na
+offHoursBg = enableTimeFilter and not isInTradingWindow() ? color.new(color.red, 98) : na
+
+bgcolor(tradingWindowBg, title="Active Trading Window") 
+bgcolor(offHoursBg, title="Off Trading Hours")
+
+// Table for Current Strategy Info
+dashboardTextSize = dashboardSize == "Small" ? size.tiny : dashboardSize == "Medium" ? size.small : size.normal
+
+var table infoTable = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 10), border_width=1)
+if barstate.islast
+    // Header row
+    table.cell(infoTable, 0, 0, "FLOWSTATE", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+    table.cell(infoTable, 1, 0, "DASHBOARD", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+    
+    table.cell(infoTable, 0, 1, "Position", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 1, strategy.position_size > 0 ? "Long (" + str.tostring(math.abs(strategy.position_size)) + ")" : strategy.position_size < 0 ? "Short (" + str.tostring(math.abs(strategy.position_size)) + ")" : "None", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 2, "Entry Qty", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 2, str.tostring(entryQty) + " contracts", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 3, "Partial Close", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 3, enablePartialClose ? "Enabled (" + str.tostring(partialCloseQty) + " contracts)" : "Disabled", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 4, "Trend Filter", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 4, enableTrendFilter ? trendMAType + "(" + str.tostring(trendMAPeriod) + ")" : "Disabled", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 5, "Trailing Stop", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 5, enableTrailingStop ? trailMode + " Mode" : "Disabled", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 6, "Trail Status", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 6, strategy.position_size > 0 and longTrailActive ? "Long Trailing" : strategy.position_size < 0 and shortTrailActive ? "Short Trailing" : "Inactive", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 7, "Entry Price", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 7, strategy.position_size != 0 ? str.tostring(strategy.position_avg_price, "#.####") : "N/A", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 8, "Current P&L", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 8, strategy.position_size != 0 ? str.tostring(strategy.openprofit, "#.##") : "N/A", text_color=strategy.openprofit >= 0 ? color.lime : color.red, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 9, "Support", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 9, str.tostring(support, "#.####"), text_color=color.lime, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 10, "Resistance", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 10, str.tostring(resistance, "#.####"), text_color=color.red, text_size=size.tiny)
+    
+    // TIME-BASED DASHBOARD ROWS
+    table.cell(infoTable, 0, 11, "Time Filter", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 11, enableTimeFilter ? "ON" : "OFF", text_color=enableTimeFilter ? color.lime : color.red, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 12, "Trading Hours", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 12, enableTimeFilter ? str.tostring(startHour12) + startAMPM + "-" + str.tostring(endHour12) + endAMPM + " " + timeZone : "24/7", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 13, "Trading Active", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 0, 13, "Trading Active", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(infoTable, 1, 13, isGoodTradingTime() ? "YES" : "NO", text_color=isGoodTradingTime() ? color.lime : color.red, text_size=size.tiny)
+
+// Performance Scorecard Table
+if enableScorecard
+    var table scorecardTable = table.new(position.bottom_right, 2, 8, bgcolor=color.new(color.black, 10), border_width=1)
+    
+    if barstate.islast
+        // Calculate performance metrics
+        totalTrades = strategy.closedtrades
+        winningTrades = strategy.wintrades
+        losingTrades = strategy.losstrades
+        winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0
+        profitFactor = strategy.grossprofit / math.abs(strategy.grossloss)
+        netProfit = strategy.netprofit
+        maxDrawdown = strategy.max_drawdown
+        
+        // Header
+        table.cell(scorecardTable, 0, 0, "FLOWSTATE", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+        table.cell(scorecardTable, 1, 0, "SCORECARD", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.small)
+        
+        // Performance metrics
+        table.cell(scorecardTable, 0, 1, "Net P&L", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 1, "$" + str.tostring(netProfit, "#"), text_color=netProfit >= 0 ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 2, "Total Trades", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 2, str.tostring(totalTrades), text_color=color.white, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 3, "Win Rate", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 3, str.tostring(winRate, "#.#") + "%", text_color=winRate >= 50 ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 4, "Profit Factor", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 4, str.tostring(profitFactor, "#.##"), text_color=profitFactor >= 1.0 ? color.lime : color.red, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 5, "Winners", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 5, str.tostring(winningTrades), text_color=color.lime, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 6, "Losers", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 6, str.tostring(losingTrades), text_color=color.red, text_size=size.tiny)
+        
+        table.cell(scorecardTable, 0, 7, "Max DD", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=size.tiny)
+        table.cell(scorecardTable, 1, 7, "$" + str.tostring(math.abs(maxDrawdown), "#"), text_color=color.orange, text_size=size.tiny)
+
+View in Pine Editor・518 lines
+Use on chart
+1
+5
+3
+1
+2 769
+FlowState Trader - Advanced Time-Filtered Strategy
+
+## Overview
+FlowState Trader is a sophisticated algorithmic trading strategy that combines precision entry signals with intelligent time-based filtering and adaptive risk management. Built for traders seeking to achieve their optimal performance state, FlowState identifies high-probability trading opportunities within user-defined time windows while employing dynamic trailing stops and partial position management.
+
+## Core Strategy Philosophy
+FlowState Trader operates on the principle that peak trading performance occurs when three elements align: **Focus** (precise entry signals), **Flow** (optimal time windows), and **State** (intelligent position management). This strategy excels at finding reversal opportunities at key support and resistance levels while filtering out suboptimal trading periods to keep traders in their optimal flow state.
+
+## Key Features
+
+### 🎯 Focus Entry System
+**Support/Resistance Zone Trading**:
+- Dynamic identification of key price levels using configurable lookback periods
+- Entry signals triggered when price interacts with these critical zones
+- Volume confirmation ensures genuine breakout/reversal momentum
+- Trend filter alignment prevents counter-trend disasters
+
+**Entry Conditions**:
+- **Long Signals**: Price closes above support buffer, touches support level, with above-average volume
+- **Short Signals**: Price closes below resistance buffer, touches resistance level, with above-average volume
+- Optional trend filter using EMA or SMA for directional bias confirmation
+
+### ⏰ FlowState Time Filtering System
+**Comprehensive Time Controls**:
+- **12-Hour Format Trading Windows**: User-friendly AM/PM time selection
+- **Multi-Timezone Support**: UTC, EST, PST, CST with automatic conversion
+- **Day-of-Week Filtering**: Trade only weekdays, weekends, or both
+- **Lunch Hour Avoidance**: Automatically skips low-volume lunch periods (12-1 PM)
+- **Visual Time Indicators**: Background coloring shows active/inactive trading periods
+
+**Smart Time Features**:
+- Handles overnight trading sessions seamlessly
+- Prevents trades during historically poor performance periods
+- Customizable trading hours for different market sessions
+- Real-time trading window status in dashboard
+
+### 🛡️ Adaptive Risk Management
+**Multi-Level Take Profit System**:
+- **TP1**: First profit target with optional partial position closure
+- **TP2**: Final profit target for remaining position
+- **Flexible Scaling**: Choose number of contracts to close at each level
+
+**Dynamic Trailing Stop Technology**:
+- **Three Operating Modes**:
+- **Conservative**: Earlier activation, tighter trailing (protect profits)
+- **Balanced**: Optimal risk/reward balance (recommended)
+- **Aggressive**: Later activation, wider trailing (let winners run)
+- **ATR-Based Calculations**: Adapts to current market volatility
+- **Automatic Activation**: Engages when position reaches profitability threshold
+
+### 📊 Intelligent Position Sizing
+**Contract-Based Management**:
+- Configurable entry quantity (1-1000 contracts)
+- Partial close quantities for profit-taking
+- Clear position tracking and P&L monitoring
+- Real-time position status updates
+
+### 🎨 Professional Visualization
+**Enhanced Chart Elements**:
+- **Entry Zone Highlighting**: Clear visual identification of trading opportunities
+- **Dynamic Risk/Reward Lines**: Real-time TP and SL levels with price labels
+- **Trailing Stop Visualization**: Live tracking of adaptive stop levels
+- **Support/Resistance Lines**: Key level identification
+- **Time Window Background**: Visual confirmation of active trading periods
+
+**Dual Dashboard System**:
+- **Strategy Dashboard**: Real-time position info, settings status, and current levels
+- **Performance Scorecard**: Live P&L tracking, win rates, and trade statistics
+- **Customizable Sizing**: Small, Medium, or Large display options
+
+### ⚙️ Comprehensive Customization
+**Core Strategy Settings**:
+- **Lookback Period**: Support/resistance calculation period (5-100 bars)
+- **ATR Configuration**: Period and multipliers for stops/targets
+- **Reward-to-Risk Ratios**: Customizable profit target calculations
+- **Trend Filter Options**: EMA/SMA selection with adjustable periods
+
+**Time Filter Controls**:
+- **Trading Hours**: Start/end times in 12-hour format
+- **Timezone Selection**: Four major timezone options
+- **Day Restrictions**: Weekend-only, weekday-only, or unrestricted
+- **Session Management**: Lunch hour avoidance and custom periods
+
+**Risk Management Options**:
+- **Trailing Stop Modes**: Conservative/Balanced/Aggressive presets
+- **Partial Close Settings**: Enable/disable with custom quantities
+- **Alert System**: Comprehensive notifications for all trade events
+
+### 📈 Performance Tracking
+**Real-Time Metrics**:
+- Net profit/loss calculation
+- Win rate percentage
+- Profit factor analysis
+- Maximum drawdown tracking
+- Total trade count and breakdown
+- Current position P&L
+
+**Trade Analytics**:
+- Winner/loser ratio tracking
+- Real-time performance scorecard
+- Strategy effectiveness monitoring
+- Risk-adjusted return metrics
+
+### 🔔 Alert System
+**Comprehensive Notifications**:
+- Entry signal alerts with price and quantity
+- Take profit level hits (TP1 and TP2)
+- Stop loss activations
+- Trailing stop engagements
+- Position closure notifications
+
+## Strategy Logic Deep Dive
+
+### Entry Signal Generation
+The strategy identifies high-probability reversal points by combining multiple confirmation factors:
+
+1. **Price Action**: Looks for price interaction with key support/resistance levels
+2. **Volume Confirmation**: Ensures sufficient market interest and liquidity
+3. **Trend Alignment**: Optional filter prevents counter-trend positions
+4. **Time Validation**: Only trades during user-defined optimal periods
+5. **Zone Analysis**: Entry occurs within calculated buffer zones around key levels
+
+### Risk Management Philosophy
+FlowState Trader employs a three-tier risk management approach:
+
+1. **Initial Protection**: ATR-based stop losses set at strategy entry
+2. **Profit Preservation**: Trailing stops activate once position becomes profitable
+3. **Scaled Exit**: Partial profit-taking allows for both security and potential
+
+### Time-Based Edge
+The time filtering system recognizes that not all trading hours are equal:
+- Avoids low-volume, high-spread periods
+- Focuses on optimal liquidity windows
+- Prevents trading during news events (lunch hours)
+- Allows customization for different market sessions
+
+## Best Practices and Optimization
+
+### Recommended Settings
+**For Scalping (1-5 minute charts)**:
+- Lookback Period: 10-20
+- ATR Period: 14
+- Trailing Stop: Conservative mode
+- Time Filter: Major session hours only
+
+**For Day Trading (15-60 minute charts)**:
+- Lookback Period: 20-30
+- ATR Period: 14-21
+- Trailing Stop: Balanced mode
+- Time Filter: Extended trading hours
+
+**For Swing Trading (4H+ charts)**:
+- Lookback Period: 30-50
+- ATR Period: 21+
+- Trailing Stop: Aggressive mode
+- Time Filter: Disabled or very broad
+
+### Market Compatibility
+- **Forex**: Excellent for major pairs during active sessions
+- **Stocks**: Ideal for liquid stocks during market hours
+- **Futures**: Perfect for index and commodity futures
+- **Crypto**: Effective on major cryptocurrencies (24/7 capability)
+
+### Risk Considerations
+- **Market Conditions**: Performance varies with volatility regimes
+- **Timeframe Selection**: Lower timeframes require tighter risk management
+- **Position Sizing**: Never risk more than 1-2% of account per trade
+- **Backtesting**: Always test on historical data before live implementation
+
+## Educational Value
+FlowState serves as an excellent learning tool for:
+- Understanding support/resistance trading
+- Learning proper time-based filtering
+- Mastering trailing stop techniques
+- Developing systematic trading approaches
+- Risk management best practices
+
+## Disclaimer
+This strategy is for educational and informational purposes only. Past performance does not guarantee future results. Trading involves substantial risk of loss and is not suitable for all investors. Users should thoroughly backtest the strategy and understand all risks before live trading. Always use proper position sizing and never risk more than you can afford to lose.
+
+---
+
+*FlowState Trader represents the evolution of systematic trading - combining classical technical analysis with modern risk management and intelligent time filtering to help traders achieve their optimal performance state through systematic, disciplined execution.*

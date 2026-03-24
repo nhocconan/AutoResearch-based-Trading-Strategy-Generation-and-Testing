@@ -1,0 +1,5 @@
+//@version=4
+label_color_bearish=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_26')
+label_color_bullish=##input(defval=#2196F3,type='INPUT_COLOR',##id='in_27')
+##root(root_metainfo,rm_ic_0,label_color_bearish,input__color)
+##root(root_metainfo,rm_ic_1,label_color_bullish,input__color)

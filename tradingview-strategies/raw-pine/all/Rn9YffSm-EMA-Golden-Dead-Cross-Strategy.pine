@@ -1,0 +1,55 @@
+//@version=5
+strategy("EMA Golden/Dead Cross Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+fastLen   = input.int(50,  "Fast EMA Length", minval=1)
+slowLen   = input.int(200, "Slow EMA Length", minval=1)
+tradeDir  = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"])
+
+// ── EMAs ──────────────────────────────────────────────────────────────────────
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+
+plot(fastEMA, title="Fast EMA", color=color.new(color.orange, 0), linewidth=2)
+plot(slowEMA, title="Slow EMA", color=color.new(color.blue,   0), linewidth=2)
+
+// ── Cross Signals ─────────────────────────────────────────────────────────────
+goldenCross = ta.crossover(fastEMA,  slowEMA)  // Fast crosses above slow → Bull
+deadCross   = ta.crossunder(fastEMA, slowEMA)  // Fast crosses below slow → Bear
+
+// ── Visual Markers ────────────────────────────────────────────────────────────
+plotshape(goldenCross, title="Golden Cross", location=location.belowbar,
+     style=shape.triangleup,   color=color.new(color.green, 0), size=size.normal, text="BUY")
+plotshape(deadCross,   title="Dead Cross",   location=location.abovebar,
+     style=shape.triangledown, color=color.new(color.red,   0), size=size.normal, text="SELL")
+
+// ── Background Highlight ──────────────────────────────────────────────────────
+inBull = fastEMA > slowEMA
+bgcolor(inBull ? color.new(color.green, 92) : color.new(color.red, 92), title="Trend Background")
+
+// ── Strategy Orders ───────────────────────────────────────────────────────────
+if goldenCross
+    if tradeDir == "Long Only" or tradeDir == "Both"
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long)
+
+if deadCross
+    if tradeDir == "Short Only" or tradeDir == "Both"
+        strategy.close("Long")
+        strategy.entry("Short", strategy.short)
+
+// ── Info Table ────────────────────────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 3, border_width=1)
+table.cell(infoTable, 0, 0, "Fast EMA (" + str.tostring(fastLen) + ")", text_color=color.orange, bgcolor=color.new(color.black, 60))
+table.cell(infoTable, 1, 0, str.tostring(fastEMA, "#.##"),               text_color=color.orange, bgcolor=color.new(color.black, 60))
+table.cell(infoTable, 0, 1, "Slow EMA (" + str.tostring(slowLen) + ")", text_color=color.blue,   bgcolor=color.new(color.black, 60))
+table.cell(infoTable, 1, 1, str.tostring(slowEMA, "#.##"),               text_color=color.blue,   bgcolor=color.new(color.black, 60))
+table.cell(infoTable, 0, 2, "Trend",                                     text_color=color.white,  bgcolor=color.new(color.black, 60))
+table.cell(infoTable, 1, 2, inBull ? "BULL" : "BEAR",
+     text_color=inBull ? color.green : color.red,                        bgcolor=color.new(color.black, 60))
+
+View in Pine Editor・49 lines
+Use on chart
+7
+204
+This Indicator checks EMA 50 and EMA 200 golden cross and dead cross for the buy and sell. It's effective for ETF trading especially.

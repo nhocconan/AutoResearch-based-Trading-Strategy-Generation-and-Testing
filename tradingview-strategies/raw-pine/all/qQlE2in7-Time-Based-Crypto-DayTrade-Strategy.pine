@@ -1,0 +1,68 @@
+//@version=5
+strategy("Time Based Crypto DayTrade Strategy",overlay=true, pyramiding=1, initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.05)
+
+
+atr= ta.atr(input(13))
+atr2=ta.atr(input(7))
+atr_filter = false
+if(atr > atr2)
+    atr_filter:=true 
+
+monday=input.bool(false)
+tuesday=input.bool(true)
+wednesday=input.bool(false)
+thursday=input.bool(true)
+friday=input.bool(false)
+saturday=input.bool(false)
+sunday=input.bool(false)
+
+hour_entry=input(1)
+hour_exit=input(0)
+if(monday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==1 and atr_filter)
+    strategy.close("long", when=  hour==hour_exit)
+
+if(tuesday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==2 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+if(wednesday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==3 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+if(thursday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==4 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+if(friday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==5 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+if(saturday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==6 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+if(sunday)
+    strategy.entry("long", strategy.long, when= hour==hour_entry and dayofweek==7 and atr_filter)
+    strategy.close("long", when= hour==hour_exit )
+
+View in Pine Editor・50 lines
+Use on chart
+4
+7
+8
+3
+11 489
+This is a time based strategy, designed to enter and exit within the same day of the week, using different hours for entry and exit.
+
+The script is long only direction, and it has no risk management inside, so use it with caution.
+
+At the same time you can also calculate each individual hour return within a certain day, and make your own idea about the best moments to be enter.
+
+In order to filter a bit from the bad trades, I have applied an ATR filter, to check if that volatility is rising in order to help eliminate some of the bad trades when there is no volatility around.
+
+
+For this example, on BTC, it seems that for the last years, on tuesday and thursday, enterring at the beginning of the daily candle, 01:00hours and exit at 00:00 hours, seems to give positive results giving the idea that can be converted in some sort of edge into our favor.
+However dont take this entirelly for granted and conduct your own searches
+
+

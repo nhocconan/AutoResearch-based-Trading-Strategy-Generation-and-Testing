@@ -1,0 +1,171 @@
+//@version=6
+strategy(
+     "Daily Trend Strategy – Max 4 Positions, Risk-Based",
+     overlay = true,
+     initial_capital = 100000,
+     pyramiding = 0,
+     default_qty_type = strategy.fixed,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1
+)
+
+// =====================
+// INPUTS
+// =====================
+riskPct        = input.float(1.0, "Risk % per Trade", step = 0.25)
+maxPositions   = input.int(4, "Max Concurrent Positions", minval = 1)
+atrLen         = input.int(14, "ATR Length")
+atrMult        = input.float(2.5, "ATR Stop Multiple", step = 0.1)
+volLen         = input.int(20, "Volume MA Length")
+
+// =====================
+// INDICATORS
+// =====================
+sma14  = ta.sma(close, 14)
+sma50  = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+atr    = ta.atr(atrLen)
+
+volMA = ta.sma(volume, volLen)
+normalVolume = volume > volMA * 0.8 and volume < volMA * 2.0
+
+// =====================
+// ENTRY CONDITIONS
+// =====================
+trendUp =
+     sma14 > sma50 and
+     close > sma200 and
+     sma200 > sma200[1] and
+     normalVolume
+
+// =====================
+// POSITION LIMIT LOGIC
+// =====================
+canEnter = strategy.opentrades < maxPositions
+
+// =====================
+// RISK-BASED POSITION SIZE
+// =====================
+riskCapital = strategy.equity * (riskPct / 100)
+stopDistance = atr * atrMult
+positionSize = riskCapital / stopDistance
+
+// =====================
+// ENTRY
+// =====================
+if trendUp and canEnter
+    strategy.entry("Long", strategy.long, qty = positionSize)
+
+// =====================
+// TRAILING ATR STOP
+// =====================
+var float highestClose = na
+
+if strategy.position_size > 0
+    highestClose := na(highestClose) ? close : math.max(highestClose, close)
+    trailStop = highestClose - stopDistance
+    strategy.exit("ATR Stop", "Long", stop = trailStop)
+else
+    highestClose := na
+
+// =====================
+// TREND EXIT
+// =====================
+trendExit = sma14 < sma50
+
+if trendExit
+    strategy.close("Long")
+
+// =====================
+// PLOTS
+// =====================
+plot(sma14,  color=color.orange, linewidth=2, title="SMA 14")
+plot(sma50,  color=color.blue,   linewidth=2, title="SMA 50")
+plot(sma200, color=color.red,    linewidth=2, title="SMA 200")
+
+View in Pine Editor・84 lines
+Use on chart
+9
+760
+This strategy buys strong uptrends on the daily chart, risks a fixed % of capital per trade, limits how many trades are open at once, and exits using a trailing volatility stop or when the trend weakens.
+
+What kind of market does this work best in?
+
+1.Strong, persistent trends
+2.Index ETFs, sector ETFs, large-cap stocks
+3.Bull markets or strong sector rotations
+
+It will underperform in:
+
+Sideways markets
+
+Choppy ranges
+
+High-frequency reversals
+
+The market condition this is looking for " A healthy, established uptrend"
+
+It only goes LONG (no shorts) and only when all of these are true:
+
+Short-term trend is up:
+14-day moving average > 50-day moving average
+
+Long-term trend is bullish:
+Price is above the 200-day moving average
+
+Primary trend is improving:
+200-day MA is rising (today > yesterday)
+
+Volume is normal (not dead, not crazy):
+Avoids illiquid days and blow-off spikes
+
+Translation: “I only buy when the market is already strong and behaving normally.”
+
+It can hold up to 4 positions at the same time
+Designed for multiple signals across time, not over-trading
+
+You choose a Risk % per trade (default = 1%)
+
+That means: If the stop loss is hit, you lose ~1% of your total account
+
+It uses ATR (Average True Range):
+
+ATR measures how much the market normally moves
+
+Stop loss = 2.5 × ATR
+
+Position size =
+(1% of account) ÷ stop distance
+
+So:
+
+Volatile market → smaller position
+
+Calm market → bigger position
+
+Exit #1: Trailing ATR stop (main exit)
+
+Tracks the highest close since entry
+
+Stop moves up only, never down
+
+If price reverses by ~2.5 ATR → exit
+
+📌 Translation:
+
+“Let winners run, cut losers automatically.”
+Exit #1: Trailing ATR stop (main exit)
+
+Tracks the highest close since entry
+
+Stop moves up only, never down
+
+If price reverses by ~2.5 ATR → exit
+
+📌 Translation:
+
+“Let winners run, cut losers automatically.”
+
+
+
+

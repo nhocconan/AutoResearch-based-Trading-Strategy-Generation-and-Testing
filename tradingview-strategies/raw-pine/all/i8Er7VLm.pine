@@ -1,0 +1,125 @@
+//@version=6
+strategy("Forex Pair Yield Momentum with Logic Reversal", overlay=false, initial_capital=20000, default_qty_type=strategy.fixed, default_qty_value=100)
+
+// Input: Forex pair selection
+forex_pair = input.string("USD/JPY", title="Select Forex Pair", options=["GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "NZD/USD"])
+
+// Input for reversing logic
+reverse_logic = input.bool(false, title="Reverse Trading Logic")
+
+// Automatically assign 2Y yields based on the selected Forex pair
+var string yield_a = na
+var string yield_b = na
+if forex_pair == "GBP/USD"
+    yield_a := "TVC:US02Y"
+    yield_b := "TVC:GB02Y"
+if forex_pair == "USD/JPY"
+    yield_a := "TVC:JP02Y"
+    yield_b := "TVC:US02Y"
+if forex_pair == "AUD/USD"
+    yield_a := "TVC:US02Y"
+    yield_b := "TVC:AU02Y"
+if forex_pair == "USD/CAD"
+    yield_a := "TVC:US02Y"
+    yield_b := "TVC:CA02Y"
+if forex_pair == "NZD/USD"
+    yield_a := "TVC:US02Y"
+    yield_b := "TVC:NZ02Y"
+
+// Input parameters for Bollinger Bands and momentum
+momentum_length = input.int(26, title="Momentum Length")
+bb_length = input.int(24, title="Bollinger Bands Length")
+bb_std_dev = input.float(1.0, title="Bollinger Bands Std Dev")
+hold_periods = input.int(20, title="Hold Periods (Bars)", minval=1)
+
+// Retrieve yields for currencies
+yield_a_close = request.security(yield_a, timeframe.period, close, lookahead=barmerge.lookahead_off)
+yield_b_close = request.security(yield_b, timeframe.period, close, lookahead=barmerge.lookahead_off)
+
+// Calculate the yield spread and its momentum
+yield_spread = yield_a_close - yield_b_close
+yield_momentum = yield_spread - ta.sma(yield_spread, momentum_length)
+
+// Calculate Bollinger Bands on momentum
+bb_middle = ta.sma(yield_momentum, bb_length)
+bb_upper = bb_middle + bb_std_dev * ta.stdev(yield_momentum, bb_length)
+bb_lower = bb_middle - bb_std_dev * ta.stdev(yield_momentum, bb_length)
+
+// Long and short entry conditions based on Bollinger Bands
+long_condition = reverse_logic ? yield_momentum > bb_upper : yield_momentum < bb_lower
+short_condition = reverse_logic ? yield_momentum < bb_lower : yield_momentum > bb_upper
+
+// Execute trades
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// Close trades after holding for the defined period
+if strategy.position_size > 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= hold_periods
+    strategy.close("Long")
+if strategy.position_size < 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= hold_periods
+    strategy.close("Short")
+
+// Plot momentum and Bollinger Bands for visualization
+plot(yield_momentum, color=color.blue, title="Yield Momentum", linewidth=2)
+plot(bb_upper, color=color.red, title="BB Upper", linewidth=1)
+plot(bb_middle, color=color.gray, title="BB Middle", linewidth=1)
+plot(bb_lower, color=color.green, title="BB Lower", linewidth=1)
+
+View in Pine Editor・68 lines
+Use on chart
+5
+1
+1 771
+This Pine Script strategy leverages yield differentials between the 2-year government bond yields of two countries to trade Forex pairs. Yield spreads are widely regarded as a fundamental driver of currency movements, as highlighted by international finance theories like the Interest Rate Parity (IRP), which suggests that currencies with higher yields tend to appreciate due to increased capital flows:
+
+1. Dynamic Yield Spread Calculation:
+
+• The strategy dynamically calculates the yield spread (yield_a - yield_b) for the chosen Forex pair.
+
+• Example: For GBP/USD, the spread equals US 2Y Yield - UK 2Y Yield.
+
+2. Momentum Analysis via Bollinger Bands:
+
+• Yield momentum is computed as the difference between the current spread and its moving
+
+Bollinger Bands are applied to identify extreme deviations:
+
+• Long Entry: When momentum crosses below the lower band.
+
+• Short Entry: When momentum crosses above the upper band.
+
+3. Reversal Logic:
+
+• An optional checkbox reverses the trading logic, allowing long trades at the upper band and short trades at the lower band, accommodating different market conditions.
+
+4. Trade Management:
+
+• Positions are held for a predefined number of bars (hold_periods), and each trade uses a fixed contract size of 100 with a starting capital of $20,000.
+
+Theoretical Basis:
+
+1. Yield Differentials and Currency Movements:
+
+• Empirical studies, such as Clarida et al. (2009), confirm that interest rate differentials significantly impact exchange rate dynamics, especially in carry trade strategies .
+
+• Higher-yields tend to appreciate against lower-yielding currencies due to speculative flows and demand for higher returns.
+
+2. Bollinger Bands for Momentum:
+
+• Bollinger Bands effectively capture deviations in yield momentum, identifying opportunities where price returns to equilibrium (mean reversion) or extends in trend-following scenarios (momentum breakout).
+
+• As Bollinger (2001) emphasized, this tool adapts to market volatility by dynamically adjusting thresholds .
+
+References:
+
+1. Dornbusch, R. (1976). Expectations and Exchange Rate Dynamics. Journal of Political Economy.
+
+2. Obstfeld, M., & Rogoff, K. (1996). Foundations of International Macroeconomics.
+
+3. Clarida, R., Davis, J., & Pedersen, N. (2009). Currency Carry Trade Regimes. NBER.
+
+4. Bollinger, J. (2001). Bollinger on Bollinger Bands.
+
+5. Mendelsohn, L. B. (2006). Forex Trading Using Intermarket Analysis.

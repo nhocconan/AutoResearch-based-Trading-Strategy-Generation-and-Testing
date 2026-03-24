@@ -1,0 +1,8 @@
+//@version=5
+##root(root_metainfo,rm_0,'BelowBar',input__string,plotchar,location)
+##root(root_metainfo,rm_1,'tiny',const__string,plotchar,size)
+##root(root_metainfo,rm_2,'AboveBar',input__string,plotchar,location)
+##root(root_metainfo,rm_3,'tiny',const__string,plotchar,size)
+##root(root_metainfo,rm_4,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_5,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_6,plot.style_linebr,cb__plot_style__integer,plot,style)

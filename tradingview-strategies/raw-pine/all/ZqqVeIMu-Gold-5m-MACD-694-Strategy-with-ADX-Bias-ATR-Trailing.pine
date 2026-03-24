@@ -1,0 +1,177 @@
+//@version=6
+strategy("BTC 5m — MACD 4-9-4 Strategy (with ADX/Bias + ATR Trailing) v1.2",
+     overlay=true, pyramiding=0,
+     initial_capital=10000, currency=currency.USD,
+     calc_on_every_tick=true, calc_on_order_fills=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===== MACD settings =====
+fastLen   = input.int(4,  "MACD fast EMA", minval=1)
+slowLen   = input.int(9,  "MACD slow EMA", minval=2)
+sigLen    = input.int(4,  "Signal EMA",    minval=1)
+requireZero = input.bool(true, "Require MACD>0 for Long / <0 for Short?")
+
+// ===== Filters =====
+useBias    = input.bool(true,  "Use EMA200 bias?")
+emaLen     = input.int(200,    "EMA length (bias)", minval=50)
+useADX     = input.bool(false, "Use ADX filter?")
+adxLen     = input.int(14,     "ADX length", minval=5)
+adxThr     = input.int(20,     "ADX threshold", minval=5)
+useSession = input.bool(false, "Use Session Filter?")
+sess       = input.session("0000-2359", "Session (chart tz)")
+
+allowLongs  = input.bool(true,  "Allow LONGs?")
+allowShorts = input.bool(true,  "Allow SHORTs?")
+
+// ===== Risk/Exit (static SL/TP) =====
+atrLen      = input.int(14, "ATR length", minval=5)
+slATR       = input.float(1.0, "SL = N x ATR", step=0.1)
+tpR         = input.float(1.5, "TP = R x SL (R-multiple) [set 0 to disable TP]", step=0.1)
+
+// ===== Trailing Stop (ATR-based) =====
+useTrail      = input.bool(true,  "Use ATR trailing stop?")
+trailATRmult  = input.float(1.0,  "Trail ATR multiple", step=0.1, minval=0.1)
+trailAfterR   = input.float(1.0,  "Activate trail after >= this R move", step=0.1, minval=0.0)
+
+// ===== Sizing =====
+useRiskSize = input.bool(true,  "Use risk-based position sizing?")
+riskPct     = input.float(0.5,  "Risk % of equity per trade", step=0.1, minval=0.1, maxval=5.0)
+
+// ===== Core refs =====
+emaBias   = ta.ema(close, emaLen)
+atr       = ta.atr(atrLen)
+inSession = not useSession or not na(time(timeframe.period, sess))
+
+// ===== MACD(4,9,4) =====
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+macd    = fastEMA - slowEMA
+signal  = ta.ema(macd, sigLen)
+
+// ===== ADX (manual calc; ไม่ใช้ ta.adx เพื่อกัน error) =====
+upMove   = ta.change(high)
+downMove = -ta.change(low)
+plusDM   = (upMove > downMove and upMove > 0) ? upMove : 0.0
+minusDM  = (downMove > upMove and downMove > 0) ? downMove : 0.0
+trRaw    = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+trSm     = ta.rma(trRaw, adxLen)
+pdi      = 100.0 * ta.rma(plusDM,  adxLen) / math.max(trSm, 1e-10)
+mdi      = 100.0 * ta.rma(minusDM, adxLen) / math.max(trSm, 1e-10)
+dx       = 100.0 * math.abs(pdi - mdi) / math.max(pdi + mdi, 1e-10)
+adx      = ta.rma(dx, adxLen)
+
+// ===== Filters =====
+biasLongOK  = (not useBias) or (close > emaBias)
+biasShortOK = (not useBias) or (close < emaBias)
+adxOK       = (not useADX) or (adx >= adxThr)
+
+// ===== Entries =====
+crossUp   = ta.crossover(macd, signal)
+crossDown = ta.crossunder(macd, signal)
+
+longOK  = inSession and allowLongs  and crossUp   and adxOK and biasLongOK  and ((not requireZero) or macd > 0)
+shortOK = inSession and allowShorts and crossDown and adxOK and biasShortOK and ((not requireZero) or macd < 0)
+
+enterLong  = strategy.position_size == 0 and longOK
+enterShort = strategy.position_size == 0 and shortOK
+
+// ===== Position sizing by risk =====
+f_qty_by_risk(risk_cash, entry_price, stop_price) =>
+    risk_per_unit = math.abs(entry_price - stop_price)
+    risk_per_unit > 0 ? (risk_cash / risk_per_unit) : 0.0
+
+// ===== State for exits & trailing =====
+var float longSL  = na
+var float longTP  = na
+var float shortSL = na
+var float shortTP = na
+var float longTrail  = na
+var float shortTrail = na
+var float highSinceEntry = na
+var float lowSinceEntry  = na
+
+// ---- LONG ----
+if enterLong
+    float slDist = slATR * atr
+    float _sl = close - slDist
+    float _tp = tpR > 0 ? (close + tpR * slDist) : na
+    if useRiskSize
+        float qtyCalc = f_qty_by_risk(strategy.equity * (riskPct/100.0), close, _sl)
+        strategy.entry("Long", strategy.long, qty=qtyCalc)
+    else
+        strategy.entry("Long", strategy.long)
+    longSL := _sl
+    longTP := _tp
+    // reset trailing trackers
+    longTrail := na
+    shortTrail := na
+    highSinceEntry := high
+    lowSinceEntry  := na
+
+// ---- SHORT ----
+if enterShort
+    float slDist = slATR * atr
+    float _sl = close + slDist
+    float _tp = tpR > 0 ? (close - tpR * slDist) : na
+    if useRiskSize
+        float qtyCalc = f_qty_by_risk(strategy.equity * (riskPct/100.0), close, _sl)
+        strategy.entry("Short", strategy.short, qty=qtyCalc)
+    else
+        strategy.entry("Short", strategy.short)
+    shortSL := _sl
+    shortTP := _tp
+    // reset trailing trackers
+    shortTrail := na
+    longTrail := na
+    lowSinceEntry  := low
+    highSinceEntry := na
+
+// ===== Trailing logic (ATR) =====
+if strategy.position_size > 0
+    // track high since entry
+    highSinceEntry := na(highSinceEntry) ? high : math.max(highSinceEntry, high)
+    float entryP   = strategy.position_avg_price
+    float riskLong = entryP - longSL
+    bool allowTrail = useTrail and not na(riskLong) and (highSinceEntry - entryP) >= trailAfterR * riskLong
+    if allowTrail
+        float candidate = highSinceEntry - trailATRmult * atr
+        longTrail := na(longTrail) ? candidate : math.max(longTrail, candidate)  // never loosen
+if strategy.position_size < 0
+    // track low since entry
+    lowSinceEntry := na(lowSinceEntry) ? low : math.min(lowSinceEntry, low)
+    float entryP   = strategy.position_avg_price
+    float riskShort= shortSL - entryP
+    bool allowTrail = useTrail and not na(riskShort) and (entryP - lowSinceEntry) >= trailAfterR * riskShort
+    if allowTrail
+        float candidate = lowSinceEntry + trailATRmult * atr
+        shortTrail := na(shortTrail) ? candidate : math.min(shortTrail, candidate) // never loosen
+
+// ===== Exits (combine static SL with trailing; TP optional) =====
+if strategy.position_size > 0 and not na(longSL)
+    float stopL = (useTrail and not na(longTrail)) ? math.max(longSL, longTrail) : longSL
+    if not na(longTP)
+        strategy.exit("L-TP/SL", from_entry="Long", stop=stopL, limit=longTP)
+    else
+        strategy.exit("L-SL",    from_entry="Long", stop=stopL)
+
+if strategy.position_size < 0 and not na(shortSL)
+    float stopS = (useTrail and not na(shortTrail)) ? math.min(shortSL, shortTrail) : shortSL
+    if not na(shortTP)
+        strategy.exit("S-TP/SL", from_entry="Short", stop=stopS, limit=shortTP)
+    else
+        strategy.exit("S-SL",    from_entry="Short", stop=stopS)
+
+// ===== Arrows only =====
+plotshape(enterLong,  title="Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small)
+plotshape(enterShort, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small)
+
+// Alerts (ข้อความคงที่ per Pine rule)
+alertcondition(enterLong,  title="Enter LONG",  message="MACD 4-9-4 LONG")
+alertcondition(enterShort, title="Enter SHORT", message="MACD 4-9-4 SHORT")
+
+View in Pine Editor・170 lines
+Use on chart
+2
+6
+1 317
+This is my sustain gold trade for trading gold 5m TF

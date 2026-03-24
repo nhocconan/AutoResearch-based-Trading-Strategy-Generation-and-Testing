@@ -1,0 +1,75 @@
+//@version=5
+strategy("Custom Strategy: 2x Touch Entry/Exit (Visual)", overlay=true, default_qty_type=strategy.cash, default_qty_value=1000)
+
+// === EMA ===
+emaLength = input.int(200, "EMA Period")
+ema = ta.ema(close, emaLength)
+stepLevel = input.int(34, "Distance Level")
+
+// === DISTANZA DA EMA ===
+k = high > ema ? high - ema : low - ema
+
+// === STATO ===
+var bool touchMinusFirst  = false
+var bool touchMinusSecond = false
+var bool touchPlusFirst   = false
+var bool touchPlusSecond  = false
+var bool inLong = false
+
+// === SEGNALI (RESET OGNI BARRA) ===
+longSignal = false
+exitSignal = false
+
+// === ENTRY LONG (2 tocchi -34) ===
+if not inLong and not touchMinusFirst and ta.crossunder(k, -stepLevel)
+    touchMinusFirst := true
+
+if not inLong and touchMinusFirst and ta.crossover(k, -stepLevel)
+    touchMinusSecond := true
+
+if not inLong and touchMinusFirst and touchMinusSecond
+    strategy.entry("Long", strategy.long)
+    inLong := true
+    longSignal := true
+
+    touchMinusFirst  := false
+    touchMinusSecond := false
+    touchPlusFirst   := false
+    touchPlusSecond  := false
+
+// === EXIT LONG (2 tocchi +34) ===
+if inLong and not touchPlusFirst and ta.crossover(k, stepLevel)
+    touchPlusFirst := true
+
+if inLong and touchPlusFirst and ta.crossunder(k, stepLevel)
+    touchPlusSecond := true
+
+if inLong and touchPlusFirst and touchPlusSecond
+    strategy.close("Long")
+    inLong := false
+    exitSignal := true
+
+    touchPlusFirst   := false
+    touchPlusSecond  := false
+    touchMinusFirst  := false
+    touchMinusSecond := false
+
+// === PLOT ===
+plot(ema, "EMA 200", color=color.blue, linewidth=2)
+plot(k, "Distance from EMA", color = k >= 0 ? color.green : color.red)
+hline(0, "Zero", color=color.gray)
+hline(stepLevel, "+34", color=color.orange)
+hline(-stepLevel, "-34", color=color.orange)
+
+// === SEGNALI VISIVI ===
+plotshape(longSignal, title="LONG", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="LONG")
+plotshape(exitSignal, title="EXIT", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="EXIT")
+
+View in Pine Editor・66 lines
+Use on chart
+1
+6
+1 197
+It works best on XAUUSD,
+
+If you have ideas give me ideas to optimize it

@@ -1,0 +1,222 @@
+//@version=6
+strategy("Mean Reversion Oleg", overlay = true, initial_capital = 5000)
+
+// === Точность лота ===
+lot_precision     = input.int(title = "Точность лота", defval = 3, minval = 0, maxval = 8)
+show_base_labels  = input.bool(title = "Показывать метку базового ордера", defval = true)
+show_small_table  = input.bool(title = "Показывать мини-таблицу", defval = true)
+
+roundQty(q) =>
+    factor = math.pow(10.0, lot_precision)
+    raw    = math.ceil(q * factor) / factor
+    math.max(1.0 / factor, raw)
+
+// === Webhook ===
+buy     = input.string(title = "Webhook для покупки", defval = "")
+exitbuy = input.string(title = "Webhook для выхода",  defval = "")
+
+// === Режимы ===
+STK   = input.bool(title = "Режим акций (единицы вместо количества)", defval = false)
+PLotD = input.bool(title = "Показывать динамические уровни",          defval = false)
+
+// === Отклонения ===
+deviation  = input.float(title = "Отклонение 1 (%)", defval = 1.3,  minval = 0.01, maxval = 100, step = 0.1)  / 100
+deviation1 = input.float(title = "Отклонение 2 (%)", defval = 7.5,  minval = 0.01, maxval = 100, step = 0.1)  / 100
+deviation2 = input.float(title = "Отклонение 3 (%)", defval = 13.3, minval = 0.01, maxval = 100, step = 0.1)  / 100
+deviation3 = input.float(title = "Отклонение 4 (%)", defval = 21.1, minval = 0.01, maxval = 100, step = 0.1)  / 100
+deviation4 = input.float(title = "Отклонение 5 (%)", defval = 33.7, minval = 0.01, maxval = 100, step = 0.1)  / 100
+
+// === Уровни покупки ($) ===
+unitsLevel1 = input.float(title = "Уровень 1 ($)", defval = 50)
+unitsLevel2 = input.float(title = "Уровень 2 ($)", defval = 100)
+unitsLevel3 = input.float(title = "Уровень 3 ($)", defval = 200)
+unitsLevel4 = input.float(title = "Уровень 4 ($)", defval = 400)
+unitsLevel5 = input.float(title = "Уровень 5 ($)", defval = 600)
+
+// === MA ===
+maType   = input.string(title = "Тип MA", defval = "WMA", options = ["WMA","SMA","RMA","EMA","HMA"])
+maLength = input.int(title = "Период MA", defval = 20, minval = 2)
+
+ma = switch maType
+    "EMA" => ta.ema(close, maLength)
+    "SMA" => ta.sma(close, maLength)
+    "RMA" => ta.rma(close, maLength)
+    "WMA" => ta.wma(close, maLength)
+    "HMA" => ta.hma(close, maLength)
+    => na
+
+// === Динамические уровни ===
+L1 = ma * (1 - deviation)
+L2 = ma * (1 - deviation1)
+L3 = ma * (1 - deviation2)
+L4 = ma * (1 - deviation3)
+L5 = ma * (1 - deviation4)
+
+// === Статические уровни ===
+s2 = 0.0
+s2 := na(s2[1]) ? na : s2[1]
+
+s3 = 0.0
+s3 := na(s3[1]) ? na : s3[1]
+
+s4 = 0.0
+s4 := na(s4[1]) ? na : s4[1]
+
+s5 = 0.0
+s5 := na(s5[1]) ? na : s5[1]
+
+// === Тейк-профит ===
+take_profit1 = input.float(title = "Тейк-профит (%)", defval = 1.67, step = 0.01, minval = 0.0) / 100
+take_profit_level1 = strategy.position_avg_price * (1 + take_profit1)
+
+plot(take_profit_level1, style = plot.style_linebr, linewidth = 2, color = color.green)
+plot(strategy.position_avg_price, style = plot.style_linebr, linewidth = 2, color = color.black)
+
+// === Трейлинг ===
+takeProfitTrailingEnabled = input.bool(title = "Включить трейлинг", defval = false)
+trailingTakeProfitDistancePerc = input.float(title = "Дистанция трейлинга (%)", defval = 1.0, minval = 0.01, maxval = 100, step = 0.01) / 100
+
+longTrailingTakeProfitStepTicks = take_profit_level1 * trailingTakeProfitDistancePerc / syminfo.mintick
+
+if strategy.position_size > 0
+    strategy.exit("B-ALL",
+        limit        = takeProfitTrailingEnabled ? na : take_profit_level1,
+        comment      = exitbuy,
+        trail_price  = takeProfitTrailingEnabled ? take_profit_level1 : na,
+        trail_offset = takeProfitTrailingEnabled ? longTrailingTakeProfitStepTicks : na)
+
+// === Логика входов B1–B5 ===
+
+// B1
+if close < L1 and strategy.opentrades == 0
+    qty1 = STK ? unitsLevel1 : roundQty(unitsLevel1 / close)
+    strategy.order("B1", strategy.long, qty1, comment = buy)
+    s2 := L2
+
+    if show_base_labels
+        label.new(bar_index, low, "B1: " + str.tostring(qty1),
+            style = label.style_label_up, color = color.green)
+
+// B2
+if close < s2 and strategy.opentrades == 1
+    qty2 = STK ? unitsLevel2 : roundQty(unitsLevel2 / close)
+    strategy.order("B2", strategy.long, qty2, comment = buy)
+    s3 := L3
+
+// B3
+if close < s3 and strategy.opentrades == 2
+    qty3 = STK ? unitsLevel3 : roundQty(unitsLevel3 / close)
+    strategy.order("B3", strategy.long, qty3, comment = buy)
+    s4 := L4
+
+// B4
+if close < s4 and strategy.opentrades == 3
+    qty4 = STK ? unitsLevel4 : roundQty(unitsLevel4 / close)
+    strategy.order("B4", strategy.long, qty4, comment = buy)
+    s5 := L5
+
+// B5
+if close < s5 and strategy.opentrades == 4
+    qty5 = STK ? unitsLevel5 : roundQty(unitsLevel5 / close)
+    strategy.order("B5", strategy.long, qty5, comment = buy)
+
+// === Графика динамических уровней ===
+l_ma = plot(ma, color = color.new(color.red, 0), linewidth = 3)
+
+l_b1 = plot(PLotD ? L1 : na, color = color.new(color.red, 0),   linewidth = 1)
+l_b2 = plot(PLotD ? L2 : na, color = color.new(color.black, 0), linewidth = 1)
+l_b3 = plot(PLotD ? L3 : na, color = color.new(color.black, 0), linewidth = 1)
+l_b4 = plot(PLotD ? L4 : na, color = color.new(color.black, 0), linewidth = 1)
+l_b5 = plot(PLotD ? L5 : na, color = color.new(color.black, 0), linewidth = 1)
+
+fill(l_ma, l_b1, color = color.new(color.gray, 50))
+fill(l_b1, l_b2, color = color.new(color.orange, 90))
+fill(l_b2, l_b3, color = color.new(color.orange, 70))
+fill(l_b3, l_b4, color = color.new(color.orange, 50))
+fill(l_b4, l_b5, color = color.new(color.orange, 30))
+
+// === Статические уровни ===
+st2 = plot(strategy.opentrades > 0 ? s2 : na, title = "Статический 2", style = plot.style_linebr)
+st3 = plot(strategy.opentrades > 1 ? s3 : na, title = "Статический 3", style = plot.style_linebr)
+st4 = plot(strategy.opentrades > 2 ? s4 : na, title = "Статический 4", style = plot.style_linebr)
+st5 = plot(strategy.opentrades > 3 ? s5 : na, title = "Статический 5", style = plot.style_linebr)
+
+bot_color = input.color(title = "Цвет статических уровней", defval = color.blue)
+
+fill(st2, st3, color.new(bot_color, 90))
+fill(st3, st4, color.new(bot_color, 80))
+fill(st4, st5, color.new(bot_color, 70))
+
+// === Мини-таблица ===
+if show_small_table
+    sum_qty     = strategy.position_size
+    sum_usd     = sum_qty * close
+    open_trades = strategy.opentrades
+    open_pnl    = strategy.openprofit
+    eq          = strategy.equity
+
+    var table mini = table.new(position.top_right, 5, 1, bgcolor = na)
+
+    table.cell(mini, 0, 0, "Кол-во: " + str.tostring(sum_qty),                  text_color = color.white)
+    table.cell(mini, 1, 0, "USD: "    + str.tostring(sum_usd,  format.mintick), text_color = color.white)
+    table.cell(mini, 2, 0, "Сделок: " + str.tostring(open_trades),              text_color = color.white)
+    table.cell(mini, 3, 0, "PnL: "    + str.tostring(open_pnl, format.mintick), text_color = open_pnl >= 0 ? color.green : color.red)
+    table.cell(mini, 4, 0, "Equity: "+ str.tostring(eq,       format.mintick), text_color = eq >= 0 ? color.green : color.red)
+
+View in Pine Editor・164 lines
+Use on chart
+4
+0
+868
+📘 Description
+This script is an extended and customized version of the original “Mean Reversion V‑F” created by the respected author fullmax.
+I adapted the logic for my own trading workflow and added several improvements aimed at stability, automation, and exchange‑safe execution when using webhooks.
+
+🔧 Key Enhancements
+Lot precision control (prevents exchange errors when sending webhook orders)
+
+Base order labels for visual clarity
+
+Mini‑table with live position metrics
+
+Dynamic deviation levels (L1–L5)
+
+Static averaging levels (B2–B5)
+
+Trailing take‑profit option
+
+Support for stock mode (fixed units instead of quantity)
+
+Webhook fields for entry and exit signals
+
+🎯 How the Strategy Works
+The script calculates a moving average and builds five deviation‑based levels below it.
+When price reaches these levels, the strategy opens a base order (B1) and then averages the position using B2–B5 levels.
+
+After entering a position, the strategy manages it using:
+
+a fixed take‑profit target
+
+or an optional trailing take‑profit
+
+plus a visual table showing position size, USD value, open PnL, and equity
+
+All quantities are rounded according to the selected lot precision to ensure compatibility with exchange requirements when using webhook automation.
+
+⚙️ Features Overview
+Automated long entries based on deviation levels
+
+Configurable order sizes for each averaging step
+
+Optional stock‑mode (units instead of calculated quantity)
+
+Dynamic and static level visualization
+
+Trailing TP with adjustable distance
+
+Clean UI with optional labels and mini‑table
+
+📝 Disclaimer
+This script is provided for educational purposes only.
+It does not constitute financial advice and does not guarantee profits.
+Always test strategies on historical data before using them in live trading.

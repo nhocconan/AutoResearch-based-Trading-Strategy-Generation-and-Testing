@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-03-23T04:48:12.612441+00:00",
+  "queue_rank": 3467,
+  "page": 145,
+  "name": "BTC bot",
+  "slug": "dpbezbmp-btc-bot",
+  "chart_url": "https://www.tradingview.com/script/DPBeZbMP-BTC-bot/",
+  "pine_file": "raw-pine/bulk/DPBeZbMP-BTC-bot.pine",
+  "symbol_name": "BITSTAMP:BTCUSD",
+  "repo_timeframe_hint": "15m",
+  "status": "unsupported",
+  "classification": "unsupported",
+  "timeframe": "15m",
+  "reason": "Uses security() with lookahead=true causing repainting; strategy.exit requires next-bar approximation",
+  "adaptations": [
+    "Remove lookahead=true from security calls",
+    "Convert strategy.exit to next-bar signal changes",
+    "Replace strategy.risk with position sizing logic"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [],
+  "python_file": null,
+  "failed_python_files": [],
+  "validation": null,
+  "last_error": null
+}

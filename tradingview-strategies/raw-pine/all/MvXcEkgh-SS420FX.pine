@@ -1,0 +1,20 @@
+//@version=3
+study("script removed")
+plot(close)
+
+View in Pine Editor・3 lines
+Use on chart
+1
+6
+9
+8
+3 955
+Aug 29, 2016
+Two Moving_Average cross's & Daily_Candle cross
+Based on Hull_MA
+Developed by Alan Hull, it is an indicator, that solves the problem with making a moving average more reactive to current price activity. The Hull Moving Average almost eliminates lag and manages to improve smoothing.
+The HMA manages to stick to rapid changes in price activity, as it has superior smoothing over a Simple Moving Average of the same period. The HMA employs Weighted Moving Averages (WMA) and dampens the smoothing effect. It can be calculated as follows:
+HMA(n) = WMA(2*WMA(n/2) – WMA(n)), sqrt(n))
+Nov 13, 2017
+Release Notes
+removed (overwritten)

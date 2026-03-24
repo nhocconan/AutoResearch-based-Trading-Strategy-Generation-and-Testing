@@ -1,0 +1,81 @@
+//@version=5
+strategy("Bollinger Bands and RSI Short Selling",
+         overlay=true,
+         initial_capital = 1000,
+         default_qty_value = 30,
+         default_qty_type = strategy.percent_of_equity,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+//Backtest period
+timePeriod = time >= timestamp(syminfo.timezone, 2021, 12, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+
+//Bollinger Bands Indicator
+length = input.int(20, minval=1)
+src = input(close, title="Source")
+mult = input.float(2.0, minval=0.001, maxval=50, title="StdDev")
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+offset = input.int(0, "Offset", minval = -500, maxval = 500)
+plot(basis, "Basis", color=#FF6D00, offset = offset)
+p1 = plot(upper, "Upper", color=#2962FF, offset = offset)
+p2 = plot(lower, "Lower", color=#2962FF, offset = offset)
+fill(p1, p2, title = "Background", color=color.rgb(33, 150, 243, 95))
+
+
+// RSI inputs and calculations
+lengthRSI = 14
+RSI = ta.rsi(close, lengthRSI)
+oversold= input(30)
+
+
+//Stop Loss and Take Profit for Shorting
+Stop_loss= ((input (1))/100)
+Take_profit= ((input (7)/100))
+
+shortStopPrice  = strategy.position_avg_price * (1 + Stop_loss)
+shortTakeProfit = strategy.position_avg_price * (1 - Take_profit)
+
+//Entry and Exit
+strategy.entry(id="short", direction=strategy.short, when=ta.crossover(close, upper) and RSI < 70 and timePeriod and notInTrade)
+
+if (ta.crossover(upper, close) and RSI > 70 and timePeriod)
+    strategy.exit(id='close', stop = shortTakeProfit, limit = shortStopPrice)
+
+View in Pine Editor・50 lines
+Use on chart
+1
+1
+7
+1
+5 343
+The Bollinger Bands are among the most famous and widely used indicators. A Bollinger Band is a technical analysis tool defined by a set of trendlines plotted two standard deviations (positively and negatively) away from a simple moving average ( SMA ) of a security's price, but which can be adjusted to user preferences. They can suggest when an asset is oversold or overbought in the short term, thus provide the best time for buying and selling it.
+
+The relative strength index ( RSI ) is a momentum indicator used in technical analysis . RSI measures the speed and magnitude of a security's recent price changes to evaluate overvalued or undervalued conditions in the price of that security. The RSI can do more than point to overbought and oversold securities. It can also indicate securities that may be primed for a trend reversal or corrective pullback in price. It can signal when to buy and sell. Traditionally, an RSI reading of 70 or above indicates an overbought situation. A reading of 30 or below indicates an oversold condition.
+
+The short order is placed on assets that present strong momentum when it's more likely that it is about to decrease further. The rule strategy places and closes the order when the following conditions are met:
+
+ENTRY
+
+The closing price is greater than the upper standard deviation of the Bollinger Bands
+
+The RSI is less than 70
+
+
+
+EXIT
+
+The trade is closed in profit when the RSI is less than 70
+
+Upper standard deviation of the Bollinger Band is greater than the the closing price.
+
+
+
+This strategy comes with a stop loss and a take profit, and as you can see by the results, it is well suited for a bear market.
+
+This trade works very well with ETH (1h timeframe), AVA (4h timeframe), and SOL (3h timeframe) and is backtested from the 1 December 2021 to capture how this strategy would perform in a bear market.
+
+To make the results more realistic, the strategy assumes each order to trade 30% of the available capital. A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange.

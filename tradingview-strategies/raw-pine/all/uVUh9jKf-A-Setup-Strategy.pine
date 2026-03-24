@@ -1,0 +1,263 @@
+//@version=6
+strategy("A+ Setup Strategy", overlay=true, max_bars_back=500)
+
+// ============================
+// INPUTS
+// ============================
+showSR = input.bool(true, "Show Daily S/R", group="Display")
+showPrevLevels = input.bool(true, "Show Previous Highs/Lows", group="Display")
+showFVG = input.bool(true, "Show Fair Value Gaps", group="Display")
+showBOS = input.bool(true, "Show Break of Structure", group="Display")
+
+// Volume Settings
+volMultiplier = input.float(2.0, "Volume Spike Multiplier", minval=1.0, group="Volume")
+volMaLength = input.int(20, "Volume MA Length", minval=1, group="Volume")
+
+// BOS Settings
+swingLength = input.int(10, "Swing Length for BOS", minval=5, group="Structure")
+
+// Filter Settings
+minFVGSize = input.float(0.2, "Min FVG Size %", minval=0.05, maxval=2.0, group="Filters")
+trendFilter = input.bool(true, "Use Trend Filter", group="Filters")
+emaLength = input.int(50, "Trend EMA Length", minval=20, group="Filters")
+requireBOS = input.bool(true, "Require Break of Structure", group="Filters")
+requireKeyLevel = input.bool(true, "Require Near Key Level", group="Filters")
+
+// Session Settings
+asianSessionOnly = input.bool(false, "Trade Asian Session Only", group="Session Filter")
+asianStartHour = input.int(23, "Asian Session Start Hour (GMT)", minval=0, maxval=23, group="Session Filter")
+asianEndHour = input.int(8, "Asian Session End Hour (GMT)", minval=0, maxval=23, group="Session Filter")
+
+// Candlestick Pattern Settings
+useEngulfing = input.bool(false, "Require Engulfing Pattern", group="Candlestick Patterns")
+showEngulfing = input.bool(true, "Show Engulfing Signals", group="Candlestick Patterns")
+
+// Risk Management
+riskPercent = input.float(1.0, "Risk Per Trade %", minval=0.1, maxval=5.0, group="Risk Management")
+stopLossPercent = input.float(2.0, "Stop Loss %", minval=0.5, maxval=10.0, group="Risk Management")
+takeProfitPercent = input.float(4.0, "Take Profit %", minval=1.0, maxval=20.0, group="Risk Management")
+
+// ============================
+// DAILY SUPPORT & RESISTANCE
+// ============================
+var float dailyHigh = na
+var float dailyLow = na
+
+bool isNewDay = ta.change(time('D')) != 0
+if isNewDay
+    dailyHigh := high
+    dailyLow := low
+else
+    dailyHigh := math.max(dailyHigh, high)
+    dailyLow := math.min(dailyLow, low)
+
+// Plot Daily Levels
+plot(showSR ? dailyHigh : na, "Daily High", color=color.red, linewidth=2)
+plot(showSR ? dailyLow : na, "Daily Low", color=color.green, linewidth=2)
+
+// ============================
+// PREVIOUS TIMEFRAME LEVELS
+// ============================
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+prevDayLow = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+prev1hHigh = request.security(syminfo.tickerid, "60", high[1], lookahead=barmerge.lookahead_on)
+prev1hLow = request.security(syminfo.tickerid, "60", low[1], lookahead=barmerge.lookahead_on)
+prev4hHigh = request.security(syminfo.tickerid, "240", high[1], lookahead=barmerge.lookahead_on)
+prev4hLow = request.security(syminfo.tickerid, "240", low[1], lookahead=barmerge.lookahead_on)
+
+// Plot Previous Levels
+plot(showPrevLevels ? prevDayHigh : na, "Prev Day High", color=color.new(color.red, 50), linewidth=1, style=plot.style_circles)
+plot(showPrevLevels ? prevDayLow : na, "Prev Day Low", color=color.new(color.green, 50), linewidth=1, style=plot.style_circles)
+plot(showPrevLevels ? prev1hHigh : na, "Prev 1H High", color=color.new(color.orange, 60), linewidth=1, style=plot.style_cross)
+plot(showPrevLevels ? prev1hLow : na, "Prev 1H Low", color=color.new(color.blue, 60), linewidth=1, style=plot.style_cross)
+
+// ============================
+// SESSION FILTER
+// ============================
+currentHour = hour(time, "GMT")
+isAsianSession = asianSessionOnly ? 
+                 (asianStartHour > asianEndHour ? 
+                  (currentHour >= asianStartHour or currentHour < asianEndHour) : 
+                  (currentHour >= asianStartHour and currentHour < asianEndHour)) : true
+
+bgcolor(isAsianSession and asianSessionOnly ? color.new(color.blue, 95) : na, title="Asian Session")
+
+// ============================
+// TREND FILTER
+// ============================
+ema = ta.ema(close, emaLength)
+bullishTrend = close > ema
+bearishTrend = close < ema
+
+plot(trendFilter ? ema : na, "Trend EMA", color=color.yellow, linewidth=2)
+
+// ============================
+// FAIR VALUE GAPS (FVG)
+// ============================
+fvgGapBull = low - high[2]
+fvgGapBear = low[2] - high
+fvgSizeBull = (fvgGapBull / close) * 100
+fvgSizeBear = (fvgGapBear / close) * 100
+
+bullishFVG = low > high[2] and close[1] > open[1] and fvgSizeBull >= minFVGSize
+bearishFVG = high < low[2] and close[1] < open[1] and fvgSizeBear >= minFVGSize
+
+// Visual FVG boxes
+if bullishFVG and showFVG
+    box.new(bar_index - 2, high[2], bar_index + 10, low, border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 90))
+    
+if bearishFVG and showFVG
+    box.new(bar_index - 2, low[2], bar_index + 10, high, border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 90))
+
+// ============================
+// BREAK OF STRUCTURE (BOS)
+// ============================
+swingHigh = ta.pivothigh(high, swingLength, swingLength)
+swingLow = ta.pivotlow(low, swingLength, swingLength)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+    
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+bullishBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bearishBOS = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+plotshape(showBOS and bullishBOS, "Bull BOS", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(showBOS and bearishBOS, "Bear BOS", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+
+// ============================
+// VOLUME ANALYSIS
+// ============================
+volMA = ta.sma(volume, volMaLength)
+volumeSpike = volume > (volMA * volMultiplier)
+
+bgcolor(volumeSpike ? color.new(color.yellow, 90) : na, title="Volume Spike")
+
+// ============================
+// CANDLESTICK PATTERNS
+// ============================
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1] and (close - open) > (open[1] - close[1])
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1] and (open - close) > (close[1] - open[1])
+
+plotshape(showEngulfing and bullishEngulfing, "Bull Engulf", shape.triangleup, location.belowbar, color.new(color.green, 70), size=size.tiny, text="BE")
+plotshape(showEngulfing and bearishEngulfing, "Bear Engulf", shape.triangledown, location.abovebar, color.new(color.red, 70), size=size.tiny, text="BE")
+
+// ============================
+// A+ SETUP LOGIC
+// ============================
+nearSupport = math.abs(close - dailyLow) / close < 0.002 or math.abs(close - prevDayLow) / close < 0.002
+nearResistance = math.abs(close - dailyHigh) / close < 0.002 or math.abs(close - prevDayHigh) / close < 0.002
+
+// Basic A+ conditions
+bullishSetup = bullishFVG and volumeSpike and (not trendFilter or bullishTrend) and (not useEngulfing or bullishEngulfing)
+bearishSetup = bearishFVG and volumeSpike and (not trendFilter or bearishTrend) and (not useEngulfing or bearishEngulfing)
+
+// Enhanced with BOS
+bullishAPlusStrong = bullishSetup and bullishBOS
+bearishAPlusStrong = bearishSetup and bearishBOS
+
+// Elite with key levels
+bullishAPlusElite = bullishAPlusStrong and nearSupport
+bearishAPlusElite = bearishAPlusStrong and nearResistance
+
+// ============================
+// SIGNAL GENERATION
+// ============================
+buySignal = bullishSetup or bullishAPlusStrong or bullishAPlusElite
+sellSignal = bearishSetup or bearishAPlusStrong or bearishAPlusElite
+
+plotshape(buySignal and bullishAPlusElite, "BUY ELITE", shape.labelup, location.belowbar, color.new(color.lime, 0), text="BUY\nELITE", textcolor=color.white, size=size.normal)
+plotshape(buySignal and bullishAPlusStrong and not bullishAPlusElite, "BUY STRONG", shape.labelup, location.belowbar, color.new(color.green, 0), text="BUY\nA+", textcolor=color.white, size=size.small)
+plotshape(buySignal and not bullishAPlusStrong, "BUY", shape.labelup, location.belowbar, color.new(color.green, 40), text="BUY", textcolor=color.white, size=size.tiny)
+
+plotshape(sellSignal and bearishAPlusElite, "SELL ELITE", shape.labeldown, location.abovebar, color.new(color.red, 0), text="SELL\nELITE", textcolor=color.white, size=size.normal)
+plotshape(sellSignal and bearishAPlusStrong and not bearishAPlusElite, "SELL STRONG", shape.labeldown, location.abovebar, color.new(color.orange, 0), text="SELL\nA+", textcolor=color.white, size=size.small)
+plotshape(sellSignal and not bearishAPlusStrong, "SELL", shape.labeldown, location.abovebar, color.new(color.orange, 40), text="SELL", textcolor=color.white, size=size.tiny)
+
+// ============================
+// STRATEGY EXECUTION
+// ============================
+if buySignal and isAsianSession
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=close * (1 - stopLossPercent/100), limit=close * (1 + takeProfitPercent/100))
+    
+if sellSignal and isAsianSession
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=close * (1 + stopLossPercent/100), limit=close * (1 - takeProfitPercent/100))
+
+// BOS exit override
+if strategy.position_size > 0 and bearishBOS
+    strategy.close("Long", comment="Bear BOS Exit")
+    
+if strategy.position_size < 0 and bullishBOS
+    strategy.close("Short", comment="Bull BOS Exit")
+
+// ============================
+// ALERTS
+// ============================
+alertcondition(bullishFVG, "Bullish FVG", "Bullish Fair Value Gap")
+alertcondition(bearishFVG, "Bearish FVG", "Bearish Fair Value Gap")
+alertcondition(bullishBOS, "Bullish BOS", "Bullish Break of Structure")
+alertcondition(bearishBOS, "Bearish BOS", "Bearish Break of Structure")
+alertcondition(volumeSpike, "Volume Spike", "Volume Spike Detected")
+alertcondition(buySignal, "BUY Signal", "A+ BUY Setup")
+alertcondition(sellSignal, "SELL Signal", "A+ SELL Setup")
+
+View in Pine Editor・209 lines
+Use on chart
+4
+4
+1 154
+Trendline Features Added:
+1. Automatic Trendline Detection
+
+Support Trendline (green) - Connects swing lows
+Resistance Trendline (red) - Connects swing highs
+Uses pivot points to identify key swing levels
+Validates trendlines by counting touches (minimum 3 touches required)
+
+2. Trendline Settings
+
+Show Trendlines - Toggle on/off
+Lookback Period - How far back to look for pivots (default: 50 bars)
+Min Touches - How many touches needed for valid trendline (default: 3)
+
+3. Trendline Break Detection
+
+Bullish Break - Price breaks above support trendline (marked with small green circle)
+Bearish Break - Price breaks below resistance trendline (marked with small red circle)
+Generates signals when breaks occur
+
+4. Enhanced A+ Setups
+Now includes ULTRA setups - the absolute best trades:
+ULTRA BUY Setup (Aqua label):
+
+Bullish FVG + BOS + Volume Spike + Uptrend
+PLUS: Support trendline break OR near key support
+PLUS: Trendline breakout confirmation
+
+ULTRA SELL Setup (Fuchsia label):
+
+Bearish FVG + BOS + Volume Spike + Downtrend
+PLUS: Resistance trendline break OR near key resistance
+PLUS: Trendline breakdown confirmation
+
+5. Confluence Integration
+The strategy now considers price near trendlines as additional confluence, similar to how it uses daily S/R levels.
+6. Additional Alerts
+
+Support Trendline Break
+Resistance Trendline Break
+ULTRA BUY/SELL Setup alerts
+
+This gives you multiple tiers of signal quality:
+
+Standard A+ Setup - All conditions met
+ULTRA A+ Setup - All conditions + trendline break (highest probability)
+
+The trendlines will help you identify major trend reversals and breakouts for even better entry timing!

@@ -1,0 +1,68 @@
+//@version=2
+strategy("BTCbot", shorttitle="BTCbot", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=420, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+keh=input(title="HullMA Length",type=integer,defval=7, minval=1)
+dt = 0.001
+ot=1
+src = ohlc4[1]
+tf='15'
+DXY=(security("DXY",tf, src))
+e2ma=2*wma(DXY,round(keh/2))
+ema=wma(DXY,keh)
+ediff=e2ma-ema
+esqn=round(sqrt(keh))
+e2ma1=2*wma(DXY[1],round(keh/2))
+ema1=wma(DXY[1],keh)
+ediff1=e2ma1-ema1
+esqn1=round(sqrt(keh))
+e1=wma(ediff,esqn)
+e2=wma(ediff1,esqn)
+XAU=(security("XAUAUD", tf, src))
+n2ma=2*wma(XAU,round(keh/2))
+nma=wma(XAU,keh)
+ndiff=n2ma-nma
+nsqn=round(sqrt(keh))
+n2ma1=2*wma(XAU[1],round(keh/2))
+nma1=wma(XAU[1],keh)
+ndiff1=n2ma1-nma1
+nsqn1=round(sqrt(keh))
+n1=wma(ndiff,nsqn)
+n2=wma(ndiff1,nsqn)
+CUR=(security("BTCUSD", tf, src))
+s2ma=2*wma(CUR,round(keh/2))
+sma=wma(CUR,keh)
+sdiff=s2ma-sma
+ssqn=round(sqrt(keh))
+s2ma1=2*wma(CUR[1],round(keh/2))
+sma1=wma(CUR[1],keh)
+sdiff1=s2ma1-sma1
+ssqn1=round(sqrt(keh))
+s1=wma(sdiff,ssqn)
+s2=wma(sdiff1,ssqn)
+confidence=(security(tickerid, 'D', src)-security(tickerid, 'D', src[1]))/security(tickerid, 'D', src[1])
+b=s1>s2?lime:black
+c=s1>s2?black:red
+c1=plot(s1, color=b, title="hull1", linewidth=2, transp=0)
+c2=plot(s2, color=c, title="hull1", linewidth=2, transp=0)
+fill(c1, c2, color=c, transp=75)
+closelong = e1>e2 and confidence<dt
+if (closelong)
+    strategy.close("Long")
+closeshort = e1<e2 and confidence>dt
+if (closeshort)
+    strategy.close("Short")
+longCondition = e1<e2 and n1>n2 and s1>s2 and strategy.opentrades<ot and confidence>dt
+if (longCondition)
+    strategy.entry("Long",strategy.long)
+shortCondition = e1>e2 and n1<n2 and s1<s2 and strategy.opentrades<ot and confidence<dt
+if (shortCondition)
+    strategy.entry("Short",strategy.short)
+
+View in Pine Editor・58 lines
+Use on chart
+2
+8
+2
+9
+4 603
+Looks at more than just the BTC price, based off Hull MA
+Attempt at reducing repaint by Averaging each candles Open-High-Low-Close and then using previous (not current) candle to calculate signal

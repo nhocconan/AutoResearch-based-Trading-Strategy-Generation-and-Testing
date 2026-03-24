@@ -1,0 +1,210 @@
+//@version=5
+strategy("Structural Tester | OR Pullback A+ (Outside OR+ON) | First Pullback Only",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=false)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Inputs
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+string tz = "America/New_York"
+
+// Trade window (NY)
+useTimeWindow = input.bool(true, "Use trade time window")
+startH = input.int(9,  "Start hour (NY)", minval=0, maxval=23)
+startM = input.int(45, "Start minute (NY)", minval=0, maxval=59)
+endH   = input.int(15, "End hour (NY)",   minval=0, maxval=23)
+endM   = input.int(0,  "End minute (NY)", minval=0, maxval=59)
+
+// Force flat
+useForceFlat = input.bool(true, "Force flat by 4:45pm NY")
+flatH = input.int(16, "Force flat hour (NY)", minval=0, maxval=23)
+flatM = input.int(45, "Force flat minute (NY)", minval=0, maxval=59)
+
+// Qty + OR settings
+qty = input.int(1, "Contracts", minval=1)
+
+entryOffset   = input.float(0.0,  "Entry offset (points)", step=0.25)
+stopPts       = input.float(100.0,"Stop (points)", minval=0.25, step=0.25)
+targetPts     = input.float(300.0,"Target (points)", minval=0.25, step=0.25)
+
+maxFollowBars = input.int(8, "Max bars to keep rolling limit (stale cancel)", minval=1)
+
+// A+ filters
+requireONBreak = input.bool(true, "A+: require CLOSE outside Overnight range too")
+invalidateOnCloseInsideOR = input.bool(true, "A+: invalidate if CLOSE returns inside OR")
+
+// New: first pullback only
+firstPullbackOnly = input.bool(true, "A+: only first pullback per side per day")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Time helpers (NY)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+int nyH = hour(time, tz)
+int nyM = minute(time, tz)
+
+bool inWindow = true
+if useTimeWindow
+    bool afterStart = (nyH > startH) or (nyH == startH and nyM >= startM)
+    bool beforeEnd  = (nyH < endH)   or (nyH == endH and nyM <= endM)
+    inWindow := afterStart and beforeEnd
+
+bool forceFlat = useForceFlat and ((nyH > flatH) or (nyH == flatH and nyM >= flatM))
+
+bool is930  = (nyH == 9 and nyM == 30)
+bool is1800 = (nyH == 18 and nyM == 0)
+
+// Overnight session: 18:00 -> 9:29 NY
+bool inOvernight = (nyH >= 18) or (nyH < 9) or (nyH == 9 and nyM < 30)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Overnight Range (ONH/ONL)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float onHigh = na
+var float onLow  = na
+
+if is1800
+    onHigh := na
+    onLow  := na
+
+if inOvernight
+    onHigh := na(onHigh) ? high : math.max(onHigh, high)
+    onLow  := na(onLow)  ? low  : math.min(onLow, low)
+
+plot(onHigh, "ON High", linewidth=2)
+plot(onLow,  "ON Low",  linewidth=2)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// OR = first 15m bar (9:30–9:45)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float orHigh = na
+var float orLow  = na
+var bool  orLocked = false
+
+if is930
+    orHigh := high
+    orLow  := low
+    orLocked := true
+
+plot(orHigh, "OR High", linewidth=2)
+plot(orLow,  "OR Low",  linewidth=2)
+
+// Break conditions (CLOSE outside OR)
+bool brokeLongOR  = orLocked and not na(orHigh) and close > orHigh
+bool brokeShortOR = orLocked and not na(orLow)  and close < orLow
+
+// Require CLOSE outside Overnight range too (A+)
+bool brokeLongON  = not requireONBreak or (not na(onHigh) and close > onHigh)
+bool brokeShortON = not requireONBreak or (not na(onLow)  and close < onLow)
+
+// Armed/invalidate states
+var bool longArmed = false
+var bool shortArmed = false
+var bool longInvalid = false
+var bool shortInvalid = false
+
+// First pullback consumed flags
+var bool longUsed = false
+var bool shortUsed = false
+
+if is930
+    longArmed := false
+    shortArmed := false
+    longInvalid := false
+    shortInvalid := false
+    longUsed := false
+    shortUsed := false
+
+// Arm when a candle CLOSES outside both OR and ON (if required)
+if brokeLongOR and brokeLongON
+    longArmed := true
+
+if brokeShortOR and brokeShortON
+    shortArmed := true
+
+// Invalidate if price CLOSES back inside OR after breakout
+bool closeInsideOR = orLocked and not na(orHigh) and not na(orLow) and close <= orHigh and close >= orLow
+
+if invalidateOnCloseInsideOR
+    if longArmed and closeInsideOR
+        longInvalid := true
+    if shortArmed and closeInsideOR
+        shortInvalid := true
+
+bool allowLongSetup  = longArmed and not longInvalid
+bool allowShortSetup = shortArmed and not shortInvalid
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Entries (rolling limit at prior bar low/high)
+// First pullback only: once a trade opens from that side, mark used
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bool flat = strategy.position_size == 0
+bool canPlace = inWindow and not forceFlat and flat
+
+float longLimit  = low[1]  - entryOffset
+float shortLimit = high[1] + entryOffset
+
+var int followL = 0
+var int followS = 0
+
+bool sideOKLong  = not firstPullbackOnly or not longUsed
+bool sideOKShort = not firstPullbackOnly or not shortUsed
+
+bool wantL = canPlace and allowLongSetup  and sideOKLong  and not na(longLimit)
+bool wantS = canPlace and allowShortSetup and sideOKShort and not na(shortLimit)
+
+if wantL
+    followL += 1
+else
+    followL := 0
+
+if wantS
+    followS += 1
+else
+    followS := 0
+
+bool allowL = wantL and followL <= maxFollowBars
+bool allowS = wantS and followS <= maxFollowBars
+
+if allowL
+    strategy.entry("OR-L", strategy.long, qty=qty, limit=longLimit)
+else
+    strategy.cancel("OR-L")
+
+if allowS
+    strategy.entry("OR-S", strategy.short, qty=qty, limit=shortLimit)
+else
+    strategy.cancel("OR-S")
+
+// Mark side used when a position opens, based on direction
+var int lastDir = 0
+int dir = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+bool openedNow = (lastDir == 0 and dir != 0)
+lastDir := dir
+
+if openedNow
+    if dir == 1
+        longUsed := true
+    if dir == -1
+        shortUsed := true
+
+// Exits
+if strategy.position_size > 0 and strategy.opentrades > 0 and strategy.opentrades.entry_id(0) == "OR-L"
+    float avg = strategy.position_avg_price
+    strategy.exit("OR-LX", from_entry="OR-L", stop=avg - stopPts, limit=avg + targetPts)
+
+if strategy.position_size < 0 and strategy.opentrades > 0 and strategy.opentrades.entry_id(0) == "OR-S"
+    float avg = strategy.position_avg_price
+    strategy.exit("OR-SX", from_entry="OR-S", stop=avg + stopPts, limit=avg - targetPts)
+
+// Force flat
+if forceFlat
+    strategy.cancel_all()
+    strategy.close_all(comment="4:45 Flat")
+
+View in Pine Editor・204 lines
+Use on chart
+6
+548
+system works best on the 15 min for mnq. looking for a break of the opening range and the overnight range then selling above the prior bar high or buying below the prior bar low. So buying a pullback after a breakout about above the range or sells prior bar high after the breakout below the range. You can mess with stop and target sizes time cut offs and such. Hope it helps

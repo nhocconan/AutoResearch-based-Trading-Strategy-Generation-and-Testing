@@ -1,0 +1,28 @@
+//@version=2
+strategy("Setting Strategy Time Frame")
+
+ema20 = ema(close, 20)
+ema50 = ema(close, 50)
+
+long = ema20 > ema50 
+short = ema20 < ema50 
+
+testPeriodStart = timestamp(2010,7,2,0,0)
+
+testPeriodStop = timestamp(2018,8,30,0,0)
+
+if time >= testPeriodStart and time <= testPeriodStop
+    strategy.entry("Long", strategy.long, 10000.0, when=long)
+    strategy.entry("Short", strategy.short, 10000.0, when=short)
+    
+
+strategy.close("Long", when = short)
+strategy.close("Short", when = long)
+
+View in Pine Editor・20 lines
+Use on chart
+7
+1
+2
+6 470
+Advancing my previous post on my first pine script strategy in which i built a working Moving Average Crossover strategy, we now added a custom time frame.

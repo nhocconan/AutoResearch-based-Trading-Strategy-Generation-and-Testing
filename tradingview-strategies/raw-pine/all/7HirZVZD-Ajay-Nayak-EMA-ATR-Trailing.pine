@@ -1,0 +1,85 @@
+//@version=6
+strategy('Ajay Nayak - EMA ATR Trailing', overlay = false)
+
+//------------------- EMA Setup -------------------
+len1 = input.int(9,'EMA1 Length')
+len2 = input.int(20,'EMA2 Length')
+
+ema1 = ta.ema(close,len1)
+ema2 = ta.ema(close,len2)
+
+plot(ema1,'ema1',force_overlay = true)
+plot(ema2,'ema2',color.red,force_overlay = true)
+
+//------------------- Entry Conditions -------------------
+COND_LE = ta.crossover(ema1,ema2) and close>ema1 and close>ema2
+COND_SE = ta.crossunder(ema1,ema2) and close<ema1 and close<ema2
+
+//------------------- Tradetron Webhook -------------------
+auth_token = input.string ( "" , title = "Tradetron Auth Token" , group = "Tradetron" )
+MSG_LE = '{"auth-token":"'+auth_token+'","key":"'+syminfo.root+'_key1","value":"1"}'
+MSG_LX = '{"auth-token":"'+auth_token+'","key":"'+syminfo.root+'_key1","value":"2"}'
+MSG_SE = '{"auth-token":"'+auth_token+'","key":"'+syminfo.root+'_key2","value":"1"}'
+MSG_SX = '{"auth-token":"'+auth_token+'","key":"'+syminfo.root+'_key2","value":"2"}'
+
+COMM_LE = 'BuyCE' 
+COMM_LX = 'ExitCE'
+COMM_SE = 'BuyPE' 
+COMM_SX = 'ExitPE'
+
+//------------------- ATR Setup -------------------
+atr_len   = input.int(14,'ATR Length')
+atr_mult  = input.float(1.0,'ATR Target Multiplier',step=0.1)
+atr_val   = ta.atr(atr_len)
+
+// Stoploss ATR/3
+sl_val = atr_val / 3
+
+//------------------- Stop & Target Levels -------------------
+var float long_stop_level   = na
+var float short_stop_level  = na
+var float long_target_level = na
+var float short_target_level= na
+
+// Long side trailing logic
+if strategy.position_size > 0
+    long_stop_level   := math.max(long_stop_level[1], close - sl_val)
+    long_target_level := math.max(long_target_level[1], close + atr_val * atr_mult)
+else
+    long_stop_level   := na
+    long_target_level := na
+
+// Short side trailing logic
+if strategy.position_size < 0
+    short_stop_level   := math.min(short_stop_level[1], close + sl_val)
+    short_target_level := math.min(short_target_level[1], close - atr_val * atr_mult)
+else
+    short_stop_level   := na
+    short_target_level := na
+
+//------------------- Entry / Exit -------------------
+if COND_LE
+    strategy.close('Short', alert_message = MSG_SX,comment = COMM_SX)
+    strategy.entry('Long', strategy.long, alert_message = MSG_LE,comment = COMM_LE)
+
+if COND_SE
+    strategy.close('Long', alert_message = MSG_LX,comment = COMM_LX)
+    strategy.entry('Short', strategy.short, alert_message = MSG_SE,comment = COMM_SE)
+
+strategy.exit('LongExit','Long', stop=long_stop_level, limit=long_target_level, comment='CE-SL/Target', alert_message=MSG_LX)
+strategy.exit('ShortExit','Short', stop=short_stop_level, limit=short_target_level, comment='PE-SL/Target', alert_message=MSG_SX)
+
+//------------------- Plot Levels -------------------
+plot(strategy.position_size > 0 ? long_stop_level   : na, 'Long Stop',   color=color.red,   linewidth=2, style=plot.style_linebr, force_overlay = true)
+plot(strategy.position_size > 0 ? long_target_level : na, 'Long Target', color=color.green, linewidth=2, style=plot.style_linebr, force_overlay = true)
+
+plot(strategy.position_size < 0 ? short_stop_level   : na, 'Short Stop',   color=color.red,   linewidth=2, style=plot.style_linebr, force_overlay = true)
+plot(strategy.position_size < 0 ? short_target_level : na, 'Short Target', color=color.green, linewidth=2, style=plot.style_linebr, force_overlay = true)
+
+View in Pine Editor・80 lines
+Use on chart
+8
+931
+e strategy RSI aur RSI ke SMA ke crossover par CALL aur PUT signal generate karti hai.
+Saath me ATR based stoploss aur crossover target bhi diya gaya hai.
+Algo trading ke liye useful hai.

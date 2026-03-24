@@ -1,0 +1,165 @@
+//@version=5
+indicator(title='TSI CCI Hull Alerts', shorttitle='TSICCIHULL')
+long = input(title='Long Length', defval=50)
+short = input(title='Short Length', defval=50)
+signal = input(title='Signal Length', defval=25)
+price = input(title='Source', defval=open)
+Period = input.int(25, minval=1)
+lineupper = input(title='Upper Line', defval=100)
+linelower = input(title='Lower Line', defval=-100)
+p = price
+length = Period
+double_smooth(src, long, short) =>
+    fist_smooth = ta.ema(src, long)
+    ta.ema(fist_smooth, short)
+pc = ta.change(price)
+double_smoothed_pc = double_smooth(pc, long, short)
+double_smoothed_abs_pc = double_smooth(math.abs(pc), long, short)
+tsi_value = 100 * (double_smoothed_pc / double_smoothed_abs_pc)
+keh = tsi_value * 5 > linelower ? color.red : color.lime
+teh = ta.ema(tsi_value * 5, signal * 5) > lineupper ? color.red : color.lime
+meh = ta.ema(tsi_value * 5, signal * 5) > tsi_value * 5 ? color.red : color.lime
+i1 = plot(tsi_value * 5, title='TSI Value', color=color.new(color.black, 100), linewidth=1)
+i2 = plot(ta.ema(tsi_value * 5, signal * 5), title='TSI Signal', color=color.new(color.black, 100), linewidth=1)
+fill(i1, i2, color=meh)
+plot(ta.cross(tsi_value * 5, ta.ema(tsi_value * 5, signal * 5)) ? tsi_value * 5 : na, style=plot.style_circles, color=color.new(color.black, 0), linewidth=10)
+plot(ta.cross(tsi_value * 5, ta.ema(tsi_value * 5, signal * 5)) ? tsi_value * 5 : na, style=plot.style_circles, color=color.new(color.white, 0), linewidth=8)
+plot(ta.cross(tsi_value * 5, ta.ema(tsi_value * 5, signal * 5)) ? tsi_value * 5 : na, style=plot.style_circles, color=meh, linewidth=5)
+n2ma = 2 * ta.wma(p, math.round(length / 2))
+nma = ta.wma(p, length)
+diff = n2ma - nma
+sqn = math.round(math.sqrt(length))
+n1 = ta.wma(diff, sqn)
+cci = (p - n1) / (0.015 * ta.dev(p, length))
+c = cci > 0 ? color.lime : color.red
+c1 = cci > 20 ? color.lime : color.silver
+c2 = cci < -20 ? color.red : color.silver
+cc = plot(cci, color=c, title='CCI Line', linewidth=2)
+cc2 = plot(cci[1], color=color.new(color.gray, 100), linewidth=1)
+fill(cc, cc2, color=c)
+plot(ta.cross(20, cci) ? 20 : na, style=plot.style_cross, title='CCI cross UP', color=c1, linewidth=2, offset=-2)
+plot(ta.cross(-20, cci) ? -20 : na, style=plot.style_cross, title='CCI cross down', color=c2, linewidth=2, offset=-2)
+TSI1 = ta.ema(tsi_value * 5, signal * 5)
+TSI2 = ta.ema(tsi_value * 5, signal * 5)[2]
+hullma_smoothed = ta.wma(2 * ta.wma(n1, Period / 2) - ta.wma(n1, Period), math.round(math.sqrt(Period)))
+longCondition = TSI1 > TSI2 and hullma_smoothed < price and cci > 0
+shortCondition = TSI1 < TSI2 and hullma_smoothed > price and cci < 0
+alertcondition(longCondition and cci > cci[1] and cci > 0 and n1 > n1[1], title='Green Alert', message='Green Dot Alert =(BUY)')
+alertcondition(shortCondition and cci < cci[1] and cci < 0 and n1 < n1[1], title='Red Alert', message='Red Dot Alert =(SELL)')
+
+Expand 43 lines
+1
+Reply
+shivan.pereira
+Jan 21, 2022
+SeaSide420, Thanks Mate, appreciate it
+0
+Reply
+godugotijayaram
+Jul 9, 2023
+Is it repaints????
+0
+Reply
+Devilarshon
+May 26, 2022
+This would be a nice addition as a library, so it could be used in any strategy
+0
+Reply
+Jova-A
+Feb 15, 2022
+Your work is Brilliant, Thanks for sharing 🥂
+0
+Reply
+8 more replies
+English
+
+Select market data provided by ICE Data Services.
+Select reference data provided by FactSet. Copyright © 2026 FactSet Research Systems Inc.
+Copyright © 2026, American Bankers Association. CUSIP Database provided by FactSet Research Systems Inc. All rights reserved.
+SEC fillings and other documents provided by Quartr.
+© 2026 TradingView, Inc.
+
+MORE THAN A PRODUCT
+Supercharts
+SCREENERS
+Stocks
+ETFs
+Bonds
+Crypto coins
+CEX pairs
+DEX pairs
+Pine
+HEATMAPS
+Stocks
+ETFs
+Crypto coins
+CALENDARS
+Economic
+Earnings
+Dividends
+MORE PRODUCTS
+Yield Curves
+Options
+Macro Maps
+News Flow
+Pine Script®
+APPS
+Mobile
+Desktop
+TOOLS & SUBSCRIPTIONS
+Features
+Pricing
+Market data
+Gift plans
+TRADING
+Overview
+Top brokers
+Brokers comparison
+SPECIAL OFFERS
+CME Group futures
+Eurex futures
+US stocks bundle
+ABOUT COMPANY
+Who we are
+Space mission
+Blog
+Careers
+Media kit
+MERCH
+TradingView store
+Tarot cards for traders
+The C63 TradeTime
+POLICIES & SECURITY
+Terms of Use
+Disclaimer
+Privacy Policy
+Cookies Policy
+Accessibility Statement
+Security tips
+Bug Bounty program
+Status page
+COMMUNITY
+Social network
+Wall of Love
+Refer a friend
+House Rules
+Moderators
+IDEAS
+Trading
+Education
+Editors' picks
+PINE SCRIPT
+Indicators & strategies
+Wizards
+Freelancers
+BUSINESS SOLUTIONS
+Widgets
+Charting libraries
+Lightweight Charts™
+Advanced Charts
+Trading Platform
+GROWTH OPPORTUNITIES
+Advertising
+Brokerage integration
+Partner program
+Education program

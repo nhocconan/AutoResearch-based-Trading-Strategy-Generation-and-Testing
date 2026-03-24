@@ -1,0 +1,37 @@
+//@version=4
+strategy("Turtle System", overlay=true)
+
+n = input(55,"Entry Length")
+e = input(20,"Exit Length")
+
+HI = highest(n)
+LO = lowest(n)
+hi = highest(e)
+lo = lowest(e)
+
+if close>HI[1]
+    strategy.entry("Buy", strategy.long)
+
+if close<LO[1]
+    strategy.entry("Sell", strategy.short)
+    
+if low<lo[1]
+    strategy.close("Buy")
+
+if high>hi[1]
+    strategy.close("Sell")
+
+plot(HI,color=color.lime)
+plot(LO,color=color.red)
+plot(hi,color=color.blue)
+plot(lo,color=color.maroon)
+
+View in Pine Editor・29 lines
+Use on chart
+7
+2
+0
+5
+18 352
+This is the Turtle traders' actual system which uses a 55 period channel for entries & a 20 period channel for exits. Enjoy ;)
+

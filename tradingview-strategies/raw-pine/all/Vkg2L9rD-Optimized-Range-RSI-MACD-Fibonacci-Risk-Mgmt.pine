@@ -1,0 +1,85 @@
+//@version=5
+strategy("Optimized Range + RSI + MACD + Fibonacci + Risk Mgmt", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, pyramiding=0)
+
+// INPUTS
+fibLookback     = input.int(50, "Fibonacci Lookback Bars")
+rsiLen          = input.int(14, "RSI Length")
+rsiOB           = input.int(70, "RSI Overbought Level")
+rsiOS           = input.int(30, "RSI Oversold Level")
+macdFast        = input.int(12, "MACD Fast Length")
+macdSlow        = input.int(26, "MACD Slow Length")
+macdSig         = input.int(9, "MACD Signal Length")
+atrLen          = input.int(14, "ATR Length (Volatility Stop)")
+atrMult         = input.float(1.5, "ATR Multiplier (Stop)")
+
+// FIBONACCI RANGE
+var float swingHigh = na
+var float swingLow  = na
+
+// Update swing ranges once every lookback bars
+if bar_index % fibLookback == 0
+    swingHigh := ta.highest(high, fibLookback)
+    swingLow  := ta.lowest(low, fibLookback)
+
+// Fibonacci levels
+fib38  = swingLow + (swingHigh - swingLow) * 0.382
+fib61  = swingLow + (swingHigh - swingLow) * 0.618
+
+// MOMENTUM INDICATORS
+rsi = ta.rsi(close, rsiLen)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSig)
+
+// ATR (volatility-based stop)
+atr = ta.atr(atrLen)
+stopDist = atr * atrMult
+
+// CONDITIONS
+
+// Range Neutral Entry (proxy "condor range")
+inRange = close > fib38 and close < fib61
+
+// RSI Filter — avoids extremes
+rsiFilter = (rsi < rsiOB) and (rsi > rsiOS)
+
+// MACD Filter — weak momentum for range
+macdAsc = macdLine < signalLine
+
+// ENTRY CONDITION
+entryCond = inRange and rsiFilter and macdAsc and strategy.position_size == 0
+
+// EXIT CONDITIONS
+exitRangeBreak = not inRange
+exitRSIOver    = rsi > rsiOB
+exitMACDUp     = macdLine > signalLine
+exitCond = exitRangeBreak or exitRSIOver or exitMACDUp
+
+// RISK MANAGEMENT
+stopLevel = close - stopDist
+takeProfitLevel = close + stopDist * 0.8
+
+// EXECUTE STRATEGY
+if (entryCond)
+    strategy.entry("RangeLong", strategy.long)
+
+if (strategy.position_size > 0)
+    strategy.exit("RiskExit", "RangeLong", stop=stopLevel, limit=takeProfitLevel)
+
+if (exitCond and strategy.position_size > 0)
+    strategy.close("RangeLong")
+
+// PLOTTING
+plot(fib38, "Fib 38.2%", color=color.orange)
+plot(fib61, "Fib 61.8%", color=color.orange)
+hline(rsiOB, "RSI OB", color=color.red, linestyle=hline.style_dashed)
+hline(rsiOS, "RSI OS", color=color.green, linestyle=hline.style_dashed)
+
+// VOLATILITY VISUAL
+plot(stopLevel, "ATR Stop", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(takeProfitLevel, "Take Profit", color=color.green, linewidth=1, style=plot.style_linebr)
+
+View in Pine Editor・79 lines
+Use on chart
+7
+548
+iron condor nsdkdkikdkckdkkellkemlfnlwlnelkflkwenlflkwklefnlkw

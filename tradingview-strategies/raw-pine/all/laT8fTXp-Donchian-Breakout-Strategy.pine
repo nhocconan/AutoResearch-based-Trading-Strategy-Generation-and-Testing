@@ -1,0 +1,126 @@
+//@version=5
+strategy("Donchian Breakout Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.045)
+
+// === Inputs ===
+entryLen = input.int(20, "Donchian Entry Length", minval=1)
+exitLen = input.int(10, "Donchian Exit Length", minval=1)
+atrLength = input.int(14, "ATR Length", minval=1)
+atrMult = input.float(1.5, "ATR Stop Multiplier", minval=0.1)
+emaLen = input.int(50, "EMA Trend Filter Length")
+
+useLongs = input.bool(true, "Enable Longs")
+useShorts = input.bool(true, "Enable Shorts")
+useVolatilityFilter = input.bool(true, "Use Volatility Filter (ATR must be above SMA of ATR)")
+useVolumeFilter = input.bool(false, "Use Volume Filter (Volume above SMA)")
+
+volSmaLen = input.int(20, "Volume SMA Length")
+volatilitySmaLen = input.int(20, "ATR SMA Length")
+
+// === Time Filter for Backtest ===
+startDate = timestamp("2025-01-01 00:00 +0000")
+if (time < startDate)
+    strategy.cancel_all()
+
+// === Indicators ===
+highestHigh = ta.highest(high, entryLen)
+lowestLow = ta.lowest(low, entryLen)
+exitLong = ta.lowest(low, exitLen)
+exitShort = ta.highest(high, exitLen)
+
+atr = ta.atr(atrLength)
+atrSMA = ta.sma(atr, volatilitySmaLen)
+volatilityPass = not useVolatilityFilter or (atr > atrSMA)
+
+volSMA = ta.sma(volume, volSmaLen)
+volumePass = not useVolumeFilter or (volume > volSMA)
+
+ema = ta.ema(close, emaLen)
+
+// === Entry Conditions ===
+longCondition = useLongs and close > highestHigh[1] and close > ema and ta.rsi(close, 14) > 50 and volatilityPass and volumePass
+shortCondition = useShorts and close < lowestLow[1] and close < ema and ta.rsi(close, 14) < 50 and volatilityPass and volumePass
+
+// === Exit Conditions ===
+longExit = close < exitLong[1]
+shortExit = close > exitShort[1]
+
+// === ATR-Based Stop Loss ===
+longStop = close - atr * atrMult
+shortStop = close + atr * atrMult
+
+// === Entry Execution ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop)
+
+// === Exit Execution ===
+if (strategy.position_size > 0 and longExit)
+    strategy.close("Long")
+
+if (strategy.position_size < 0 and shortExit)
+    strategy.close("Short")
+
+// === Plotting ===
+plot(highestHigh, title="Donchian High", color=color.green)
+plot(lowestLow, title="Donchian Low", color=color.red)
+plot(exitLong, title="Long Exit Level", color=color.orange)
+plot(exitShort, title="Short Exit Level", color=color.purple)
+plot(ema, title="EMA Filter", color=color.blue)
+
+// === Visual Debug ===
+plotshape(longCondition, title="Long Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(shortCondition, title="Short Entry", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+plotshape(longExit, title="Long Exit", location=location.abovebar, color=color.orange, style=shape.xcross, size=size.tiny)
+plotshape(shortExit, title="Short Exit", location=location.belowbar, color=color.purple, style=shape.xcross, size=size.tiny)
+
+View in Pine Editor・78 lines
+Use on chart
+5
+7
+1 742
+📈 Donchian Breakout Strategy (Inspired by Way of the Turtle)
+
+This strategy is a modern adaptation of the legendary Turtle Trading system as taught in Way of the Turtle by Curtis Faith — re-engineered for the crypto market’s volatility, 24/7 nature, and frequent fakeouts.
+
+⸻
+
+🐢 Original Inspiration
+
+The original Turtle system, created by Richard Dennis and William Eckhardt, used:
+• Breakouts of Donchian Channels (20-day for entry, 10-day for exit)
+• Volatility-based position sizing using ATR (N)
+• Simple rules, big trend exposure, and pyramiding to grow winners
+
+It was built for futures and commodities, trading daily bars, assuming stable trading hours and regulated markets.
+
+⸻
+
+🚀 What’s Different in This Strategy?
+
+✅ Optimized for Crypto
+• Adapts to constant volatility and price manipulation common in crypto
+• Adds commission modeling for realistic results (0.045% default)
+
+✅ Improved Entry Filtering
+• Uses EMA filter to align with trend direction
+• Adds RSI momentum check to avoid early or weak breakouts
+• Optional volatility and volume filters to reduce false signals
+
+✅ Smarter Exits
+• ATR-based volatility stop loss, not just Donchian reversal
+• Avoids pyramiding to reduce risk from sudden reversals
+
+✅ Backtest-Friendly
+• Default backtest window starts from 2025-01-01
+• Fully configurable: long/short toggle, filter control, stop loss multiplier
+
+⸻
+
+🧪 Use Case
+• Best on trending coins with strong directional moves
+• Avoids chop via filters, preserving capital
+• Can be tuned for aggressive or conservative setups with just a few tweaks

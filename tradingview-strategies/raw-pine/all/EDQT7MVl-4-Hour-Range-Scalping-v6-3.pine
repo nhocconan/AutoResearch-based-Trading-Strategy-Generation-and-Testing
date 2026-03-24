@@ -1,0 +1,288 @@
+//@version=6
+// 
+// ————————————————————————————————————————————————————————————————————————————————————————————————————
+//
+// STRATEGY DESCRIPTION
+//
+// This Pine Script automates the "4-Hour Range Scalping Strategy". The core logic is to identify the
+// high and low of the first four hours of a major trading session (e.g., New York) and use that
+// range as a "trap zone" for the rest of the day.
+//
+// HOW TO USE
+//
+// 1.  **Set Chart Timeframe:** Run on a **5-minute (5m)** chart.
+// 2.  **Configure Settings:** Adjust the Trading Session and Risk/Reward Ratio in the settings.
+// 3.  **Set Alerts:** Use the chart's "Alert" menu (clock icon) to create alerts for "Long Signal"
+//     or "Short Signal" to automate your trading or receive notifications.
+//
+// ————————————————————————————————————————————————————————————————————————————————————————————————————
+
+strategy("4-Hour Range Scalping [v6.3]",
+         shorttitle="4H Scalp",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=2, // <<< CRITICAL FIX: Changed from 100 to 2 for safe risk
+         commission_type=strategy.commission.percent,
+         commission_value=0.04,
+         slippage=2)
+
+// --- (The rest of your code remains exactly the same) ---
+// --- Constants & Inputs ---
+GROUP_STRATEGY = "Strategy Parameters"
+rrRatio = input.float(2.0, "Risk/Reward Ratio", step=0.1, group=GROUP_STRATEGY)
+sessionOption = input.string("New York", "Trading Session", options=["New York", "London", "Tokyo"], group=GROUP_STRATEGY)
+
+GROUP_VISUALS = "Visual Parameters"
+showShapes = input.bool(true, "Show Entry Arrows", group=GROUP_VISUALS)
+showRangeFill = input.bool(true, "Show Range Fill", group=GROUP_VISUALS)
+
+GROUP_BACKTEST = "Backtesting Period"
+backtestStartDate = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Start Date", group=GROUP_BACKTEST)
+backtestEndDate = input.time(timestamp("01 Jan 2025 00:00 +0000"), "End Date", group=GROUP_BACKTEST)
+
+// --- Time & Session Logic ---
+var string tz = switch sessionOption
+    "New York" => "America/New_York"
+    "London"   => "Europe/London"
+    "Tokyo"    => "Asia/Tokyo"
+    => "America/New_York"
+
+inDateRange() => time >= backtestStartDate and time < backtestEndDate
+isNewDay = ta.change(time("D", tz)) != 0
+
+// --- Corrected Range Calculation Logic ---
+var float dailyRangeHigh = na
+var float dailyRangeLow = na
+var int barCounter = 0
+var bool isRangeSet = false
+
+if isNewDay and inDateRange()
+    dailyRangeHigh := high
+    dailyRangeLow := low
+    barCounter := 1
+    isRangeSet := false
+
+if barCounter > 0 and barCounter < 48
+    dailyRangeHigh := math.max(dailyRangeHigh, high)
+    dailyRangeLow := math.min(dailyRangeLow, low)
+    barCounter := barCounter + 1
+
+if barCounter == 48
+    isRangeSet := true
+    barCounter := -1
+
+// --- State & Signal Logic ---
+var bool inBreakoutUp = false
+var bool inBreakoutDown = false
+var float breakoutPeak = na
+var float breakoutTrough = na
+
+if isNewDay
+    inBreakoutUp := false
+    inBreakoutDown := false
+    breakoutPeak := na
+    breakoutTrough := na
+
+if isRangeSet
+    if close > dailyRangeHigh
+        inBreakoutUp := true
+        inBreakoutDown := false
+        breakoutPeak := math.max(high, nz(breakoutPeak, high))
+        breakoutTrough := na
+
+    if close < dailyRangeLow
+        inBreakoutDown := true
+        inBreakoutUp := false
+        breakoutTrough := math.min(low, nz(breakoutTrough, low))
+        breakoutPeak := na
+
+// --- Entry & Alert Conditions ---
+cross_under_high = ta.crossunder(close, dailyRangeHigh)
+cross_over_low = ta.crossover(close, dailyRangeLow)
+
+shortCondition = isRangeSet and inBreakoutUp and cross_under_high
+longCondition = isRangeSet and inBreakoutDown and cross_over_low
+
+// --- Strategy Execution ---
+if inDateRange()
+    if shortCondition and strategy.opentrades == 0
+        sl_short = breakoutPeak
+        tp_short = close - (sl_short - close) * rrRatio
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", from_entry="Short", loss=sl_short, profit=tp_short)
+        alert(str.format("4H Scalp: New Short Signal on {0} @ {1, number}", syminfo.tickerid, close), alert.freq_once_per_bar_close)
+        inBreakoutUp := false
+        breakoutPeak := na
+
+    if longCondition and strategy.opentrades == 0
+        sl_long = breakoutTrough
+        tp_long = close + (close - sl_long) * rrRatio
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", from_entry="Long", loss=sl_long, profit=tp_long)
+        alert(str.format("4H Scalp: New Long Signal on {0} @ {1, number}", syminfo.tickerid, close), alert.freq_once_per_bar_close)
+        inBreakoutDown := false
+        breakoutTrough := na
+
+// --- Alerts ---
+alertcondition(longCondition, title="Long Signal", message="4H Scalp: Long Entry Triggered on {{ticker}}")
+alertcondition(shortCondition, title="Short Signal", message="4H Scalp: Short Entry Triggered on {{ticker}}")
+
+// --- Plotting ---
+p_high = plot(isRangeSet and inDateRange() ? dailyRangeHigh : na, "Range High", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+p_low = plot(isRangeSet and inDateRange() ? dailyRangeLow : na, "Range Low", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+fill(p_high, p_low, color=showRangeFill ? color.new(color.gray, 90) : na, title="Range Fill")
+
+plotshape(showShapes and longCondition, "Long Entry", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(showShapes and shortCondition, "Short Entry", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+bgcolor(barCounter > 0 and barCounter < 48 ? color.new(color.blue, 95) : na)
+
+View in Pine Editor・139 lines
+Use on chart
+1
+0
+0
+2
+2 496
+Oct 22, 2025
+User Guide: 4-Hour Range Scalping Strategy
+Hello! Here is the guide for the Pine Script strategy. Please read it carefully to get the best results.
+
+📈 This script automates the "4-Hour Range Scalping Strategy" from the video.
+
+The main idea is that the first four hours of a major trading day (like New York) set up a "trap zone." The strategy waits for the price to break out of this zone and then fail, giving us a signal that the breakout was false and the price is likely to reverse.
+
+Here’s the simple logic:
+
+
+Define the Range: It precisely calculates the highest high and lowest low during the first four hours of the selected trading session (e.g., 00:00 to 04:00 New York Time).
+
+
+Wait for a Breakout: It then monitors the 5-minute chart for a price breakout where a candle fully closes outside of this established range.
+
+
+Identify the Reversal: The trade trigger occurs when the price fails to continue its breakout and a subsequent 5-minute candle closes back inside the range. This signals a potential reversal or "failed breakout."
+
+
+Execute the Trade:
+
+]A Short (Sell) trade is triggered after a failed breakout above the range high.
+A Long (Buy) trade is triggered after a failed breakout below the range low.
+
+
+Manage the Risk: The Stop Loss is automatically placed at the peak (for shorts) or trough (for longs) of the breakout move, and the Take Profit is set to a default 2:1 Risk/Reward Ratio.
+
+
+
+How to Use the Script (Step-by-Step) ⚙️
+Follow these instructions to get it running perfectly.
+
+1. Set Your Chart Timeframe This is the most important step. The strategy is designed to run on a 5-minute (5m) chart. Open your TradingView chart and make sure the timeframe is set to "5m".
+
+2. Add the Script to Your Chart Open the Pine Editor tab at the bottom of TradingView, paste the entire script, and click the "Add to chart" button.
+
+3. Configure the Settings On your chart, find the strategy's name (e.g., "4-Hour Range Scalping [v6.3]") and click the gear icon ⚙️ to open its settings.
+
+Trading Session: Choose the session for the range. New York is the default and the one from the video.
+
+Risk/Reward Ratio: The default is 2.0, meaning your potential profit is twice your potential loss. You can adjust this to test other targets.
+
+Backtesting Period: To see how the strategy performed on all historical data, go to the "Strategy Tester" panel, click its own gear icon ⚙️, and uncheck the boxes for "Start Date" and "End Date."
+
+4. Understand the Visuals on Your Chart
+
+Blue Background Area: This is the 4-hour calculation window. The script is identifying the day's high and low during this time. No trades will ever happen here.
+
+Red Line (Range High): The highest price of the 4-hour window. This is the upper boundary of the "trap zone."
+
+Green Line (Range Low): The lowest price of the 4-hour window. This is the lower boundary.
+
+Green Triangle (▲): Shows where a Long (Buy) trade was entered.
+
+Red Triangle (▼): Shows where a Short (Sell) trade was entered.
+
+A Very Important Note on Timezones 🕒
+This is critical for you in the Philippines (PHT).
+
+The script is based on the New York session, which is 12 hours behind you. Your TradingView chart will still show your local time, but the script works on NY time in the background.
+
+The New York "day" begins at 12:00 PM (Noon) your time.
+
+The script's blue calculation window will be from 12:00 PM to 4:00 PM your local time.
+
+The red and green range lines will appear on your chart only after 4:00 PM your time.
+
+So, if you look at your chart in the morning or early afternoon, you will not see today's range yet. This is normal! The script is just waiting for the New York session to start.
+
+How to Set Up Trade Alerts 🔔
+You can have TradingView send you a notification whenever the script enters a trade.
+
+Click the "Alert" button (looks like a clock) in the right-hand toolbar of TradingView.
+
+In the "Condition" dropdown, select the name of the script (e.g., "4-Hour Range Scalping...").
+
+You will then see two options: "Long Signal" and "Short Signal".
+
+Select one (e.g., "Long Signal") and configure how you want to be notified (e.g., "Notify on app").
+
+Click "Create". Repeat the process to create an alert for the other signal.
+
+⚠️ Important Disclosure
+For Educational and Research Purposes Only.
+
+This script and all accompanying information are provided for educational and research purposes only. The strategy demonstrated is a technical concept and should not be misconstrued as financial, investment, legal, or tax advice.
+
+Trading financial markets involves substantial risk and is not suitable for every investor. There is a possibility that you could sustain a loss of some or all of your initial investment. Therefore, you should not invest money that you cannot afford to lose.
+
+Past performance is not indicative of future results. The backtesting results shown by this script are historical and do not guarantee future performance. Market conditions are constantly changing.
+
+By using this script, you acknowledge that you are solely responsible for any and all trading decisions you make. You should conduct your own thorough research and, if necessary, seek advice from an independent financial advisor before making any investment decisions. The creators of this script assume no liability for any of your trading results.
+Oct 25, 2025
+Release Notes
+### STRATEGY DESCRIPTION
+
+This script automates the **"4-Hour Range Scalping Strategy."** The core logic is to identify the high and low of the first four hours of a major trading session (New York, London, or Tokyo) and use that range as a "trap zone" for the rest of the day.
+
+The strategy operates as follows:
+1. **Defines the Range:** It precisely calculates the highest high and lowest low during the first four hours of the selected trading session (e.g., 00:00 to 04:00 New York Time).
+2. **Waits for a Breakout:** It then monitors the 5-minute chart for a price breakout where a candle **fully closes outside** of this established range.
+3. **Identifies the Reversal:** The trade trigger occurs when the price fails to continue its breakout and a subsequent 5-minute candle **closes back *inside*** the range. This signals a potential reversal or "failed breakout."
+4. **Executes the Trade:**
+* A **Short (Sell)** trade is triggered after a failed breakout above the range high.
+* A **Long (Buy)** trade is triggered after a failed breakout below the range low.
+5. **Manages the Risk:** The Stop Loss is automatically placed at the peak (for shorts) or trough (for longs) of the breakout move, and the Take Profit is set based on the user-defined Risk/Reward Ratio.
+
+---
+### HOW TO USE
+
+**1. Set Your Chart Timeframe**
+This is the most important step. This strategy is designed to run on a **5-minute (5m) chart**. Make sure your chart is set to this timeframe for the logic to work correctly.
+
+**2. Configure the Settings (Gear Icon ⚙️)**
+* **Trading Session:** Choose the session you want to base the range on. **New York** is the default.
+* **Risk/Reward Ratio:** The default is **2.0**, meaning your potential profit is twice your potential loss. You can adjust this to test other targets.
+* **Backtesting Period:** To run a full backtest, go to the **"Strategy Tester"** panel, click its own gear icon ⚙️, and **uncheck the boxes for "Start Date" and "End Date"** to run the strategy on all available historical data.
+
+**3. Understand the Visuals on Your Chart**
+* **Blue Background Area:** This is the 4-hour calculation window. The script is identifying the day's high and low during this time. **No trades will ever happen here.**
+* **Red Line (Range High):** The highest price of the 4-hour window. This is the upper boundary of the "trap zone."
+* **Green Line (Range Low):** The lowest price of the 4-hour window. This is the lower boundary.
+* **Green Triangle (▲):** Shows where a **Long (Buy)** trade was entered.
+* **Red Triangle (▼):** Shows where a **Short (Sell)** trade was entered.
+
+---
+### IMPORTANT NOTE ON TIMEZONES 🕒
+
+The script automatically handles the session timezone in the background. Your chart will continue to display your local time. For example, the New York session is 12 hours behind the Philippines (PHT).
+
+This means the blue calculation window for the "New York day" will start around **12:00 PM (Noon) PHT**, and the red and green range lines will only appear on your chart after **4:00 PM PHT**. If you don't see today's range in your morning, this is normal! The script is simply waiting for the correct session to begin.
+
+---
+### DISCLAIMER
+
+This script is for educational and research purposes only. Trading financial markets involves substantial risk and is not suitable for every investor. Past performance is not indicative of future results. Please do not risk money you cannot afford to lose. The author assumes no liability for any trading results.
+
+Version 6.3.1:
+- Adjusted default risk management settings to 2% of equity per trade to comply with publishing rules and promote safe backtesting practices.
+- Added a comprehensive description explaining the strategy's logic, settings, and how to use it correctly.

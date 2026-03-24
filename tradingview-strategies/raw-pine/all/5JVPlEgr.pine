@@ -1,0 +1,103 @@
+//@version=5
+strategy("Statistical Arbitrage",  overlay=false, precision=2, calc_on_every_tick=true, initial_capital=30000, currency=currency.USD, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.05)
+
+// Input for Correlated Symbols
+symbol1Ticker = input.symbol("CBOT_MINI:YM1!", title="Symbol 1")
+symbol2Ticker = input.symbol("CME_MINI:ES1!", title="Symbol 2")
+
+// Input parameters for Spread Calculation
+maLength = input.int(20, title="Lookback Period for Mean and Std Dev", minval=1)
+stdMultiplier = input.float(2.0, title="Standard Deviation Multiplier for Entry")
+
+// Requesting data for the two symbols (on the chart's default timeframe)
+symbol1 = request.security(symbol1Ticker, timeframe.period, close)
+symbol2 = request.security(symbol2Ticker, timeframe.period, close)
+
+// Calculate Spread (Difference between two assets)
+spread = symbol1 - symbol2
+
+// Calculate the mean and standard deviation of the spread
+meanSpread = ta.sma(spread, maLength)
+stdDevSpread = ta.stdev(spread, maLength)
+
+// Entry and Exit Conditions based on GUI inputs
+buyCondition = spread < meanSpread - stdMultiplier * stdDevSpread  // Buy when spread is below lower band
+sellCondition = spread > meanSpread                                // Close when spread reverts to the mean
+
+// Trade Logic
+if (buyCondition)
+    strategy.entry("Long", strategy.long)
+
+if (sellCondition)
+    strategy.close("Long")
+
+// Plot the spread and thresholds
+plot(spread, title="Spread", color=color.blue)
+plot(meanSpread, title="Mean Spread", color=color.gray)
+plot(meanSpread + stdMultiplier * stdDevSpread, title="Upper Band", color=color.red)
+plot(meanSpread - stdMultiplier * stdDevSpread, title="Lower Band", color=color.green)
+
+View in Pine Editor・41 lines
+Use on chart
+1
+1
+8
+5
+3 432
+The Statistical Arbitrage Strategy, also known as pairs trading, is a quantitative trading method that capitalizes on price discrepancies between two correlated assets. The strategy assumes that over time, the prices of these two assets will revert to their historical relationship. The core idea is to take advantage of mean reversion, a principle suggesting that asset prices will revert to their long-term average after deviating significantly.
+
+Strategy Mechanics:
+
+1. Selection of Correlated Assets:
+
+• The strategy focuses on two historically correlated assets (e.g., equity index futures like Dow Jones Mini and S&P 500 Mini). These assets tend to move in the same direction due to similar underlying fundamentals, such as overall market conditions. By tracking their relative prices, the strategy seeks to exploit temporary mispricings.
+
+2. Spread Calculation:
+
+• The spread is the difference between the prices of the two assets. This spread represents the relationship between the assets and serves as the basis for determining when to enter or exit trades.
+
+3. Mean and Standard Deviation:
+
+• The historical average (mean) of the spread is calculated using a Simple Moving Average (SMA) over a chosen period. The strategy also computes the standard deviation (volatility) of the spread, which measures how far the spread has deviated from the mean over time. This allows the strategy to define statistically significant price deviations.
+
+4. Entry Signal (Mean Reversion):
+
+• A buy signal is triggered when the spread falls below the mean by a multiple (e.g., two) of the standard deviation. This indicates that one asset is temporarily undervalued relative to the other, and the strategy expects the spread to revert to its mean, generating profits as the prices converge.
+
+5. Exit Signal:
+
+• The strategy exits the trade when the spread reverts to the mean. At this point, the mispricing has been corrected, and the profit from the mean reversion is realized.
+
+Academic Support:
+
+Statistical arbitrage has been widely studied in finance and economics. Gatev, Goetzmann, and Rouwenhorst’s (2006) landmark study on pairs trading demonstrated that this strategy could generate excess returns in equity markets. Their research found that by focusing on historically correlated stocks, traders could identify pricing anomalies and profit from their eventual correction.
+
+Additionally, Avellaneda and Lee (2010) explored statistical arbitrage in different asset classes and found that exploiting deviations in price relationships can offer a robust, market-neutral trading strategy. In these studies, the strategy’s success hinges on the stability of the relationship between the assets and the timely execution of trades when deviations occur.
+
+Risks of Statistical Arbitrage:
+
+1. Correlation Breakdown:
+
+• One of the primary risks is the breakdown of correlation between the two assets. Statistical arbitrage assumes that the historical relationship between the assets will hold in the future. However, market conditions, company fundamentals, or external shocks (e.g., macroeconomic changes) can cause these assets to deviate permanently, leading to potential losses.
+
+• For instance, if two equity indices historically move together but experience divergent economic conditions or policy changes, their prices may no longer revert to the expected mean.
+
+2. Execution Risk:
+
+• This strategy relies on efficient execution and tight spreads. In volatile or illiquid markets, the actual price at which trades are executed may differ significantly from expected prices, leading to slippage and reduced profits.
+
+3. Market Risk:
+
+• Although statistical arbitrage is designed to be market-neutral (i.e., not dependent on the overall market direction), it is not entirely risk-free. Systematic market shocks, such as financial crises or sudden shifts in market sentiment, can affect both assets simultaneously, causing the spread to widen rather than revert to the mean.
+
+4. Model Risk:
+
+• The assumptions underlying the strategy, particularly regarding mean reversion, may not always hold true. The model assumes that asset prices will return to their historical averages within a certain timeframe, but the timing and magnitude of mean reversion can be uncertain. Misestimating this timeframe can lead to extended drawdowns or unrealized losses.
+
+5. Overfitting:
+
+• Over-reliance on historical data to fine-tune the strategy parameters (e.g., the lookback period or standard deviation thresholds) may result in overfitting. This means that the strategy works well on past data but fails to perform in live markets due to changing conditions.
+
+Conclusion:
+
+The Statistical Arbitrage Strategy offers a systematic and quantitative approach to trading that capitalizes on temporary price inefficiencies between correlated assets. It has been proven to generate returns in academic studies and is widely used by hedge funds and institutional traders for its market-neutral characteristics. However, traders must be aware of the inherent risks, including correlation breakdown, execution risks, and the potential for prolonged deviations from the mean. Effective risk management, diversification, and constant monitoring are essential for successfully implementing this strategy in live markets.

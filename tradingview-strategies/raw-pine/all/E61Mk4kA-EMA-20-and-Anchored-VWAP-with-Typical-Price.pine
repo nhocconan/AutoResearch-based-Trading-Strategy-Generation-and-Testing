@@ -1,0 +1,111 @@
+//@version=5
+strategy("EMA 20 and Anchored VWAP with Typical Price", overlay=true)
+
+// === INPUTS ===
+emaLength = input.int(20, title="EMA Length")
+atrMultiplier = input.float(2.0, title="Stop Loss Multiplier (x ATR)", minval=1)
+riskRewardRatio = input.float(3.0, title="Risk/Reward Ratio", minval=1, step=0.1)  // 1:3 Risk/Reward Ratio
+
+// === CALCULATIONS ===
+// EMA 20
+ema20 = ta.ema(close, emaLength)
+
+// === TYPICAL PRICE ===
+typicalPrice = (high + low + close) / 3
+
+// === VWAP CALCULATION (ANCHOR PERIOD = SESSION) ===
+
+// Reset at the start of each session (new day)
+var float cumPriceVol = na
+var float cumVol = na
+
+if (dayofweek != dayofweek[1])  // Reset at the start of each day
+    cumPriceVol := typicalPrice * volume
+    cumVol := volume
+else
+    cumPriceVol := cumPriceVol + (typicalPrice * volume)
+    cumVol := cumVol + volume
+
+vwap = cumPriceVol / cumVol  // VWAP = cumulative price-volume / cumulative volume
+
+// ATR Calculation
+atr = ta.atr(14)
+
+// === BUY CONDITIONS ===
+// EMA 20 above VWAP and close crosses EMA 20 from below, OR EMA 20 crosses VWAP from below
+buyCondition = (ema20 > vwap and ta.crossover(close, ema20)) or ta.crossover(ema20, vwap)
+
+// === SELL CONDITIONS ===
+// EMA 20 below VWAP and close crosses EMA 20 from above, OR EMA 20 crosses VWAP from above
+sellCondition = (ema20 < vwap and ta.crossunder(close, ema20)) or ta.crossunder(ema20, vwap)
+
+// === STOP LOSS and TARGET ===
+// Buy Stop Loss and Target calculation (Weapon Candle is the signal candle)
+buyStopLoss = close - atr * atrMultiplier
+
+// Weapon Candle (signal candle) for Buy
+weaponCandleSize = high - low
+buyTarget = high + 2 * weaponCandleSize // Target = High of weapon candle + 2 * candle size
+
+// Sell Stop Loss and Target calculation (Weapon Candle is the signal candle)
+sellStopLoss = close + atr * atrMultiplier
+
+// Weapon Candle (signal candle) for Sell
+weaponCandleSizeSell = high - low
+sellTarget = low - 2 * weaponCandleSizeSell // Target = Low of weapon candle - 2 * candle size
+
+// === EXECUTE STRATEGY (Buy and Sell) ===
+// Buy order entry
+if (buyCondition)
+    strategy.entry("Buy", strategy.long, stop=buyStopLoss, limit=buyTarget)
+    
+// Sell order entry
+if (sellCondition)
+    strategy.entry("Sell", strategy.short, stop=sellStopLoss, limit=sellTarget)
+
+// === PLOTS ===
+// Plot EMA 20
+plot(ema20, color=color.blue, title="EMA 20", linewidth=2)
+
+// Plot VWAP
+plot(vwap, color=color.orange, title="Session Anchored VWAP", linewidth=2)
+
+// Plot Buy and Sell signals on the chart
+plotshape(series=buyCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal", text="BUY")
+plotshape(series=sellCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal", text="SELL")
+
+// === BACKGROUND COLORS ===
+bgcolor(buyCondition ? color.new(color.green, 90) : na, title="Buy Background")
+bgcolor(sellCondition ? color.new(color.red, 90) : na, title="Sell Background")
+
+// === DRAW HORIZONTAL LINES FOR TARGET AND STOP LOSS ===
+// For Buy Signals
+if (buyCondition)
+    var line buyStopLossLine = na
+    var line buyTakeProfitLine = na
+    // Draw Buy Stop Loss line
+    buyStopLossLine := line.new(x1=bar_index, y1=buyStopLoss, x2=bar_index + 10, y2=buyStopLoss, color=color.red, width=2, style=line.style_dashed)
+    // Draw Buy Target line
+    buyTakeProfitLine := line.new(x1=bar_index, y1=buyTarget, x2=bar_index + 10, y2=buyTarget, color=color.green, width=2, style=line.style_dashed)
+    // Add labels to the lines
+    label.new(x=bar_index + 10, y=buyStopLoss, text="Buy Stop Loss", color=color.red, style=label.style_label_right, textcolor=color.white)
+    label.new(x=bar_index + 10, y=buyTarget, text="Buy Target", color=color.green, style=label.style_label_right, textcolor=color.white)
+
+// For Sell Signals
+if (sellCondition)
+    var line sellStopLossLine = na
+    var line sellTakeProfitLine = na
+    // Draw Sell Stop Loss line
+    sellStopLossLine := line.new(x1=bar_index, y1=sellStopLoss, x2=bar_index + 10, y2=sellStopLoss, color=color.red, width=2, style=line.style_dashed)
+    // Draw Sell Target line
+    sellTakeProfitLine := line.new(x1=bar_index, y1=sellTarget, x2=bar_index + 10, y2=sellTarget, color=color.green, width=2, style=line.style_dashed)
+    // Add labels to the lines
+    label.new(x=bar_index + 10, y=sellStopLoss, text="Sell Stop Loss", color=color.red, style=label.style_label_right, textcolor=color.white)
+    label.new(x=bar_index + 10, y=sellTarget, text="Sell Target", color=color.green, style=label.style_label_right, textcolor=color.white)
+
+View in Pine Editor・104 lines
+Use on chart
+4
+8
+1 325
+Intraday scalping using EMA 20 and VWAP along with targets and Stoploss

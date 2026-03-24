@@ -1,0 +1,117 @@
+//@version=5
+strategy("ICT Opening Gap - Confirmed Close w/ Breakeven", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//------------------------------------------------------------------------------
+gapType         = input.string('NDOG', 'Gap Type' , options = ['NWOG', 'NDOG'])
+requiredCrosses = input.int(3, "Crosses Required for Entry", minval = 1)
+exitTime        = input.string("1400", "Exit Time (NY Time)", tooltip = "Default 1400 (2 PM)")
+
+groupTP = "Targets & Protection"
+useTP           = input.bool(true, "Use Take Profit?", group = groupTP)
+tpTicks         = input.int(40, "Take Profit (Ticks)", minval = 1, group = groupTP)
+useTrailing     = input.bool(true, "Use Trailing Stop?", group = groupTP)
+trailTicks      = input.int(20, "Trailing Stop (Ticks)", minval = 1, group = groupTP)
+
+groupBE = "Breakeven Logic"
+useBE           = input.bool(true, "Use Breakeven?", group = groupBE)
+beTrigger       = input.int(20, "BE Trigger (Ticks In Profit)", minval = 1, group = groupBE)
+beOffset        = input.int(1, "BE Offset (Ticks above entry)", minval = 0, group = groupBE)
+
+//------------------------------------------------------------------------------
+// Gap Detection & State Tracking
+//------------------------------------------------------------------------------
+var float gapTop = na
+var float gapBtm = na
+var int crossCount = 0
+var bool tradeTakenToday = false
+var int lastSide = 0 
+
+isNewDay = timeframe.change("D")
+tf = gapType == 'NWOG' ? 'W' : 'D'
+isNewPeriod = timeframe.change(tf)
+
+if isNewDay
+    tradeTakenToday := false
+    crossCount := 0
+    lastSide := 0 
+
+if isNewPeriod
+    gapTop := math.max(close[1], open)
+    gapBtm := math.min(close[1], open)
+
+// Confirmed Close Cross Logic
+currentSide = close > gapTop ? 1 : close < gapBtm ? -1 : 0
+if not na(gapTop) and not tradeTakenToday
+    if currentSide != 0 and currentSide != lastSide
+        crossCount += 1
+        lastSide := currentSide
+
+//------------------------------------------------------------------------------
+// Entry Logic
+//------------------------------------------------------------------------------
+canTrade = crossCount == requiredCrosses and not tradeTakenToday and strategy.position_size == 0
+
+if canTrade
+    if close > gapTop
+        strategy.entry("Long", strategy.long)
+        tradeTakenToday := true
+    else if close < gapBtm
+        strategy.entry("Short", strategy.short)
+        tradeTakenToday := true
+
+//------------------------------------------------------------------------------
+// Exit Logic
+//------------------------------------------------------------------------------
+// 1. Time-Based Exit
+exitHour   = math.floor(str.tonumber(exitTime) / 100)
+exitMinute = str.tonumber(exitTime) % 100
+isExitTime = hour(time, "America/New_York") == exitHour and minute(time, "America/New_York") == exitMinute
+
+// 2. Gap Stop Loss (Close on opposite side)
+stopLossLong  = strategy.position_size > 0 and close < gapBtm
+stopLossShort = strategy.position_size < 0 and close > gapTop
+
+// 3. Breakeven / TP / Trailing Logic
+if strategy.position_size != 0
+    float tpDist = useTP ? tpTicks * syminfo.mintick : na
+    float trailP = useTrailing ? trailTicks : na
+    
+    // Calculate Breakeven
+    if useBE
+        float beTriggerPrice = strategy.position_size > 0 ? 
+             strategy.position_avg_price + (beTrigger * syminfo.mintick) : 
+             strategy.position_avg_price - (beTrigger * syminfo.mintick)
+        
+        float bePrice = strategy.position_size > 0 ? 
+             strategy.position_avg_price + (beOffset * syminfo.mintick) : 
+             strategy.position_avg_price - (beOffset * syminfo.mintick)
+        
+        // If profit target for BE is hit, move stop to entry + offset
+        if (strategy.position_size > 0 and high >= beTriggerPrice) or (strategy.position_size < 0 and low <= beTriggerPrice)
+            strategy.exit("BE/Exit", stop = bePrice, limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+        else
+            strategy.exit("BE/Exit", limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+    else
+        strategy.exit("BE/Exit", limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+
+// Execution for Time and Gap Side Close
+if isExitTime or stopLossLong or stopLossShort
+    strategy.close_all("Exit Triggered")
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+plot(gapTop, "Gap Top", color=color.new(color.teal, 50), style=plot.style_linebr, linewidth = 2)
+plot(gapBtm, "Gap Bottom", color=color.new(color.orange, 50), style=plot.style_linebr, linewidth = 2)
+
+if not tradeTakenToday and not na(gapTop) and ta.change(crossCount)
+    label.new(bar_index, high, "Cross #" + str.tostring(crossCount), color=color.yellow, style=label.style_label_down, size=size.small)
+
+View in Pine Editor・110 lines
+Use on chart
+1
+6
+516
+This Strategy uses an adjustable counter of candle closes that cross New Day Opening Gaps or New Week Opening Gaps. An entry is taken on the candle close after your choice on the number of crosses. I have included an adjustable time based exit, an exact adjustable exit (number of ticks) and an optional break even with adjustable offset for commissions. No information or signals generated with this strategy is investment advice. Script was created with Gemini.

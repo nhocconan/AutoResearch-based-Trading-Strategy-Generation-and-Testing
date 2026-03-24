@@ -1,0 +1,84 @@
+//@version=2
+strategy(title="SB_CM_MacD_Ult_MTF", shorttitle="SB_CM_Ult_MacD_MTF")
+source = close
+useCurrentRes = input(true, title="Use Current Chart Resolution?")
+resCustom = input(title="Use Different Timeframe? Uncheck Box Above", type=resolution, defval="60")
+smd = input(true, title="Show MacD & Signal Line? Also Turn Off Dots Below")
+sd = input(true, title="Show Dots When MacD Crosses Signal Line?")
+sh = input(true, title="Show Histogram?")
+macd_colorChange = input(true,title="Change MacD Line Color-Signal Line Cross?")
+hist_colorChange = input(true,title="MacD Histogram 4 Colors?")
+
+res = useCurrentRes ? period : resCustom
+
+fastLength = input(12, minval=1), slowLength=input(26,minval=1)
+signalLength=input(9,minval=1)
+
+fastMA = ema(source, fastLength)
+slowMA = ema(source, slowLength)
+
+macd = fastMA - slowMA
+signal = sma(macd, signalLength)
+hist = macd - signal
+
+outMacD = security(tickerid, res, macd)
+outSignal = security(tickerid, res, signal)
+outHist = security(tickerid, res, hist)
+
+histA_IsUp = outHist > outHist[1] and outHist > 0
+histA_IsDown = outHist < outHist[1] and outHist > 0
+histB_IsDown = outHist < outHist[1] and outHist <= 0
+histB_IsUp = outHist > outHist[1] and outHist <= 0
+
+//MacD Color Definitions
+macd_IsAbove = outMacD >= outSignal
+macd_IsBelow = outMacD < outSignal
+
+plot_color = hist_colorChange ? histA_IsUp ? aqua : histA_IsDown ? blue : histB_IsDown ? red : histB_IsUp ? maroon :yellow :gray
+macd_color = macd_colorChange ? macd_IsAbove ? lime : red : red
+signal_color = macd_colorChange ? macd_IsAbove ? yellow : yellow : lime
+
+circleYPosition = outSignal
+ 
+plot(smd and outMacD ? outMacD : na, title="MACD", color=macd_color, linewidth=4)
+plot(smd and outSignal ? outSignal : na, title="Signal Line", color=signal_color, style=line ,linewidth=2)
+plot(sh and outHist ? outHist : na, title="Histogram", color=plot_color, style=histogram, linewidth=4)
+plot(sd and cross(outMacD, outSignal) ? circleYPosition : na, title="Cross", style=circles, linewidth=4, color=macd_color)
+hline(0, '0 Line', linestyle=solid, linewidth=2, color=white)
+
+macd_chk=smd and outMacD ? outMacD : na
+checker=smd and outSignal ? outSignal : na
+if (crossover(macd_chk,checker))
+    strategy.entry("BBandLE", strategy.long, comment="BBandLE")
+
+if (crossunder(macd_chk, checker))
+    strategy.entry("BBandSE", strategy.short, comment="BBandSE")
+
+View in Pine Editor・56 lines
+Use on chart
+4
+9
+2
+2
+6 854
+This strategy places the order based on the MACD signal.
+
+Original Indicator: MacD Custom Indicator-Multiple Time Frame+All Available Options! by ChrisMoody
+Link to the Indicator:
+
+
+If your risk appetite is high you can replace the first statement with the below statement:
+
+strategy(title="SB_CM_MacD_Ult_MTF", shorttitle="SB_CM_MacD_Ult_MTF", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 5)
+
+
+You can check for repainting. Did not check for that.
+
+Message if you think of any modifications/ enhancements/ any opportunities. :)
+
+
+Donations/Tips... :) -
+
+BTC: 1BjswGcRR6c23pka7qh5t5k56j46cuyyy2
+ETH: 0x64fed71c9d6c931639c7ba4671aeb6b05e6b3781
+LTC: LKT2ykQ8QSzzfTDB6Tnsf12xwYPjgq95h4

@@ -1,0 +1,118 @@
+//@version=6
+strategy("3 Down, 3 Up Strategy", overlay=true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group = "Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group = "Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// Strategy Settings
+// ============================================
+buyTriggerInput = input.int(3, "Consecutive Down Closes for Entry", minval = 1, group = "Strategy Settings")
+sellTriggerInput = input.int(3, "Consecutive Up Closes for Exit", minval = 1, group = "Strategy Settings")
+
+// ============================================
+// EMA Filter Settings
+// ============================================
+useEmaFilter = input.bool(false, "Use EMA Filter", group = "Trend Filter")
+emaPeriodInput = input.int(200, "EMA Period", minval = 1, group = "Trend Filter")
+//#endregion
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Consecutive Close Counter
+// ============================================
+var int aboveCount = na
+var int belowCount = na
+
+aboveCount := close > close[1] ? (na(aboveCount) ? 1 : aboveCount + 1) : 0
+belowCount := close < close[1] ? (na(belowCount) ? 1 : belowCount + 1) : 0
+
+// ============================================
+// Trend Filter Calculation
+// ============================================
+emaValue = ta.ema(close, emaPeriodInput)
+//#endregion
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================
+longCondition = belowCount >= buyTriggerInput and isWithinTradingWindow
+exitCondition = aboveCount >= sellTriggerInput
+
+// Apply EMA Filter if enabled
+if useEmaFilter
+    longCondition := longCondition and close > emaValue
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if longCondition
+    strategy.entry("Long", strategy.long)
+    
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+View in Pine Editor・63 lines
+Use on chart
+1
+1
+8
+1
+2 875
+█ STRATEGY DESCRIPTION
+The "3 Down, 3 Up Strategy" is a mean-reversion strategy designed to capitalize on short-term price reversals. It enters a long position after consecutive bearish closes and exits after consecutive bullish closes. This strategy is NOT optimized and can be used on any timeframes.
+
+█ WHAT ARE CONSECUTIVE DOWN/UP CLOSES?
+- Consecutive Down Closes: A sequence of trading bars where each close is lower than the previous close.
+- Consecutive Up Closes: A sequence of trading bars where each close is higher than the previous close.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The price closes lower than the previous close for Consecutive Down Closes for Entry (default: 3) consecutive bars.
+
+The signal occurs within the specified time window (between Start Time and End Time).
+
+If enabled, the close price must also be above the 200-period EMA (Exponential Moving Average).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the price closes higher than the previous close for Consecutive Up Closes for Exit (default: 3) consecutive bars.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Consecutive Down Closes for Entry: Number of consecutive lower closes required to trigger a buy. Default = 3.
+
+Consecutive Up Closes for Exit: Number of consecutive higher closes required to exit. Default = 3.
+
+EMA Filter: Optional 200-period EMA filter to confirm long entries in bullish trends. Default = disabled.
+
+Start Time and End Time: Restrict trading to specific dates (default: 2014-2099).
+
+
+
+█ PERFORMANCE OVERVIEW
+
+Designed for volatile markets with frequent short-term reversals.
+
+Performs best when price oscillates between clear support/resistance levels.
+
+The EMA filter improves reliability in trending markets but may reduce trade frequency.
+
+Backtest to optimize consecutive close thresholds and EMA period for specific instruments.
+

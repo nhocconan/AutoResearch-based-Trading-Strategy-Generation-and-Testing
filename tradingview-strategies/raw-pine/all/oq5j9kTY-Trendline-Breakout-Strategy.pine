@@ -1,0 +1,208 @@
+//@version=5
+strategy("Trendline Breakout Strategy", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// === INPUTS ===
+ema_len = input.int(200, "EMA Length", minval=1, group="Trend Detection")
+src = input.source(close, "EMA Source", group="Trend Detection")
+lookback = input.int(20, "Lookback Window for Pivots (bars)", minval=5, group="Trend Detection")
+left_bars = input.int(5, "Pivot Left Sensitivity (bars)", minval=1, group="Trend Detection")
+right_bars = input.int(5, "Pivot Right Sensitivity (bars)", minval=1, group="Trend Detection")
+
+qty_mode = input.string("Risk Percent", "Position Sizing Mode", options=["Risk Percent", "Fixed Contracts"], group="Position Sizing")
+risk_pct = input.float(1.0, "Risk % of Equity", minval=0.1, maxval=10.0, step=0.1, group="Position Sizing")
+fixed_size = input.int(1, "Fixed Contract Size", minval=1, group="Position Sizing")
+
+show_trendline = input.bool(true, "Show Trendline", group="Visuals")
+enable_prints = input.bool(true, "Enable Info Table", group="Visuals")
+
+// === CORE LOGIC ===
+// EMA Calculation
+ema = ta.ema(src, ema_len)
+bias_bull = close > ema
+bias_bear = close < ema
+
+// Pivot Detection (confirmed, no repainting)
+ph = ta.pivothigh(high, left_bars, right_bars)
+pl = ta.pivotlow(low, left_bars, right_bars)
+
+// Arrays to store historical pivots (limited to prevent memory issues)
+var array<float> ph_values = array.new<float>()
+var array<int> ph_bars = array.new<int>()
+var array<float> pl_values = array.new<float>()
+var array<int> pl_bars = array.new<int>()
+
+// Update pivot highs array
+if not na(ph)
+    array.push(ph_values, ph)
+    array.push(ph_bars, bar_index - right_bars)
+    if array.size(ph_values) > 100
+        array.shift(ph_values)
+        array.shift(ph_bars)
+
+// Update pivot lows array
+if not na(pl)
+    array.push(pl_values, pl)
+    array.push(pl_bars, bar_index - right_bars)
+    if array.size(pl_values) > 100
+        array.shift(pl_values)
+        array.shift(pl_bars)
+
+// Function to find two most recent pivots within lookback
+get_two_pivots(arr_vals, arr_bars) =>
+    int p1_bar = na
+    float p1_val = na
+    int p2_bar = na
+    float p2_val = na
+    for j = array.size(arr_bars) - 1 to 0
+        int pb = array.get(arr_bars, j)
+        if pb < bar_index - lookback
+            break
+        if na(p1_bar)
+            p1_bar := pb
+            p1_val := array.get(arr_vals, j)
+        else if na(p2_bar)
+            p2_bar := pb
+            p2_val := array.get(arr_vals, j)
+            break  // Only need the two most recent
+    [p1_bar, p1_val, p2_bar, p2_val]
+
+// Get pivots for bullish bias
+int p1h_bar = na
+float p1h_val = na
+int p2h_bar = na
+float p2h_val = na
+if bias_bull
+    [tmp1, tmp2, tmp3, tmp4] = get_two_pivots(ph_values, ph_bars)
+    p1h_bar := tmp1
+    p1h_val := tmp2
+    p2h_bar := tmp3
+    p2h_val := tmp4
+
+// Get pivots for bearish bias
+int p1l_bar = na
+float p1l_val = na
+int p2l_bar = na
+float p2l_val = na
+if bias_bear
+    [tmp5, tmp6, tmp7, tmp8] = get_two_pivots(pl_values, pl_bars)
+    p1l_bar := tmp5
+    p1l_val := tmp6
+    p2l_bar := tmp7
+    p2l_val := tmp8
+
+// Validate trendlines
+bull_valid = bias_bull and not na(p1h_bar) and not na(p2h_bar) and p2h_bar < p1h_bar and p2h_val > p1h_val  // Descending: older high > newer high
+bear_valid = bias_bear and not na(p1l_bar) and not na(p2l_bar) and p2l_bar < p1l_bar and p2l_val < p1l_val  // Ascending: older low < newer low
+
+// Calculate trendline Y at current bar
+float bull_y = na
+if bull_valid and p1h_bar != p2h_bar
+    float slope = (p1h_val - p2h_val) / (p1h_bar - p2h_bar)
+    bull_y := p1h_val + slope * (bar_index - p1h_bar)
+
+float bear_y = na
+if bear_valid and p1l_bar != p2l_bar
+    float slope = (p1l_val - p2l_val) / (p1l_bar - p2l_bar)
+    bear_y := p1l_val + slope * (bar_index - p1l_bar)
+
+// Breakout conditions (confirmed on close, no repainting)
+long_breakout = bull_valid and ta.crossover(close, bull_y)
+short_breakout = bear_valid and ta.crossunder(close, bear_y)
+
+// === TREND LINE DRAWING ===
+var line bull_line = na
+var line bear_line = na
+
+if bull_valid and show_trendline
+    if not na(bull_line)
+        line.delete(bull_line)
+    bull_line := line.new(x1=p2h_bar, y1=p2h_val, x2=p1h_bar, y2=p1h_val, extend=extend.right, color=color.red, width=2, style=line.style_solid)
+
+if bear_valid and show_trendline
+    if not na(bear_line)
+        line.delete(bear_line)
+    bear_line := line.new(x1=p2l_bar, y1=p2l_val, x2=p1l_bar, y2=p1l_val, extend=extend.right, color=color.green, width=2, style=line.style_solid)
+
+// Hide if disabled (runs every bar to clean up)
+if not show_trendline
+    if not na(bull_line)
+        line.delete(bull_line)
+        bull_line := na
+    if not na(bear_line)
+        line.delete(bear_line)
+        bear_line := na
+
+// === POSITION SIZING AND ENTRIES ===
+var float entry_price = na
+var float sl_price = na
+var float tp_price = na
+
+if long_breakout and strategy.position_size == 0
+    entry_price := close
+    sl_price := low[1]
+    float risk = entry_price - sl_price
+    if risk > 0
+        strategy.entry("Long", strategy.long, qty = qty_mode == "Fixed Contracts" ? float(fixed_size) : (strategy.equity * risk_pct / 100) / risk)
+        tp_price := sl_price + 3 * risk
+        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+
+if short_breakout and strategy.position_size == 0
+    entry_price := close
+    sl_price := high[1]
+    float risk = sl_price - entry_price
+    if risk > 0
+        strategy.entry("Short", strategy.short, qty = qty_mode == "Fixed Contracts" ? float(fixed_size) : (strategy.equity * risk_pct / 100) / risk)
+        tp_price := sl_price - 3 * risk
+        strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+
+// === VISUAL LABELS ===
+if long_breakout
+    label.new(bar_index, low, text="Long\nEntry: " + str.tostring(entry_price, "#.##") + "\nSL: " + str.tostring(sl_price, "#.##") + "\nTP: " + str.tostring(tp_price, "#.##") + "\nReason: Trendline Breakout", 
+              style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if short_breakout
+    label.new(bar_index, high, text="Short\nEntry: " + str.tostring(entry_price, "#.##") + "\nSL: " + str.tostring(sl_price, "#.##") + "\nTP: " + str.tostring(tp_price, "#.##") + "\nReason: Trendline Breakout", 
+              style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// === INFO TABLE ===
+if enable_prints and barstate.islast
+    var table info_table = table.new(position.top_right, 2, 4, bgcolor=color.white, border_width=1)
+    table.cell(info_table, 0, 0, "Bias", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 0, bias_bull ? "Bull" : "Bear", text_color=bias_bull ? color.green : color.red)
+    table.cell(info_table, 0, 1, "Trendline", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 1, bull_valid or bear_valid ? (bull_valid ? "Descending" : "Ascending") : "None", text_color=color.black)
+    table.cell(info_table, 0, 2, "Position", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 2, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", text_color=color.black)
+    table.cell(info_table, 0, 3, "P&L", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 3, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.green : color.red)
+
+// === EMA PLOT ===
+plot(ema, "EMA", color=color.blue, linewidth=2)
+
+// === ALERTS ===
+alertcondition(long_breakout, title="Long Entry Alert", message="Bullish bias: Price broke above descending trendline. Enter Long.")
+alertcondition(short_breakout, title="Short Entry Alert", message="Bearish bias: Price broke below ascending trendline. Enter Short.")
+alertcondition(strategy.position_size[1] != 0 and strategy.position_size == 0, title="Exit Alert", message="Position closed at SL or TP.")
+
+// === COMMENTS AND LIMITATIONS ===
+// Comments:
+// - Pivots are detected using ta.pivothigh/low with user-defined sensitivity to identify "significant" swings.
+// - Trendlines are redrawn only when bias is active and valid (two qualifying pivots found).
+// - Entries/exits use strategy.entry/exit for backtesting; position size closes opposite trades automatically.
+// - No repainting: All pivots require 'right_bars' confirmation; breakouts checked on bar close.
+// - Variable names: Descriptive (e.g., p1h_bar for most recent pivot high bar).
+//
+// Limitations:
+// - Trendline uses the two *most recent* pivot highs/lows within lookback; may not always connect the absolute highest/lowest if more pivots exist.
+// - Pivot sensitivity (left/right bars) approximates "significant" swings—too low may include noise, too high may miss turns.
+// - Only one trendline per bias; does not handle multiple parallel lines or complex channels.
+// - Position sizing assumes equity-based risk; in "Fixed Contracts" mode, risk % varies with SL distance.
+// - Lookback window limits historical context—short windows may yield few/no valid trendlines on low-volatility periods.
+// - Strategy does not filter for overall trend strength beyond EMA bias; add filters (e.g., volume) for production use.
+
+View in Pine Editor・201 lines
+Use on chart
+6
+9
+1 735
+Strategy should place entries & exits so that it can be backtested (use strategy.entry and strategy.exit with explicit stop and limit prices). Include an option for fixed percent position sizing and an option for fixed contract size. Draw the trendline on the chart (with option to hide/show) and add labels that show: bias (Bull/Bear), trendline slope, entry price, SL, TP and the reason (e.g., "Trendline Breakout"). Provide user inputs for: EMA length (default 200), lookback for pivot detection, pivot sensitivity (left/right bars), quantity mode (percent / contracts), risk percent or fixed size, enable/disable backtest prints, and enable alerts. Avoid repainting: use confirmed pivot logic (pivot detection must use completed bars) and only take entry after breakout confirmed on close. Document any limitations (for example, trendline using two highest/highest bars inside lookback is approximate). Add clear comments, helpful variable names, and include example alertcondition lines for entry and exit signals.

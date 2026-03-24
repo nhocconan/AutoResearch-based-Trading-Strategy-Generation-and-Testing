@@ -1,0 +1,232 @@
+//@version=6
+//Quant Trading
+strategy("Enhanced Ichimoku Cloud Strategy V1 [Quant Trading]", overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=3,
+     initial_capital=1000,
+     margin_long=0,
+     margin_short=0)
+
+// === DESCRIPTION ===
+// Enhanced Ichimoku Cloud Strategy with 171-Day EMA
+// Original logic preserved with proper formatting and structure
+
+// === INPUT PARAMETERS ===
+
+// Date Range Settings
+startDate = input.time(timestamp("01 Jan 2018 00:00 +0000"), "Start Date", group="Date Range")
+endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date", group="Date Range")
+
+// Ichimoku Settings
+conversionPeriods = input.int(7, minval=1, title="Conversion Line Periods", group="Ichimoku Settings")
+basePeriods = input.int(211, minval=1, title="Base Line Periods", group="Ichimoku Settings")
+laggingSpan2Periods = input.int(120, minval=1, title="Lagging Span 2 Periods", group="Ichimoku Settings")
+displacement = input.int(41, minval=1, title="Displacement", group="Ichimoku Settings")
+
+// EMA Settings
+emaPeriod = input.int(171, minval=1, title="EMA Period", group="EMA Settings")
+
+// Trade Settings
+tradeModeOptions = input.string(defval="Ichi", title="Trade Setup", options=["Ichi", "Cloud"], group="Trade Settings")
+allowShortTrades = input.bool(false, "Allow Short Trades?", group="Trade Settings")
+
+// === 1️⃣ CALCULATIONS ===
+
+// Date Range Filter
+tradeAllowed = time >= startDate and time <= endDate
+
+// EMA Calculation
+ema171 = ta.ema(close, emaPeriod)
+
+// Donchian Channel Function
+f_donchian(len) =>
+    l = ta.lowest(low, len)
+    h = ta.highest(high, len)
+    (l + h) / 2
+
+// Ichimoku Components
+conversionLine = f_donchian(conversionPeriods)
+baseLine = f_donchian(basePeriods)
+spanA = (conversionLine + baseLine) / 2
+spanB = f_donchian(laggingSpan2Periods)
+
+// === 2️⃣ ENTRY & EXIT LOGIC ===
+
+// Original Ichimoku Conditions (preserved exactly)
+idealbuy = (spanA[displacement - 1] > spanB[displacement - 1]) and 
+           (close > high[25]) and 
+           (conversionLine > baseLine) and 
+           (close > ema171)
+
+idealsell = (conversionLine < baseLine)
+
+// State Tracking (preserved exactly)
+var bool buymem = false
+var bool sellmem = false
+
+if idealbuy
+    buymem := true
+else if idealsell
+    buymem := false
+else
+    buymem := buymem[1]
+
+if idealsell
+    sellmem := true
+else if idealbuy
+    sellmem := false
+else
+    sellmem := sellmem[1]
+
+// Signal Generation (preserved exactly)
+longCond = idealbuy and not buymem[1]
+shortCond = idealsell and not sellmem[1]
+
+// Determine Buy and Sell Signals (preserved exactly)
+buySignal = (tradeModeOptions == "Ichi") ? longCond : ta.crossover(spanA, spanB) and (low > spanA[25]) and (low > spanB[25]) and (close > ema171)
+sellSignal = (tradeModeOptions == "Ichi") ? shortCond : ta.crossunder(spanA, spanB) and (high < spanA[25]) and (high < spanB[25]) and (close < ema171)
+
+// === 3️⃣ TRADE EXECUTIONS ===
+
+// Original Trade Logic (preserved exactly)
+forced_slippage = close + (3 * syminfo.mintick)
+
+if tradeAllowed
+    if strategy.position_size == 0 and buySignal
+        strategy.entry("Long", strategy.long, limit=forced_slippage)
+
+    if sellSignal
+        strategy.close("Long")
+
+// === 4️⃣ VISUALIZATIONS ===
+
+// Ichimoku Cloud Components
+plot(conversionLine, color=color.yellow, title="Conversion Line")
+plot(baseLine, color=color.blue, title="Base Line")
+
+p1 = plot(spanA, offset=displacement - 1, color=color.green, title="Span A")
+p2 = plot(spanB, offset=displacement - 1, color=color.red, title="Span B")
+plot(close, offset=-displacement + 1, color=color.gray, title="Lagging Span")
+
+// Cloud Fill
+fill(p1, p2, color=spanA > spanB ? color.new(color.green, 80) : color.new(color.red, 80))
+
+// EMA
+plot(ema171, color=color.orange, title="171-Day EMA")
+
+// Entry and Exit Signals (commented out as in original)
+// plotshape(series=buySignal, title="Buy Entry", location=location.belowbar, style=shape.labelup, color=color.lime, text="BUY", size=size.small)
+// plotshape(series=sellSignal, title="Sell Exit", location=location.abovebar, style=shape.labeldown, color=color.red, text="SELL", size=size.small)
+
+View in Pine Editor・122 lines
+Use on chart
+7
+7
+2 153
+Overview
+This strategy combines the powerful Ichimoku Kinko Hyo system with a 171-period Exponential Moving Average (EMA) filter to create a robust trend-following approach. The strategy is designed for traders seeking to capitalize on strong momentum moves while using the Ichimoku cloud structure to identify optimal entry and exit points.
+
+This is a patient, low-frequency trading system that prioritizes quality over quantity. In backtesting on Solana, the strategy achieved impressive results with approximately 3600% profit over just 29 trades, demonstrating its effectiveness at capturing major trend movements rather than attempting to profit from every market fluctuation. The extended parameters and strict entry criteria are specifically optimized for Solana's price action characteristics, making it well-suited for traders who prefer fewer, higher-conviction positions over high-frequency trading approaches.
+
+What Makes This Strategy Original
+This implementation enhances the traditional Ichimoku system by:
+
+Custom Ichimoku Parameters: Uses non-standard periods (Conversion: 7, Base: 211, Lagging Span 2: 120, Displacement: 41) optimized for different market conditions
+EMA Confirmation Filter: Incorporates a 171-period EMA as an additional trend confirmation layer
+
+State Memory System: Implements a sophisticated memory system to track buy/sell states and prevent false signals
+
+Dual Trade Modes: Offers both traditional Ichimoku signals ("Ichi") and cloud-based signals ("Cloud")
+
+Breakout Confirmation: Requires price to break above the 25-period high for long entries
+
+
+
+How It Works
+Core Components
+
+Ichimoku Elements:
+-Conversion Line (Tenkan-sen): 7-period Donchian midpoint
+-Base Line (Kijun-sen): 211-period Donchian midpoint
+-Span A (Senkou Span A): Average of Conversion and Base lines, plotted 41 periods ahead
+-Span B (Senkou Span B): 120-period Donchian midpoint, plotted 41 periods ahead
+-Lagging Span (Chikou Span): Current close plotted 41 periods back
+EMA Filter: 171-period EMA acts as a long-term trend filter
+
+Entry Logic (Ichi Mode - Default)
+A long position is triggered when ALL conditions are met:
+
+Cloud Bullish: Span A > Span B (41 periods ago)
+Breakout Confirmation: Current close > 25-period high
+Ichimoku Bullish: Conversion Line > Base Line
+Trend Alignment: Current close > 171-period EMA
+State Memory: No previous buy signal is still active
+
+Exit Logic
+Positions are closed when:
+
+Ichimoku Bearish: Conversion Line < Base Line
+
+Alternative Cloud Mode
+When "Cloud" mode is selected, the strategy uses:
+
+Entry: Span A crosses above Span B with additional cloud and EMA confirmations
+Exit: Span A crosses below Span B with cloud and EMA confirmations
+
+Default Settings Explained
+Strategy Properties
+Initial Capital: $1,000 (realistic for average traders)
+Position Size: 100% of equity (appropriate for backtesting single-asset strategies)
+Commission: 0.1% (realistic for most brokers)
+Slippage: 3 ticks (accounts for realistic execution costs)
+Date Range: January 1, 2018 to December 31, 2069
+
+Key Parameters
+Conversion Periods: 7 (faster than traditional 9, more responsive to price changes)
+Base Periods: 211 (much longer than traditional 26, provides stronger trend confirmation)
+Lagging Span 2 Periods: 120 (custom period for stronger support/resistance levels)
+Displacement: 41 (projects cloud further into future than standard 26)
+EMA Period: 171 (long-term trend filter, approximately 8.5 months of daily data)
+
+How to Use This Strategy
+Best Market Conditions
+Trending Markets: Works best in clearly trending markets where the cloud provides strong directional bias
+Medium to Long-term Timeframes: Optimized for daily charts and higher timeframes
+Volatile Assets: The breakout confirmation helps filter out weak signals in choppy markets
+
+Risk Management
+The strategy uses 100% equity allocation, suitable for backtesting single strategies
+Consider reducing position size when implementing with real capital
+Monitor the 25-period high breakout requirement as it may delay entries in fast-moving markets
+
+Visual Elements
+Green/Red Cloud: Shows bullish/bearish cloud conditions
+Yellow Line: Conversion Line (Tenkan-sen)
+Blue Line: Base Line (Kijun-sen)
+Orange Line: 171-period EMA trend filter
+Gray Line: Lagging Span (Chikou Span)
+
+Important Considerations
+Limitations
+Lagging Nature: Like all Ichimoku strategies, signals may lag significant price moves
+Whipsaw Risk: Extended periods of consolidation may generate false signals
+Parameter Sensitivity: Custom parameters may not work equally well across all market conditions
+
+Backtesting Notes
+Results are based on historical data and past performance does not guarantee future results
+The strategy includes realistic slippage and commission costs
+Default settings are optimized for backtesting and may need adjustment for live trading
+
+Risk Disclaimer
+This strategy is for educational purposes only and should not be considered financial advice. Always conduct your own analysis and risk management before implementing any trading strategy. The unique parameter combinations used may not be suitable for all market conditions or trading styles.
+Customization Options
+
+Trade Mode: Switch between "Ichi" and "Cloud" signal generation
+Short Trading: Option to enable short positions (disabled by default)
+Date Range: Customize backtesting period
+All Ichimoku Parameters: Fully customizable for different market conditions
+
+This enhanced Ichimoku implementation provides a structured approach to trend following while maintaining the flexibility to adapt to different trading styles and market conditions.

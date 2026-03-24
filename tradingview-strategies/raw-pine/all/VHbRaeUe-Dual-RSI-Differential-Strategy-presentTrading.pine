@@ -1,0 +1,4 @@
+//@version=5
+rsiDiffLevel=##input(defval=5,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,rsiDiffLevel,input__float)
+##root(root_metainfo,rm_1,(-rsiDiffLevel),input__float)

@@ -1,0 +1,146 @@
+//@version=6
+strategy(
+     "EMA Trend Strategy for Bitcoin 1H| EMA 20/50 Crossover with ATR Stop Loss",
+     overlay = true,  // TO JEST KLUCZOWE: Przykleja wszystko do wykresu świecowego
+     calc_on_every_tick = true,
+     process_orders_on_close = false
+)
+
+// ===============================
+// ===== ŚREDNIE KROCZĄCE (MA)
+// ===============================
+ma20  = ta.ema(close, 20)
+ma50  = ta.ema(close, 50)
+ma100 = ta.ema(close, 100)
+ma200 = ta.ema(close, 200)
+
+// Rysowanie średnich bezpośrednio na świecach
+plot(ma20,  color=color.new(color.yellow, 30), title="EMA 20")
+plot(ma50,  color=color.new(color.orange, 30), title="EMA 50")
+plot(ma100, color=color.new(color.purple, 30), title="EMA 100")
+plot(ma200, color=color.new(color.blue, 0),    title="EMA 200", linewidth=2)
+
+// ===============================
+// ===== LOGIKA WEJŚCIA (UPROSZCZONA DO TESTU)
+// ===============================
+atr = ta.atr(14)
+longCond  = ta.crossover(ma20, ma50) and close > ma200
+shortCond = ta.crossunder(ma20, ma50) and close < ma200
+
+// ===============================
+// ===== ETYKIETY (LABELS) I EGZEKUCJA
+// ===============================
+var float ep = na
+var float sl = na
+var float tp1 = na
+var float tp2 = na
+
+if longCond and strategy.position_size == 0
+    ep := close
+    sl := low - atr * 1.5
+    tp1 := ep + (ep - sl) * 1.5
+    tp2 := ep + (ep - sl) * 3.0
+    
+    strategy.entry("LONG", strategy.long)
+    
+    // Etykieta przy świecy
+    label.new(bar_index, low, 
+         "LONG\nEntry: " + str.tostring(ep, "#.#") + 
+         "\nSL: " + str.tostring(sl, "#.#") + 
+         "\nTP1: " + str.tostring(tp1, "#.#") + 
+         "\nTP2: " + str.tostring(tp2, "#.#"),
+         color=color.green, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar)
+
+if shortCond and strategy.position_size == 0
+    ep := close
+    sl := high + atr * 1.5
+    tp1 := ep - (sl - ep) * 1.5
+    tp2 := ep - (sl - ep) * 3.0
+    
+    strategy.entry("SHORT", strategy.short)
+    
+    // Etykieta przy świecy
+    label.new(bar_index, high, 
+         "SHORT\nEntry: " + str.tostring(ep, "#.#") + 
+         "\nSL: " + str.tostring(sl, "#.#") + 
+         "\nTP1: " + str.tostring(tp1, "#.#") + 
+         "\nTP2: " + str.tostring(tp2, "#.#"),
+         color=color.red, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar)
+
+// Wyjścia
+strategy.exit("L-Exit", "LONG", stop=sl, limit=tp2)
+strategy.exit("S-Exit", "SHORT", stop=sl, limit=tp2)
+
+// ===============================
+// ===== PANEL STATYSTYK (DASHBOARD) - LEWY DÓŁ
+// ===============================
+var table dash = table.new(position.bottom_left, 2, 4, bgcolor=color.rgb(20,20,25), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    // Obliczanie Winrate
+    float wr = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    
+    // Wiersz 1: Zysk Netto
+    table.cell(dash, 0, 0, "Net Profit", text_color=color.white, text_halign=text.align_left)
+    table.cell(dash, 1, 0, str.tostring(strategy.netprofit, "#.##") + " USDT", text_color=strategy.netprofit >= 0 ? color.lime : color.red)
+    
+    // Wiersz 2: Liczba Transakcji
+    table.cell(dash, 0, 1, "Total Trades", text_color=color.white, text_halign=text.align_left)
+    table.cell(dash, 1, 1, str.tostring(strategy.closedtrades), text_color=color.yellow)
+    
+    // Wiersz 3: Winrate
+    table.cell(dash, 0, 2, "Winrate", text_color=color.white, text_halign=text.align_left)
+    table.cell(dash, 1, 2, str.tostring(wr, "#.#") + "%", text_color=wr >= 50 ? color.lime : color.orange)
+
+    // Wiersz 4: Max Drawdown
+    float max_dd_perc = strategy.max_drawdown / (strategy.initial_capital + strategy.netprofit) * 100
+    table.cell(dash, 0, 3, "Max DD", text_color=color.white, text_halign=text.align_left)
+    table.cell(dash, 1, 3, str.tostring(max_dd_perc, "#.#") + "%", text_color=color.red)
+
+View in Pine Editor・98 lines
+Use on chart
+1
+7
+611
+Designed for traders who want to capture strong market trends using a simple and clear EMA-based trading system.
+A simple and effective trend-following strategy using EMA crossovers and ATR-based risk management to capture strong crypto market trends.
+
+📘 How to Use
+
+1️⃣ Add the strategy to your chart on TradingView.
+
+2️⃣ Use it on BTC or other crypto assets.
+
+3️⃣ Recommended timeframes:
+
+1H
+
+4H
+
+1D
+
+4️⃣ The strategy automatically generates:
+
+LONG signals when bullish momentum appears
+
+SHORT signals when bearish momentum appears
+
+5️⃣ Each trade displays:
+
+Entry price
+
+Stop Loss
+
+Take Profit levels (TP1 and TP2)
+
+6️⃣ Use the built-in dashboard to analyze:
+
+Net Profit
+
+Winrate
+
+Total Trades
+
+Max Drawdown
+
+7️⃣ For best results, use the strategy in trending markets and avoid trading during strong consolidation.

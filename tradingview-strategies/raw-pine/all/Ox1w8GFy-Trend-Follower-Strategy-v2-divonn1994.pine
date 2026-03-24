@@ -1,0 +1,64 @@
+//@version=5
+//Author @divonn1994
+
+strategy(title='Trend Follower Strategy v2 [divonn1994]', shorttitle='TrendFollowStrategyV2', overlay=false, pyramiding=0, default_qty_value=100, default_qty_type=strategy.percent_of_equity, precision=7, currency=currency.USD, commission_value=0.1, commission_type=strategy.commission.percent, initial_capital=100)
+
+//Important Constants for Classifying Candle Size----------------------------------------------------------------------------------------------------------------------------------------------
+
+timesBigger = 2
+crumbSize = 1400
+crumbSize2 = 2100
+bigCandleSize = 3800
+
+//Key Alerts and Classifications of Candle Size and EMAs---------------------------------------------------------------------------------------------------------------------------------------
+
+emaAlert = ta.ema(close, 8) > ta.ema(open, 8) ? 1 : 0 
+CandleSize = close * 1 - open * 1
+previousCandleSize = close[1] * 1 - open[1] * 1
+greenCandle = close > open ? 1 : 0
+previousGreenCandle = close[1] > open[1] ? 1 : 0
+
+crumb = (greenCandle==1 and CandleSize<=crumbSize) or (greenCandle==0 and -CandleSize<=crumbSize) ? 1 : 0
+bigCrumb = (greenCandle==1 and CandleSize<=crumbSize2 and CandleSize>crumbSize) or (greenCandle==0 and -CandleSize<=crumbSize2 and -CandleSize>crumbSize) ? 1 : 0
+previousCandleIsSmallCrumb = (previousGreenCandle==1 and previousCandleSize<=crumbSize) or (previousGreenCandle==0 and -previousCandleSize<=crumbSize) ? 1 : 0
+previousCandleIsBigCrumb = (previousGreenCandle==1 and previousCandleSize<=crumbSize2 and previousCandleSize>crumbSize) or (previousGreenCandle==0 and -previousCandleSize<=crumbSize2 and -previousCandleSize>crumbSize) ? 1 : 0
+
+bigCandle = (greenCandle==1 and previousCandleIsBigCrumb==1 and CandleSize>=math.abs(timesBigger*previousCandleSize)) or (greenCandle==1 and previousCandleIsSmallCrumb==1 and CandleSize>=bigCandleSize) or (greenCandle==1 and previousCandleIsSmallCrumb==0 and previousCandleIsBigCrumb==0 and CandleSize>=math.abs(timesBigger*previousCandleSize)) ? 1 : 0
+
+//Engine (Secret Sauce)------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+buy = (crumb==0 and bigCrumb==0 and greenCandle==0) or (greenCandle==1 and bigCandle==1) or (emaAlert==0) ? 0 : 1
+
+//Strategy-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if ta.crossover(buy, 0.5)
+    strategy.entry('long', strategy.long, comment='long')
+if ta.crossunder(buy, 0.5)
+    strategy.close('long')
+
+//Plot Strategy Behavior-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+plot(buy, color=color.new(color.silver, 0))
+plot(0.5, color=color.new(color.fuchsia, 0))
+
+View in Pine Editor・42 lines
+Use on chart
+7
+0
+5
+3 518
+The Trend Follower Strategy that I made classifies red and green candles into tiny, small, and big sizes and will send buy or sell signals depending on if the candle is classified as "big" so you get into and out of a position when there is a big candle. Out during a big green candle to take profit. Out during a big red candle in case the market is turning down. It also won't enter a position unless there is positive EMA momentum.
+
+For the chart there is a Buy and a Sell signal. Buy = 1, Sell = 0, and when the value crosses above or below 0.5 it will trigger a long position or close the long position. The graph isn't necessary to the strategy, but can help with visualizing the trade patterns in the past if you like.
+
+This strategy works best so far with these coins at time of posting (March 4th, 2022):
+KCSUSDT (621x profit), HTUSDT (45x profit), LUNAUSDT (45x profit), BNBBTC (1553x profit), ETHBTC (219x profit), KCSBTC (1222x profit), LUNABTC (83x profit), FTMBTC (52x profit).
+
+It can work with other pairings, but I personally like these pairings best. I didn't test it with coins outside of the top 100 coins by market cap. Use it however you want.
+
+Works best on 1 Day charts.
+
+The strategy would rather be in the market than out. It gets out when it see's a red flag, but can immediately go back in in the next bar if the red flags are all gone. So it makes a lot of trades.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Update: This is the same strategy I uploaded before but I made the code Open for anyone to check it out and so it has a similar description as the previous version. Let me know what you think. I'd remove the old version if I could, but I guess it's site policy to not be able to remove scripts that have been uploaded.
+

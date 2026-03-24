@@ -1,0 +1,312 @@
+//@version=6
+strategy("15m ORB Breakout NAS100 (5m Mgmt) v6 - Optimized",
+     overlay           = true,
+     initial_capital   = 10000,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 0,
+     calc_on_every_tick = false,
+     pyramiding        = 1,
+     margin_long       = 100,
+     margin_short      = 100)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+symGroup   = "Symbol / Timeframe"
+orbGroup   = "ORB Settings"
+fltGroup   = "Filters (Win Rate)"
+riskGroup  = "Risk / Targets"
+btGroup    = "Backtest Filter"
+visGroup   = "Visuals"
+
+// Symbol guard
+limitSymbol   = input.bool(true, "Limit to OANDA NAS100?", group = symGroup)
+allowedSymbol = input.symbol("OANDA:NAS100USD", "Symbol", group = symGroup)
+
+// Normalize ticker (avoids warning on syminfo.tickerid)
+currSymbol  = ticker.standard(syminfo.tickerid)
+allowSymbol = not limitSymbol or currSymbol == allowedSymbol
+
+// ORB settings (designed for 5m chart)
+orbMinutes   = input.int(15, "ORB Length (minutes)", minval = 5, maxval = 60, group = orbGroup)
+barsInORB    = math.max(1, math.round(orbMinutes / 5.0))
+
+orbStartHour = input.int(9,  "ORB Start Hour (0-23, exchange)", minval = 0, maxval = 23, group = orbGroup)
+orbStartMin  = input.int(30, "ORB Start Minute (0-59)",          minval = 0, maxval = 59, group = orbGroup)
+
+// Trend filter
+useTrendFilter = input.bool(true, "Use EMA Trend Filter?", group = fltGroup)
+emaFastLen     = input.int(50,  "Fast EMA Length", minval = 5, maxval = 400, group = fltGroup)
+emaSlowLen     = input.int(200, "Slow EMA Length", minval = 10, maxval = 800, group = fltGroup)
+
+// ATR Volatility filter
+useATRFilter   = input.bool(true, "Use ATR Volatility Filter?", group = fltGroup)
+atrLen         = input.int(14,  "ATR Length",           minval = 5,  maxval = 200, group = fltGroup)
+atrBaseLen     = input.int(200, "ATR Baseline Length",  minval = 50, maxval = 500, group = fltGroup)
+atrThreshMult  = input.float(0.7, "Min ATR / Baseline", minval = 0.1, maxval = 2.0, step = 0.05, group = fltGroup)
+
+// Breakout behaviour
+useCloseOutside = input.bool(true, "Require Full Close Outside ORB?", group = fltGroup)
+useRetestEntry  = input.bool(true, "Use Retest Entry (instead of raw breakout)?", group = fltGroup)
+
+// Day filter (highest win rate: Wed–Fri only by default)
+useDayFilter = input.bool(true, "Filter by Day of Week?", group = fltGroup)
+tradeMon     = input.bool(false, "Trade Monday?",                        group = fltGroup)
+tradeTue     = input.bool(false, "Trade Tuesday?",                       group = fltGroup)
+tradeWed     = input.bool(true,  "Trade Wednesday?",                     group = fltGroup)
+tradeThu     = input.bool(true,  "Trade Thursday?",                      group = fltGroup)
+tradeFri     = input.bool(true,  "Trade Friday?",                        group = fltGroup)
+
+// Session filter
+useSessionFilter = input.bool(true, "Use Time Session Filter?", group = fltGroup)
+tradeSession     = input.session("1430-1700", "Trade Session (exchange time)", group = fltGroup)
+
+// Risk / Targets
+rangeStopMult   = input.float(1.0, "Stop distance (x ORB range)", minval = 0.1, maxval = 3.0, step = 0.1, group = riskGroup)
+useDynamicTP    = input.bool(true,  "Use ATR-based Take Profit?", group = riskGroup)
+rr              = input.float(1.0, "RR (TP multiple)",            minval = 0.1, maxval = 5.0, step = 0.1, group = riskGroup)
+atrTpLen        = input.int(14, "ATR Length for TP", minval = 5, maxval = 200, group = riskGroup)
+
+// Backtest filter
+const int BT_START_DEF = timestamp("2025-05-01")
+limitBacktest = input.bool(true, "Limit to recent period?", group = btGroup)
+btStart       = input.time(BT_START_DEF, "Start date (exchange time)", group = btGroup)
+
+// Visuals
+showSignals   = input.bool(true, "Show BUY/SELL signals", group = visGroup)
+showORB       = input.bool(true, "Show ORB High/Low lines", group = visGroup)
+showDashboard = input.bool(true, "Show Backtest Dashboard", group = visGroup)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TIME / SESSION / DAY FILTERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+allowTradingDate = not limitBacktest or time >= btStart
+
+// Day filter
+d = dayofweek
+dayOK =
+     not useDayFilter or
+     (d == dayofweek.monday    and tradeMon) or
+     (d == dayofweek.tuesday   and tradeTue) or
+     (d == dayofweek.wednesday and tradeWed) or
+     (d == dayofweek.thursday  and tradeThu) or
+     (d == dayofweek.friday    and tradeFri)
+
+// Session filter: true if inside session, or filter disabled
+sessionOK = not useSessionFilter or not na(time(timeframe.period, tradeSession))
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ORB BUILD (15m from custom start time)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Detect new day
+isNewDay = ta.change(time("D")) != 0
+
+// Current bar time (exchange)
+currHour = hour(time)
+currMin  = minute(time)
+isORBStartBar = currHour == orbStartHour and currMin == orbStartMin
+
+var float orbHigh  = na
+var float orbLow   = na
+var bool  orbReady = false
+var int   orbCount = 0
+
+// Reset each new day
+if isNewDay
+    orbHigh  := na
+    orbLow   := na
+    orbCount := 0
+    orbReady := false
+
+// Build ORB window from custom time (15m = barsInORB * 5m)
+if isORBStartBar
+    orbHigh  := high
+    orbLow   := low
+    orbCount := 1
+    orbReady := false
+else if orbCount > 0 and not orbReady
+    if orbCount < barsInORB
+        orbHigh  := math.max(orbHigh, high)
+        orbLow   := math.min(orbLow,  low)
+        orbCount += 1
+    if orbCount >= barsInORB
+        orbReady := true
+
+orbRange = orbReady ? (orbHigh - orbLow) : na
+
+// Plot ORB levels
+plot(showORB and orbReady ? orbHigh : na, "ORB High", color = color.new(color.lime, 0), linewidth = 2, style = plot.style_stepline)
+plot(showORB and orbReady ? orbLow  : na, "ORB Low",  color = color.new(color.red,  0), linewidth = 2, style = plot.style_stepline)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INDICATORS: TREND + VOLATILITY
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+trendLong  = emaFast > emaSlow
+trendShort = emaFast < emaSlow
+
+plot(useTrendFilter ? emaFast : na, "Fast EMA", color = color.new(color.orange, 0))
+plot(useTrendFilter ? emaSlow : na, "Slow EMA", color = color.new(color.blue,   0))
+
+atr      = ta.atr(atrLen)
+atrBase  = ta.sma(atr, atrBaseLen)
+atrFilt  = not useATRFilter or (atrBase > 0 and atr > atrBase * atrThreshMult)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RETEST STATE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var bool brokeUp = false
+var bool brokeDn = false
+
+if isORBStartBar
+    brokeUp := false
+    brokeDn := false
+
+if orbReady and not na(orbHigh) and not na(orbLow)
+    if close > orbHigh
+        brokeUp := true
+    if close < orbLow
+        brokeDn := true
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENTRY CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+baseOK = orbReady and allowTradingDate and allowSymbol and dayOK and sessionOK and atrFilt and not na(orbRange) and orbRange > 0
+
+// Raw breakout
+bool breakoutLong  = baseOK and close > orbHigh
+bool breakoutShort = baseOK and close < orbLow
+
+// Close fully outside ORB if enabled
+if useCloseOutside
+    breakoutLong  := baseOK and close > orbHigh and low  > orbHigh
+    breakoutShort := baseOK and close < orbLow  and high < orbLow
+
+// Retest entry logic
+retestLong  = baseOK and brokeUp and ta.crossover(close, orbHigh)
+retestShort = baseOK and brokeDn and ta.crossunder(close, orbLow)
+
+// Choose trigger: retest or raw breakout
+entryLongTrigger  = useRetestEntry ? retestLong  : breakoutLong
+entryShortTrigger = useRetestEntry ? retestShort : breakoutShort
+
+// Apply trend filter last
+if useTrendFilter
+    entryLongTrigger  := entryLongTrigger  and trendLong
+    entryShortTrigger := entryShortTrigger and trendShort
+
+// One trade per direction per day
+var bool longDoneToday  = false
+var bool shortDoneToday = false
+
+if isNewDay
+    longDoneToday  := false
+    shortDoneToday := false
+
+entryLong  = entryLongTrigger  and not longDoneToday  and strategy.position_size <= 0
+entryShort = entryShortTrigger and not shortDoneToday and strategy.position_size >= 0
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STOPS & TARGETS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+float longSL  = na
+float longTP  = na
+float shortSL = na
+float shortTP = na
+
+atrTP = ta.atr(atrTpLen)
+
+if orbReady and not na(orbRange) and orbRange > 0
+    // Stops based on ORB range
+    longSL  := orbHigh - orbRange * rangeStopMult
+    shortSL := orbLow  + orbRange * rangeStopMult
+
+    if useDynamicTP
+        // ATR-based TP (higher hit rate)
+        longTP  := close + atrTP * rr
+        shortTP := close - atrTP * rr
+    else
+        // Range/RR-based TP
+        longTP  := orbHigh + orbRange * rangeStopMult * rr
+        shortTP := orbLow  - orbRange * rangeStopMult * rr
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ORDERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if entryLong and not na(longSL) and not na(longTP)
+    strategy.entry("Long", strategy.long, comment = "ORB Long")
+    longDoneToday := true
+
+if entryShort and not na(shortSL) and not na(shortTP)
+    strategy.entry("Short", strategy.short, comment = "ORB Short")
+    shortDoneToday := true
+
+// Attach exits while in position
+if strategy.position_size > 0 and not na(longSL) and not na(longTP)
+    strategy.exit("Long Exit", "Long", stop = longSL, limit = longTP)
+
+if strategy.position_size < 0 and not na(shortSL) and not na(shortTP)
+    strategy.exit("Short Exit", "Short", stop = shortSL, limit = shortTP)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CHART SIGNALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+plotshape(showSignals and entryLong,  title = "BUY",  style = shape.triangleup,
+     location = location.belowbar, color = color.lime, text = "BUY",  size = size.tiny)
+
+plotshape(showSignals and entryShort, title = "SELL", style = shape.triangledown,
+     location = location.abovebar, color = color.red,  text = "SELL", size = size.tiny)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BACKTEST DASHBOARD
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var table dash = table.new(position.top_right, 2, 6, border_width = 1)
+
+if showDashboard and barstate.islastconfirmedhistory
+    float trades    = strategy.closedtrades
+    float wins      = strategy.wintrades
+    float losses    = strategy.losstrades
+    float netProfit = strategy.netprofit
+    float winRate   = trades > 0 ? (wins / trades) * 100.0 : na
+    float avgTrade  = trades > 0 ? (netProfit / trades) : na
+
+    table.cell(dash, 0, 0, "15m ORB NAS100 (Optimized)", text_color = color.white, bgcolor = color.new(color.blue, 65))
+    table.cell(dash, 1, 0, "",                            bgcolor = color.new(color.blue, 65))
+
+    table.cell(dash, 0, 1, "Closed trades")
+    table.cell(dash, 1, 1, str.tostring(trades, "#"))
+
+    table.cell(dash, 0, 2, "Win rate %")
+    table.cell(dash, 1, 2, na(winRate) ? "n/a" : str.tostring(winRate, "#.0"))
+
+    table.cell(dash, 0, 3, "Wins / Losses")
+    table.cell(dash, 1, 3, str.tostring(wins, "#") + " / " + str.tostring(losses, "#"))
+
+    table.cell(dash, 0, 4, "Net profit")
+    table.cell(dash, 1, 4, str.tostring(netProfit, "#.0"))
+
+    table.cell(dash, 0, 5, "Avg / trade")
+    table.cell(dash, 1, 5, na(avgTrade) ? "n/a" : str.tostring(avgTrade, "#.1"))
+
+View in Pine Editor・306 lines
+Use on chart
+3
+5
+1
+1 167
+Opening Range Breakout Strategy
+
+Buy and sell signals are given upon break of market session opening range. Best utilized for 30 minute NY opening range, managed on 5 min timeframe on NAS100. Tweak the settings for higher win rate on backtesting dashboard before implementing strategy.

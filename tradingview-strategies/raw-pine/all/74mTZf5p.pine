@@ -1,0 +1,62 @@
+//@version=3
+strategy("HiLo", overlay=true)
+
+// Testing a specific period
+testStartYear = input(2017, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2017, "Backtest Stop Year")
+testStopMonth = input(6, "Backtest Stop Month")
+testStopDay = input(1, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+length = input(4, minval=0)
+displace = input(0, minval=0)
+highsma = sma(high, length)
+lowsma = sma(low, length)
+
+if testPeriod()
+    longCondition = close > highsma[displace] and strategy.position_size <= 0
+    if (longCondition) 
+        strategy.entry("long", true)
+
+    
+    shortCondition = close < lowsma[displace] and strategy.position_size >= 0
+    if (shortCondition) 
+        strategy.entry("short", false)
+        
+    // strategy.exit("exit", profit = 150, loss = 50)
+    
+    
+    
+    
+
+    // if time("60", "0900-1729")
+    //     strategy.exit("exit", profit=9, loss=3)
+        
+    // if time("15", "1729-1730")    
+    //     strategy.close_all()
+
+View in Pine Editor・48 lines
+Use on chart
+4
+2
+9
+2
+11 959
+Hi Everyone,
+
+Do you guys know how can I add an exit strategy to this hilo.
+I would like it to exit either with hilo invertion (already does) or with profit/loss (it doesn't work)
+
+Thank you

@@ -1,0 +1,78 @@
+//@version=5
+strategy("Market Structure Swing Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Inputs
+emaLength = input.int(200, "Trend EMA")
+swingLength = input.int(5, "Swing Lookback")
+rsiLength = input.int(14, "RSI Length")
+atrLength = input.int(14, "ATR Length")
+stopATR = input.float(1.5, "Stop ATR Multiplier")
+targetATR = input.float(3.0, "Target ATR Multiplier")
+
+// Indicators
+ema200 = ta.ema(close, emaLength)
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+
+// Swing high/low detection
+swingHigh = ta.highest(high, swingLength)
+swingLow = ta.lowest(low, swingLength)
+
+// Liquidity sweeps
+liquiditySweepHigh = high > swingHigh[1] and close < swingHigh[1]
+liquiditySweepLow = low < swingLow[1] and close > swingLow[1]
+
+// Trend filter
+bullTrend = close > ema200
+bearTrend = close < ema200
+
+// Entry logic
+longCondition = bullTrend and liquiditySweepLow and rsi > 40
+shortCondition = bearTrend and liquiditySweepHigh and rsi < 60
+
+// Stop and target
+longStop = close - atr * stopATR
+longTarget = close + atr * targetATR
+
+shortStop = close + atr * stopATR
+shortTarget = close - atr * targetATR
+
+// Execute trades
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=longStop, limit=longTarget)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=shortStop, limit=shortTarget)
+
+// Plot trend EMA
+plot(ema200, title="200 EMA", color=color.orange, linewidth=2)
+
+// Plot signals
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.labelup, text="LONG")
+plotshape(shortCondition, location=location.abovebar, color=color.red, style=shape.labeldown, text="SHORT")
+
+View in Pine Editor・54 lines
+Use on chart
+3
+1
+523
+Instead of just indicators, it looks for behavioral patterns in price:
+
+1️⃣ Liquidity sweep
+
+Example:
+• Price breaks a previous low
+• Triggers stop losses
+• Then quickly reverses upward
+
+That often signals smart money accumulation.
+
+2️⃣ Trend alignment
+
+Only trades with the larger trend using the 200 EMA.
+
+3️⃣ Volatility-adaptive exits
+
+Stops and targets use ATR, which adapts to market volatility

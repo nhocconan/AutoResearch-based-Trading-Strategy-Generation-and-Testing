@@ -1,0 +1,200 @@
+//@version=6
+strategy("Buy_Reversal Strategy (RR Based TP)", 
+     overlay=true,
+     calc_on_every_tick=true,
+     process_orders_on_close=false,
+     pyramiding=0)
+
+// ===== INPUTS =====
+length      = input.int(50, "Channel Length")
+atrLength   = input.int(20, "ATR Length")
+swingLookbk = input.int(5, "Swing Lookback")
+rrMultiplier = input.float(2.0, "Risk Reward Ratio (TP)") // ⭐ NEW
+
+// ===== CHANNEL =====
+downBound = ta.lowest(low[1], length)
+
+// ===== ATR =====
+atr = ta.atr(atrLength)
+
+// ===== VARIABLES =====
+var bool sellActive = false
+var float trailSL = na
+var float tpPrice = na
+
+// ===== FIRST BREAKOUT SELL MARK =====
+sellBreak = low < downBound and low[1] >= downBound[1]
+
+if sellBreak and not sellActive
+    sellActive := true
+    trailSL := high + atr
+
+    label.new(bar_index, high, "",
+         style=label.style_label_down,
+         color=color.red, textcolor=color.white)
+
+    // EXIT BUY IF RUNNING
+    if strategy.position_size > 0
+        strategy.close("BUY")
+
+// ===== TRAILING UPDATE =====
+if sellActive
+    newSL = ta.highest(high, swingLookbk) + atr
+    trailSL := math.min(trailSL, newSL)
+
+// ===== BUY ENTRY =====
+buySignal = sellActive and ta.crossover(close, trailSL)
+
+if buySignal
+    strategy.entry("BUY", strategy.long)
+
+    label.new(bar_index, low, "BUY",
+         style=label.style_label_up,
+         color=color.green, textcolor=color.white)
+
+    sellActive := false
+    trailSL := na
+    tpPrice := na
+
+// ===================================================
+// ===== RISK REWARD PROFIT TARGET CALCULATION =====
+// ===================================================
+if strategy.position_size > 0 and na(tpPrice)
+    risk = strategy.position_avg_price - downBound
+    tpPrice := strategy.position_avg_price + (risk * rrMultiplier)
+
+// ===== EXIT WHEN TARGET HIT =====
+if strategy.position_size > 0 and not na(tpPrice)
+    if close >= tpPrice
+        strategy.close("BUY")
+
+// ===== RESET =====
+if strategy.position_size == 0
+    tpPrice := na
+
+// ===== PLOTS =====
+plot(downBound, "Lower Channel", color=color.red)
+plot(trailSL, "ATR Trail", color=color.orange, style=plot.style_linebr)
+plot(tpPrice, "RR Target", color=color.blue)
+
+View in Pine Editor・78 lines
+Use on chart
+1
+2
+439
+📘 Buy Reversal Strategy
+🎯 What Is This Strategy?
+
+This is a reversal trading strategy.
+It waits for the market to first move downward (break support), and then it looks for signs that the trend is changing upward before entering a buy trade.
+
+Profit is taken using a Risk–Reward (RR) based target, not random profit booking.
+
+👉 Simple idea:
+Market falls → Wait for reversal → Buy → Exit at calculated target
+
+✅ Core Concept of the Strategy
+
+The strategy works in 3 main stages:
+
+1️⃣ Downside Breakout (Market Weakness)
+
+A recent support level (price channel) is identified.
+
+When price breaks below this support, it shows selling pressure.
+
+The system prepares for a possible reversal.
+
+👉 Important:
+The strategy does NOT buy immediately.
+It first waits for the market to show weakness.
+
+2️⃣ Reversal Confirmation
+
+After the breakdown, a dynamic level (ATR-based trailing level) is formed.
+
+When price crosses above this level, it signals a possible trend change.
+
+This confirms that buyers are coming back into the market.
+
+👉 Buy only after confirmation — not during panic selling.
+
+3️⃣ Buy Entry
+
+A buy position is opened only when reversal confirmation happens.
+
+No guessing.
+
+No early entry.
+
+No random trade.
+
+This improves trade quality.
+
+✅ Risk Management (Most Important Part)
+📊 What Is Risk?
+
+Risk = Difference between Entry Price and Breakdown Level
+
+This tells us how much we are risking in the trade.
+
+🎯 Take Profit Using Risk–Reward Ratio
+
+Instead of setting a random target, profit is calculated like this:
+
+Target = Entry Price + (Risk × Risk-Reward Ratio)
+
+Example:
+
+Entry = 100
+
+Breakdown level = 95
+
+Risk = 5
+
+Risk–Reward Ratio = 2
+
+Target = 100 + (5 × 2) = 110
+
+This means we aim to earn twice what we risk.
+
+✅ Full Strategy Flow
+
+Market breaks support
+↓
+System waits for reversal
+↓
+Price crosses above trailing level
+↓
+Buy entry
+↓
+Risk is calculated
+↓
+Target set using RR
+↓
+Exit when target is reached
+
+✅ Why This Strategy Is Useful
+
+✔ Waits for confirmation before entry
+✔ Uses volatility-based logic
+✔ Controls risk properly
+✔ Uses professional Risk–Reward planning
+✔ Avoids emotional trading
+
+⚠️ Limitations
+
+May give false signals in strong downtrends
+
+Needs proper backtesting
+
+Parameters must be optimized
+
+Not suitable for every market condition
+
+🧠 Simple Understanding
+
+The market falls first.
+Then it shows signs of strength.
+We buy only after confirmation.
+We exit with a planned reward.

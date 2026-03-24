@@ -1,0 +1,42 @@
+[
+  {
+    "slug": "macd-rsi-momentum",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/b7zn25L6-Momentum-Strategy-BTC-USDT-1h-MACD-with-source-code/",
+    "python_file": "python-strategies/bulk/macd-rsi-momentum.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "3kilos-btc-15m",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/M9tw82HU-3kilos-BTC-15m/",
+    "python_file": "python-strategies/bulk/3kilos-btc-15m.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "ultimate-t3-fibonacci-btc-scalping",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/",
+    "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "eth-apo-strategy-60min",
+    "classification": "direct",
+    "chart_url": "https://www.tradingview.com/script/SEZOsi3X-ETH-APO-Strategy-60MIN/",
+    "python_file": "python-strategies/bulk/eth-apo-strategy-60min.py",
+    "import_ok": true,
+    "backtested": false
+  },
+  {
+    "slug": "vinz-win-btc-1m",
+    "classification": "direct",
+    "chart_url": "https://www.tradingview.com/script/bt8HJINE/",
+    "python_file": "python-strategies/bulk/vinz-win-btc-1m.py",
+    "import_ok": true,
+    "backtested": false
+  }
+]

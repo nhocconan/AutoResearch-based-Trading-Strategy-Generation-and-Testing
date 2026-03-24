@@ -1,0 +1,167 @@
+//@version=6
+strategy("Triple Confirmation System (Weekly) — Backtest (v6)",
+     overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     pyramiding=1,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+//======================
+// Inputs
+//======================
+hmaLen1   = input.int(30, "HMA Length 1", minval=1)
+hmaLen2   = input.int(44, "HMA Length 2", minval=1)
+
+macdFast  = input.int(21, "MACD Fast", minval=1)
+macdSlow  = input.int(3,  "MACD Slow", minval=1)
+macdSig   = input.int(9,  "MACD Signal", minval=1)
+
+rsiLen    = input.int(9,  "RSI Length", minval=1)
+rsiMaLen  = input.int(3,  "RSI MA Length", minval=1)
+rsiWmaLen = input.int(21, "RSI WMA Length", minval=1)
+
+swingLeft  = input.int(2, "Swing Low Left Bars", minval=1)
+swingRight = input.int(2, "Swing Low Right Bars", minval=1)
+
+targetLookback = input.int(26, "Target = Highest High Lookback (weeks)", minval=1)
+
+partialPct      = input.float(20.0, "Partial Exit % (of initial position)", minval=0.0, maxval=100.0)
+partialDailyUp  = input.float(3.0,  "Partial Exit Trigger: Daily % Up", minval=0.1)
+
+reentryPct      = input.float(10.0, "Re-entry % (of initial position)", minval=0.0, maxval=100.0)
+reentryDailyDown= input.float(3.0,  "Re-entry Trigger: Daily % Down", minval=0.1)
+
+//======================
+// Weekly Indicators (run on chart timeframe; use Weekly chart)
+//======================
+hma1 = ta.hma(close, hmaLen1)
+hma2 = ta.hma(close, hmaLen2)
+
+[macdLine, sigLine, hist] = ta.macd(close, macdFast, macdSlow, macdSig)
+
+rsi9     = ta.rsi(close, rsiLen)
+rsiMA3   = ta.sma(rsi9, rsiMaLen)
+rsiWMA21 = ta.wma(rsi9, rsiWmaLen)
+
+//======================
+// Entry Conditions (ALL 3)
+//======================
+upperHMA = math.max(hma1, hma2)
+lowerHMA = math.min(hma1, hma2)
+priceBetween = close >= lowerHMA and close <= upperHMA
+
+macdBelowZero = hist < 0
+
+// "RSI-9 & 3-MA cross above 21-WMA" interpreted as both crossing up
+rsiCross1 = ta.crossover(rsi9, rsiWMA21)
+rsiCross2 = ta.crossover(rsiMA3, rsiWMA21)
+rsiConfirm = rsiCross1 and rsiCross2
+
+entrySignal = priceBetween and macdBelowZero and rsiConfirm
+
+//======================
+// Stop Loss: Below recent swing low (weekly pivot low)
+//======================
+pivLow = ta.pivotlow(low, swingLeft, swingRight) // confirmed after swingRight bars
+var float lastSwingLow = na
+if not na(pivLow)
+    lastSwingLow := pivLow
+
+stopPrice = lastSwingLow
+
+//======================
+// Target: Previous weekly highs
+// Implemented as: Highest High of last N weeks excluding current bar
+//======================
+targetPrice = ta.highest(high[1], targetLookback)
+
+//======================
+// Track initial position size for partials
+//======================
+var float initPosQty = na
+var bool partialDone = false
+var bool reentryDone = false
+
+// Reset flags when flat
+if strategy.position_size == 0
+    initPosQty := na
+    partialDone := false
+    reentryDone := false
+
+//======================
+// Entry
+//======================
+if entrySignal and strategy.position_size == 0 and not na(stopPrice) and not na(targetPrice)
+    strategy.entry("Long", strategy.long)
+
+// Capture initial qty on the first bar after entry is live
+if strategy.position_size > 0 and na(initPosQty)
+    initPosQty := math.abs(strategy.position_size)
+
+//======================
+// Core Exit: Stop + Target
+//======================
+if strategy.position_size > 0 and not na(stopPrice) and not na(targetPrice)
+    strategy.exit("Core Exit", "Long", stop=stopPrice, limit=targetPrice)
+
+//======================
+// Daily partial exit / re-entry triggers while on Weekly chart
+//======================
+// Daily % change
+dClose     = request.security(syminfo.tickerid, "D", close)
+dClosePrev = request.security(syminfo.tickerid, "D", close[1])
+dChangePct = 100.0 * (dClose - dClosePrev) / dClosePrev
+
+// Helper: safe qty calc (avoid 0 qty)
+f_qty_from_pct(pct) =>
+    q = na(initPosQty) ? na : math.floor(initPosQty * pct / 100.0)
+    q < 1 ? 1 : q
+
+// Partial sell: 20% when daily >= +3%
+if strategy.position_size > 0 and not partialDone and dChangePct >= partialDailyUp and not na(initPosQty)
+    sellQty = f_qty_from_pct(partialPct)
+    // Reduce long by selling (short order reduces existing long)
+    strategy.order("Partial Sell", strategy.short, qty=sellQty)
+    partialDone := true
+    reentryDone := false
+
+// Re-entry: buy back 10% when daily <= -3% (after partial sell)
+if strategy.position_size > 0 and partialDone and not reentryDone and dChangePct <= -reentryDailyDown and not na(initPosQty)
+    buyQty = f_qty_from_pct(reentryPct)
+    strategy.order("Re-entry Buy", strategy.long, qty=buyQty)
+    reentryDone := true
+
+//======================
+// Plotting
+//======================
+plot(hma1, "HMA 30", color=color.new(color.blue, 0))
+plot(hma2, "HMA 44", color=color.new(color.red, 0))
+
+plotshape(entrySignal, title="Entry Signal", style=shape.labelup, text="ENTRY",
+     color=color.new(color.green, 0), textcolor=color.white, location=location.belowbar)
+
+plot(strategy.position_size > 0 ? stopPrice : na, "Stop (Swing Low)", color=color.new(color.orange, 0), style=plot.style_linebr)
+plot(strategy.position_size > 0 ? targetPrice : na, "Target (Prev High)", color=color.new(color.teal, 0), style=plot.style_linebr)
+
+View in Pine Editor・146 lines
+Use on chart
+1
+1
+380
+How to Filter “Good Companies”
+
+In screener add:
+
+Market Cap > Mid-cap level
+
+Positive EPS
+
+Revenue growth positive
+
+ROE > 15%
+
+Debt/Equity low
+
+This improves probability.

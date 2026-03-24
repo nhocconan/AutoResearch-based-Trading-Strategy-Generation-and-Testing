@@ -1,0 +1,133 @@
+//@version=5
+strategy("LinReg Slope + Acceleration Filter", overlay=false, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+regLen = input.int(50, "Regression Length")
+slopeThreshold = input.float(0, "Slope Threshold")
+smoothLen = input.int(3, "Acceleration Smoothing", minval=1)
+accelScale = input.float(100, "Acceleration Scale Factor", minval=1)
+
+// === CALCULATE SLOPE (First Derivative) ===
+linRegValue = ta.linreg(close, regLen, 0)
+linRegPrev = ta.linreg(close, regLen, 1)
+slope = linRegValue - linRegPrev
+
+// === CALCULATE ACCELERATION (Second Derivative) ===
+acceleration = slope - slope[1]
+smoothAccel = ta.ema(acceleration, smoothLen)
+
+// === POSITION STATE ===
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// === ENTRY CONDITIONS ===
+// Long: Slope positive AND Acceleration positive
+longEntry = slope > slopeThreshold and smoothAccel > 0 and not inLong
+
+// Short: Slope negative AND Acceleration negative
+shortEntry = slope < -slopeThreshold and smoothAccel < 0 and not inShort
+
+// === EXIT CONDITIONS ===
+// Exit Long: Acceleration turns zero or negative
+exitLong = inLong and smoothAccel <= 0
+
+// Exit Short: Acceleration turns zero or positive
+exitShort = inShort and smoothAccel >= 0
+
+// === EXECUTION ===
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+// === PLOTS ===
+// Slope
+slopeColor = slope > 0 ? color.green : color.red
+plot(slope, "Slope", color=slopeColor, linewidth=2)
+
+// Acceleration (histogram)
+accelColor = smoothAccel > 0 ? color.new(color.aqua, 50) : color.new(color.orange, 50)
+plot(smoothAccel * accelScale, "Acceleration", color=accelColor, style=plot.style_histogram, linewidth=3)
+
+// Reference lines
+hline(0, "Zero", color=color.gray, linewidth=1)
+hline(slopeThreshold, "Upper", color=color.green, linestyle=hline.style_dotted)
+hline(-slopeThreshold, "Lower", color=color.red, linestyle=hline.style_dotted)
+
+// Background - highlight valid entry zones
+validLong = slope > slopeThreshold and smoothAccel > 0
+validShort = slope < -slopeThreshold and smoothAccel < 0
+bgcolor(validLong ? color.new(color.green, 85) : validShort ? color.new(color.red, 85) : na)
+
+// Entry/Exit markers
+plotshape(longEntry, title="Long Entry", location=location.bottom, color=color.green, style=shape.triangleup, size=size.normal, text="L")
+plotshape(shortEntry, title="Short Entry", location=location.top, color=color.red, style=shape.triangledown, size=size.normal, text="S")
+plotshape(exitLong, title="Exit Long", location=location.top, color=color.yellow, style=shape.xcross, size=size.small)
+plotshape(exitShort, title="Exit Short", location=location.bottom, color=color.yellow, style=shape.xcross, size=size.small)
+
+// === INFO TABLE ===
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Slope", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(slope, "#.#####"), text_color=slope > 0 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 1, "Acceleration", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(smoothAccel, "#.######"), text_color=smoothAccel > 0 ? color.aqua : color.orange, text_size=size.small)
+    
+    // Entry Valid
+    var string entryValid = ""
+    if validLong
+        entryValid := "LONG VALID"
+    else if validShort
+        entryValid := "SHORT VALID"
+    else
+        entryValid := "NO ENTRY"
+    
+    validColor = validLong ? color.green : validShort ? color.red : color.gray
+    table.cell(infoTable, 0, 2, "Entry Zone", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, entryValid, text_color=validColor, text_size=size.small)
+    
+    // Position
+    var string posText = ""
+    if inLong
+        posText := "LONG"
+    else if inShort
+        posText := "SHORT"
+    else
+        posText := "FLAT"
+    
+    posColor = inLong ? color.green : inShort ? color.red : color.gray
+    table.cell(infoTable, 0, 3, "Position", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, posText, text_color=posColor, text_size=size.small)
+    
+    // Exit Warning
+    var string exitWarning = ""
+    if inLong and smoothAccel <= 0
+        exitWarning := "EXIT LONG!"
+    else if inShort and smoothAccel >= 0
+        exitWarning := "EXIT SHORT!"
+    else
+        exitWarning := "---"
+    
+    warnColor = exitWarning != "---" ? color.yellow : color.gray
+    table.cell(infoTable, 0, 4, "Exit Signal", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, exitWarning, text_color=warnColor, text_size=size.small)
+    
+    // LinReg Value
+    table.cell(infoTable, 0, 5, "LinReg", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(linRegValue, "#.##"), text_color=color.white, text_size=size.small)
+
+View in Pine Editor・126 lines
+Use on chart
+3
+4
+851
+linear regression, with acceleration, long when slope is positive and exists when acceleration is 0, shorts are slope is negative, acceleration is negative and exits when slope returns to 0. use 100 length

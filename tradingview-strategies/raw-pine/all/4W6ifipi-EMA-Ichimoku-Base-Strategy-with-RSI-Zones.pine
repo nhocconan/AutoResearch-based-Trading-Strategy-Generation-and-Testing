@@ -1,0 +1,135 @@
+//@version=6
+strategy("EMA + Ichimoku Base Strategy with RSI Zones", overlay=true, pyramiding=10)
+
+//-----------------------------------------------------
+// INPUTS
+//-----------------------------------------------------
+rsiLen      = input.int(7, "RSI Length")
+rsiWmaLen   = input.int(5, "RSI WMA Length")
+emaLen      = input.int(4, "EMA Length")
+smaLen      = input.int(6, "SMA Length")
+kijunLen    = input.int(10, "Ichimoku Base Line Length")
+
+upperBand   = input.float(60.0, "RSI Upper Band")
+middleBand  = input.float(40.0, "RSI Middle Band")
+lowerBand   = input.float(32.0, "RSI Lower Band")
+
+tpPercent   = input.float(30.0, "Take Profit %") / 100.0
+
+//-----------------------------------------------------
+// INDICATORS
+//-----------------------------------------------------
+rsiValue = ta.rsi(close, rsiLen)
+rsiWma   = ta.wma(rsiValue, rsiWmaLen)
+
+emaVal = ta.ema(close, emaLen)
+smaVal = ta.sma(close, smaLen)
+
+// Ichimoku Base Line (Kijun-sen)
+highestHigh = ta.highest(high, kijunLen)
+lowestLow   = ta.lowest(low, kijunLen)
+kijun       = (highestHigh + lowestLow) / 2
+
+//-----------------------------------------------------
+// RSI ZONE CROSS SIGNAL
+//-----------------------------------------------------
+oversoldCross   = ta.crossover(smaVal, rsiValue) and rsiValue <= lowerBand
+overboughtCross = ta.crossunder(smaVal, rsiValue) and rsiValue >= upperBand
+
+var float signalLevel = na
+if oversoldCross or overboughtCross
+    signalLevel := close
+
+//-----------------------------------------------------
+// ENTRY CONDITIONS
+//-----------------------------------------------------
+longEntry  = ta.crossover(close, emaVal)
+shortEntry = ta.crossunder(close, emaVal)
+
+//-----------------------------------------------------
+// EXECUTE ENTRIES
+//-----------------------------------------------------
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+//-----------------------------------------------------
+// STOP LOSS
+//-----------------------------------------------------
+longStop  = kijun
+shortStop = kijun
+
+//-----------------------------------------------------
+// TAKE PROFIT
+//-----------------------------------------------------
+longTP  = strategy.position_avg_price * (1 + tpPercent)
+shortTP = strategy.position_avg_price * (1 - tpPercent)
+
+//-----------------------------------------------------
+// EXIT CONDITIONS
+//-----------------------------------------------------
+emaCrossDown = ta.crossunder(close, emaVal)
+emaCrossUp   = ta.crossover(close, emaVal)
+
+// Stop + Target
+strategy.exit("Long Exit",  from_entry="Long",  stop=longStop,  limit=longTP)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTP)
+
+// EMA reversal
+if strategy.position_size > 0 and emaCrossDown
+    strategy.close("Long")
+
+if strategy.position_size < 0 and emaCrossUp
+    strategy.close("Short")
+
+//-----------------------------------------------------
+// PLOTS
+//-----------------------------------------------------
+plot(emaVal, "EMA", color=color.orange)
+plot(smaVal, "SMA", color=color.blue)
+plot(kijun, "Ichimoku Base Line (KS)", color=color.purple)
+
+plot(rsiValue, "RSI", color=color.green)
+plot(rsiWma, "RSI WMA", color=color.red)
+
+hline(upperBand, "Upper Band", color=color.red)
+hline(middleBand, "Middle Band", color=color.gray)
+hline(lowerBand, "Lower Band", color=color.green)
+
+plot(signalLevel, "RSI Zone Signal", color=color.green, linewidth=2, style=plot.style_linebr)
+
+//-----------------------------------------------------
+// ENTRY / EXIT ARROWS
+//-----------------------------------------------------
+plotshape(longEntry,  title="Long Entry",  location=location.belowbar, color=color.green, style=shape.arrowup, size=size.small)
+plotshape(shortEntry, title="Short Entry", location=location.abovebar, color=color.red,   style=shape.arrowdown, size=size.small)
+
+longExit  = strategy.position_size > 0 and (emaCrossDown or close <= longStop or close >= longTP)
+shortExit = strategy.position_size < 0 and (emaCrossUp or close >= shortStop or close <= shortTP)
+
+plotshape(longExit,  title="Long Exit",  location=location.abovebar, color=color.red,   style=shape.xcross, size=size.small)
+plotshape(shortExit, title="Short Exit", location=location.belowbar, color=color.green, style=shape.xcross, size=size.small)
+
+View in Pine Editor・113 lines
+Use on chart
+9
+305
+Strategy Overview
+
+Name: EMA + Ichimoku Base Strategy with RSI Zones
+Script Type: TradingView Strategy (Pine Script v6)
+Market Style: Trend-following with RSI zone signals
+Trade Direction: Both Long and Short
+Pyramiding: Up to 10 positions allowed
+
+The strategy combines 4 indicators:
+
+EMA (4) → Entry trigger
+
+Ichimoku Base Line (Kijun-sen 10) → Stop loss level
+
+RSI (7) → Momentum zones
+
+WMA of RSI (5) → RSI smoothing

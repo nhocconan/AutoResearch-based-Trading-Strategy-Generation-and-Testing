@@ -1,0 +1,182 @@
+//@version=6
+strategy("EMA Pullback Speed Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+max_length       = input.int(50, title="Maximum Length")
+accel_multiplier = input.float(3.0, title="Accelerator Multiplier")
+return_threshold = input.float(5.0, title="Pullback Threshold (%)", step=0.01)
+atr_length       = input.int(14, title="ATR Period")
+atr_mult         = input.float(4.0, title="ATR Multiplier (Stop Loss)")
+fixed_tp_pct     = input.float(1.5, title="Fixed Take Profit (%)")
+short_ema_len    = input.int(21, title="Short EMA Length")
+long_ema_len     = input.int(50, title="Long EMA Length")
+long_speed_min   = input.float(1000.0, title="Minimum Speed for Long Entry", step=0.1)
+short_speed_max  = input.float(-1000.0, title="Maximum Speed for Short Entry", step=0.1)
+
+// === EMA FILTER ===
+ema_short = ta.ema(close, short_ema_len)
+ema_long  = ta.ema(close, long_ema_len)
+ema_uptrend = ema_short > ema_long
+ema_downtrend = ema_short < ema_long
+
+// === DYNAMIC EMA ===
+counts_diff = close
+max_abs_counts_diff = ta.highest(math.abs(counts_diff), 200)
+counts_diff_norm = (counts_diff + max_abs_counts_diff) / (2 * max_abs_counts_diff)
+dyn_length = 5 + counts_diff_norm * (max_length - 5)
+
+calc_accel_factor(float counts_diff, float prev_counts_diff) =>
+    delta_counts_diff = math.abs(counts_diff - prev_counts_diff)
+    max_delta_counts_diff = ta.highest(delta_counts_diff, 200)
+    max_delta_counts_diff := max_delta_counts_diff == 0 ? 1 : max_delta_counts_diff
+    delta_counts_diff / max_delta_counts_diff
+
+adjust_alpha(float dyn_length, float accel_factor, float accel_multiplier) =>
+    alpha_base = 2 / (dyn_length + 1)
+    alpha = alpha_base * (1 + accel_factor * accel_multiplier)
+    math.min(1, alpha)
+
+accel_factor = calc_accel_factor(counts_diff, nz(counts_diff[1]))
+alpha = adjust_alpha(dyn_length, accel_factor, accel_multiplier)
+var float dyn_ema = na
+dyn_ema := na(dyn_ema[1]) ? close : alpha * close + (1 - alpha) * dyn_ema[1]
+
+// === TREND LOGIC ===
+is_uptrend = close > dyn_ema
+is_downtrend = close < dyn_ema
+distance = math.abs(close - dyn_ema) / dyn_ema * 100
+returned_to_trend = distance < return_threshold
+
+// === CANDLE CONFIRMATION ===
+bullish_reversal = close[2] > open[2] and close[1] > open[1] and close > high[1]
+bearish_reversal = close[2] < open[2] and close[1] < open[1] and close < low[1]
+
+// === SPEED & FILTER ===
+speed = close - open
+trend_speed_up = speed > 0
+trend_speed_dn = speed < 0
+trend_speed_filter_long  = speed >= long_speed_min
+trend_speed_filter_short = speed <= short_speed_max
+
+// === ATR FOR STOPS AND TARGETS ===
+atr = ta.atr(atr_length)
+long_sl = close - atr * atr_mult
+short_sl = close + atr * atr_mult
+long_tp = close + close * fixed_tp_pct / 100
+short_tp = close - close * fixed_tp_pct / 100
+
+// === ENTRY CONDITIONS ===
+long_condition = is_uptrend and bullish_reversal and returned_to_trend and trend_speed_up and ema_uptrend and trend_speed_filter_long
+short_condition = is_downtrend and bearish_reversal and returned_to_trend and trend_speed_dn and ema_downtrend and trend_speed_filter_short
+
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// === EXITS ===
+strategy.exit("Exit Long", from_entry="Long", stop=long_sl, limit=long_tp)
+strategy.exit("Exit Short", from_entry="Short", stop=short_sl, limit=short_tp)
+
+// === VISUALIZATION PLOTS ===
+plot(ema_short, color=color.teal, linewidth=1, title="EMA Short", style=plot.style_line)
+plot(ema_long, color=color.orange, linewidth=1, title="EMA Long", style=plot.style_line)
+plot(dyn_ema, color=color.blue, linewidth=2, title="Dynamic EMA", style=plot.style_line)
+
+View in Pine Editor・88 lines
+Use on chart
+8
+8
+1
+3 181
+　📌 **Overview**
+The **EMA Pullback Speed Strategy** is a trend-following approach that combines **price momentum** and **Exponential Moving Averages (EMA)**.
+It aims to identify high-probability entry points during brief pullbacks within ongoing uptrends or downtrends.
+
+
+
+
+The strategy evaluates **speed of price movement**, **relative position to dynamic EMA**, and **candlestick patterns** to determine ideal timing for entries.
+One of the key concepts is checking whether the price has **“not pulled back too much”**, helping focus only on situations where the trend is likely to continue.
+
+⚠️ This strategy is designed for educational and research purposes only. It does not guarantee future profits.
+
+
+
+
+🧭 **Purpose**
+This strategy addresses the common issue of **"jumping in too late during trends and taking unnecessary losses."**
+By waiting for a healthy pullback and confirming signs of **trend resumption**, traders can enter with greater confidence and reduce false entries.
+
+🎯 **Strategy Objectives**
+
+* Enter in the direction of the prevailing trend to increase win rate
+* Filter out false signals using pullback depth, speed, and candlestick confirmations
+* Predefine Take-Profit (TP) and Stop-Loss (SL) levels for safer, rule-based trading
+
+✨ **Key Features**
+
+* **Dynamic EMA**: Reacts faster when price moves quickly, slower when market is calm – adapting to current momentum
+* **Pullback Filter**: Avoids trades when price pulls back too far (e.g., more than 5%), indicating a trend may be weakening
+* **Speed Check**: Measures how strongly the price returns to the trend using candlestick body speed (open-to-close range in ticks)
+
+📊 **Trading Rules**
+
+**■ Long Entry Conditions:**
+
+* Current price is above the dynamic EMA (indicating uptrend)
+* Price has pulled back toward the EMA (a "buy the dip" situation)
+* Pullback depth is within the threshold (not excessive)
+* Candlesticks show consecutive bullish closes and break the previous high
+* Price speed is strong (positive movement with momentum)
+
+**■ Short Entry Conditions:**
+
+* Current price is below the dynamic EMA (indicating downtrend)
+* Price has pulled back up toward the EMA (a "sell the rally" setup)
+* Pullback is within range (not too deep)
+* Candlesticks show consecutive bearish closes and break the previous low
+* Price speed is negative (downward momentum confirmed)
+
+**■ Exit Conditions (TP/SL):**
+
+* **Take-Profit (TP):** Fixed 1.5% target above/below entry price
+* **Stop-Loss (SL):** Based on recent price volatility, calculated using ATR × 4
+
+💰 **Risk Management Parameters**
+
+* Symbol & Timeframe: BTCUSD on 1-hour chart (H1)
+* Test Capital: \$3000 (simulated account)
+* Commission: 0.02%
+* Slippage: 2 ticks (minimal execution lag)
+* Max risk per trade: 5% of account balance
+* Backtest Period: Aug 30, 2023 – May 9, 2025
+* Profit Factor (PF): 1.965 (Net profit ÷ Net loss, including spreads & fees)
+
+⚙️ **Trading Parameters & Indicator Settings**
+
+* Maximum EMA Length: 50
+* Accelerator Multiplier: 3.0
+* Pullback Threshold: 5.0%
+* ATR Period: 14
+* ATR Multiplier (SL distance): 4.0
+* Fixed TP: 1.5%
+* Short-term EMA: 21
+* Long-term EMA: 50
+* Long Speed Threshold: ≥ 1000.0 (ticks)
+* Short Speed Threshold: ≤ -1000.0 (ticks)
+⚠️Adjustments are based on BTCUSD.
+⚠️Forex and other currency pairs require separate adjustments.
+
+
+🔧 **Strategy Improvements & Uniqueness**
+Unlike basic moving average crossovers or RSI triggers, this strategy emphasizes **"momentum-supported pullbacks"**.
+By combining dynamic EMA, speed checks, and candlestick signals, it captures trades **as if surfing the wave of a trend.**
+Its built-in filters help **avoid overextended pullbacks**, which often signal the trend is ending – making it more robust than traditional trend-following systems.
+
+✅ **Summary**
+The **EMA Pullback Speed Strategy** is easy to understand, rule-based, and highly reproducible – ideal for both beginners and intermediate traders.
+Because it shows **clear visual entry/exit points** on the chart, it’s also a great tool for practicing discretionary trading decisions.
+
+⚠️ Past performance is not a guarantee of future results.
+Always respect your Stop-Loss levels and manage your position size according to your risk tolerance.

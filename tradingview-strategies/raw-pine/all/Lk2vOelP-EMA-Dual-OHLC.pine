@@ -1,0 +1,56 @@
+//@version=2
+
+strategy("EMA Dual OHLC", shorttitle = "EMA Dual OHLC", overlay=true, pyramiding=1, default_qty_type= strategy.cash, default_qty_value = 1000)
+
+
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(2, "Backtest Stop Month")
+testStopDay = input(1, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=false)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00ff00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time > testPeriodStart and time <= testPeriodStop ? true : false
+//    time >= testPeriodStart ? true : false
+
+price = (open + close + high + low)/4
+
+Up = input(1, "Up")
+Right = input(5, "Right")
+Number = input(100, "EMA")
+Ma10 = ema(price, Number)
+MaUp = (Ma10 + ((Ma10/1000)*Up))
+MaBuy = offset(MaUp, Right)
+MaSell = offset(Ma10, Right)
+Long = crossunder(MaBuy, Ma10) and testPeriod()
+Short = crossover(MaSell, Ma10) and testPeriod()
+
+Position = Long[1]? true: Short[1]? false: Position[1]? true:false
+GoLong = Long and not Position? true : false
+GoShort = Short and Position? true : false
+
+strategy.entry("GoLong", strategy.long, when = Long)
+strategy.close_all(when = GoShort)
+
+plot( Ma10, color=blue, style=line, title="MMA10", linewidth=2)
+plot( MaBuy, color=green, style=line, title="MMA20", linewidth=2)
+plot( MaSell, color=red, style=line, title="MMA20", linewidth=2)
+
+bgcolor(GoLong ? lime : GoShort ? red : na, transp=50)
+
+View in Pine Editor・48 lines
+Use on chart
+1
+0
+0
+3 740
+Experiment with simple EMA against offset curve using OHLC averages

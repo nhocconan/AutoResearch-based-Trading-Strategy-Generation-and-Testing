@@ -1,0 +1,67 @@
+//@version=4
+strategy(title="Parabolic SAR Strategy (on close) [QuantNomad]", shorttitle="SAR Strategy [QN]", overlay=true)
+
+start      = input(0.02)
+increment  = input(0.02)
+maximum    = input(0.2)
+entry_bars = input(1, title = "Entry on Nth trend bar") 
+
+psar        = 0.0 // PSAR
+af          = 0.0 // Acceleration Factor
+trend_dir   = 0   // Current direction of PSAR
+ep          = 0.0 // Extreme point
+trend_bars  = 0
+
+sar_long_to_short = trend_dir[1] == 1  and close <= psar[1] // PSAR switches from long to short
+sar_short_to_long = trend_dir[1] == -1 and close >= psar[1] // PSAR switches from short to long
+
+trend_change = barstate.isfirst[1] or sar_long_to_short or sar_short_to_long
+
+// Calculate trend direction
+trend_dir    := barstate.isfirst[1] and close[1] > open[1] ? 1 : 
+   barstate.isfirst[1] and close[1] <= open[1] ? -1 : 
+   sar_long_to_short ? -1 : 
+   sar_short_to_long ?  1 : nz(trend_dir[1])
+
+trend_bars := sar_long_to_short ? -1 : 
+              sar_short_to_long ?  1 : 
+              trend_dir ==  1   ? nz(trend_bars[1]) + 1 : 
+              trend_dir == -1   ? nz(trend_bars[1]) - 1 : 
+              nz(trend_bars[1])
+
+// Calculate  Acceleration Factor
+af := trend_change ? start : 
+   (trend_dir == 1 and high > ep[1]) or  
+   (trend_dir == -1 and low < ep[1]) ? 
+   min(maximum, af[1] + increment) : 
+   af[1]
+
+// Calculate extreme point
+ep := trend_change and trend_dir == 1 ? high :  
+   trend_change and trend_dir == -1 ? low : 
+   trend_dir == 1 ? max(ep[1], high) : 
+   min(ep[1], low)
+
+// Calculate PSAR
+psar := barstate.isfirst[1] and close[1] > open[1] ? low[1] : 
+   barstate.isfirst[1] and close[1] <= open[1] ? high[1] : 
+   trend_change ? ep[1] :    
+   trend_dir == 1 ? psar[1] + af * (ep - psar[1]) : psar[1] - af * (psar[1] - ep) 
+
+plot(psar, style=plot.style_cross, color=trend_dir == 1 ? color.green : color.red,  linewidth = 2)
+
+// Strategy 
+strategy.entry("Long",  true,  when = trend_bars ==  entry_bars)
+strategy.entry("Short", false, when = trend_bars == -entry_bars)
+
+View in Pine Editor・55 lines
+Use on chart
+1.6 K
+23
+48 834
+Dec 18, 2019
+Created a Parabolic SAR strategy where price has to close under/above the level before for it to reverse. This way it should be a bit more stable and protect you from false breakouts.
+It was impossible to adjust the built-in "sar" function so I implemented PSAR from scratch. So if you're interested in how it's work inside you can check the code and probably adjust to your need if you have a custom modification of PSAR in your mind.
+Apr 25, 2020
+Release Notes
+Added "Entry on Nth trend bar" parameter. Now you can specify on which trends bar do you want to reverse position. That can help you to filter out noice and skip 1-2 bars trends.

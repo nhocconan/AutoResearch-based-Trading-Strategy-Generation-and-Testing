@@ -1,0 +1,218 @@
+//@version=5
+strategy("Supertrend [TradingConToto]", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital = 1000000, commission_type = strategy.commission.percent, commission_value = 0.01)
+
+// 🔒 Parámetros fijos
+adxLen        = 9
+emaShortLen   = 63
+emaMidLen     = 2400
+emaLongLen    = 4800
+atrLen        = 2
+minGapATR     = 2.2
+
+// 📈 Indicadores base
+emaShort = ta.ema(close, emaShortLen)
+emaMid   = ta.ema(close, emaMidLen)
+emaLong  = ta.ema(close, emaLongLen)
+atr      = ta.atr(atrLen)
+avgATR   = ta.sma(atr, emaLongLen)
+
+// 📐 ADX y DI
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = na(upMove) or upMove < 0 or upMove < downMove ? 0 : upMove
+minusDM  = na(downMove) or downMove < 0 or downMove < upMove ? 0 : downMove
+tr       = ta.rma(ta.tr(true), adxLen)
+plusDI   = 100 * ta.rma(plusDM, adxLen) / tr
+minusDI  = 100 * ta.rma(minusDM, adxLen) / tr
+adx      = 100 * ta.rma(math.abs(plusDI - minusDI) / (plusDI + minusDI), adxLen)
+adxMean  = ta.sma(adx, adxLen)
+
+// 📊 Filtros combinados
+direccionAlcista = plusDI > minusDI
+fuerzaADX        = adx > adxMean
+sobreEMA         = close > emaShort
+sobreEMA4800     = close > emaLong
+rupturaAlta      = close > high[1]
+gapEMAsValido    = (emaMid - emaLong) > (avgATR * minGapATR)
+
+// 📥 Entrada / 📤 Salida (misma lógica)
+enPosicion = strategy.position_size > 0
+entrada = direccionAlcista and fuerzaADX and sobreEMA and sobreEMA4800 and rupturaAlta and gapEMAsValido
+salida  = plusDI < minusDI or close < emaShort
+
+if (entrada and not enPosicion)
+    strategy.entry("Long", strategy.long, comment = "Buy")
+if (salida and enPosicion)
+    strategy.close("Long",comment = "Sell")
+
+// 🌈 EMA estilo “supertrend”
+emaColor = enPosicion ? color.new(color.lime, 0) : color.new(color.red, 0)
+plot(emaShort, title="EMA63", color=emaColor, linewidth=3)
+
+// 🎨 Banda Supertrend (relleno hacia extremos de precio)
+pBullTop = plot(enPosicion ? emaShort : na, title="BullTop", display=display.none)
+pBullBot = plot(enPosicion ? low      : na, title="BullBot", display=display.none)
+fill(pBullTop, pBullBot, color=color.new(color.lime, 85), title="Bull Fill")
+
+pBearTop = plot(not enPosicion ? high     : na, title="BearTop", display=display.none)
+pBearBot = plot(not enPosicion ? emaShort : na, title="BearBot", display=display.none)
+fill(pBearTop, pBearBot, color=color.new(color.red, 85), title="Bear Fill")
+
+// 🔒 Labels SOLO en cambio de estado (evita repeticiones)
+cambiaA_Long = enPosicion and not enPosicion[1]
+cambiaA_Flat = not enPosicion and enPosicion[1]
+
+// Posición del label
+yBuy  = low   // debajo de la franja verde
+ySell = high  // arriba de la franja roja
+
+if (cambiaA_Long and barstate.isconfirmed)
+    label.new(bar_index, yBuy, text="BUY", style=label.style_label_up,
+              textcolor=color.white, color=color.new(color.green, 0), size=size.normal, yloc=yloc.belowbar)
+
+if (cambiaA_Flat and barstate.isconfirmed)
+    label.new(bar_index, ySell, text="SELL", style=label.style_label_down,
+              textcolor=color.white, color=color.new(color.red, 0), size=size.normal, yloc=yloc.abovebar)
+// =========================
+// 📱 UI Tabla “re flama” SIN columna de valores actuales
+// =========================
+uiCompact = input.bool(true, "UI Compact (Mobile)")
+
+// Helpers
+fTexto(cond) => cond ? "✅" : "❌"
+fRowBG()     => color.rgb(255,255,255)
+fRowAltBG()  => color.rgb(245,247,250)
+fHeaderBG    = color.rgb(20,20,20)
+
+fNum(x, d) =>
+    _p = math.pow(10.0, d)
+    str.tostring(math.round(x * _p) / _p)
+
+// Umbrales
+condDirTxt   = "+DI > -DI"
+condADXTt    = "ADX > " + fNum(adxMean,1)
+condRupTt    = "Cierre > " + fNum(high[1],2)
+condEMA63Tt  = "Cierre > EMA63"
+condEMA200Tt = "Cierre > " + fNum(emaLong,2)
+condGapTt    = "(EMA2400-EMA4800) > " + fNum(avgATR * minGapATR,2)
+
+// Tabla
+var int cols = na
+if na(cols)
+    cols := uiCompact ? 1 : 2  // Compacto = 1 col, Desktop = 2 col
+
+var table t = table.new(position.top_right, cols, 10, bgcolor=color.white,border_width=1, border_color=color.black, force_overlay=true)
+
+fRowCompact(row, titleWithThreshold, cond) =>
+    table.cell(t, 0, row," " + (cond ? "🟢 " : "🔴 ") + titleWithThreshold + " " + fTexto(cond),text_color=color.black, bgcolor=row % 2 == 0 ? fRowBG() : fRowAltBG(), text_halign=text.align_left)
+
+fRowDesktop(row, titleWithThreshold, cond) =>
+    table.cell(t, 0, row, (cond ? "🟢 " : "🔴 ") + titleWithThreshold,text_color=color.black, bgcolor=row % 2 == 0 ? fRowBG() : fRowAltBG(),text_halign=text.align_left)
+    table.cell(t, 1, row, fTexto(cond),text_color=color.black, bgcolor=row % 2 == 0 ? fRowBG() : fRowAltBG(),text_halign=text.align_center)
+
+// Render
+if barstate.islast
+    if uiCompact
+        table.cell(t, 0, 0, "⚙️ Confirmaciones", text_color=color.white, bgcolor=fHeaderBG)
+    else
+        table.cell(t, 0, 0, "⚙️ Condición", text_color=color.white, bgcolor=fHeaderBG)
+        table.cell(t, 1, 0, "Estado",     text_color=color.white, bgcolor=fHeaderBG, text_halign=text.align_center)
+
+    // Filas
+    if uiCompact
+        fRowCompact(1, condDirTxt, direccionAlcista)
+        fRowCompact(2, condADXTt, fuerzaADX)
+        fRowCompact(3, condRupTt, rupturaAlta)
+        fRowCompact(4, condEMA63Tt, sobreEMA)
+        fRowCompact(5, condEMA200Tt, sobreEMA4800)
+        fRowCompact(6, condGapTt, gapEMAsValido)
+    else
+        fRowDesktop(1, condDirTxt, direccionAlcista)
+        fRowDesktop(2, condADXTt, fuerzaADX)
+        fRowDesktop(3, condRupTt, rupturaAlta)
+        fRowDesktop(4, condEMA63Tt, sobreEMA)
+        fRowDesktop(5, condEMA200Tt, sobreEMA4800)
+        fRowDesktop(6, condGapTt, gapEMAsValido)
+
+View in Pine Editor・135 lines
+Use on chart
+2
+6
+6
+1
+5 026
+Supertrend [TradingConToto] — ADX/DI + EMA Gap + Breakout (with Mobile UI)
+
+What makes it original
+Supertrend [TradingConToto] combines trend strength (ADX/DI), multi-timeframe bias (EMA63 and EMA 200D equivalent), a structural filter based on the distance between EMA2400 and EMA4800 expressed in ATR units, and a momentum confirmation through a previous high breakout.
+This is not a random mashup — it’s a sequence of filters designed to reduce trades in ranging markets and prioritize mature trends:
+
+Direction: +DI > -DI (trend led by buyers).
+
+Strength: ADX > mean(ADX) (avoids weak, choppy phases).
+
+Short-term bias: Close > EMA63.
+
+Long-term bias: Close > EMA4800 ≈ EMA200 daily on H1.
+
+Momentum: Close > High[1] (immediate breakout).
+
+Structure: (EMA2400 − EMA4800) > k·ATR (ensures separation in ATR units, filters out flat phases).
+
+Entries & exits
+
+Entry: when all six conditions are met and no open position exists.
+
+Exit: if +DI < -DI or Close < EMA63.
+
+Visuals: EMA63 is painted green while in position and red otherwise, with a supertrend-style band; “BUY” labels appear below the green band and “SELL” labels above the red band.
+
+UI: includes a compact table (mobile-friendly) showing the state of each condition.
+
+Default parameters used in this publication
+
+Initial capital: 10,000
+
+Position size: 10% of equity (≤10% per trade is considered sustainable).
+
+Commission: 0.01% per side (adjust to your broker/market).
+
+Slippage: 1 tick
+
+Pyramiding: 0 (only one position at a time)
+
+Adjust commission/slippage to match your market. For US equities, commissions are often per share; for spot crypto, 0.10–0.20% total is common. I publish with 0.01% per side as a conservative example to avoid overestimating results.
+
+Recommended backtest dataset
+
+Timeframe: H1
+
+Multi-cycle window (e.g. 2015–today)
+
+Symbols with high liquidity (e.g. NASDAQ-100 large caps, or BTC/ETH spot) to generate 100+ trades. Avoid cherry-picked short windows.
+
+Why each filter matters
+
++DI > -DI + ADX > mean: reduce counter-trend trades and weak signals.
+
+Close > EMA63 + Close > EMA4800: enforce trend alignment in short and long horizons.
+
+Breakout High[1]: requires immediate momentum, avoids early entries.
+
+EMA gap in ATR units: blocks flat or compressed structures where EMA200D aligns with price.
+
+Limitations
+
+The breakout filter may skip healthy pullbacks; the design prioritizes continuation over perfect entry price.
+
+No fixed trailing stop/TP; exits depend on trend degradation via DI/EMA63.
+
+Results vary with real costs (commissions, slippage, funding). Adjust defaults to your broker.
+
+How to use
+
+Apply it on a clean chart (no other indicators when publishing).
+
+Keep in mind the default parameters above; if you change them, mention it in your notes and use the same values in the Strategy Tester.
+
+Ensure your dataset produces 100+ trades for statistical validity.

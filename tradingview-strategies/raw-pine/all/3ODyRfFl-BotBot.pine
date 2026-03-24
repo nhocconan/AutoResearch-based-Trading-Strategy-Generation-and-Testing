@@ -1,0 +1,31 @@
+//@version=2
+strategy("BotBot", overlay=false)
+atr = atr(19)
+avg = sma(close,19)
+rangeup = low[1] + atr
+rangedown = high[1] - atr
+over() => close/avg > 1.001 and high/rangeup > 1.04 and close/open > 1.001
+under() => close/avg < 0.999 and low/rangedown < 0.96 and close/open < 0.999
+
+longCondition = over()
+shortCondition = under()
+
+plot(close/avg, "close/avg", red)
+plot(high/rangeup, "high/rangeup", blue)
+plot(close/open, "close/open", green)
+
+strategy.entry("long", strategy.long, when=longCondition)
+strategy.entry("short", strategy.short, when=shortCondition)
+
+View in Pine Editor・18 lines
+Use on chart
+7
+2
+7
+15
+11 198
+My version of ChopBot tradingview.com/v/oGgGj0ZF/ with a little of Gen Opt.
+
+Seems to be good for direction spotting during sideways and uptrend. Works only on 4h HA candles.
+
+

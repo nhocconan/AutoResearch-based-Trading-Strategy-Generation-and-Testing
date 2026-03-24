@@ -1,0 +1,122 @@
+//@version=5
+strategy('Ichimoku Cloud with MACD and Trailing Stop Loss',
+         overlay=true,
+         initial_capital=1000,
+         process_orders_on_close=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=30,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+showDate = input(defval=true, title='Show Date Range')
+timePeriod = time >= timestamp(syminfo.timezone, 2022, 6, 1, 0, 0)
+
+
+// Inputs
+ts_bars = input.int(9, minval=1, title='Tenkan-Sen Bars')
+ks_bars = input.int(26, minval=1, title='Kijun-Sen Bars')
+ssb_bars = input.int(52, minval=1, title='Senkou-Span B Bars')
+cs_offset = input.int(26, minval=1, title='Chikou-Span Offset')
+ss_offset = input.int(26, minval=1, title='Senkou-Span Offset')
+long_entry = input(true, title='Long Entry')
+short_entry = input(true, title='Short Entry')
+
+middle(len) => math.avg(ta.lowest(len), ta.highest(len))
+
+// Ichimoku Components
+tenkan = middle(ts_bars)
+kijun = middle(ks_bars)
+senkouA = math.avg(tenkan, kijun)
+senkouB = middle(ssb_bars)
+
+// Plot Ichimoku Kinko Hyo
+plot(tenkan, color=color.new(#0496ff, 0), title='Tenkan-Sen')
+plot(kijun, color=color.new(#991515, 0), title='Kijun-Sen')
+plot(close, offset=-cs_offset + 1, color=color.new(#459915, 0), title='Chikou-Span')
+sa = plot(senkouA, offset=ss_offset - 1, color=color.new(color.green, 0), title='Senkou-Span A')
+sb = plot(senkouB, offset=ss_offset - 1, color=color.new(color.red, 0), title='Senkou-Span B')
+fill(sa, sb, color=senkouA > senkouB ? color.green : color.red, title='Cloud color', transp=90)
+
+ss_high = math.max(senkouA[ss_offset - 1], senkouB[ss_offset - 1])
+ss_low = math.min(senkouA[ss_offset - 1], senkouB[ss_offset - 1])
+
+
+// MACD
+[macd, macd_signal, macd_histogram] = ta.macd(close, 12, 26, 9)
+
+
+// Entry/Exit Signals
+tk_cross_bull = tenkan > kijun
+tk_cross_bear = tenkan < kijun
+cs_cross_bull = ta.mom(close, cs_offset - 1) > 0
+cs_cross_bear = ta.mom(close, cs_offset - 1) < 0
+price_above_kumo = close > ss_high
+price_below_kumo = close < ss_low
+
+bullish = tk_cross_bull and cs_cross_bull and price_above_kumo and ta.crossover(macd, macd_signal)
+bearish = tk_cross_bear and cs_cross_bear and price_below_kumo and ta.crossunder(macd, macd_signal)
+
+// Configure trail stop level with input options
+longTrailPerc = input.float(title='Trail Long Loss (%)', minval=0.0, step=0.1, defval=3) * 0.01
+shortTrailPerc = input.float(title='Trail Short Loss (%)', minval=0.0, step=0.1, defval=3) * 0.01
+
+// Determine trail stop loss prices
+longStopPrice = 0.0
+shortStopPrice = 0.0
+
+longStopPrice := if strategy.position_size > 0
+    stopValue = close * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999
+
+strategy.entry('Long', strategy.long, when=bullish and long_entry and timePeriod)
+strategy.exit('Exit', stop = longStopPrice, limit = shortStopPrice)
+//strategy.close('Long', when=bearish and not short_entry)
+
+//strategy.entry('Short', strategy.short, when=bearish and short_entry and timePeriod)
+//strategy.close('Short', when=bullish and not long_entry)
+
+View in Pine Editor・84 lines
+Use on chart
+3
+2
+0
+1
+10 084
+The Ichimoku Cloud is a collection of technical indicators that show support and resistance levels, as well as momentum and trend direction. It does this by taking multiple averages and plotting them on a chart. It also uses these figures to compute a “cloud” that attempts to forecast where the price may find support or resistance in the future.
+
+The Ichimoku Cloud was developed by Goichi Hosoda, a Japanese journalist, and published in the late 1960s. It provides more data points than the standard candlestick chart. While it seems complicated at first glance, those familiar with how to read the charts often find it easy to understand with well-defined trading signals.
+
+The Ichimoku Cloud is composed of five lines or calculations, two of which comprise a cloud where the difference between the two lines is shaded in.
+The lines include a nine-period average, a 26-period average, an average of those two averages, a 52-period average, and a lagging closing price line.
+The cloud is a key part of the indicator. When the price is below the cloud, the trend is down. When the price is above the cloud, the trend is up.
+The above trend signals are strengthened if the cloud is moving in the same direction as the price. For example, during an uptrend, the top of the cloud is moving up, or during a downtrend, the bottom of the cloud is moving down.
+
+The MACD is a trend following momentum indicator and provides identification of short-term trend direction. In this variation it utilises the 12-period as the fast and 26-period as the slow length EMAs, with signal smoothing set at 9.
+
+This strategy combines the Ichimoku Cloud with the MACD indicator to better enter trades.
+
+Long/Exit orders are placed when three basic signals are triggered.
+
+Long Position:
+Tenkan-Sen is above the Kijun-Sen
+Chikou-Span is above the close of 26 bars ago
+Close is above the Kumo Cloud
+MACD line crosses over the signal line
+
+Exit Position:
+Price increases 3% trailing
+Price decreases 3% trailing
+
+The script is backtested from 1 June 2022 and provides good returns.
+
+The strategy assumes each order is using 30% of the available coins to make the results more realistic and to simulate you only ran this strategy on 30% of your holdings. A trading fee of 0.1% is also taken into account and is aligned to the base fee applied on Binance.
+
+

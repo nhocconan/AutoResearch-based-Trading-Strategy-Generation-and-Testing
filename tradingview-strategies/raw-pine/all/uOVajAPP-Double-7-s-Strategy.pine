@@ -1,0 +1,72 @@
+//@version=4
+strategy("Double 7's Strategy", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+value1=input(7, title="Quantity of day low")
+value2=input(7, title="Quantity of day high")
+entry=lowest(close[1],value1)
+exit=highest(close[1],value2)
+
+
+mma200=sma(close,200)
+
+// Test Period
+testStartYear = input(2009, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2020, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+if testPeriod()
+    if (close>mma200) and (close<entry)
+        strategy.entry("RsiLE", strategy.long , comment="Open")
+
+    if (close>exit)
+        strategy.close_all()
+
+View in Pine Editor・31 lines
+Use on chart
+3
+5
+4
+8
+8 619
+Strategy described in the book "Short Term Trading Strategies that Work", written by Larry Connors and Cesar Alvarez.
+
+It is the simplest strategy I know and has only 3 rules:
+
+- Price must be above the arithmetic moving average of 200 periods.
+- Buy when the price closes below the closing of the last 7 days.
+- Sale when the price closes above the closing of the last 7 days.
+
+Simple as it may seem, this strategy works very well in some stocks and/or graphical times (in some stocks it overcomes many RSI 2 strategies). It was developed for the daily chart and does not usually work well on weekly or monthly charts, but can be used for day trades if the back-test proves to be favorable.
+
+If you want, you can change the input and output rules by setting other values ​​for the input or output period and thus find more positive results for specific stocks.
+
+There is no stop loss because in tests the stop loss usually reduces the gains of the strategy.
+
+Good luck and good trades.
+
+================================
+
+Estrategia descrita no livro "Short Term Trading Strategies that Work", escrito por Larry Connors e Cesar Alvarez.
+
+É a estratégia mais simples que eu conheço e tem apenas 3 regras:
+
+- Preço deve estar acima da média móvel aritmética de 200 períodos.
+- Compre quando o preço fechar abaixo do fechamento dos ultimos 7 dias.
+- Venda quando o preço fechar acima do fechamento dos ultimos 7 dias.
+
+Por mais simples que pareça, esta estratégia funciona muito bem em alguns papeis e/ou tempos gráficos (em alguns papeis a mesma supera muitas estratégias pelo IFR2). A mesma foi desenvolvida para o gráfico diário e normalmente não funciona muito bem em gráficos semanais ou mensais, mas pode ser utilizado no intraday caso o backtest se mostre favorável.
+
+Caso você queira, é possível alterar a regra de entrada e saída definindo outros valores para o período de entrada ou saída e assim encontrar resultados mais positivos para cada papel.
+
+Não existe stop loss pois nos testes normalmente o stop loss reduz os ganhos da estratégia.
+
+Boa sorte e bons trades.

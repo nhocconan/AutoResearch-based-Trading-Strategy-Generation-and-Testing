@@ -1,0 +1,4 @@
+//@version=4
+pline=##input(defval=true,type='INPUT_BOOL',##id='in_5')
+##root(root_metainfo,rm_0,(pline?true:false),input__bool)
+##root(root_metainfo,rm_1,(pline?true:false),input__bool)

@@ -1,0 +1,272 @@
+//@version=6
+strategy("VWAP + EMA9/EMA21 Pullback Scalper",
+     overlay = true,
+     pyramiding = 0,
+     process_orders_on_close = true,
+     calc_on_order_fills = true,
+     calc_on_every_tick = false,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+groupGeneral = "General"
+useSession   = input.bool(true, "Restrict to session?", group = groupGeneral)
+tradeSession = input.session("0935-1555:23456", "Trade session (exchange time)", group = groupGeneral)
+cooldownBars = input.int(3, "Cooldown bars after a trade closes", minval = 0, group = groupGeneral)
+allowLong    = input.bool(true, "Enable LONG trades", group = groupGeneral)
+allowShort   = input.bool(true, "Enable SHORT trades", group = groupGeneral)
+
+groupTF      = "Timeframes / Filters"
+biasTF       = input.timeframe("5", "Bias timeframe (VWAP + EMA trend)", group = groupTF)
+useHTF200    = input.bool(false, "Require HTF EMA200 filter?", group = groupTF)
+htfTF        = input.timeframe("15", "HTF for EMA200 filter", group = groupTF)
+
+groupInd     = "Indicators"
+emaFastLen   = input.int(9, "EMA Fast", minval = 1, group = groupInd)
+emaSlowLen   = input.int(21, "EMA Slow", minval = 1, group = groupInd)
+emaHTFLen    = input.int(200, "HTF EMA length", minval = 1, group = groupInd)
+vwapSrc      = input.source(hlc3, "VWAP source", group = groupInd)
+
+groupEntry   = "Entry Rules"
+requireTouchSlow      = input.bool(false, "Pullback must touch EMA Slow (21)? (Else EMA Fast touch is enough)", group = groupEntry)
+confirmVWAPOnEntryTF  = input.bool(true, "Confirm price on correct side of VWAP on entry TF", group = groupEntry)
+useRVOL               = input.bool(true, "Relative Volume filter", group = groupEntry)
+rvolLen               = input.int(20, "RVOL length", minval = 1, group = groupEntry)
+rvolMult              = input.float(1.2, "RVOL threshold (e.g., 1.2)", step = 0.1, group = groupEntry)
+
+groupRisk   = "Stops / Targets"
+stopMode    = input.string("Swing", "Stop mode", options = ["Swing", "VWAP"], group = groupRisk)
+swingLookback = input.int(7, "Swing stop lookback (bars)", minval = 2, group = groupRisk)
+atrLen        = input.int(14, "ATR length", minval = 1, group = groupRisk)
+atrBufferMult = input.float(0.0, "ATR buffer beyond swing stop (0 = none)", step = 0.1, group = groupRisk)
+
+tp1R        = input.float(1.0, "TP1 in R-multiples", minval = 0.25, step = 0.25, group = groupRisk)
+tp1Pct      = input.int(50, "TP1 percent to close", minval = 1, maxval = 99, group = groupRisk)
+trailAfterTP1 = input.bool(true, "After TP1: trail remainder using EMA Fast (with BE floor/ceiling)", group = groupRisk)
+
+timeStopBars = input.int(5, "Time stop bars (if no TP1 and trade not green)", minval = 0, group = groupRisk)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session filter
+// time() returns na outside the session string.
+// ─────────────────────────────────────────────────────────────────────────────
+inSession = not useSession or not na(time(timeframe.period, tradeSession))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Base indicators (chart timeframe)
+// ─────────────────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwapVal = ta.vwap(vwapSrc)
+
+volSma  = ta.sma(volume, rvolLen)
+rvol    = (volSma == 0) ? na : (volume / volSma)
+volOK   = not useRVOL or (not na(rvol) and rvol >= rvolMult)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bias timeframe (5m by default): trend must be aligned with VWAP + EMA slope
+// ─────────────────────────────────────────────────────────────────────────────
+closeBias   = request.security(syminfo.tickerid, biasTF, close,  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+emaFastBias = request.security(syminfo.tickerid, biasTF, ta.ema(close, emaFastLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+emaSlowBias = request.security(syminfo.tickerid, biasTF, ta.ema(close, emaSlowLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+vwapBias    = request.security(syminfo.tickerid, biasTF, ta.vwap(vwapSrc), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+trendUpBias = closeBias > vwapBias and emaFastBias > emaSlowBias
+trendDnBias = closeBias < vwapBias and emaFastBias < emaSlowBias
+
+// Optional HTF EMA200 filter
+closeHTF  = request.security(syminfo.tickerid, htfTF, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+ema200HTF = request.security(syminfo.tickerid, htfTF, ta.ema(close, emaHTFLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+biasUp = trendUpBias and (not useHTF200 or closeHTF > ema200HTF)
+biasDn = trendDnBias and (not useHTF200 or closeHTF < ema200HTF)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cooldown logic (avoid immediate re-entries after exit)
+// ─────────────────────────────────────────────────────────────────────────────
+var int cdLeft = 0
+justClosed = (strategy.position_size == 0) and (strategy.position_size[1] != 0)
+
+if justClosed
+    cdLeft := cooldownBars
+else if cdLeft > 0
+    cdLeft -= 1
+
+canEnter = strategy.position_size == 0 and cdLeft == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Strategy 1 entry logic (pullback → reclaim EMA9 with bias + VWAP + volume)
+// ─────────────────────────────────────────────────────────────────────────────
+touchLevelLong  = requireTouchSlow ? emaSlow : emaFast
+touchLevelShort = requireTouchSlow ? emaSlow : emaFast
+
+pullbackLong  = low  <= touchLevelLong
+pullbackShort = high >= touchLevelShort
+
+reclaimLong  = close > emaFast and close[1] <= emaFast
+reclaimShort = close < emaFast and close[1] >= emaFast
+
+vwapOKLong  = not confirmVWAPOnEntryTF or close > vwapVal
+vwapOKShort = not confirmVWAPOnEntryTF or close < vwapVal
+
+longSetup  = inSession and allowLong  and canEnter and biasUp and vwapOKLong  and pullbackLong  and reclaimLong  and volOK
+shortSetup = inSession and allowShort and canEnter and biasDn and vwapOKShort and pullbackShort and reclaimShort and volOK
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trade state (store entry, stops, TP1 level)
+// ─────────────────────────────────────────────────────────────────────────────
+var float entryPx   = na
+var float stopSwing = na
+var float vwapEntry = na
+var float riskUnit  = na
+var float tp1Px     = na
+var bool  tp1Hit    = false
+var int   barsInPos = 0
+
+// Reset when flat
+if strategy.position_size == 0
+    barsInPos := 0
+
+// Long entry
+if longSetup
+    entryPx   := close
+    stopSwing := ta.lowest(low, swingLookback) - ta.atr(atrLen) * atrBufferMult
+    vwapEntry := vwapVal
+    riskUnit  := math.max(entryPx - (stopMode == "Swing" ? stopSwing : vwapEntry), syminfo.mintick)
+    tp1Px     := entryPx + riskUnit * tp1R
+    tp1Hit    := false
+    barsInPos := 0
+    strategy.entry("L", strategy.long, alert_message = "L entry | VWAP+EMA pullback")
+
+// Short entry
+if shortSetup
+    entryPx   := close
+    stopSwing := ta.highest(high, swingLookback) + ta.atr(atrLen) * atrBufferMult
+    vwapEntry := vwapVal
+    riskUnit  := math.max((stopMode == "Swing" ? stopSwing : vwapEntry) - entryPx, syminfo.mintick)
+    tp1Px     := entryPx - riskUnit * tp1R
+    tp1Hit    := false
+    barsInPos := 0
+    strategy.entry("S", strategy.short, alert_message = "S entry | VWAP+EMA pullback")
+
+// Update trade progression
+if strategy.position_size != 0
+    barsInPos += 1
+
+// Detect TP1 hit (approx)
+if strategy.position_size > 0 and not tp1Hit and high >= tp1Px
+    tp1Hit := true
+
+if strategy.position_size < 0 and not tp1Hit and low <= tp1Px
+    tp1Hit := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stops + Exits
+// We use 2 exit brackets with qty_percent so stops cover BOTH parts properly.
+// ─────────────────────────────────────────────────────────────────────────────
+isLong  = strategy.position_size > 0
+isShort = strategy.position_size < 0
+
+// Base stop (dynamic VWAP stop if stopMode == "VWAP")
+stopNowLong  = (stopMode == "Swing") ? stopSwing : vwapVal
+stopNowShort = (stopMode == "Swing") ? stopSwing : vwapVal
+
+// Trail remainder after TP1 using EMA fast, with BE floor/ceiling
+trailStopLong  = tp1Hit and trailAfterTP1 ? math.max(math.max(entryPx, emaFast), stopNowLong) : stopNowLong
+trailStopShort = tp1Hit and trailAfterTP1 ? math.min(math.min(entryPx, emaFast), stopNowShort) : stopNowShort
+
+// Exit brackets (only place when in position)
+if isLong
+    // TP1 bracket (partial)
+    strategy.exit("L-TP1", from_entry = "L", qty_percent = tp1Pct, stop = stopNowLong, limit = tp1Px,
+         alert_message = "L TP1/SL hit")
+    // Remainder bracket (stop only; trails after TP1)
+    strategy.exit("L-REM", from_entry = "L", qty_percent = 100 - tp1Pct, stop = trailStopLong,
+         alert_message = "L remainder stop hit")
+
+if isShort
+    strategy.exit("S-TP1", from_entry = "S", qty_percent = tp1Pct, stop = stopNowShort, limit = tp1Px,
+         alert_message = "S TP1/SL hit")
+    strategy.exit("S-REM", from_entry = "S", qty_percent = 100 - tp1Pct, stop = trailStopShort,
+         alert_message = "S remainder stop hit")
+
+// Time stop: if no TP1 yet and trade isn't green by X bars, exit
+if timeStopBars > 0 and strategy.position_size != 0 and not tp1Hit and barsInPos >= timeStopBars
+    if isLong and close <= entryPx
+        strategy.close("L", comment = "TimeStop", alert_message = "L time stop")
+    if isShort and close >= entryPx
+        strategy.close("S", comment = "TimeStop", alert_message = "S time stop")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts (setup alerts, separate from order-fill alerts)
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(longSetup,  title = "Long Setup (Strategy 1)",  message = "LONG setup: biasUp + pullback + reclaim EMA9 + VWAP + RVOL")
+alertcondition(shortSetup, title = "Short Setup (Strategy 1)", message = "SHORT setup: biasDn + pullback + reclaim EMA9 + VWAP + RVOL")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plotting
+// ─────────────────────────────────────────────────────────────────────────────
+plot(emaFast, "EMA Fast", linewidth = 2)
+plot(emaSlow, "EMA Slow", linewidth = 2)
+plot(vwapVal, "VWAP", linewidth = 2)
+
+// Bias background
+bgcolor(biasUp ? color.new(color.green, 90) : biasDn ? color.new(color.red, 90) : na)
+
+// Warn if VWAP is NA (common on some indices)
+var label vwapWarn = na
+if barstate.islast and na(vwapVal)
+    label.delete(vwapWarn)
+    vwapWarn := label.new(bar_index, high,
+      "VWAP is NA (no volume on this symbol/feed).\nUse SPY or /ES chart for VWAP-based Strategy 1.",
+      style = label.style_label_down, textcolor = color.white, color = color.new(color.red, 0))
+
+View in Pine Editor・224 lines
+Use on chart
+1
+5
+1
+499
+1) “Bias” filter on a higher timeframe (default = 5m)
+
+It only looks for longs if the 5-minute chart is bullish:
+
+Price is above VWAP (5m)
+
+EMA(9) is above EMA(21) (5m)
+
+It only looks for shorts if the 5-minute chart is bearish:
+
+Price is below VWAP (5m)
+
+EMA(9) is below EMA(21) (5m)
+
+This prevents you from taking random counter-trend scalps.
+
+2) “Trigger” on your entry timeframe (you’ll typically use 1m)
+
+Once bias is bullish, it waits for a pullback + reclaim:
+
+Long scalp trigger (1m):
+
+Price pulls back to EMA9 (or EMA21 if you choose that), then
+
+Price reclaims EMA9 (the candle closes back above EMA9)
+
+Short scalp trigger (1m):
+
+Price pulls back up to EMA9/EMA21, then
+
+Price rejects EMA9 (the candle closes back below EMA9)
+
+3) Optional filters you can turn on/off
+
+Confirm VWAP on entry TF (ex: only long if current TF close > VWAP)
+
+Relative volume filter (RVOL) (only signal when volume is “decent”)
+
+Session filter (skip first minutes after open, etc.)
+
+Cooldown (prevents alert spam)

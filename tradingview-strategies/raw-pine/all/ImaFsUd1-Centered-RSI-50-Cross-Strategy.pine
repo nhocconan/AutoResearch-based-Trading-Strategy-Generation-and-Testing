@@ -1,0 +1,65 @@
+//@version=5
+strategy("Centered RSI +/-50 Cross Strategy (TP Slider + ATR SL + Trailing Stop + JSON Alerts)", overlay=true, initial_capital=50000)
+
+// Inputs
+rsiLength     = input.int(14, "RSI Length")
+src           = input.source(close, "Source")
+atrLength     = input.int(14, "ATR Length")
+atrMult       = input.float(1.5, "ATR Multiplier", step=0.25, minval=0.5, maxval=5.0)
+contracts     = input.int(5, "Contracts", minval=1, maxval=50)
+tpPoints      = input.float(31, "Take Profit (Points)", step=1, minval=5, maxval=200)
+
+// Trailing stop inputs
+useTrail      = input.bool(false, "Use Trailing Stop?")
+trailStart    = input.float(10, "Trail Start (Points)", step=1, minval=1, maxval=200)
+trailDistance = input.float(8, "Trail Distance (Points)", step=1, minval=1, maxval=200)
+
+// Indicators
+rsi = ta.rsi(src, rsiLength)
+crsi = (rsi - 50) * 2
+atr = ta.atr(atrLength)
+
+// Conditions
+longCondition  = ta.crossover(crsi, -50)
+shortCondition = ta.crossunder(crsi, 50)
+
+// ATR stop in points
+slPoints = atr * atrMult
+
+// Entries
+if longCondition
+    strategy.entry("Long", strategy.long, qty=contracts)
+    alert('{"symbol":"{{ticker}}","side":"buy","qty":' + str.tostring(contracts) + '}', alert.freq_once_per_bar_close)
+
+if shortCondition
+    strategy.entry("Short", strategy.short, qty=contracts)
+    alert('{"symbol":"{{ticker}}","side":"sell","qty":' + str.tostring(contracts) + '}', alert.freq_once_per_bar_close)
+
+// Exits with optional trailing stop
+if useTrail
+    strategy.exit("Long Exit",  from_entry="Long",  profit=tpPoints, loss=slPoints, trail_points=trailDistance, trail_offset=trailStart)
+    strategy.exit("Short Exit", from_entry="Short", profit=tpPoints, loss=slPoints, trail_points=trailDistance, trail_offset=trailStart)
+else
+    strategy.exit("Long Exit",  from_entry="Long",  profit=tpPoints, loss=slPoints)
+    strategy.exit("Short Exit", from_entry="Short", profit=tpPoints, loss=slPoints)
+
+// Exit alerts
+longExit  = strategy.position_size[1] > 0 and strategy.position_size == 0
+shortExit = strategy.position_size[1] < 0 and strategy.position_size == 0
+
+if longExit
+    alert('{"symbol":"{{ticker}}","side":"sell","qty":' + str.tostring(contracts) + '}', alert.freq_once_per_bar_close)
+
+if shortExit
+    alert('{"symbol":"{{ticker}}","side":"buy","qty":' + str.tostring(contracts) + '}', alert.freq_once_per_bar_close)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+9
+492
+Mar 7
+RSI CROSSING -50 OR PLUS 50 MAKING BIG MONEY sliders for all settings
+Mar 8
+Release Notes
+RSI cross -50 to +50 money maker for all

@@ -1,0 +1,253 @@
+//@version=3
+//
+
+strategy(title = "Money Tree", shorttitle = "Money Tree", overlay = true, 
+  pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, calc_on_every_tick=true)
+
+//
+// Revision:        6
+// Original Author: @JayRogers
+// Revision Author: JustUncleL revisions 3, 4, 5
+// Revison Author: Dozza
+//
+// *** USE AT YOUR OWN RISK ***
+//  - There are drawing/painting issues in pinescript when working across resolutions/timeframes that I simply
+//    cannot fix here.. I will not be putting any further effort into developing this until such a time when
+//    workarounds become available. 
+//    NOTE: Re-painting has been observed infrequently with default settings and seems OK up to Alternate 
+//          multiplier of 5.
+//          Non-repainting mode is available by setting "Delay Open/Close MA" to 1 or more, but the reported
+//          performance will drop dramatically.
+//
+// R6 Changes by Dozza
+//  - Add chop indicator to remove false starts and reduce the amount of trades during choppyness. WIP.
+//
+//
+// R5.1 Changes by JustUncleL
+//  - Upgraded to Version 3 Pinescript.
+//  - Added option to select Trade type (Long, Short, Both or None)
+//  - Added bar colouring work around patch.
+//  - Small code changes to improve efficiency.
+//  - NOTE: To enable non-Repainting mode set "Delay Open/Close MA" to 1 or more.
+//  9-Aug-2017
+//  - Correction on SuperSmooth MA calculation.
+//
+// R5 Changes by JustUncleL
+//  - Corrected cross over calculations, sometimes gave false signals.
+//  - Corrected Alternate Time calculation to allow for Daily,Weekly and Monthly charts.
+//  - Open Public release.
+// R4 Changes By JustUncleL
+//  - Change the way the Alternate resolution in selected, use a Multiplier of the base Time Frame instead,
+//    this makes it easy to switch between base time frames.
+//  - Added TMA and SSMA moving average options. But DEMA is still giving the best results.
+//  - Using "calc_on_every_tick=false" ensures results between backtesting and real time are similar.
+//  - Added Option to Disable the coloring of the bars.
+//  - Updated default settings.
+//
+// R3 Changes by JustUncleL:
+//  - Returned a simplified version of the open/close channel, it shows strength of current trend.
+//  - Added Target Profit Option.
+//  - Added option to reduce the number of historical bars, overcomes the too many trades limit error.
+//  - Simplified the strategy code.
+//  - Removed Trailing Stop option, not required and in my opion does not work well in Trading View,
+//    it also gives false and unrealistic performance results in backtesting.
+//
+// R2 Changes:
+//  - Simplified and cleaned up plotting, now just shows a Moving Average derived from the average of open/close.
+//  - Tried very hard to alleviate painting issues caused by referencing alternate resolution..
+//
+// Description:
+//  - Strategy based around Open-Close Crossovers.
+// Setup:
+//  - I have generally found that setting the strategy resolution to 3-4x that of the chart you are viewing
+//    tends to yield the best results, regardless of which MA option you may choose (if any) BUT can cause
+//    a lot of false positives - be aware of this
+//  - Don't aim for perfection. Just aim to get a reasonably snug fit with the O-C band, with good runs of
+//    green and red.
+//  - Option to either use basic open and close series data, or pick your poison with a wide array of MA types.
+//  - Optional trailing stop for damage mitigation if desired (can be toggled on/off)
+//  - Positions get taken automagically following a crossover - which is why it's better to set the resolution
+//    of the script greater than that of your chart, so that the trades get taken sooner rather than later.
+//  - If you make use of the stops, be sure to take your time tweaking the values. Cutting it too fine
+//    will cost you profits but keep you safer, while letting them loose could lead to more drawdown than you
+//    can handle.
+//  - To enable non-Repainting mode set "Delay Open/Close MA" to 1 or more.
+//
+
+// === INPUTS ===
+useRes      = input(defval = true, title = "Use Alternate Resolution?")
+intRes      = input(defval = 5,    title = "Multiplier for Alernate Resolution")
+stratRes    = ismonthly? tostring(interval*intRes,"###M") : isweekly? tostring(interval*intRes,"###W") : isdaily?  tostring(interval*intRes,"###D") : isintraday ? tostring(interval*intRes,"####") : '60'
+basisType   = input(defval = "DEMA", title = "MA Type: ", options=["SMA", "EMA", "DEMA", "TEMA", "WMA", "VWMA", "SMMA", "HullMA", "LSMA", "ALMA", "SSMA", "TMA"])
+basisLen    = input(defval = 8, title = "MA Period", minval = 1)
+offsetSigma = input(defval = 6, title = "Offset for LSMA / Sigma for ALMA", minval = 0)
+offsetALMA  = input(defval = 0.85, title = "Offset for ALMA", minval = 0, step = 0.01)
+scolor      = input(true, title="Show coloured Bars to indicate Trend?")
+delayOffset = input(defval = 1, title = "Delay Open/Close MA (Forces Non-Repainting)", minval = 0, step = 1)
+tradeType   = input("LONG", title="What trades should be taken : ", options=["LONG", "SHORT", "BOTH", "NONE"])
+// === /INPUTS ===
+
+// Constants colours that include fully non-transparent option.
+green100 = #008000FF
+lime100  = #00FF00FF
+red100   = #FF0000FF
+blue100  = #0000FFFF
+aqua100  = #00FFFFFF
+darkred100 = #8B0000FF
+gray100 = #808080FF
+
+// === BASE FUNCTIONS ===
+// Returns MA input selection variant, default to SMA if blank or typo.
+variant(type, src, len, offSig, offALMA) =>
+    v1 = sma(src, len)                                                  // Simple
+    v2 = ema(src, len)                                                  // Exponential
+    v3 = 2 * v2 - ema(v2, len)                                          // Double Exponential
+    v4 = 3 * (v2 - ema(v2, len)) + ema(ema(v2, len), len)               // Triple Exponential
+    v5 = wma(src, len)                                                  // Weighted
+    v6 = vwma(src, len)                                                 // Volume Weighted
+    v7 = 0.0
+    v7 := na(v7[1]) ? sma(src, len) : (v7[1] * (len - 1) + src) / len    // Smoothed
+    v8 = wma(2 * wma(src, len / 2) - wma(src, len), round(sqrt(len)))   // Hull
+    v9 = linreg(src, len, offSig)                                       // Least Squares
+    v10 = alma(src, len, offALMA, offSig)                               // Arnaud Legoux
+    v11 = sma(v1,len)                                                   // Triangular (extreme smooth)
+    // SuperSmoother filter
+    // © 2013  John F. Ehlers
+    a1 = exp(-1.414*3.14159 / len)
+    b1 = 2*a1*cos(1.414*3.14159 / len)
+    c2 = b1
+    c3 = (-a1)*a1
+    c1 = 1 - c2 - c3
+    v12 = 0.0
+    v12 := c1*(src + nz(src[1])) / 2 + c2*nz(v12[1]) + c3*nz(v12[2])
+    type=="EMA"?v2 : type=="DEMA"?v3 : type=="TEMA"?v4 : type=="WMA"?v5 : type=="VWMA"?v6 : type=="SMMA"?v7 : type=="HullMA"?v8 : type=="LSMA"?v9 : type=="ALMA"?v10 : type=="TMA"?v11: type=="SSMA"?v12: v1
+
+// security wrapper for repeat calls
+reso(exp, use, res) => use ? security(tickerid, res, exp, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off) : exp
+
+// === /BASE FUNCTIONS ===
+
+// === SERIES SETUP ===
+closeSeries     = variant(basisType, close[delayOffset], basisLen, offsetSigma, offsetALMA)
+openSeries      = variant(basisType, open[delayOffset], basisLen, offsetSigma, offsetALMA)
+// === /SERIES ===
+
+// === PLOTTING ===
+
+// Get Alternate resolution Series if selected.
+closeSeriesAlt = reso(closeSeries, useRes, stratRes)
+openSeriesAlt = reso(openSeries, useRes, stratRes)
+//
+trendColour = (closeSeriesAlt > openSeriesAlt) ? green: red
+bcolour    = (closeSeriesAlt > openSeriesAlt) ? green : red
+barcolor(scolor?bcolour:na, title = "Bar Colours")
+closeP=plot(closeSeriesAlt, title = "Close Series", color = trendColour, linewidth = 2, style = line, transp = 20)
+openP=plot(openSeriesAlt, title = "Open Series", color = trendColour, linewidth = 2, style = line, transp = 20)
+fill(closeP,openP,color=trendColour,transp=80)
+
+// === /Chop Indicator ===
+
+colorTurquoise = #34dddd
+colorDarkGreen = #006400
+colorPaleGreen = #98fb98
+colorLime = lime
+colorDarkRed = #8B0000
+colorRed = red
+colorOrange = orange
+colorLightOrange = #ffc04c
+colorYellow = yellow
+
+turquoiseChoppy = input(false, title="Is turquoise considered choppy?")
+darkGreenChoppy = input(false, title="Is dark green considered choppy?")
+paleGreenChoppy = input(false, title="Is pale green considered choppy?")
+limeChoppy = input(false, title="Is lime considered choppy?")
+darkRedChoppy = input(true, title="Is dark red considered choppy?")
+redChoppy = input(true, title="Is red considered choppy?")
+orangeChoppy = input(true, title="Is orange considered choppy?")
+lightOrangeChoppy = input(true, title="Is lightOrange considered choppy?")
+yellowChoppy = input(true, title="Is yellow considered choppy?")
+
+source = close
+avg = hlc3
+
+pi = atan(1) * 4
+periods = 30
+highestHigh = highest(periods)
+lowestLow = lowest(periods)
+range = 25 / (highestHigh - lowestLow) * lowestLow
+
+ema34 = ema(source, 34)
+x1_ema34 = 0
+x2_ema34 = 1
+y1_ema34 = 0
+y2_ema34 = (ema34[1] - ema34) / avg * range
+c_ema34 = sqrt((x2_ema34 - x1_ema34)*(x2_ema34 - x1_ema34) + (y2_ema34 - y1_ema34)*(y2_ema34 - y1_ema34))
+emaAngle_1 = round(180 * acos((x2_ema34 - x1_ema34)/c_ema34) / pi)
+emaAngle = iff(y2_ema34 > 0, - emaAngle_1, emaAngle_1)
+
+chopZoneColor = emaAngle >= 5 ? colorTurquoise : emaAngle < 5 and emaAngle >= 3.57 ? colorDarkGreen : emaAngle < 3.57 and emaAngle >= 2.14 ? colorPaleGreen : emaAngle < 2.14 and emaAngle >= .71 ? colorLime : emaAngle <= -1 * 5 ? colorDarkRed : emaAngle > -1 * 5 and emaAngle <= -1 * 3.57 ? colorRed : emaAngle > -1 * 3.57 and emaAngle <= -1 * 2.14 ? colorOrange : emaAngle > -1 * 2.14 and emaAngle <= -1 * .71 ? colorLightOrange : colorYellow
+
+//choppy = chopZoneColor == colorOrange ? true: chopZoneColor == colorDarkRed ? true : chopZoneColor == colorRed ? true : chopZoneColor == colorOrange ? true : false
+
+choppy = chopZoneColor == colorOrange and orangeChoppy ? true : chopZoneColor == colorDarkRed and darkRedChoppy ? true : chopZoneColor == colorRed and redChoppy ? true : chopZoneColor == colorOrange and orangeChoppy ? true : chopZoneColor == colorTurquoise and turquoiseChoppy ? true : chopZoneColor == colorDarkGreen and darkGreenChoppy ? true : chopZoneColor == colorPaleGreen and paleGreenChoppy ? true : chopZoneColor == colorLime and limeChoppy ? true : chopZoneColor == colorLightOrange and lightOrangeChoppy ? true : chopZoneColor == colorYellow and yellowChoppy ? true : false
+
+// plot(1, color=chopZoneColor, linewidth=4, style=columns)
+
+
+// === /PLOTTING ===
+//
+
+//
+// === ALERT conditions
+xlong       = crossover(closeSeriesAlt, openSeriesAlt)
+xshort      = crossunder(closeSeriesAlt, openSeriesAlt)
+longCond    = xlong   // alternative: longCond[1]? false : (xlong or xlong[1]) and close>closeSeriesAlt and close>=open
+shortCond   = xshort  // alternative: shortCond[1]? false : (xshort or xshort[1]) and close<closeSeriesAlt and close<=open
+// === /ALERT conditions.
+
+// === STRATEGY ===
+// stop loss
+slPoints    = input(defval = 0, title = "Initial Stop Loss Points (zero to disable)", minval = 0)
+tpPoints    = input(defval = 0, title = "Initial Target Profit Points (zero for disable)", minval = 0)
+// Include bar limiting algorithm
+ebar            = input(defval = 8760, title="Number of Bars for Back Testing", minval=0)
+dummy           = input(false,        title="- SET to ZERO for Daily or Longer Timeframes" )
+//
+// Calculate how many mars since last bar
+tdays       = (timenow-time)/60000.0  // number of minutes since last bar
+tdays       := ismonthly? tdays/1440.0/5.0/4.3/interval : isweekly? tdays/1440.0/5.0/interval : isdaily? tdays/1440.0/interval : tdays/interval // number of bars since last bar
+//
+//set up exit parameters
+TP = tpPoints>0?tpPoints:na
+SL = slPoints>0?slPoints:na
+
+// Make sure we are within the bar range, Set up entries and exit conditions
+if ((ebar==0 or tdays<=ebar) and tradeType!="NONE")
+    strategy.entry("long", strategy.long, when=longCond==true and tradeType!="SHORT" and choppy==false)
+    strategy.entry("short", strategy.short, when=shortCond==true and tradeType!="LONG" and choppy==true)
+    strategy.close("long", when = shortCond==true and tradeType=="LONG")
+    strategy.close("short", when = longCond==true and tradeType=="SHORT")
+    strategy.exit("XL", from_entry = "long", profit = TP, loss = SL)
+    strategy.exit("XS", from_entry = "short", profit = TP, loss = SL)
+
+// === /STRATEGY ===
+// eof
+
+View in Pine Editor・234 lines
+Use on chart
+2
+5
+4
+5
+6 213
+Disclaimer Use at your own risk, this is not financial advice!
+
+Based on:
+OCC v5.1 by JustUncleL and the Tradeview built in Chop Zone indicator
+
+Merging both the OCC and chopzone allows to filter out some unprofitable trades during choppy times.
+
+You can filter out the zones using the checkboxes in the settings.
+
+Works well on 15min and 30min candles
+

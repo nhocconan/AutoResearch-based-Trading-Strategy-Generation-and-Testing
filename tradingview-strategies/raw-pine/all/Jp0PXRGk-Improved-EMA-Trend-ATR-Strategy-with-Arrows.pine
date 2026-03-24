@@ -1,0 +1,133 @@
+//@version=6
+strategy("Improved EMA Trend + ATR Strategy with Arrows",
+     overlay=true,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=2,
+     initial_capital=10000)
+
+
+// Inputs
+fastLen   = input.int(12, "Fast EMA Length")
+slowLen   = input.int(26, "Slow EMA Length")
+atrLen    = input.int(14, "ATR Length")
+riskATR   = input.float(2.0, "ATR Stop Multiplier")
+rewardATR = input.float(4.0, "ATR Limit Multiplier")
+minBars   = input.int(2, "Minimum Bars Before Exit")
+atrFilter = input.float(0.0, "ATR Minimum Threshold (0=auto)")
+
+
+// Indicators
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+atr     = ta.atr(atrLen)
+
+
+// Trend Filter
+trendUp   = close > slowEMA
+trendDown = close < slowEMA
+
+
+// ATR Threshold filter
+atrThreshold = atrFilter > 0 ? atrFilter : ta.sma(atr, atrLen)
+
+
+// Entry Conditions
+longCondition  = ta.crossover(fastEMA, slowEMA) and trendUp and atr > atrThreshold and barstate.isconfirmed
+shortCondition = ta.crossunder(fastEMA, slowEMA) and trendDown and atr > atrThreshold and barstate.isconfirmed
+
+
+// Entries
+if longCondition
+    strategy.entry("Long", strategy.long)
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+
+// Exits with minimum bar hold
+if strategy.position_size > 0
+    barsHeld = bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+    if barsHeld >= minBars
+        strategy.exit("Long Exit", "Long", stop=close - atr * riskATR, limit=close + atr * rewardATR)
+
+
+if strategy.position_size < 0
+    barsHeld = bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+    if barsHeld >= minBars
+        strategy.exit("Short Exit", "Short", stop=close + atr * riskATR, limit=close - atr * rewardATR)
+
+
+// Plot arrows on chart
+plotshape(longCondition, title="Buy Arrow", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortCondition, title="Sell Arrow", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+View in Pine Editor・65 lines
+Use on chart
+2
+9
+856
+This strategy is built around a simple idea: strong directional moves often begin after periods of low volatility. Instead of chasing trends late, it waits for price compression and then trades the breakout when expansion begins.
+The approach combines volatility structure and trend alignment to reduce random entries.
+
+Core Concept
+
+Markets cycle between quiet phases and expansion phases.
+When volatility contracts, it often leads to a stronger move once price breaks out of that range.
+This strategy attempts to capture that transition.
+
+How It Works
+1. Volatility Compression Detection
+A squeeze condition is identified when Bollinger Bands contract inside Keltner Channels.
+This signals reduced volatility.
+
+2. Squeeze Release
+The strategy waits for volatility to expand again.
+Trades are only considered when the squeeze ends.
+
+3. Breakout Confirmation
+Entries occur when price breaks above or below the Bollinger Bands after the squeeze release.
+
+4. Trend Alignment
+A long-term EMA is used to filter direction:
+
+Above EMA → bullish bias
+
+Below EMA → bearish bias
+
+
+This helps reduce counter-trend trades.
+
+5. Risk Management
+Stop-loss and take-profit levels are based on ATR.
+This allows exits to adapt to current market volatility.
+A configurable risk-to-reward ratio defines profit targets.
+
+Key Features
+
+Structured volatility-based entries
+
+Trend confirmation filter
+
+ATR-based dynamic risk control
+
+Commission and slippage included for realistic testing
+
+No repainting logic
+
+
+
+Best Conditions
+This type of strategy tends to perform better during:
+
+Volatility expansion phases
+
+Strong directional markets
+
+
+Assets that experience compression before breakouts
+It may underperform in slow, range-bound environments.
+
+Important Notes
+This strategy is designed for research and backtesting purposes.
+Performance will vary across different markets and timeframes.
+Always evaluate across multiple conditions before considering live deployment.

@@ -1,0 +1,627 @@
+//@version=5
+strategy("Supertrend advance", overlay=true,default_qty_type =strategy.percent_of_equity,default_qty_value = 1,process_orders_on_close = false)
+
+// group string////
+var string group_text000="Choose Strategy"
+var string group_text0="Supertrend Settings"
+var string group_text0000="Ema Settings"
+var string group_text00="Rsi Settings"
+var string group_text1="Backtest Period"
+var string group_text2="Trade Direction"
+var string group_text3="Quantity Settings"
+var string group_text4="Sl/Tp Settings"
+var string group_text5="Enable/Disable Condition Filter"
+var string group_macd="Macd Set"
+var group_cci="Cci Set"
+var string group_text6="Choose Sl/Tp"
+var string group_text7="Percentage Sl/Tp"
+var string group_text9="Atr SL/Tp"
+var string group_text8='Swing Hl & Supertrend Sl/Tp'
+
+
+// filter enable and disbale
+on_ma  =input.bool(true,"Ema Condition On/Off",group=group_text5,inline = "CL")
+en_rsi = input.bool(true,"Rsi Condition On/Off",group = group_text5,inline = "CL")
+en_macd=input.bool(true,title ="Enable Macd Condition",group =group_text5,inline = "CS")
+en_cci=input.bool(true,title ="Enable/Disable CCi Filter",group =group_text5,inline = "CS")
+
+////////////////////
+option_ch=input.string('Pullback',title = "Type Of Stratgey",options =['Pullback','Simple'],group = "Choose Strategy Type")
+
+// option for stop loss and take profit 
+option_ts=input.string("Percentage","Chosse Type Of Sl/tp",["Percentage","Supertrend","Swinghl","Atr"],group=group_text6)
+//atr period input supertrend 
+atrPeriod = input(10, "ATR Length",group = group_text0)
+factor = input.float(3.0, "Factor", step = 0.01,group=group_text0)
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+bodyMiddle = plot((open + close) / 2, display=display.none)
+upTrend = plot(direction < 0 ? supertrend : na, "Up Trend", color = color.green, style=plot.style_linebr)
+downTrend = plot(direction < 0? na : supertrend, "Down Trend", color = color.red, style=plot.style_linebr)
+
+fill(bodyMiddle, upTrend, color.new(color.green, 90), fillgaps=false)
+fill(bodyMiddle, downTrend, color.new(color.red, 90), fillgaps=false)
+
+long=direction < 0 ? supertrend : na
+short=direction < 0? na : supertrend
+
+longpos=false
+shortpos=false
+
+longpos :=long?true :short?false:longpos[1]
+shortpos:=short?true:long?false:shortpos[1]
+
+fin_pullbuy= (ta.crossunder(low[1],long) and long and high>high[1])
+fin_pullsell=(ta.crossover(high[1],short) and short and low<low[1]) 
+
+//Ema 1
+
+ma_len= input.int(200, minval=1, title="Ema Length",group = group_text0000)
+ma_src = input.source(close, title="Ema Source",group = group_text0000)
+ma_out = ta.ema(ma_src, ma_len)
+
+ma_buy=on_ma?close>ma_out?true:false:true
+ma_sell=on_ma?close<ma_out?true:false:true
+
+// rsi indicator and condition
+// Get user input
+rsiSource = input(title='RSI Source', defval=close,group = group_text00)
+rsiLength = input(title='RSI Length', defval=14,group = group_text00)
+rsiOverbought = input(title='RSI BUY Level', defval=50,group = group_text00)
+rsiOversold   = input(title='RSI SELL Level', defval=50,group = group_text00)
+
+// Get RSI value
+rsiValue = ta.rsi(rsiSource, rsiLength)
+
+rsi_buy=en_rsi?rsiValue>=rsiOverbought ?true:false:true
+rsi_sell=en_rsi?rsiValue<=rsiOversold?true:false:true
+
+
+// Getting inputs macd
+
+fast_length = input(title="Fast Length", defval=12,group =group_macd)
+slow_length = input(title="Slow Length", defval=26,group =group_macd)
+macd_src = input(title="Source", defval=close,group =group_macd)
+signal_length = input.int(title="Signal Smoothing",  minval = 1, maxval = 50, defval = 9,group =group_macd)
+
+[macdLine, signalLine, histLine] = ta.macd(macd_src, fast_length ,slow_length,signal_length)
+
+buy_macd=en_macd?macdLine>0?true:false:true
+sell_macd=en_macd?macdLine<0?true:false:true
+
+
+// CCI indicator 
+length_cci = input.int(20, minval=1,group = group_cci)
+src_cci = input(hlc3, title="Source",group = group_cci)
+cci_gr=input.int(200,title = "CCi > Input",group = group_cci,tooltip ="CCi iS Greater thn 100 buy")
+cci_ls=input.int(-200,title = "CCi < -Input",group = group_cci,tooltip  ="CCi iS Less thn -100 Sell")
+
+ma = ta.sma(src_cci, length_cci)
+cci = (src_cci - ma) / (0.015 * ta.dev(src_cci, length_cci))
+
+//cci buy and sell
+buy_cci=en_cci?cci>cci_gr?true:false:true
+sell_cci=en_cci?cci<cci_ls?true:false:true
+
+// final condition
+buy_cond=option_ch=='Simple'?long and not(longpos[1]) and rsi_buy and ma_buy and buy_macd and buy_cci:option_ch=='Pullback'?fin_pullbuy and rsi_buy and ma_buy and buy_macd and buy_cci:na
+sell_cond=option_ch=='Simple'?short and not(shortpos[1]) and rsi_sell and ma_sell and sell_macd and sell_cci:option_ch=='Pullback'?fin_pullsell and rsi_sell and ma_sell and sell_macd and sell_cci:na
+
+//backtest engine
+start = input.time(timestamp('2005-01-01'), title='Start calculations from',group=group_text1)
+end=input.time(timestamp('2045-03-01'), title='End calculations',group=group_text1)
+
+time_cond = time >= start and time<=end
+
+// Make input option to configure trade direction
+
+tradeDirection = input.string(title='Trade Direction', options=['Long', 'Short', 'Both'], defval='Both',group = group_text2)
+
+// Translate input into trading conditions
+longOK  = (tradeDirection == "Long") or (tradeDirection == "Both")
+shortOK = (tradeDirection == "Short") or (tradeDirection == "Both")
+
+// quantity 
+qty_new=input.float(1.0,step =0.10,title ="Quantity",group =group_text3)
+
+// supertrend and swing high and low 
+
+tpnewf = input.float(title="take profit swinghl||supertrend ", step=0.1, defval=1.5, group=group_text8)
+hiLen = input.int(title='Highest High Lookback', defval=6, minval=2, group=group_text8)
+loLen = input.int(title='Lowest Low Lookback', defval=6, minval=2, group=group_text8)
+
+
+globl = option_ts=="Swinghl"? nz(ta.lowest(low, loLen),low[1]):option_ts=="Supertrend"?nz(supertrend,low[1]):na
+globl2=option_ts=="Swinghl"? nz(ta.highest(high, hiLen),high[1]) :option_ts=="Supertrend"?nz(supertrend,high[1]):na
+
+var store = float(na)
+var store2=float(na)
+
+// strategy start
+if buy_cond and longOK and time_cond and strategy.position_size==0
+    strategy.entry("enter long",direction = strategy.long,qty =qty_new)
+    store:=globl
+
+if sell_cond and shortOK and time_cond and strategy.position_size==0
+    strategy.entry("enter short",direction =strategy.short,qty =qty_new)
+    store2:=globl2
+
+
+//stop loss and take profit 
+
+enable_trail=input.bool(false,"Enable Trail",group =group_text7)
+stopPer = input.float(1.0,step=0.10,title='Stop Loss %',group=group_text7)* 0.01
+takePer = input.float(2.0,step=0.10, title='Take Profit %',group=group_text7)* 0.01
+
+//TRAILING STOP CODE
+trailStop = input.float(title='Trailing Stop (%)', minval=0.0, step=0.1, defval=1,group=group_text7) * 0.01
+
+
+longStopPrice = 0.0
+shortStopPrice = 0.0
+longStopPrice := if strategy.position_size > 0
+    stopValue = close * (1 - trailStop)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + trailStop)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999
+
+// Determine where you've entered and in what direction
+longStop = 0.0
+shortStop =0.0
+shortTake =0.0
+longTake = 0.0
+
+if (option_ts=="Percentage" )
+    // Determine where you've entered and in what direction
+    longStop  := strategy.position_avg_price * (1 - stopPer)
+    shortStop := strategy.position_avg_price * (1 + stopPer)
+    shortTake := strategy.position_avg_price * (1 - takePer)
+    longTake  := strategy.position_avg_price * (1 + takePer)
+if enable_trail and (option_ts=="Percentage" )
+    longStop  := longStopPrice
+    shortStop := shortStopPrice
+//single take profit exit position 
+
+if strategy.position_size > 0 and option_ts=="Percentage"
+    strategy.exit(id='Close Long',from_entry = "enter long", stop=longStop, limit=longTake)
+
+if strategy.position_size < 0 and option_ts=="Percentage" 
+    strategy.exit(id='Close Short',from_entry = "enter short", stop=shortStop, limit=shortTake)
+
+//PLOT FIXED SLTP LINE
+plot(strategy.position_size > 0 and option_ts=="Percentage" ? longStop : na, style=plot.style_linebr, color=enable_trail?na:color.new(#c0ff52, 0), linewidth=1, title='Long Fixed SL')
+plot(strategy.position_size < 0 and option_ts=="Percentage"? shortStop : na, style=plot.style_linebr, color=enable_trail?na:color.new(#5269ff, 0), linewidth=1, title='Short Fixed SL')
+plot(strategy.position_size  > 0 and option_ts=="Percentage"? longTake : na, style=plot.style_linebr, color=color.new(#5e6192, 0), linewidth=1, title='Long Take Profit')
+plot(strategy.position_size < 0 and option_ts=="Percentage"? shortTake : na, style=plot.style_linebr, color=color.new(#dcb53d, 0), linewidth=1, title='Short Take Profit')
+
+
+//PLOT TSL LINES
+plot(series=strategy.position_size > 0 and option_ts=="Percentage" and enable_trail ? longStopPrice : na, color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1, title='Long Trail Stop', offset=1)
+plot(series=strategy.position_size < 0 and option_ts=="Percentage" and enable_trail ? shortStopPrice : na, color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1, title='Short Trail Stop', offset=1)
+
+
+
+// swing high and low 
+
+//take profit
+takeProfit_buy = strategy.position_avg_price - ((store - strategy.position_avg_price) * tpnewf)
+takeProfit_sell = strategy.position_avg_price - ((store2  - strategy.position_avg_price) * tpnewf)
+
+
+// Submit stops based on highest high and lowest low
+if strategy.position_size >= 0 and (option_ts=="Swinghl" or option_ts=="Supertrend") 
+    strategy.exit(id='XL HH',from_entry = "enter long", stop=store,limit=takeProfit_buy,comment ="Long Exit")
+
+if strategy.position_size <= 0 and (option_ts=="Swinghl" or option_ts=="Supertrend") 
+    strategy.exit(id='XS LL',from_entry = "enter short", stop=store2,limit=takeProfit_sell,comment = "Short Exit")
+
+
+// plot take profit
+plot(series=strategy.position_size < 0 and (option_ts=="Swinghl" or option_ts=="Supertrend")? takeProfit_sell : na, style=plot.style_circles, color=color.orange, linewidth=1, title="take profit sell")
+plot(series=strategy.position_size > 0 and (option_ts=="Swinghl" or option_ts=="Supertrend")? takeProfit_buy: na, style=plot.style_circles, color=color.blue, linewidth=1, title="take profit buy")
+
+// Plot stop Loss for visual confirmation
+plot(series=strategy.position_size > 0 and (option_ts=="Swinghl" or option_ts=="Supertrend")? store : na, style=plot.style_circles, color=color.new(color.green, 0), linewidth=1, title='Lowest Low Stop')
+plot(series=strategy.position_size < 0 and (option_ts=="Swinghl" or option_ts=="Supertrend")? store2 : na, style=plot.style_circles, color=color.new(color.red, 0), linewidth=1, title='Highest High Stop')
+
+// atr 
+enable_atrtrail=input.bool(false,"Enable Atr Trail",group = group_text9)
+atrLength = input(title='ATR Length', defval=14,group =group_text9)
+slATRMult = input.float(title='Stop loss ATR multiplier',step=0.1, defval=2.0,group =group_text9)
+tpATRMult = input.float(title='Take profit multiplier',step=0.1, defval=1.5,group =group_text9)
+lookback = input.int(title='How Far To Look Back For High/Lows', defval=7, minval=1,group =group_text9)
+
+
+atr = ta.atr(atrLength)
+lowestLow = ta.lowest(low, lookback)
+highestHigh = ta.highest(high, lookback)
+longStopa = (enable_atrtrail ? lowestLow : close) - atr * slATRMult
+shortStopa = (enable_atrtrail ? highestHigh : close) + atr * slATRMult
+
+atr_l=0.0
+atr_s=0.0
+
+atr_l:=nz(strategy.position_avg_price-(atr[1] * slATRMult),strategy.position_avg_price-(1 * slATRMult))
+atr_s:=nz(strategy.position_avg_price+ (atr[1] * slATRMult),strategy.position_avg_price-(1 * slATRMult))
+
+stoploss_l = ta.valuewhen(strategy.position_size != 0 and strategy.position_size[1] == 0,atr_l, 0) 
+stoploss_s = ta.valuewhen(strategy.position_size != 0 and strategy.position_size[1] == 0,atr_s, 0)
+
+takeprofit_l = strategy.position_avg_price - ((stoploss_l - strategy.position_avg_price) * tpATRMult)
+takeprofit_s = strategy.position_avg_price - ((stoploss_s  - strategy.position_avg_price) * tpATRMult)
+
+// Submit stops based on highest high and lowest low
+if strategy.position_size > 0 and (option_ts=="Atr") 
+    strategy.exit(id='Xl', stop= enable_atrtrail?longStopa:stoploss_l,limit=takeprofit_l ,comment ="Long Exit")
+
+if strategy.position_size < 0 and (option_ts=="Atr")
+    strategy.exit(id='XH', stop=enable_atrtrail?shortStopa:stoploss_s,limit=takeprofit_s,comment = "Short Exit")
+
+
+// // plot take profit
+plot(series=strategy.position_size > 0 and  (option_ts=="Atr")? takeprofit_l : na, style=plot.style_circles, color=color.orange, linewidth=1, title="take profit sell")
+plot(series=strategy.position_size < 0 and  (option_ts=="Atr")? takeprofit_s: na, style=plot.style_circles, color=color.blue, linewidth=1, title="take profit buy")
+
+// Plot stop Loss for visual confirmation
+plot(series=strategy.position_size  >0 and (option_ts=="Atr") and not enable_atrtrail? stoploss_l : na, style=plot.style_circles, color=color.new(color.green, 0), linewidth=1, title='Lowest Low Stop')
+plot(series=strategy.position_size < 0 and (option_ts=="Atr") and not enable_atrtrail? stoploss_s : na, style=plot.style_circles, color=color.new(color.red, 0), linewidth=1, title='Highest High Stop')
+
+//PLOT TSL LINES
+plot(series=strategy.position_size  >0 and option_ts=="Atr" and enable_atrtrail ? longStopa : na, color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1, title='Long Trail Stop', offset=1)
+plot(series=strategy.position_size < 0 and (option_ts=="Atr") and enable_atrtrail?  shortStopa : na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='short Trail Stop', offset=1)
+
+View in Pine Editor・280 lines
+Use on chart
+9
+1
+2
+1
+23 650
+Handbook for the Supertrend Advance Strategy
+
+
+1. Introduction
+
+Purpose of the Handbook:
+The main purpose of this handbook is to serve as a comprehensive guide for traders and investors who are looking to explore and harness the potential of the Supertrend Advance Strategy. In the rapidly changing financial market, having the right tools and strategies at one's disposal is crucial. Whether you're a beginner hoping to dive into the world of trading or a seasoned investor aiming to optimize and diversify your portfolio, this handbook offers the insights and methodologies you need. By the end of this guide, readers should have a clear understanding of how the Supertrend Advance Strategy works, its benefits, potential pitfalls, and practical application in various trading scenarios.
+
+Overview of the Supertrend Advance Pullback Strategy:
+At its core, the Supertrend Advance Strategy is an evolution of the popular Supertrend Indicator. Designed to generate buy and sell signals in trending markets, the Supertrend Indicator has been a favorite tool for many traders around the world. The Advance Strategy, however, builds upon this foundation by introducing enhanced mechanisms, filters, and methodologies to increase precision and reduce false signals.
+
+1. Basic Concept:
+The Supertrend Advance Strategy relies on a combination of price action and volatility to determine the potential trend direction. By assessing the average true range (ATR) in conjunction with specific price points, this strategy aims to highlight the potential starting and ending points of market trends.
+
+2. Methodology:
+Unlike the traditional Supertrend Indicator, which primarily focuses on closing prices and ATR, the Advance Strategy integrates other critical market variables, such as volume, momentum oscillators, and perhaps even fundamental data, to validate its signals. This multidimensional approach ensures that the generated signals are more reliable and are less prone to market noise.
+
+3. Benefits:
+One of the main benefits of the Supertrend Advance Strategy is its ability to filter out false breakouts and minor price fluctuations, which can often lead to premature exits or entries in the market. By waiting for a confluence of factors to align, traders using this advanced strategy can increase their chances of entering or exiting trades at optimal points.
+
+4. Practical Applications:
+The Supertrend Advance Strategy can be applied across various timeframes, from intraday trading to swing trading and even long-term investment scenarios. Furthermore, its flexible nature allows it to be tailored to different asset classes, be it stocks, commodities, forex, or cryptocurrencies.
+
+In the subsequent sections of this handbook, we will delve deeper into the intricacies of this strategy, offering step-by-step guidelines on its application, case studies, and tips for maximizing its efficacy in the volatile world of trading.
+
+As you journey through this handbook, we encourage you to approach the Supertrend Advance Strategy with an open mind, testing and tweaking it as per your personal trading style and risk appetite. The ultimate goal is not just to provide you with a new tool but to empower you with a holistic strategy that can enhance your trading endeavors.
+
+2. Getting Started
+Navigating the financial markets can be a daunting task without the right tools. This section is dedicated to helping you set up the Supertrend Advance Strategy on one of the most popular charting platforms, TradingView. By following the steps below, you'll be able to integrate this strategy into your charts and start leveraging its insights in no time.
+
+
+Setting up on TradingView:
+TradingView is a web-based platform that offers a wide range of charting tools, social networking, and market data. Before you can apply the Supertrend Advance Strategy, you'll first need a TradingView account. If you haven't set one up yet, here's how:
+
+1. Account Creation:
+• Visit TradingView's official website.
+• Click on the "Join for free" or "Sign up" button.
+• Follow the registration process, providing the necessary details and setting up your login credentials.
+
+2. Navigating the Dashboard:
+• Once logged in, you'll be taken to your dashboard. Here, you'll see a variety of tools, including watchlists, alerts, and the main charting window.
+• To begin charting, type in the name or ticker of the asset you're interested in the search bar at the top.
+
+3. Configuring Chart Settings:
+• Before integrating the Supertrend Advance Strategy, familiarize yourself with the chart settings. This can be accessed by clicking the 'gear' icon on the top right of the chart window.
+• Adjust the chart type, time intervals, and other display settings to your preference.
+
+
+Integrating the Strategy into a Chart:
+Now that you're set up on TradingView, it's time to integrate the Supertrend Advance Strategy.
+
+1. Accessing the Pine Script Editor:
+• Located at the top-center of your screen, you'll find the "Pine Editor" tab. Click on it.
+• This is where custom strategies and indicators are scripted or imported.
+
+2. Loading the Supertrend Advance Strategy Script:
+• Depending on whether you have the script or need to find it, there are two paths:
+• If you have the script: Copy the Supertrend Advance Strategy script, and then paste it into the Pine Editor.
+• If searching for the script: Click on the “Indicators” icon (looks like a flame) at the top of your screen, and then type “Supertrend Advance Strategy” in the search bar. If available, it will show up in the list. Simply click to add it to your chart.
+
+3. Applying the Strategy:
+• After pasting or selecting the Supertrend Advance Strategy in the Pine Editor, click on the “Add to Chart” button located at the top of the editor. This will overlay the strategy onto your main chart window.
+
+4. Configuring Strategy Settings:
+• Once the strategy is on your chart, you'll notice a small settings ('gear') icon next to its name in the top-left of the chart window. Click on this to access settings.
+• Here, you can adjust various parameters of the Supertrend Advance Strategy to better fit your trading style or the specific asset you're analyzing.
+
+5. Interpreting Signals:
+• With the strategy applied, you'll now see buy/sell signals represented on your chart. Take time to familiarize yourself with how these look and behave over various timeframes and market conditions.
+
+3. Strategy Overview
+
+What is the Supertrend Advance Strategy?
+The Supertrend Advance Strategy is a refined version of the classic Supertrend Indicator, which was developed to aid traders in spotting market trends. The strategy utilizes a combination of data points, including average true range (ATR) and price momentum, to generate buy and sell signals.
+In essence, the Supertrend Advance Strategy can be visualized as a line that moves with the price. When the price is above the Supertrend line, it indicates an uptrend and suggests a potential buy position. Conversely, when the price is below the Supertrend line, it hints at a downtrend, suggesting a potential selling point.
+
+Strategy Goals and Objectives:
+
+1. Trend Identification: At the core of the Supertrend Advance Strategy is the goal to efficiently and consistently identify prevailing market trends. By recognizing these trends, traders can position themselves to capitalize on price movements in their favor.
+2. Reducing Noise: Financial markets are often inundated with 'noise' - short-term price fluctuations that can mislead traders. The Supertrend Advance Strategy aims to filter out this noise, allowing for clearer decision-making.
+3. Enhancing Risk Management: With clear buy and sell signals, traders can set more precise stop-loss and take-profit points. This leads to better risk management and potentially improved profitability.
+4. Versatility: While primarily used for trend identification, the strategy can be integrated with other technical tools and indicators to create a comprehensive trading system.
+
+Type of Assets/Markets to Apply the Strategy:
+
+1. Equities: The Supertrend Advance Strategy is highly popular among stock traders. Its ability to capture long-term trends makes it particularly useful for those trading individual stocks or equity indices.
+2. Forex: Given the 24-hour nature of the Forex market and its propensity for trends, the Supertrend Advance Strategy is a valuable tool for currency traders.
+3. Commodities: Whether it's gold, oil, or agricultural products, commodities often move in extended trends. The strategy can help in identifying and capitalizing on these movements.
+4. Cryptocurrencies: The volatile nature of cryptocurrencies means they can have pronounced trends. The Supertrend Advance Strategy can aid crypto traders in navigating these often tumultuous waters.
+5. Futures & Options: Traders and investors in derivative markets can utilize the strategy to make more informed decisions about contract entries and exits.
+
+It's important to note that while the Supertrend Advance Strategy can be applied across various assets and markets, its effectiveness might vary based on market conditions, timeframe, and the specific characteristics of the asset in question. As always, it's recommended to use the strategy in conjunction with other analytical tools and to backtest its effectiveness in specific scenarios before committing to trades.
+
+4. Input Settings
+
+Understanding and correctly configuring input settings is crucial for optimizing the Supertrend Advance Strategy for any specific market or asset. These settings, when tweaked correctly, can drastically impact the strategy's performance.
+
+Grouping Inputs:
+Before diving into individual input settings, it's important to group similar inputs. Grouping can simplify the user interface, making it easier to adjust settings related to a specific function or indicator.
+
+Strategy Choice:
+This input allows traders to select from various strategies that incorporate the Supertrend indicator. Options might include "Supertrend with RSI," "Supertrend with MACD," etc. By choosing a strategy, the associated input settings for that strategy become available.
+
+Supertrend Settings:
+1. Multiplier: Typically, a default value of 3 is used. This multiplier is used in the ATR calculation. Increasing it makes the Supertrend line further from prices, while decreasing it brings the line closer.
+2. Period: The number of bars used in the ATR calculation. A common default is 7.
+
+EMA Settings (Exponential Moving Average):
+1. Period: Defines the number of previous bars used to calculate the EMA. Common periods are 9, 21, 50, and 200.
+2. Source: Allows traders to choose which price (Open, Close, High, Low) to use in the EMA calculation.
+
+RSI Settings (Relative Strength Index):
+1. Length: Determines how many periods are used for RSI calculation. The standard setting is 14.
+2. Overbought Level: The threshold at which the asset is considered overbought, typically set at 70.
+3. Oversold Level: The threshold at which the asset is considered oversold, often at 30.
+
+MACD Settings (Moving Average Convergence Divergence):
+1. Short Period: The shorter EMA, usually set to 12.
+2. Long Period: The longer EMA, commonly set to 26.
+3. Signal Period: Defines the EMA of the MACD line, typically set at 9.
+
+CCI Settings (Commodity Channel Index):
+1. Period: The number of bars used in the CCI calculation, often set to 20.
+2. Overbought Level: Typically set at +100, denoting overbought conditions.
+3. Oversold Level: Usually set at -100, indicating oversold conditions.
+
+SL/TP Settings (Stop Loss/Take Profit):
+1. SL Multiplier: Defines the multiplier for the average true range (ATR) to set the stop loss.
+2. TP Multiplier: Defines the multiplier for the average true range (ATR) to set the take profit.
+
+
+Filtering Conditions:
+This section allows traders to set conditions to filter out certain signals. For example, one might only want to take buy signals when the RSI is below 30, ensuring they buy during oversold conditions.
+
+Trade Direction and Backtest Period:
+
+1. Trade Direction: Allows traders to specify whether they want to take long trades, short trades, or both.
+2. Backtest Period: Specifies the time range for backtesting the strategy. Traders can choose from options like 'Last 6 months,' 'Last 1 year,' etc.
+
+It's essential to remember that while default settings are provided for many of these tools, optimal settings can vary based on the market, timeframe, and trading style. Always backtest new settings on historical data to gauge their potential efficacy.
+
+
+5. Understanding Strategy Conditions
+Developing an understanding of the conditions set within a trading strategy is essential for traders to maximize its potential. Here, we delve deep into the logic behind these conditions, using the Supertrend Advance Strategy as our focal point.
+
+Basic Logic Behind Conditions:
+Every strategy is built around a set of conditions that provide buy or sell signals. The conditions are based on mathematical or statistical methods and are rooted in the study of historical price data. The fundamental idea is to recognize patterns or behaviors that have been profitable in the past and might be profitable in the future.
+
+Buy and Sell Conditions:
+1. Buy Conditions: Usually formulated around bullish signals or indicators suggesting upward price momentum.
+2. Sell Conditions: Centered on bearish signals or indicators indicating downward price momentum.
+
+Simple Strategy:
+
+The simple strategy could involve using just the Supertrend indicator. Here:
+• Buy: When price closes above the Supertrend line.
+• Sell: When price closes below the Supertrend line.
+
+Pullback Strategy:
+
+This strategy capitalizes on price retracements:
+• Buy: When the price retraces to the Supertrend line after a bullish signal and is supported by another bullish indicator.
+• Sell: When the price retraces to the Supertrend line after a bearish signal and is confirmed by another bearish indicator.
+
+Indicators Used:
+
+EMA (Exponential Moving Average):
+• Logic: EMA gives more weight to recent prices, making it more responsive to current price movements. A shorter-period EMA crossing above a longer-period EMA can be a bullish sign, while the opposite is bearish.
+
+RSI (Relative Strength Index):
+• Logic: RSI measures the magnitude of recent price changes to analyze overbought or oversold conditions. Values above 70 are typically considered overbought, and values below 30 are considered oversold.
+
+MACD (Moving Average Convergence Divergence):
+• Logic: MACD assesses the relationship between two EMAs of a security’s price. The MACD line crossing above the signal line can be a bullish signal, while crossing below can be bearish.
+
+CCI (Commodity Channel Index):
+• Logic: CCI compares a security's average price change with its average price variation. A CCI value above +100 may mean the price is overbought, while below -100 might signify an oversold condition.
+And others...
+As the strategy expands or contracts, more indicators might be added or removed. The crucial point is to understand the core logic behind each, ensuring they align with the strategy's objectives.
+
+Logic Behind Each Indicator:
+1. EMA: Emphasizes recent price movements; provides dynamic support and resistance levels.
+2. RSI: Indicates overbought and oversold conditions based on recent price changes.
+3. MACD: Showcases momentum and direction of a trend by comparing two EMAs.
+4. CCI: Measures the difference between a security's price change and its average price change.
+
+Understanding strategy conditions is not just about knowing when to buy or sell but also about comprehending the underlying market dynamics that those conditions represent. As you familiarize yourself with each condition and indicator, you'll be better prepared to adapt and evolve with the ever-changing financial markets.
+
+
+6. Trade Execution and Management
+
+Trade execution and management are crucial aspects of any trading strategy. Efficient execution can significantly impact profitability, while effective management can preserve capital during adverse market conditions. In this section, we'll explore the nuances of position entry, exit strategies, and various Stop Loss (SL) and Take Profit (TP) methodologies within the Supertrend Advance Strategy.
+
+Position Entry:
+Effective trade entry revolves around:
+1. Timing: Enter at a point where the risk-reward ratio is favorable. This often corresponds to confirmatory signals from multiple indicators.
+2. Volume Analysis: Ensure there's adequate volume to support the movement. Volume can validate the strength of a signal.
+3. Confirmation: Use multiple indicators or chart patterns to confirm the entry point. For instance, a buy signal from the Supertrend indicator can be confirmed with a bullish MACD crossover.
+
+Position Exit Strategies:
+A successful exit strategy will lock in profits and minimize losses. Here are some strategies:
+1. Fixed Time Exit: Exiting after a predetermined period.
+2. Percentage-based Profit Target: Exiting after a certain percentage gain.
+3. Indicator-based Exit: Exiting when an indicator gives an opposing signal.
+
+Percentage-based SL/TP:
+• Stop Loss (SL): Set a fixed percentage below the entry price to limit potential losses.
+• Example: A 2% SL on an entry at $100 would trigger a sell at $98.
+• Take Profit (TP): Set a fixed percentage above the entry price to lock in gains.
+• Example: A 5% TP on an entry at $100 would trigger a sell at $105.
+
+Supertrend-based SL/TP:
+• Stop Loss (SL): Position the SL at the Supertrend line. If the price breaches this line, it could indicate a trend reversal.
+• Take Profit (TP): One could set the TP at a point where the Supertrend line flattens or turns, indicating a possible slowdown in momentum.
+
+Swing high/low-based SL/TP:
+• Stop Loss (SL): For a long position, set the SL just below the recent swing low. For a short position, set it just above the recent swing high.
+• Take Profit (TP): For a long position, set the TP near a recent swing high or resistance. For a short position, near a swing low or support.
+
+And other methods...
+1. Trailing Stop Loss: This dynamic SL adjusts with the price movement, locking in profits as the trade moves in your favor.
+2. Multiple Take Profits: Divide the position into segments and set multiple TP levels, securing profits in stages.
+3. Opposite Signal Exit: Exit when another reliable indicator gives an opposite signal.
+Trade execution and management are as much an art as they are a science. They require a blend of analytical skill, discipline, and intuition. Regularly reviewing and refining your strategies, especially in light of changing market conditions, is crucial to maintaining consistent trading performance.
+
+
+7. Visual Representations
+Visual tools are essential for traders, as they simplify complex data into an easily interpretable format. Properly analyzing and understanding the plots on a chart can provide actionable insights and a more intuitive grasp of market conditions. In this section, we’ll delve into various visual representations used in the Supertrend Advance Strategy and their significance.
+
+Understanding Plots on the Chart:
+Charts are the primary visual aids for traders. The arrangement of data points, lines, and colors on them tell a story about the market's past, present, and potential future moves.
+1. Data Points: These represent individual price actions over a specific timeframe. For instance, a daily chart will have data points showing the opening, closing, high, and low prices for each day.
+2. Colors: Used to indicate the nature of price movement. Commonly, green is used for bullish (upward) moves and red for bearish (downward) moves.
+
+Trend Lines:
+Trend lines are straight lines drawn on a chart that connect a series of price points. Their significance:
+1. Uptrend Line: Drawn along the lows, representing support. A break below might indicate a trend reversal.
+2. Downtrend Line: Drawn along the highs, indicating resistance. A break above might suggest the start of a bullish trend.
+
+Filled Areas:
+These represent a range between two values on a chart, usually shaded or colored. For instance:
+1. Bollinger Bands: The area between the upper and lower band is filled, giving a visual representation of volatility.
+2. Volume Profile: Can show a filled area representing the amount of trading activity at different price levels.
+
+Stop Loss and Take Profit Lines:
+These are horizontal lines representing pre-determined exit points for trades.
+1. Stop Loss Line: Indicates the level at which a trade will be automatically closed to limit losses. Positioned according to the trader's risk tolerance.
+2. Take Profit Line: Denotes the target level to lock in profits. Set according to potential resistance (for long trades) or support (for short trades) or other technical factors.
+
+Trailing Stop Lines:
+A trailing stop is a dynamic form of stop loss that moves with the price. On a chart:
+1. For Long Trades: Starts below the entry price and moves up with the price but remains static if the price falls, ensuring profits are locked in.
+2. For Short Trades: Starts above the entry price and moves down with the price but remains static if the price rises.
+
+Visual representations offer traders a clear, organized view of market dynamics. Familiarity with these tools ensures that traders can quickly and accurately interpret chart data, leading to more informed decision-making. Always ensure that the visual aids used resonate with your trading style and strategy for the best results.
+
+8. Backtesting
+Backtesting is a fundamental process in strategy development, enabling traders to evaluate the efficacy of their strategy using historical data. It provides a snapshot of how the strategy would have performed in past market conditions, offering insights into its potential strengths and vulnerabilities. In this section, we'll explore the intricacies of setting up and analyzing backtest results and the caveats one must be aware of.
+
+Setting Up Backtest Period:
+1. Duration: Determine the timeframe for the backtest. It should be long enough to capture various market conditions (bullish, bearish, sideways). For instance, if you're testing a daily strategy, consider a period of several years.
+2. Data Quality: Ensure the data source is reliable, offering high-resolution and clean data. This is vital to get accurate backtest results.
+3. Segmentation: Instead of a continuous period, sometimes it's helpful to backtest over distinct market phases, like a particular bear or bull market, to see how the strategy holds up in different environments.
+
+Analyzing Backtest Results:
+1. Performance Metrics: Examine metrics like the total return, annualized return, maximum drawdown, Sharpe ratio, and others to gauge the strategy's efficiency.
+2. Win Rate: It's the ratio of winning trades to total trades. A high win rate doesn't always signify a good strategy; it should be evaluated in conjunction with other metrics.
+3. Risk/Reward: Understand the average profit versus the average loss per trade. A strategy might have a low win rate but still be profitable if the average gain far exceeds the average loss.
+4. Drawdown Analysis: Review the periods of losses the strategy could incur and how long it takes, on average, to recover.
+
+
+9. Tips and Best Practices
+Successful trading requires more than just knowing how a strategy works. It necessitates an understanding of when to apply it, how to adjust it to varying market conditions, and the wisdom to recognize and avoid common pitfalls. This section offers insightful tips and best practices to enhance the application of the Supertrend Advance Strategy.
+
+When to Use the Strategy:
+1. Market Conditions: Ideally, employ the Supertrend Advance Strategy during trending market conditions. This strategy thrives when there are clear upward or downward trends. It might be less effective during consolidative or sideways markets.
+2. News Events: Be cautious around significant news events, as they can cause extreme volatility. It might be wise to avoid trading immediately before and after high-impact news.
+3. Liquidity: Ensure you are trading in assets/markets with sufficient liquidity. High liquidity ensures that the price movements are more reflective of genuine market sentiment and not due to thin volume.
+
+Adjusting Settings for Different Markets/Timeframes:
+1. Markets: Each market (stocks, forex, commodities) has its own characteristics. It's essential to adjust the strategy's parameters to align with the market's volatility and liquidity.
+2. Timeframes: Shorter timeframes (like 1-minute or 5-minute charts) tend to have more noise. You might need to adjust the settings to filter out false signals. Conversely, for longer timeframes (like daily or weekly charts), you might need to be more responsive to genuine trend changes.
+3. Customization: Regularly review and tweak the strategy's settings. Periodic adjustments can ensure the strategy remains optimized for the current market conditions.
+
+10. Frequently Asked Questions (FAQs)
+
+Given the complexities and nuances of the Supertrend Advance Strategy, it's only natural for traders, both new and seasoned, to have questions. This section addresses some of the most commonly asked questions regarding the strategy.
+
+1. What exactly is the Supertrend Advance Strategy?
+The Supertrend Advance Strategy is an evolved version of the traditional Supertrend indicator. It's designed to provide clearer buy and sell signals by incorporating additional indicators like EMA, RSI, MACD, CCI, etc. The strategy aims to capitalize on market trends while minimizing false signals.
+
+2. Can I use the Supertrend Advance Strategy for all asset types?
+Yes, the strategy can be applied to various asset types like stocks, forex, commodities, and cryptocurrencies. However, it's crucial to adjust the settings accordingly to suit the specific characteristics and volatility of each asset type.
+
+3. Is this strategy suitable for day trading?
+Absolutely! The Supertrend Advance Strategy can be adjusted to suit various timeframes, making it versatile for both day trading and long-term trading. Remember to fine-tune the settings to align with the timeframe you're trading on.
+
+4. How do I deal with false signals?
+No strategy is immune to false signals. However, by combining the Supertrend with other indicators and adhering to strict risk management protocols, you can minimize the impact of false signals. Always use stop-loss orders and consider filtering trades with additional confirmation signals.
+
+5. Do I need any prior trading experience to use this strategy?
+While the Supertrend Advance Strategy is designed to be user-friendly, having a foundational understanding of trading and market analysis can greatly enhance your ability to employ the strategy effectively. If you're a beginner, consider pairing the strategy with further education and practice on demo accounts.
+
+6. How often should I review and adjust the strategy settings?
+There's no one-size-fits-all answer. Some traders adjust settings weekly, while others might do it monthly. The key is to remain responsive to changing market conditions. Regular backtesting can give insights into potential required adjustments.
+
+7. Can the Supertrend Advance Strategy be automated?
+Yes, many traders use algorithmic trading platforms to automate their strategies, including the Supertrend Advance Strategy. However, always monitor automated systems regularly to ensure they're operating as intended.
+
+8. Are there any markets or conditions where the strategy shouldn't be used?
+The strategy might generate more false signals in markets that are consolidative or range-bound. During significant news events or times of unexpected high volatility, it's advisable to tread with caution or stay out of the market.
+
+9. How important is backtesting with this strategy?
+Backtesting is crucial as it allows traders to understand how the strategy would have performed in the past, offering insights into potential profitability and areas of improvement. Always backtest any new setting or tweak before applying it to live trades.
+
+10. What if the strategy isn't working for me?
+No strategy guarantees consistent profits. If it's not working for you, consider reviewing your settings, seeking expert advice, or complementing the Supertrend Advance Strategy with other analysis methods. Remember, continuous learning and adaptation are the keys to trading success.
+
+
+Other comments
+Value of combining several indicators in this script and how they work together
+Diversification of Signals: Just as diversifying an investment portfolio can reduce risk, using multiple indicators can offer varied perspectives on potential price movements. Each indicator can capture a different facet of the market, ensuring that traders are not overly reliant on a single data point.
+Confirmation & Reduced False Signals: A common challenge with many indicators is the potential for false signals. By requiring confirmation from multiple indicators before acting, the chances of acting on a false signal can be significantly reduced.
+Flexibility Across Market Conditions: Different indicators might perform better under different market conditions. For example, while moving averages might excel in trending markets, oscillators like RSI might be more useful during sideways or range-bound conditions. A mashup strategy can potentially adapt better to varying market scenarios.
+Comprehensive Analysis: With multiple indicators, traders can gauge trend strength, momentum, volatility, and potential market reversals all at once, providing a holistic view of the market.
+
+How do the different indicators in the Supertrend Advance Strategy work together?
+Supertrend: This is primarily a trend-following indicator. It provides traders with buy and sell signals based on the volatility of the price. When combined with other indicators, it can filter out noise and give more weight to strong, confirmed trends.
+EMA (Exponential Moving Average): EMA gives more weight to recent price data. It can be used to identify the direction and strength of a trend. When the price is above the EMA, it's generally considered bullish, and vice versa.
+RSI (Relative Strength Index): An oscillator that measures the magnitude of recent price changes to evaluate overbought or oversold conditions. By cross-referencing with other indicators like EMA or MACD, traders can spot potential reversals or confirmations of a trend.
+MACD (Moving Average Convergence Divergence): This indicator identifies changes in the strength, direction, momentum, and duration of a trend in a stock's price. When the MACD line crosses above the signal line, it can be a bullish sign, and when it crosses below, it can be bearish. Pairing MACD with Supertrend can provide dual confirmation of a trend.
+CCI (Commodity Channel Index): Initially developed for commodities, CCI can indicate overbought or oversold conditions. It can be used in conjunction with other indicators to determine entry and exit points.
+
+In essence, the synergy of these indicators provides a balanced, comprehensive approach to trading. Each indicator offers its unique lens into market conditions, and when they align, it can be a powerful indication of a trading opportunity. This combination not only reduces the potential drawbacks of each individual indicator but leverages their strengths, aiming for more consistent and informed trading decisions.
+
+
+Backtesting and Default Settings
+• This indicator has been optimized to be applied for 1 hour-charts. However, the underlying principles of this strategy are supply and demand in the financial markets and the strategy can be applied to all timeframes. Daytraders can use the 1min- or 5min charts, swing-traders can use the daily charts.
+• This strategy has been designed to identify the most promising, highest probability entries and trades for each stock or other financial security.
+• The combination of the qualifiers results in a highly selective strategy which only considers the most promising swing-trading entries. As a result, you will normally only find a low number of trades for each stock or other financial security per year in case you apply this strategy for the daily charts. Shorter timeframes will result in a higher number of trades / year.
+• Consequently, traders need to apply this strategy for a full watchlist rather than just one financial security.
+• Default properties: RSI on (length 14, RSI buy level 50, sell level 50), EMA, RSI, MACD on, type of strategy pullback, SL/TP type: ATR (length 10, factor 3), trade direction both, quantity 5, take profit swing hl 5.1, highest / lowest lookback 2, enable ATR trail (ATR length 10, SL ATR multiplier 1.4, TP multiplier 2.1, lookback = 4, trade direction = both).

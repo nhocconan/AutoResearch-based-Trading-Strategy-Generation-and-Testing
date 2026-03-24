@@ -1,0 +1,64 @@
+//@version=5
+strategy("Gold - First 5m Candle NY Session - Daily Reset Market Entry Fixed", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+// Inputs
+startHourInput   = input.int(13, "Start Hour (UTC)", minval=0, maxval=23)
+startMinuteInput = input.int(30, "Start Minute (UTC)", minval=0, maxval=59)
+rrInput          = input.float(3.0, "Risk/Reward Ratio", minval=0.5, step=0.5)
+
+// زمان فعلی
+curHour   = hour(time, "UTC")
+curMinute = minute(time, "UTC")
+currentDayKey = year(time)*10000 + month(time)*100 + dayofmonth(time)
+
+// Persistent vars
+var int   lastTradeDay = na
+var float targetHigh   = na
+var float targetLow    = na
+var int   targetBar    = na
+var int   side         = 0   // 1=long, -1=short
+var bool  pending      = false
+
+// ریست روزانه
+if currentDayKey != lastTradeDay
+    pending      := false
+    lastTradeDay := currentDayKey
+
+// شناسایی کندل هدف
+isTargetCandle = (curHour == startHourInput and curMinute == startMinuteInput)
+
+// ذخیره اطلاعات کندل هدف
+if isTargetCandle and barstate.isconfirmed
+    if close > open
+        side       := 1
+        targetLow  := low
+        targetHigh := high
+    else if close < open
+        side       := -1
+        targetLow  := low
+        targetHigh := high
+    else
+        side := 0
+
+    pending   := (side != 0)
+    targetBar := bar_index
+
+// ورود روی کندل بعدی کندل هدف
+if pending and bar_index == targetBar + 1
+    if side == 1
+        entryPrice = open
+        strategy.entry("Long", strategy.long, comment="Long Entry")
+        strategy.exit("Long Exit", "Long", stop=targetLow, limit=entryPrice + (entryPrice - targetLow) * rrInput)
+    else if side == -1
+        entryPrice = open
+        strategy.entry("Short", strategy.short, comment="Short Entry")
+        strategy.exit("Short Exit", "Short", stop=targetHigh, limit=entryPrice - (targetHigh - entryPrice) * rrInput)
+
+    pending := false
+
+View in Pine Editor・57 lines
+Use on chart
+2
+3
+1 398
+rteerrhhrhhfkfwewjgggjjgtiioghghghghghghihhjggdhlhg

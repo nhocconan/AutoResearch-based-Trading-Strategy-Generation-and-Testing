@@ -1,0 +1,60 @@
+//@version=5
+strategy("Short Selling EMA Cross (By Coinrule)", overlay=true, initial_capital = 10000, default_qty_value = 30, default_qty_type = strategy.percent_of_equity, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// EMAs 
+fastEMA = ta.ema(close, 20)
+slowEMA = ta.ema(close, 50)
+
+// Conditions
+goShortCondition1 = ta.crossunder(fastEMA, slowEMA)
+
+timePeriod = time >= timestamp(syminfo.timezone, 2021, 12, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+strategyDirection = strategy.direction.short
+
+if (goShortCondition1 and timePeriod and notInTrade)
+    stopLoss = high * 1.16
+    takeProfit = low * 0.92
+    strategy.entry("short", strategy.short)
+    strategy.exit("exit","short", stop=stopLoss, limit=takeProfit)
+    
+plot(fastEMA, color=color.blue)
+plot(slowEMA, color=color.yellow)
+
+View in Pine Editor・25 lines
+Use on chart
+2
+5
+9
+7 218
+BINANCE:AVAXUSDT
+
+This short selling script works best in periods of downtrends and general bearish market conditions, with the ultimate goal to sell as the the price decreases further and buy back before a rebound.
+
+This script can work well on coins you are planning to hodl for long-term and works especially well whilst using an automated bot that can execute your trades for you. It allows you to hedge your investment by allocating a % of your coins to trade with, whilst not risking your entire holding. This mitigates unrealised losses from hodling as it provides additional cash from the profits made. You can then choose to to hodl this cash, or use it to reinvest when the market reaches attractive buying levels.
+
+Entry
+The exponential moving average ( EMA ) 20 and EMA 50 have been used for the variables determining the entry to the short. EMAs can operate better than simple moving averages due to the additional weighting placed on the most recent data points, whereas simple moving averages weight all the data the same. This means that price is tracked more closely and the most recent volatile moves can be captured and exploited more efficiently using EMAs.
+
+Our backtesting data revealed that the most profitable timeframe was the 30-minute timeframe, this also enabled a good frequency of trades and high profitability.
+
+A fast (shorter term) exponential moving average , in this strategy the EMA 20, crossing under a slow (longer term) moving average, in this example the EMA 50, signals the price of an asset has started to trend to the downside, as the most recent data signals price is declining compared to earlier data. The entry acts on this principle and executes when the EMA 20 crosses under the EMA 50.
+
+Enter Short: EMA 20 crosses under EMA 50.
+
+Exit
+This script utilises a take profit and stop loss for the exit. The take profit is set at -8% and the stop loss is set at +16% from the entry price. This would normally be a poor trade due to the risk:reward equalling 0.5. However, when looking at the backtesting data, the high profitability of the strategy (93.33%) leads to increased confidence and showcases the high probability of success according to historical data.
+
+The take profit (-8%) and the stop loss (+16%) of the strategy are widely placed to ensure the move is captured without being stopped out due to relief rallies. The stop loss also plays a role of mitigating losses and minimising risk of being stuck in a short position once there has been a fundamental trend reversal and the market has become bullish .
+
+Exit Short: -8% price decrease from entry price.
+
+OR
+
+Exit Short: +16% price increase from entry price.
+
+Tip: Research what coins have consistent and large token unlocks / highly inflationary tokenomics, and target these during bear markets to short as they will most likely have substantial selling pressure that outweighs demand - leading to declining prices.
+
+The strategy assumes each order is using 30% of the available coins to make the results more realistic and to simulate you only ran this strategy on 30% of your holdings. A trading fee of 0.1% is also taken into account and is aligned to the base fee applied on Binance.
+
+The backtesting data was recorded from December 1st 2021, just as the market was beginning its downtrend. We therefore recommend analysing the market conditions prior to utilising this strategy as it operates best on weak coins during downtrends and bearish conditions.

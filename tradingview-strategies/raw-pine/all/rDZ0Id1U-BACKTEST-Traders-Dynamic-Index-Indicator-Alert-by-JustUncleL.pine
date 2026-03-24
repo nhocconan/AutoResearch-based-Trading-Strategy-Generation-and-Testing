@@ -1,0 +1,5 @@
+//@version=4
+rsiOSL=##input(defval=22,type='INPUT_INTEGER',##id='in_5')
+rsiOBL=##input(defval=78,type='INPUT_INTEGER',##id='in_6')
+##root(root_metainfo,rm_0,rsiOSL)
+##root(root_metainfo,rm_1,rsiOBL)

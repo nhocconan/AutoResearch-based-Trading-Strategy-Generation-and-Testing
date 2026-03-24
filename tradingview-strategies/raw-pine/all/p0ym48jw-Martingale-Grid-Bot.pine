@@ -1,0 +1,267 @@
+//@version=6
+strategy("Martingale Grid Bot", "MGB", overlay = true, calc_on_every_tick = true)
+
+// Inputs {
+direction = input.string("Long", "Direction", options = ["Long", "Short"])
+entrySource = input.source(close, "Entry Signal Source")
+startTime = input.time(timestamp("Jan 01 2025 00:00:00"), "Start Time", display = display.data_window)
+nonRepaint = input.bool(false, "No Repainting Mode", tooltip = "For realtime use. If enabled new orders will be placed only when the bar is confirmed. This will reduce possible redraws, but it will not eliminate them completely.")
+
+gridDepth = input.float(5, "Grid Depth %", 0.1, step = 0.1, group = "Grid")
+ordersCount = input.int(10, "Orders Count", minval = 2, maxval = 20, group = "Grid")
+martin = input.float(1, "Martingale Multiplier", minval = 1, step = 0.1, group = "Grid")
+leverage = input.int(1, "Leverage", 1, 100, group = "Grid", tooltip = "Use it together with the margin parameters in the strategy settings.")
+profitPerc = input.float(1, "Take Profit %", minval = 0.1, step = 0.1, group = "Grid", tooltip = "Calculated from the average entry price.")
+stopPerc = input.float(10, "Stop Loss %", minval = 0, step = 0.1, group = "Grid", tooltip = "Calculated from the price of the first entry. If zero is set, stop loss is disabled.")
+
+showTab = input.bool(true, "Show Table", group = "Table")
+sizeType = input.string("Currency", "Order Size", options = ["Currency", "Contracts"], group = "Table", display = display.data_window)
+tabSize = input.int(13, "Table Size", active = showTab, group = "Table", display = display.data_window)
+timeZone = input.string("UTC+3", "Timezone", active = showTab, group = "Table", display = display.data_window, tooltip = "It is used to display the order filling time in the status cell tooltip.")
+
+longCol = input.color(color.blue, "Long Entry", group = "Visual")
+shortCol = input.color(color.red, "Short Entry", group = "Visual")
+takeCol = input.color(color.purple, "Take Profit", group = "Visual")
+stopCol = input.color(color.purple, "Stop Loss", group = "Visual")
+// }
+
+// Type {
+type order
+    string status
+    string tooltip
+    float price
+    float size
+// }
+
+// Vars {
+var bool isLong = direction == "Long" ? true : false
+var color entryCol = isLong ? longCol : shortCol
+var line startTimeLine = line.new(startTime, low, startTime, high, xloc.bar_time, extend.both, entryCol, line.style_dashed)
+
+varip order[] grid = na
+// }
+
+// Functions and Methods {
+entrySignal() => 
+    bool result = bool(entrySource)
+              and strategy.position_size == 0 
+              and time >= startTime
+              and (nonRepaint ? barstate.isconfirmed : true)
+    result
+
+createTable() =>
+    table tab = table.new(position.top_right, 4, ordersCount + 2, color.new(chart.bg_color, 40), frame_width = 1, frame_color = chart.fg_color, border_width = 1, border_color = chart.fg_color)
+    tab.cell(0, 0, "GRID ORDERS", text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left, text_formatting = text.format_bold)
+    tab.merge_cells(0, 0, 3, 0)
+    tab.cell(0, 1, "№", text_color = chart.fg_color, text_size = tabSize)
+    tab.cell(1, 1, "Price", text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left)
+    tab.cell(2, 1, "Size", text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left)
+    tab.cell(3, 1, "Status", text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left)
+    tab
+
+method updateTable(table this, order[] grid) =>
+    this.clear(0, 2, 3, ordersCount + 1)
+    if not na(grid)
+        for i = 0 to ordersCount - 1
+            order o = grid.get(i)
+            string oSize = sizeType == "Contracts" ? str.tostring(o.size, '#.########') : str.tostring(o.size * o.price, '#.##')
+            this.cell(0, 2 + i, str.tostring(i + 1), text_color = chart.fg_color, text_size = tabSize)
+            this.cell(1, 2 + i, str.tostring(o.price, format.mintick), text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left)
+            this.cell(2, 2 + i, oSize, text_color = chart.fg_color, text_size = tabSize, text_halign = text.align_left)
+            this.cell(3, 2 + i, o.status, text_color = chart.fg_color, tooltip = o.tooltip, text_size = tabSize, text_halign = text.align_left)
+
+createGrid() =>
+    order[] orders = array.new<order>()
+    float lastOrderPrice = isLong ? close * (1 - gridDepth / 100) : close * (1 + gridDepth / 100)
+    float priceStep = math.abs(close - lastOrderPrice) / (ordersCount - 1)
+    float stopPrice = isLong ? close * (1 - stopPerc / 100) : close * (1 + stopPerc / 100)
+    float orderPrice = close
+    float orderSize = strategy.default_entry_qty(close)
+    float qty = 0
+    string status = na
+    string tooltip = na
+
+    if orderSize == 0
+        orders := na
+        log.error("\nError: First order size is too small.")
+
+    else
+        for i = 1 to ordersCount
+            qty += orderSize * orderPrice
+
+            if orderPrice <= 0
+                status := "cancelled"
+                tooltip := str.format("Order {0} price ({1}) equal or less than 0", i, orderPrice)
+                log.warning("\nWarning: " + tooltip)
+            else if stopPerc > 0 and (isLong ? orderPrice <= stopPrice : orderPrice >= stopPrice)
+                status := "cancelled"
+                tooltip := str.format("Order {0} price ({1}) {2} stop loss price ({3})", i, orderPrice, isLong ? "below" : "above", stopPrice)
+                log.warning("\nWarning: " + tooltip)
+            else if qty > strategy.equity * leverage
+                status := "cancelled"
+                tooltip := str.format("Not enough funds to place order {0}", i)
+                log.warning("\nWarning: " + tooltip)
+            else
+                status := "active"
+            
+            orders.push(order.new(status, tooltip, orderPrice, orderSize))
+            orderPrice := isLong ? orderPrice - priceStep : orderPrice + priceStep
+            orderSize := orderSize * martin
+            status := na
+            tooltip := na
+
+    orders
+
+method placeOrders(order[] this) =>
+    if not na(this)
+        for i = 0 to this.size() - 1
+            order o = this.get(i)
+            if o.status == "active"
+                strategy.entry(direction + str.format(" {0}", i + 1), (isLong ? strategy.long : strategy.short), o.size, o.price)
+
+method entryPrice(order[] this, int i) =>
+    float price = na
+    if not na(this) and this.size() > i
+        order o = this.get(i)
+        if o.status == "active"
+            price := o.price
+    price
+
+method updateOrders(order[] this) =>
+    int openTrades = strategy.opentrades
+    if not na(this) and openTrades > 0
+        for i = 0 to openTrades - 1
+            order o = this.get(i)
+            if o.status == "active" and i + 1 <= openTrades
+                o.status := "filled"
+                o.tooltip := str.format_time(time, "yyyy-MM-dd' 'HH:mm:ss", timeZone)
+
+method takeProfit(order[] this) =>
+    float price = na
+    if not na(this)
+        if strategy.position_size != 0
+            price := isLong ? strategy.position_avg_price * (1 + profitPerc / 100) : strategy.position_avg_price * (1 - profitPerc / 100)
+        else
+            price := isLong ? this.first().price  * (1 + profitPerc / 100) : this.first().price  * (1 - profitPerc / 100)
+    price
+
+method stopLoss(order[] this) =>
+    float price = na
+    if not na(this) and stopPerc != 0
+        price := isLong ? grid.first().price * (1 - stopPerc / 100) :  grid.first().price * (1 + stopPerc / 100)
+    price
+// }
+
+// Calculations {
+// Remove old grid
+if ta.change(strategy.closedtrades) != 0 and strategy.position_size == 0
+    strategy.cancel_all()
+    grid := na
+
+// Place new grid
+if na(grid) and entrySignal()
+    grid := createGrid()
+    grid.placeOrders()
+
+// Update
+float takeProfit = grid.takeProfit()
+float stopLoss = grid.stopLoss()
+strategy.exit("Exit", limit = takeProfit, stop = stopLoss, comment_profit = "TP", comment_loss = "SL")
+
+grid.updateOrders()
+
+if time <= startTime
+    startTimeLine.set_y1(low)
+    startTimeLine.set_y2(high)
+
+if showTab
+    var table tab = createTable()
+    tab.updateTable(grid)
+// }
+
+// Plotting {
+plot(takeProfit, "Take Profit", takeCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false)
+plot(stopLoss, "Stop Loss", stopCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false)
+
+plot(grid.entryPrice(0), "Entry 1", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(1), "Entry 2", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(2), "Entry 3", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(3), "Entry 4", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(4), "Entry 5", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(5), "Entry 6", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(6), "Entry 7", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(7), "Entry 8", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(8), "Entry 9", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(9), "Entry 10", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(10), "Entry 11", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(11), "Entry 12", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(12), "Entry 13", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(13), "Entry 14", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(14), "Entry 15", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(15), "Entry 16", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(16), "Entry 17", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(17), "Entry 18", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(18), "Entry 19", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+plot(grid.entryPrice(19), "Entry 20", entryCol, 1, plot.style_linebr, display = display.pane + display.price_scale, editable = false, linestyle = plot.linestyle_dotted)
+// }
+
+View in Pine Editor・209 lines
+Use on chart
+5
+1
+1 354
+Martingale Grid Bot (MGB)
+The strategy is designed to test grid trading with a possible increase in the size of each subsequent order based on the martingale principle. The strategy itself does not contain any trade decision logic and is fully driven by external signals coming from indicators used on the chart. A new grid of orders is created when an entry signal is received, provided that there is no active grid.
+
+❗Warning
+Trading with leverage and martingale involves increased risk. This strategy is a rather rough tool and is intended for testing purposes only. The author is not responsible for any possible discrepancies between the strategy results and real trading.
+
+Settings
+
+Direction - Trading direction. Possible values: Long and Short.
+
+Entry Signal Source - Source of the entry signal that initiates the creation of a new order grid. If one of the price sources (open, high, low, close, etc.) is selected, a new grid will be created automatically after the previous grid is fully closed.
+
+Start Time - Date and time when the strategy starts operating. Marked on the chart with a vertical dashed line.
+
+No Repainting Mode - A mode intended to reduce discrepancies between historical and real-time strategy behavior (repainting).
+Enabled — a new grid is created only after the bar is closed. The first order can be filled no earlier than on the next bar.
+Disabled — in real-time, a new grid can be created immediately upon receiving a signal or after the previous grid is closed by take profit or stop loss.
+
+❗Attention
+For correct real-time operation, recalculation on every tick must be enabled in the strategy settings.
+
+GRID
+
+Grid Depth % - The depth of the order grid, specified as a percentage of the closing price at the moment the grid is created.
+
+Orders Count - The number of orders in the grid. The first order is placed at the current closing price at the time of grid creation.
+
+Martingale Multiplier - Position size multiplier. Each subsequent order in the grid will be increased by this factor. The size of the first order is defined in the strategy settings.
+
+Leverage - Leverage multiplier for margin trading. Used to check available funds when creating grid orders. It is recommended to use it together with the margin parameters in the strategy settings.
+
+Take Profit % - Calculated on each strategy update based on the average entry price. If none of the grid orders have been filled yet, the take-profit level for the first order is displayed on the chart.
+
+Stop Loss % - Calculated from the price of the first grid order and does not change during the strategy operation. Orders whose price exceeds the stop-loss level will be automatically canceled.
+
+TABLE
+
+Show Table - Controls the display of the table with all orders of the current grid. If there is no active grid, no order data is displayed. Text and background colors are determined automatically based on the chart background color.
+
+Order Size - Determines how the grid order size is displayed: in contracts or in currency.
+
+Table Size - Font size in the table.
+
+Timezone - Used to correctly display the order fill time relative to the chart time. The order fill time (status: filled) can be seen by hovering over the corresponding status cell in the table.
+
+VISUAL
+
+Long Entry - Color of the dotted lines representing grid orders when trading long. Also defines the color of the vertical line indicating the strategy start time.
+
+Short Entry - Color of the dotted lines representing grid orders when trading short. Also defines the color of the vertical line indicating the strategy start time.
+
+Take Profit - Color of the solid line representing the take-profit level.
+
+Stop Loss - Color of the solid line representing the stop-loss level.
+

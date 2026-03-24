@@ -1,0 +1,49 @@
+//@version=4
+strategy("QuantNomad - SuperTrend - XBTUSD - 1m", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// INPUTS //
+st_mult   = input(2,   title = 'SuperTrend Multiplier', minval = 0, maxval = 100, step = 0.01)
+st_period = input(14, title = 'SuperTrend Period',     minval = 1)
+
+// CALCULATIONS //
+up_lev = hl2 - (st_mult * atr(st_period))
+dn_lev = hl2 + (st_mult * atr(st_period))
+
+up_trend   = 0.0
+up_trend   := close[1] > up_trend[1]   ? max(up_lev, up_trend[1])   : up_lev
+
+down_trend = 0.0
+down_trend := close[1] < down_trend[1] ? min(dn_lev, down_trend[1]) : dn_lev
+
+// Calculate trend var
+trend = 0
+trend := close > down_trend[1] ? 1: close < up_trend[1] ? -1 : nz(trend[1], 1)
+
+// Calculate SuperTrend Line
+st_line = trend ==1 ? up_trend : down_trend
+
+// Plotting
+plot(st_line[1], color = trend == 1 ? color.green : color.red , style = plot.style_line, linewidth = 2, title = "SuperTrend")
+
+plotshape(crossover( close, st_line), location = location.belowbar, color = color.green)
+plotshape(crossunder(close, st_line), location = location.abovebar, color = color.red)
+
+// Strategy with stop orders
+strategy.entry("long",  true,  stop = st_line)
+strategy.entry("short", false, stop = st_line)
+
+View in Pine Editor・33 lines
+Use on chart
+6
+2
+2
+10
+13 290
+Interesting performance for Super Trend strategy for XBTUSD 1m chart.
+Params: ST Mult: 2, ST Period 14.
+Performance: 144% profit, 1988 trades, only 41% prof, 2.04% dd , 2.51 Sharpe.
+
+On its own, it might be not a very good strategy, but the big amount of trades allows you to add more filters and improve it.
+
+And remember:
+Past performance does not guarantee future results.

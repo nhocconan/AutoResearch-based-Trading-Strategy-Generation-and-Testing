@@ -1,0 +1,54 @@
+//@version=6
+strategy("UT Bot One Alert (Buy + Sell + Exit)", overlay=true, pyramiding=0)
+
+// ===== INPUTS =====
+atrPeriod = input.int(10, "ATR Period")
+keyValue  = input.float(1.0, "Sensitivity")
+
+// ===== ATR =====
+atr = ta.atr(atrPeriod)
+src = close
+
+// ===== UT BOT LOGIC =====
+longStop  = src - keyValue * atr
+shortStop = src + keyValue * atr
+
+longStopPrev  = nz(longStop[1], longStop)
+shortStopPrev = nz(shortStop[1], shortStop)
+
+longStop  := src > longStopPrev  ? math.max(longStop, longStopPrev)   : longStop
+shortStop := src < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+trend = 0
+trend := src > shortStopPrev ? 1 : src < longStopPrev ? -1 : nz(trend[1], 0)
+
+// ===== SIGNALS =====
+buySignal  = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+// ===== ORDERS =====
+if buySignal
+    strategy.close("SELL")
+    strategy.entry("BUY", strategy.long)
+
+if sellSignal
+    strategy.close("BUY")
+    strategy.entry("SELL", strategy.short)
+
+// ===== PLOTS =====
+plotshape(buySignal, style=shape.labelup, text="BUY", color=color.green)
+plotshape(sellSignal, style=shape.labeldown, text="SELL", color=color.red)
+
+// ===== ONE SINGLE ALERT =====
+alertcondition(
+     buySignal or sellSignal,
+     title="One Alert Buy Sell Exit",
+     message="{{strategy.order.action}}"
+)
+
+View in Pine Editor・47 lines
+Use on chart
+8
+1
+3 042
+3in1 buy sell&exit alert works.includes ATR and ADX.

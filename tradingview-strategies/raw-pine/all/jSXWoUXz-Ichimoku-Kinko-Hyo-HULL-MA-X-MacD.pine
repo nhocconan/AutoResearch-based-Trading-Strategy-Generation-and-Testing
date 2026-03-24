@@ -1,0 +1,131 @@
+//@version=3
+
+strategy("Hull-MA_X + Ichimoku Kinko Hyo + MACD", shorttitle="HIM", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=1000, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+
+keh=input(title="Double HullMA",type=integer,defval=12, minval=1)
+n2ma=2*wma(close,round(keh/2))
+nma=wma(close,keh)
+diff=n2ma-nma
+sqn=round(sqrt(keh))
+n2ma1=2*wma(close[1],round(keh/2))
+nma1=wma(close[1],keh)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(keh))
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+b=n1>n2?lime:red
+c=n1>n2?green:red
+d=n1>n2?red:green
+
+TenkanSenPeriods = input(9, minval=1, title="Tenkan Sen Periods")
+KijunSenPeriods = input(24, minval=1, title="Kijun Sen Periods")
+SenkouSpanBPeriods = input(51, minval=1, title="Senkou Span B Periods")
+displacement = input(24, minval=1, title="Displacement")
+donchian(len) => avg(lowest(len), highest(len))
+TenkanSen = donchian(TenkanSenPeriods)
+KijunSen = donchian(KijunSenPeriods)
+SenkouSpanA = avg(TenkanSen, KijunSen)
+SenkouSpanB = donchian(SenkouSpanBPeriods)
+LS=close, offset = -displacement
+SenkouSpanH = max(SenkouSpanA[displacement - 1], SenkouSpanB[displacement - 1])
+SenkouSpanL = min(SenkouSpanA[displacement - 1], SenkouSpanB[displacement - 1])
+
+MACD_Length = input(9)
+MACD_fastLength = input(12)
+MACD_slowLength = input(24)
+MACD = ema(close, MACD_fastLength) - ema(close, MACD_slowLength)
+aMACD = ema(MACD, MACD_Length)
+
+Hullfast=plot(n1,color=c)
+Hullslow=plot(n2,color=c)
+plot(cross(n1, n2) ? n1:na, style = circles, color=b, linewidth = 4)
+plot(cross(n1, n2) ? n1:na, style = line, color=d, linewidth = 3)
+plot(TenkanSen, color=blue, title="Tenkan Sen", linewidth = 2)
+plot(KijunSen, color=maroon, title="Kijun Sen", linewidth = 3)
+plot(close, offset = -displacement, color=orange, title="Chikou Span", linewidth = 2)
+sa=plot (SenkouSpanA, offset = displacement, color=green,  title="Senkou Span A", linewidth = 2)
+sb=plot (SenkouSpanB, offset = displacement, color=red,  title="Senkou Span B", linewidth = 3)
+fill(sa, sb, color = SenkouSpanA > SenkouSpanB ? green : red)
+
+longCondition = n1>n2 and close>n2 and close>SenkouSpanH and MACD>aMACD and (TenkanSen>KijunSen or close>KijunSen) 
+if (longCondition)
+    strategy.entry("Long",strategy.long)
+
+shortCondition = n1<n2 and close<n2 and close<SenkouSpanL and (MACD<aMACD or TenkanSen<KijunSen or close<TenkanSen or close<KijunSen)
+if (shortCondition)
+    strategy.entry("Short",strategy.short)
+
+closelong = n1<n2 and close<n2 and (MACD<aMACD or TenkanSen<KijunSen or close<TenkanSen or close<KijunSen or close<SenkouSpanL)
+if (closelong)
+    strategy.close("Long")
+
+closeshort = n1>n2 and close>n2 and (MACD>aMACD or TenkanSen>KijunSen or close>TenkanSen or close>KijunSen or close>SenkouSpanH)
+if (closeshort)
+    strategy.close("Short")
+
+View in Pine Editor・64 lines
+Use on chart
+9
+6
+4
+9
+28 388
+Sep 9, 2017
+The Ichimoku Kinko Hyo system includes five kinds of signal, of which this strategy uses the most recent of ones i.e. Tenkan Sen / Kijun Sen Cross and price crosses the Kijun Sen. As the Chikou Span, Senkou Span A and Senkou Span B are shifted into the past/future, the trigger signals will be only be used for visual confirmation and not part of the strategy.
+
+The Tenkan Sen, also known as the Turning or Conversion line, is a moving average of the highest high and lowest low over the last 9 periods in this strategy.
+
+The Kijun Sen, also known as the Standard or Base line, is a moving average of the highest high and lowest low over the last 24 periods in this strategy.
+
+The Chikou Span, also known as the Lagging line, is the closing price plotted 24 periods behind in this strategy.
+
+The Senkou Span A, also known as the 1st leading line, is a moving average of the Tenkan Sen and Kijun Sen and is plotted 24 periods ahead in this strategy.
+
+The Senkou Span B, also known as the 2nd leading line, is a moving average of the highest high and lowest low over the last 51 trading days is plotted 24 periods ahead in this strategy.
+
+Moving average convergence divergence (MaCD) is a trend-following momentum indicator that shows the relationship between two moving averages of prices. The MaCD is calculated in this strategy by subtracting the 24-day exponential moving average (EMA) from the 12-day EMA. A nine-day EMA of the MACD, called the "signal line", aMaCD in this case, is then plotted on top of the MaCD. In this strategy, MaCD/ aMaCD Cross is functioning as a trigger for buy and sell signals.
+
+As with most technical analysis methods, Ichimoku is likely to produce frequent conflicting signals in non-trending markets, So in addition to Ichimoku Kinko Hyo, the Hull MA is popular amongst some day traders, as the indicator which in combination with MaCD attempts to give an accurate signal by eliminating lags and improving the smoothness of the line.
+
+Alan Hull, developed this moving average indicator and hence it’s called the Hull MA.
+
+Now, let’s dissect how the Hull moving average is calculated.
+
+The Hull MA involves the weighted moving average (WMA) in its calculation.
+
+First, calculate the WMA with period (n / 2) and multiply this by 2. Remember ‘n’ is the time period configurable based on the trader’s requirement. The default setting is 12 periods in this strategy, fast Hull MA crossing slow Hull MA will generate a circle on charts.
+
+Second, calculate the WMA for period “n” and subtract if from the first step. Thirdly, calculate the weighted moving average with period sqrt (n) using the data from the second step. You can take a look at the below formula:
+
+Hull MA= WMA (2*WMA (n/2) − WMA (n)), sqrt (n))
+
+The Hull MA Cross in combination with Tenkan Sen / Kijun Sen Cross and MaCD tries to give an accurate signal by eliminating lags and improve the smoothness of price activity. Please note that price trends can and do change often, so your readings of the charts and this trading system should be probabilistic, rather than predictive.
+Sep 9, 2017
+Release Notes
+Alan Hull, developed this moving average indicator and hence it’s called the Hull MA.
+
+The Hull MA involves the weighted moving average ( WMA ) in its calculation.
+
+First, calculate the WMA with period (n / 2) and multiply this by 2. Remember ‘n’ is the time period configurable based on the trader’s requirement. The default setting is 12 periods in this strategy, fast Hull MA crossing slow Hull MA will generate a circle on charts.
+
+Second, calculate the WMA for period “n” and subtract if from the first step. Thirdly, calculate the weighted moving average with period sqrt (n) using the data from the second step. You can take a look at the below formula:
+
+Hull MA= WMA (2*WMA (n/2) − WMA (n)), sqrt (n))
+
+The Ichimoku Kinko Hyo system includes five kinds of signal, of which this strategy uses three i.e. Tenkan Sen / Kijun Sen Cross, price crosses the Kijun Sen and Kumo. As the Chikou Span, Senkou Span A and Senkou Span B (Kumo) are shifted into the past/future, the trigger signals will be only be used for visual confirmation and not part of the strategy.
+
+The Tenkan Sen, also known as the Turning or Conversion line, is a moving average of the highest high and lowest low over the last 9 periods in this strategy.
+
+The Kijun Sen, also known as the Standard or Base line, is a moving average of the highest high and lowest low over the last 24 periods in this strategy.
+
+The Chikou Span, also known as the Lagging line, is the closing price plotted 24 periods behind in this strategy.
+
+The Senkou Span A, also known as the 1st leading line, is a moving average of the Tenkan Sen and Kijun Sen and is plotted 24 periods ahead in this strategy.
+
+The Senkou Span B, also known as the 2nd leading line, is a moving average of the highest high and lowest low over the last 51 trading days is plotted 24 periods ahead in this strategy.
+
+Moving average convergence divergence ( MaCD ) is a trend-following momentum indicator that shows the relationship between two moving averages of prices. The MaCD is calculated in this strategy by subtracting the 24-day exponential moving average ( EMA ) from the 12-day EMA . A nine-day EMA of the MACD , called the "signal line", aMaCD in this case, is then plotted on top of the MaCD . In this strategy, MaCD/ aMaCD Cross is functioning as a trigger for buy and sell signals.
+
+As with most technical analysis methods, Ichimoku is likely to produce frequent conflicting signals in non-trending markets, So in addition to Ichimoku Kinko Hyo, the Hull MA is popular amongst some day traders, as the indicator which in combination with MaCD attempts to give an accurate signal by eliminating lags and improving the smoothness of the line.
+
+The Hull MA Cross in combination with Ichimoku Kinko Hyo signals and MaCD tries to give an accurate signal by eliminating lags and improve the smoothness of price activity. Please note that price trends can and do change often, so your readings of the charts and this trading system should be probabilistic, rather than predictive.

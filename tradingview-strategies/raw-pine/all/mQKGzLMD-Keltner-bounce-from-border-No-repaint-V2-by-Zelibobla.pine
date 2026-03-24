@@ -1,0 +1,58 @@
+//@version=2
+strategy("Keltner bounce from border. No repaint. (by Zelibobla)", shorttitle="Keltner border bounce", overlay=true)
+
+price = close
+
+// build Keltner
+keltnerLength = input(defval=200, minval=1, title="Keltner EMA Period Length")
+keltnerATRLength = input(defval=200, minval=1, title="Keltner ATR Period Length (the same as EMA length in classic Keltner Channels)")
+keltnerDeviation = input(defval=8, minval=1, maxval=15, title="Keltner band width (in ATRs)")
+closeOnEMATouch = input(type=bool, defval=false, title="Close trade on EMA touch? (less drawdown, but less profit and higher commissions impact)")
+enterOnBorderTouchFromInside = input(type=bool, defval=false, title="Enter on border touch from inside? (by default from outside, which is less risky but less profitable)")
+SL = input(defval=50, minval=0, maxval=10000, title="Stop loss in ticks (leave zero to skip)")
+EMA = sma(price, keltnerLength)
+ATR = atr(keltnerATRLength)
+top = EMA + ATR * keltnerDeviation
+bottom = EMA - ATR * keltnerDeviation
+
+buyEntry = crossover(price, bottom)
+sellEntry = crossunder(price, top)
+plot(EMA, color=aqua,title="EMA")
+p1 = plot(top, color=silver,title="Keltner top")
+p2 = plot(bottom, color=silver,title="Keltner bottom")
+fill(p1, p2)
+
+tradeSize = input(defval=1, minval=1, title="Trade size")
+
+if ( enterOnBorderTouchFromInside and crossunder(price, bottom) )
+    strategy.entry("BUY", strategy.long, qty=tradeSize, comment="BUY")
+else
+    if( crossover(price, bottom) )
+        strategy.entry("BUY", strategy.long, qty=tradeSize, comment="BUY")
+
+if( crossover(price,EMA) and closeOnEMATouch )
+    strategy.close("BUY")
+
+if( 0 != SL )
+    strategy.exit("EXIT BUY", "BUY", qty=tradeSize, loss=SL)
+    strategy.exit("EXIT SELL", "SELL", qty=tradeSize, loss=SL)
+   
+if( enterOnBorderTouchFromInside and crossover(price, bottom) )
+    strategy.entry("SELL", strategy.long, qty=tradeSize, comment="SELL")
+else
+    if ( crossunder(price, top) )
+        strategy.entry("SELL", strategy.short, qty=tradeSize, comment="SELL")
+    
+    
+if( crossunder(price, EMA) and closeOnEMATouch )
+    strategy.close("SELL")
+
+View in Pine Editor・48 lines
+Use on chart
+1.9 K
+7
+59 930
+WARNING: despite of strategy doesn't use future data (not repaints) it doesn't consider broker`s commissions, which can be harmful for real life high frequency trading. Strategy will definitely fail on non-ordinary security behavior. But if new behavior will get stable, tuned params should make strategy profitable again.
+
+This is the second version of this strategy tradingview.com/v/meiq0PyE/
+I've added emergency stop-loss ordering, parametrized trade size and enabled to switch strategy entry mode. Now it looks good on bigger timeframes such as 5min (ES1!) on screenshot. You are welcome to bring new ideas to enhance performance.

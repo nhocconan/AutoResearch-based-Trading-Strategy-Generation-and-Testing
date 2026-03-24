@@ -1,0 +1,3 @@
+//@version=5
+label_color_bullish=##input(defval=#2bff00ff,type='INPUT_COLOR',##id='in_10')
+##root(root_metainfo,rm_ic_0,label_color_bullish,input__color)

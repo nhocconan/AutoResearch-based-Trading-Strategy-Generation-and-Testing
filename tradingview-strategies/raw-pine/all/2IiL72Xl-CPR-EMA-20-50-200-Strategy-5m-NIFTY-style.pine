@@ -1,0 +1,142 @@
+//@version=5
+strategy("CPR + EMA(20/50/200) Strategy (5m) - NIFTY style", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === INPUTS
+emaFastLen = input.int(20, "EMA Fast (20)", minval=1)
+emaSlowLen = input.int(50, "EMA Slow (50)", minval=1)
+emaLongLen = input.int(200, "EMA Long (200)", minval=1)
+
+minGapPoints = input.float(2.0, "Min gap (points) for EMA widening", step=0.1)
+requireCrossover = input.bool(true, "Require EMA crossover for initial entry")
+gapMustBeIncreasing = input.bool(true, "Require gap increasing (momentum)")
+usePrevDailyForCPR = input.bool(true, "Use previous daily H/L/C for CPR (recommended)", inline="a")
+
+// Risk/exit inputs
+tpRR = input.float(2.0, "Take Profit: Risk:Reward", step=0.1)
+useSLAs = input.string("belowEMA20", "Stop loss method", options=["belowEMA20","belowBC","ATR"])
+atrLen = input.int(14, "ATR length (if using ATR SL)")
+atrMult = input.float(1.5, "ATR multiplier (if using ATR SL)", step=0.1)
+qtyContracts = input.int(1, "Contracts / Lots (fixed size)")
+
+// === DAILY CPR (use previous day)
+get_daily(x) =>
+    request.security(syminfo.tickerid, "D", x)
+
+// get previous day values
+dH = get_daily(high[1])
+dL = get_daily(low[1])
+dC = get_daily(close[1])
+
+pivot = (dH + dL + dC) / 3.0
+bc = (dH + dL) / 2.0
+tc = 2.0 * pivot - bc
+
+// plot CPR
+plot(tc, title="CPR - Top (TC)", color=color.green, linewidth=2)
+plot(pivot, title="CPR - Pivot", color=color.gray, linewidth=1)
+plot(bc, title="CPR - Bottom (BC)", color=color.red, linewidth=2)
+
+// === EMA calculations
+ema20 = ta.ema(close, emaFastLen)
+ema50 = ta.ema(close, emaSlowLen)
+ema200 = ta.ema(close, emaLongLen)
+
+plot(ema20, color=color.green, linewidth=2, title="EMA 20")
+plot(ema50, color=color.red, linewidth=2, title="EMA 50")
+plot(ema200, color=color.black, linewidth=2, title="EMA 200")
+
+// === Gap and slope logic
+gap = ema20 - ema50
+gapPrev = gap[1]
+gapIncreasing = gap > gapPrev and gap > minGapPoints
+gapDecreasing = gap < gapPrev and gap < -minGapPoints  // for shorts
+
+// crossover / crossunder
+fastAboveSlow = ema20 > ema50
+fastBelowSlow = ema20 < ema50
+crossoverEvent = ta.crossover(ema20, ema50)
+crossunderEvent = ta.crossunder(ema20, ema50)
+
+// Price vs CPR and 200ema
+priceAboveTC = close > tc
+priceBelowBC = close < bc
+priceAbove200 = close > ema200
+priceBelow200 = close < ema200
+
+// LONG condition
+longCond = false
+if requireCrossover
+    longCond := crossoverEvent and fastAboveSlow and priceAboveTC and priceAbove200 and (not gapMustBeIncreasing or gapIncreasing)
+else
+    longCond := fastAboveSlow and priceAboveTC and priceAbove200 and (not gapMustBeIncreasing or gapIncreasing)
+
+// SHORT condition
+shortCond = false
+if requireCrossover
+    shortCond := crossunderEvent and fastBelowSlow and priceBelowBC and priceBelow200 and (not gapMustBeIncreasing or gapDecreasing)
+else
+    shortCond := fastBelowSlow and priceBelowBC and priceBelow200 and (not gapMustBeIncreasing or gapDecreasing)
+
+// === Stop Loss calculation
+slBuffer = syminfo.mintick * 1.0
+longStop = switch useSLAs
+    "belowEMA20" => math.min(ema20, bc) - slBuffer
+    "belowBC"     => bc - slBuffer
+    "ATR"         => close - ta.atr(atrLen) * atrMult
+
+shortStop = switch useSLAs
+    "belowEMA20" => math.max(ema20, bc) + slBuffer
+    "belowBC"     => bc + slBuffer
+    "ATR"         => close + ta.atr(atrLen) * atrMult
+
+// Ensure stop is sensible relative to entry (only used after entry is placed)
+calcLongTarget(stop) =>
+    risk = math.abs(close - stop)
+    target = close + risk * tpRR
+    target
+
+calcShortTarget(stop) =>
+    risk = math.abs(close - stop)
+    target = close - risk * tpRR
+    target
+
+// === Entries and Exits
+if (longCond)
+    entryPrice = close
+    stopPrice = longStop
+    // ensure stop < entry
+    if stopPrice < entryPrice
+        tpPrice = calcLongTarget(stopPrice)
+        strategy.entry("Long", strategy.long, qtyContracts)
+        strategy.exit("Long TP/SL", from_entry="Long", limit=tpPrice, stop=stopPrice)
+
+if (shortCond)
+    entryPrice = close
+    stopPrice = shortStop
+    if stopPrice > entryPrice
+        tpPrice = calcShortTarget(stopPrice)
+        strategy.entry("Short", strategy.short, qtyContracts)
+        strategy.exit("Short TP/SL", from_entry="Short", limit=tpPrice, stop=stopPrice)
+
+// === Plot signals on chart
+plotshape(longCond, title="LongSignal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="BUY")
+plotshape(shortCond, title="ShortSignal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+
+// Alerts
+alertcondition(longCond, title="Long Signal", message="CPR+EMA Long Signal on {{ticker}}")
+alertcondition(shortCond, title="Short Signal", message="CPR+EMA Short Signal on {{ticker}}")
+
+// Debug prints (optional)
+var table dbg = table.new(position.top_right, 1, 4)
+if barstate.islast
+    table.cell(dbg, 0, 0, "EMA20-EMA50 gap: " + str.tostring(gap, format.mintick))
+    table.cell(dbg, 0, 1, "GapIncreasing: " + str.tostring(gapIncreasing))
+    table.cell(dbg, 0, 2, "Price>TC: " + str.tostring(priceAboveTC))
+    table.cell(dbg, 0, 3, "Price>200: " + str.tostring(priceAbove200))
+
+View in Pine Editor・135 lines
+Use on chart
+1
+5
+782
+indicator best suited for nifty for 5 minute time frame.

@@ -1,0 +1,7 @@
+//@version=4
+buyLine=##input(defval=45,type='INPUT_INTEGER',##id='in_4')
+exitLine=##input(defval=70,type='INPUT_INTEGER',##id='in_5')
+profitExitLine=##input(defval=75,type='INPUT_INTEGER',##id='in_9')
+##root(root_metainfo,rm_0,profitExitLine,input__float)
+##root(root_metainfo,rm_1,exitLine,input__float)
+##root(root_metainfo,rm_2,buyLine,input__float)

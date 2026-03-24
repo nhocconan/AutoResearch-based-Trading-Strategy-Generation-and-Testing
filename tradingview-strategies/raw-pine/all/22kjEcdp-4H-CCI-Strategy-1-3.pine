@@ -1,0 +1,37 @@
+//@version=2
+strategy("4H CCI Strategy 1.3", overlay=true)
+length = input( 11 )
+overSold = input( -150 )
+overBought = input( +150 )
+price1 = high
+price2 = low
+ucci = cci(price1, length)
+dcci = cci(price2, length)
+vcci = cci(ohlc4, 11)
+tp = input(title='Take profit in ticks:', type=float, defval=3000.0)
+sl = input(title='Stop loss in ticks:', type=float, defval=1000.0)
+trade_size = input(title='Trade Size:', type=float, defval=5)
+if (not na(vcci))
+    if (crossover(dcci, overSold))
+        strategy.entry("CCILE", strategy.long, comment="CCILE",qty=trade_size)
+        strategy.exit(id="CCILE", profit = tp, loss = sl)
+    if (crossunder(ucci, overBought))
+        strategy.entry("CCISE", strategy.short, comment="CCISE",qty=trade_size)
+        strategy.exit(id="CCISE", profit = tp, loss = sl)
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・21 lines
+Use on chart
+1
+7
+3
+7
+5 525
+Still working on fixing the code 100%.
+Will update with a new version soon.
+This one's fine tuned for gold (tp and sl size, and contract size for a 100k account)
+
+Cheers,
+
+Ivan Labrie
+Time at Mode FX

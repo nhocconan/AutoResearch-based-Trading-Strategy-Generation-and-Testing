@@ -1,0 +1,257 @@
+//@version=5
+strategy("VIOP Scalping - Original C# (v1.1)", overlay=true, initial_capital=1000000, commission_type=strategy.commission.percent, commission_value=0.01)
+
+// --- C# PARAMETERS (Lines 20-80) ---
+// Trend and Indicators
+wmaLen = input.int(50, "Main Trend WMA", tooltip="Price above = LONG, Price below = SHORT")
+emaFastLen = input.int(8, "Fast EMA")
+emaSlowLen = input.int(21, "Slow EMA")
+rsiLen = input.int(14, "RSI Period")
+adxLen = input.int(14, "ADX Period")
+
+// Threshold Values
+rsiBuyLimit = input.float(65, "RSI Long Ceiling", tooltip="RSI must be LOWER than this for Long")
+rsiSellLimit = input.float(35, "RSI Short Floor", tooltip="RSI must be HIGHER than this for Short")
+adxThreshold = input.float(16.0, "ADX Threshold", tooltip="Trend strength must be greater than this")
+emaDiffThreshold = input.float(0.03, "EMA Difference Threshold")
+
+// Risk Management (Fixed Percentages)
+tpPercent = input.float(0.45, "Take Profit %") / 100
+tpStrongPercent = input.float(0.70, "Strong Trend Take Profit %") / 100
+slPercent = input.float(0.90, "Stop Loss %") / 100
+trailActivePct = input.float(0.35, "Trailing Activation %") / 100
+trailDistPct = input.float(0.15, "Trailing Distance %") / 100
+
+// Time Filter (C# Lines 26-27: No trades between 09:30-10:05)
+// Check your TradingView session settings to match.
+noTradeSession = input.session("0930-1005", "No-Trade Hours")
+
+// --- INDICATORS ---
+// WMA 50 Main Trend
+mainTrendWMA = ta.wma(close, wmaLen)
+
+// EMAs
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaDiff = emaFast - emaSlow
+prevEmaDiff = emaDiff[1]
+
+// RSI
+rsiVal = ta.rsi(close, rsiLen)
+
+// ADX Calculation
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen) // Built-in PineScript ADX
+
+// --- ENTRY LOGIC (C# Lines 430-520) ---
+// Time Check (Do not trade during banned hours)
+isInNoTradeTime = not na(time(timeframe.period, noTradeSession))
+
+// Trend Status
+isMainTrendUp = close > mainTrendWMA
+isMainTrendDown = close < mainTrendWMA
+
+// Long Conditions
+// 1. EMA Difference positive and > threshold
+// 2. Momentum increasing (Diff > Prev Diff)
+// 3. RSI Filter (48 < RSI < 65)
+// 4. Price higher than previous close
+// 5. ADX > 16
+longCondition = (emaDiff > emaDiffThreshold) and (emaDiff > prevEmaDiff) and (rsiVal > 48 and rsiVal < rsiBuyLimit) and (close > close[1]) and (adxVal > adxThreshold) and isMainTrendUp
+
+// Short Conditions
+shortCondition = (emaDiff < -emaDiffThreshold) and (emaDiff < prevEmaDiff) and (rsiVal < 52 and rsiVal > rsiSellLimit) and (close < close[1]) and (adxVal > adxThreshold) and isMainTrendDown
+
+// Strong Trend Check (For higher Take Profit)
+// C# Code: Price difference > 20 points AND EMA diff > 1.5 points
+isStrongTrend = math.abs(close - mainTrendWMA) > 20 and math.abs(emaDiff) > 1.5
+currentTP = isStrongTrend ? tpStrongPercent : tpPercent
+
+// --- TRADE EXECUTION ---
+if not isInNoTradeTime
+    if longCondition
+        strategy.entry("Long", strategy.long, comment="L | ADX:" + str.tostring(math.round(adxVal,1)))
+        
+    if shortCondition
+        strategy.entry("Short", strategy.short, comment="S | ADX:" + str.tostring(math.round(adxVal,1)))
+
+// --- EXIT MANAGEMENT (Trailing + Fixed TP/SL) ---
+// PineScript strategy.exit handles trailing automatically.
+// Trailing Activation: When price reaches 0.35% profit.
+// Trailing Distance: Follows price from 0.15% distance.
+
+strategy.exit("Exit Long", "Long", profit=close * currentTP / syminfo.mintick, loss=close * slPercent / syminfo.mintick, trail_price=close * (1 + trailActivePct), trail_offset=close * trailDistPct / syminfo.mintick)
+strategy.exit("Exit Short", "Short", profit=close * currentTP / syminfo.mintick, loss=close * slPercent / syminfo.mintick, trail_price=close * (1 - trailActivePct), trail_offset=close * trailDistPct / syminfo.mintick)
+
+// Visuals
+plot(mainTrendWMA, color=color.yellow, linewidth=2, title="WMA 50 Trend")
+plot(emaFast, color=color.green, title="EMA 8")
+plot(emaSlow, color=color.red, title="EMA 21")
+
+View in Pine Editor・88 lines
+Use on chart
+2
+0
+890
+VIOP Scalping – Original is a rule-based scalping strategy ported from an original C# logic set. It aims to trade only when trend direction, momentum, and trend strength align, then manages the position using fixed take-profit/stop-loss percentages with an optional trailing mechanism to protect gains during favorable moves.
+
+This strategy is provided for educational and backtesting purposes only. It is not financial advice and does not guarantee profitability. Always test thoroughly before any live usage.
+
+
+
+Core Concept
+Follow the dominant WMA trend, confirm momentum with EMA separation, filter conditions with RSI + ADX, then exit using fixed TP/SL with trailing behavior after a defined profit threshold.
+
+
+
+How the Strategy Works
+
+
+Trend Direction is defined by WMA: above WMA = long bias, below WMA = short bias.
+
+Momentum is measured via Fast EMA vs Slow EMA and the EMA difference.
+
+Trend Strength is confirmed using ADX (must exceed a threshold).
+
+RSI filters trades to avoid entering when momentum is likely overextended or weak.
+
+A no-trade session blocks entries during a predefined time window (default 09:30–10:05).
+
+Exit logic uses fixed percent TP/SL, with an optional trailing mechanism that activates after a profit threshold.
+
+
+
+Inputs and Settings
+
+Trend and Indicator Settings
+
+Main Trend WMA: Determines directional bias (price above = long, price below = short).
+
+Fast EMA / Slow EMA: Used to measure momentum and directional separation.
+
+RSI Period: Filters entries based on RSI range constraints.
+
+ADX Period: Measures trend strength (must exceed threshold to allow entries).
+
+
+
+Threshold Settings
+
+EMA Difference Threshold: Minimum EMA separation required to validate momentum.
+
+ADX Threshold: Minimum ADX required to confirm trend strength.
+
+RSI Long Ceiling: RSI must remain below this value for long entries.
+
+RSI Short Floor: RSI must remain above this value for short entries.
+
+
+
+Risk Management Settings
+
+Take Profit %: Default TP distance in percent.
+
+Strong Trend Take Profit %: Higher TP used when a “strong trend” condition is detected.
+
+Stop Loss %: Fixed SL distance in percent.
+
+Trailing Activation %: Profit threshold at which trailing starts.
+
+Trailing Distance %: Trailing offset distance used once trailing is active.
+
+
+
+Time Filter
+
+No-Trade Hours: Default session is 09:30–10:05. During this window, the strategy does not open new trades.
+
+
+
+Entry Logic
+
+No-Trade Time Filter
+
+If the current bar falls inside the no-trade session, entries are blocked.
+
+
+
+Long Entry Conditions
+
+Price is above the WMA trend line.
+
+EMA difference is positive and greater than the EMA Difference Threshold.
+
+EMA momentum is increasing (current EMA diff > previous EMA diff).
+
+RSI is within the defined range (RSI > 48 and RSI < RSI Long Ceiling).
+
+Close is higher than the previous close.
+
+ADX is above the ADX Threshold.
+
+
+
+Short Entry Conditions
+
+Price is below the WMA trend line.
+
+EMA difference is negative and lower than -EMA Difference Threshold.
+
+Bearish momentum is increasing (current EMA diff < previous EMA diff).
+
+RSI is within the defined range (RSI < 52 and RSI > RSI Short Floor).
+
+Close is lower than the previous close.
+
+ADX is above the ADX Threshold.
+
+
+
+Strong Trend Logic (Dynamic TP Selection)
+
+If price is far from the WMA (absolute distance > 20 points) AND EMA separation is strong (absolute EMA diff > 1.5 points), the strategy treats the environment as a strong trend.
+
+In strong trend mode, the strategy uses “Strong Trend Take Profit %” instead of the default “Take Profit %”.
+
+
+
+Exit Management (TP/SL + Trailing)
+
+
+The strategy uses fixed percentage-based TP and SL levels.
+
+Trailing logic is enabled via strategy.exit and activates only after price moves in profit by the defined Trailing Activation %.
+
+Once activated, trailing follows price using the defined Trailing Distance % offset.
+
+This is designed to secure partial gains during extended moves while still allowing room for continuation.
+
+
+
+What You See on the Chart
+
+WMA Trend Line (Main Trend Filter).
+
+Fast EMA and Slow EMA (Momentum Confirmation).
+
+Strategy entry/exit markers generated by TradingView.
+
+
+
+Recommended Use
+
+Scalping systems that rely on trend-following and momentum confirmation.
+
+Markets where ADX filtering helps avoid choppy conditions.
+
+Traders who want a simple, parameter-driven TP/SL system with trailing after confirmation.
+
+
+
+Important Notes
+
+The no-trade session depends on your chart/session settings. Ensure your symbol/session configuration matches your intended market hours.
+
+Percent-based exits scale with price; results will vary across instruments and volatility regimes.
+
+Always validate behavior using bar replay, forward testing, and realistic commission/slippage assumptions.
+

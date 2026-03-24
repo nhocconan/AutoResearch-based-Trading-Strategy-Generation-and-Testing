@@ -1,0 +1,117 @@
+//@version=5
+strategy("Neon Momentum Waves Strategy", overlay=false, initial_capital=100000, currency=currency.USD)
+
+// User inputs for momentum parameters
+fast_length    = input(12, "Fast Length")
+slow_length    = input(26, "Slow Length")
+signal_length  = input(20, "Signal Length")
+
+// User inputs for trade entries/exits
+entry_level    = input(0, "Entry Level (Zero Line)")
+long_exit_level  = input(11, "Long Exit Level")
+short_exit_level = input(-9, "Short Exit Level")
+
+// Calculate MACD-like momentum waves
+macd   = ta.ema(close, fast_length) - ta.ema(close, slow_length)
+signal = ta.ema(macd, signal_length)
+hist   = macd - signal
+
+// Define colors for neon effect
+aqua   = color.new(color.aqua, 0)      // Aqua for positive momentum
+purple = color.new(color.purple, 0)    // Purple for negative momentum
+dynamic_color = hist >= 0 ? aqua : purple
+
+// Plot momentum waves with neon effect
+plot(hist, title="Neon Momentum Waves", color=dynamic_color, linewidth=3)
+plot(hist, title="Glow 1", color=color.new(dynamic_color, 80), linewidth=10)
+plot(hist, title="Glow 2", color=color.new(dynamic_color, 80), linewidth=7)
+plot(hist, title="Glow 3", color=color.new(dynamic_color, 90), linewidth=4)
+plot(hist, title="Glow 4", color=color.new(dynamic_color, 90), linewidth=1)
+
+// Plot the entry level (zero line) and exit levels for reference
+hline(entry_level, "Entry Level", color=color.gray)
+hline(long_exit_level, "Long Exit Level", color=color.green)
+hline(short_exit_level, "Short Exit Level", color=color.red)
+
+// Strategy logic
+
+// Long Entry: when hist crosses above the entry level (default 0)
+longCondition = ta.crossover(hist, entry_level)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+// Short Entry: when hist crosses below the entry level (default 0)
+shortCondition = ta.crossunder(hist, entry_level)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Long Exit: exit long position when hist crosses above the long exit level (default 10)
+longExit = strategy.position_size > 0 and ta.crossover(hist, long_exit_level)
+if (longExit)
+    strategy.close("Long", comment="Long Exit")
+
+// Short Exit: exit short position when hist crosses below the short exit level (default -10)
+shortExit = strategy.position_size < 0 and ta.crossunder(hist, short_exit_level)
+if (shortExit)
+    strategy.close("Short", comment="Short Exit")
+
+View in Pine Editor・56 lines
+Use on chart
+9
+6
+2 631
+Introduction
+The Neon Momentum Waves Strategy is a momentum-based indicator designed to help traders visualize potential shifts in market direction. It builds upon a MACD-style calculation while incorporating an enhanced visual representation of momentum waves. This approach may assist traders in identifying areas of increasing or decreasing momentum, potentially aligning with market trends or reversals.
+
+How It Works
+This strategy is based on a modified MACD (Moving Average Convergence Divergence) method, calculating the difference between two Exponential Moving Averages (EMAs). The momentum wave represents this difference, while an additional smoothing line (signal line) helps highlight potential momentum shifts.
+
+Key Components:
+Momentum Calculation:
+
+Uses a fast EMA (12-period) and a slow EMA (26-period) to measure short-term and long-term momentum.
+A signal line (20-period EMA of the MACD difference) smooths fluctuations.
+The histogram (momentum wave) represents the divergence between the MACD value and the signal line.
+Interpreting Momentum Changes:
+
+Momentum Increasing: When the histogram rises above the zero line, it may indicate strengthening upward movement.
+Momentum Decreasing: When the histogram moves below the zero line, it may signal a weakening trend or downward momentum.
+Potential Exhaustion Points: Users can define custom threshold levels (default: ±10) to highlight when momentum is significantly strong or weak.
+Visual Enhancements:
+
+The neon glow effect is created by layering multiple plots with decreasing opacity, enhancing the clarity of momentum shifts.
+
+Aqua-colored waves highlight upward momentum, while purple waves represent downward momentum.
+
+Horizontal reference lines mark the zero line and user-defined thresholds to improve interpretability.
+
+How It Differs from Traditional Indicators
+Improved Visualization: Unlike standard MACD histograms, this approach provides clearer visual cues using a neon-style wave format.
+
+Customizable Thresholds: Rather than relying solely on MACD crossovers, users can adjust sensitivity settings to better suit their trading style.
+
+Momentum-Based Approach: The strategy is focused on visualizing shifts in momentum strength, rather than predicting price movements.
+
+Potential Use Cases
+Momentum Trend Awareness: Helps traders identify periods where momentum appears to be strengthening or fading.
+
+Market Structure Analysis: May complement other indicators to assess whether price action aligns with momentum changes.
+
+Flexible Timeframe Application: Can be used across different timeframes, depending on the trader’s strategy.
+
+Important Considerations
+This strategy is purely momentum-based and does not incorporate volume, fundamental factors, or price action confirmation.
+
+
+Momentum shifts do not guarantee price direction changes—they should be considered alongside broader market context.
+
+
+The strategy may perform differently in trending vs. ranging markets, so adjustments in sensitivity may be needed.
+
+
+Risk management is essential—traders should apply proper stop-losses and position sizing techniques in line with their risk tolerance.
+
+Conclusion
+The Neon Momentum Waves Strategy provides a visually enhanced method of tracking momentum, allowing traders to observe potential changes in market strength. While not a predictive tool, it serves as a complementary indicator that may help traders in momentum-based decision-making. As with any technical tool, it should be used as part of a broader strategy that considers multiple factors in market analysis.
+
+

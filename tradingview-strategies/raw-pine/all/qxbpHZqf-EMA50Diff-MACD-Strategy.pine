@@ -1,0 +1,82 @@
+//@version=3
+strategy("EMA50Diff & MACD Strategy", overlay=false, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.15, initial_capital=100000, slippage=30)
+EMA = input(18, step=1)
+MACDfast = input(12)
+MACDslow = input(26)
+EMADiffThreshold = input(8)
+MACDThreshold = input(80)
+TargetValidityThreshold = input(65, step=5)
+Target = input(120, step=5)
+StopLoss = input(650, step=5) 
+ema = ema(close, EMA)
+hl = plot(0, color=white, linewidth=1)
+diff = close - ema
+clr = color(blue, transp=100)
+if diff>0
+    clr := lime
+else 
+    if diff<0
+        clr := red
+
+fastMA = ema(close, MACDfast)
+slowMA = ema(close, MACDslow)
+macd = (fastMA - slowMA)*3
+signal = sma(macd, 9)
+plot(macd, color=aqua, linewidth=2)
+plot(signal, color=purple, linewidth=2)
+
+macdlong = macd<-MACDThreshold and signal<-MACDThreshold and crossover(macd, signal)
+macdshort = macd>MACDThreshold and signal>MACDThreshold and crossunder(macd, signal)
+position = 0.0
+position := nz(strategy.position_size, 0.0)
+long = (position < 0 and close < strategy.position_avg_price - TargetValidityThreshold and macdlong) or 
+     (position == 0.0 and diff < -EMADiffThreshold and diff > diff[1] and diff[1] < diff[2] and macdlong)
+
+short = (position > 0 and close > strategy.position_avg_price + TargetValidityThreshold and macdshort) or 
+      (position == 0.0 and diff > EMADiffThreshold and diff < diff[1] and diff[1] > diff[2] and macdshort)
+amount = (strategy.equity / close) //- ((strategy.equity / close / 10)%10)
+bgclr = color(blue, transp=100) //#0c0c0c
+if long
+    strategy.entry("long", strategy.long, amount)
+    bgclr := green
+if short
+    strategy.entry("short", strategy.short, amount)
+    bgclr := maroon
+bgcolor(bgclr, transp=20)
+strategy.close("long", when=close>strategy.position_avg_price + Target)
+strategy.close("short", when=close<strategy.position_avg_price - Target)
+strategy.exit("STOPLOSS", "long", stop=strategy.position_avg_price - StopLoss)
+strategy.exit("STOPLOSS", "short", stop=strategy.position_avg_price + StopLoss)
+//plotshape(long, style=shape.labelup, location=location.bottom, color=green)
+//plotshape(short, style=shape.labeldown, location=location.top, color=red)
+pl = plot(diff, style=histogram, color=clr)
+fill(hl, pl, color=clr)
+
+View in Pine Editor・53 lines
+Use on chart
+1
+6
+3
+2
+4 772
+One of my attempts to create a strategy for BTC.
+
+Its a combination of EMA50Diff (the difference between spot and EMA50) and MACD.
+Buy signal if (EMA50Diff) < -(EMADiffThreshold),
+(MACD bearish crossunder),
+(MACD) < -(MACDThreshold),
+(EMA50Diff) > (EMA50Diff 1 candle ago),
+(EMA50Diff 1 candle ago) < (EMA50Diff 2 candles ago)
+
+Sell signal if (EMA50Diff) > (EMADiffThreshold),
+(MACD bullish crossover),
+(MACD) > (MACDThreshold),
+(EMA50Diff) < (EMA50Diff 1 candle ago),
+(EMA50Diff 1 candle ago) > (EMA50Diff 2 candles ago)
+
+Exit either when target or stoploss get reached.
+
+Initial capital is set to 100k and its currently going all-in on every trade but im looking for a better way to handle position sizes already..
+Also i included slippage of 30 ticks and exchange commission of 0.15% (e.g. 2x BitMEX market taker fee)
+
+Works best on 15m on bitfinex, bitstamp and gdax and i'm still trying to optimize it for bitmex too, will update when i got there..

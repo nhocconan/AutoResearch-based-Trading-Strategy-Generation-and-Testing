@@ -1,0 +1,34 @@
+//@version=3
+// Modified from kivancfr3762's A2MK script
+
+strategy("EMA STRATEGY", overlay=true)
+
+ema2=input(13, "EMA2 Length")
+ema1=input(34, "EMA1 Length")
+
+ema_sr = ema((max(close[1], high) + min(close[1], low)) / 2, ema1)
+
+highest_ema = ema(highest(ema_sr, 3), ema2)
+lowest_ema = ema(lowest(ema_sr, 3), ema2)
+k1 = ema_sr > highest_ema
+k2 = ema_sr < lowest_ema
+
+ema_ysl = iff(k1, lowest_ema, highest_ema)
+
+
+longCondition = crossover(ema_ysl, ema_sr)
+if (longCondition)
+    strategy.entry("Short", strategy.short)
+
+shortCondition = crossunder(ema_ysl, ema_sr)
+if (shortCondition)
+    strategy.entry("Long", strategy.long)
+
+View in Pine Editor・25 lines
+Use on chart
+8
+9
+1
+2 665
+Modified by KIVANCfr3762's A2MK plot script to strategy script
+

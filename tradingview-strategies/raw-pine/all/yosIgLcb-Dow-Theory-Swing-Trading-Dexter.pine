@@ -1,0 +1,90 @@
+//@version=6
+strategy('Dow Theory Swing Trading-Dexter', overlay = true)
+
+// Swing High and Swing Low Detection
+swingLength = 5 // Defines how many bars on each side to confirm a swing
+swingHigh = ta.highest(high, swingLength) // Highest high in past 'swingLength' bars
+swingLow = ta.lowest(low, swingLength) // Lowest low in past 'swingLength' bars
+
+// Track previous swings
+var float prevHigh = na
+var float prevLow = na
+
+// Update previous swings
+if bool(ta.change(swingHigh))
+    prevHigh := swingHigh
+    prevHigh
+
+if bool(ta.change(swingLow))
+    prevLow := swingLow
+    prevLow
+
+// Define Higher Highs (HH) and Higher Lows (HL) for Uptrend
+isHH = swingHigh > nz(prevHigh[1])
+isHL = swingLow > nz(prevLow[1])
+
+// Define Lower Highs (LH) and Lower Lows (LL) for Downtrend
+isLH = swingHigh < nz(prevHigh[1])
+isLL = swingLow < nz(prevLow[1])
+
+// Buy and Sell Conditions
+buyCondition = isHH and isHL // Uptrend confirmation
+sellCondition = isLH and isLL // Downtrend confirmation
+
+// Execute Buy and Sell Signals
+if buyCondition
+    strategy.entry('Buy', strategy.long)
+
+if sellCondition
+    strategy.entry('Sell', strategy.short)
+
+// Plot Swing Points
+plotshape(isHH, location = location.abovebar, color = color.green, style = shape.labelup, title = 'HH')
+plotshape(isHL, location = location.belowbar, color = color.blue, style = shape.triangleup, title = 'HL')
+plotshape(isLH, location = location.abovebar, color = color.red, style = shape.triangledown, title = 'LH')
+plotshape(isLL, location = location.belowbar, color = color.orange, style = shape.labeldown, title = 'LL')
+
+// Background highlighting for trends
+bgcolor(buyCondition ? color.green : sellCondition ? color.red : na)
+
+View in Pine Editor・48 lines
+Use on chart
+4
+2
+2 448
+This Pine Script strategy that implements a basic price action-based trading system inspired by Dow Theory, focusing on swing highs and swing lows. This strategy will generate buy and sell signals based on the formation of higher highs (HH) and higher lows (HL) for an uptrend, and lower highs (LH) and lower lows (LL) for a downtrend.
+
+Swing Highs and Swing Lows:
+
+The script identifies swing highs and swing lows using the ta.highest and ta.lowest functions over a specified lookback period.
+
+A swing high is identified when the high of the current bar is the highest high over the lookback period.
+
+A swing low is identified when the low of the current bar is the lowest low over the lookback period.
+
+Trend Detection:
+
+An uptrend is detected when the current low is higher than the last identified swing low.
+
+A downtrend is detected when the current high is lower than the last identified swing high.
+
+Buy and Sell Signals:
+
+A buy signal is generated when the price closes above the last swing high during an uptrend.
+
+A sell signal is generated when the price closes below the last swing low during a downtrend.
+
+Plotting:
+
+Swing highs and swing lows are plotted on the chart using plotshape.
+
+Buy and sell signals are also plotted on the chart for visual reference.
+
+How to Use:
+Copy and paste the script into the Pine Script editor in TradingView.
+
+Adjust the lookback period as needed to suit your trading style and timeframe.
+
+Apply the script to your chart and it will generate buy and sell signals based on the price action.
+
+NOTE: Please uncheck the all the unwanted symbol from chart for clear view .

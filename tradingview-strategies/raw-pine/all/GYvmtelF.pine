@@ -1,0 +1,68 @@
+//@version=6
+strategy("Up Gap Strategy with Delay", overlay=true, pyramiding=0)  // Enable pyramiding for multiple positions
+
+// === Inputs ===
+gapThreshold = input.float(1, title="Gap Size Threshold in %", minval=0.1, step = 0.1)  // Minimum gap size in percentage
+delayPeriods = input.int(0, title="Delay Periods After Gap", minval=0)  // Number of periods after the gap before entry
+holdingPeriods = input.int(7, title="Holding Periods", minval=1)  // Number of periods for which the position is held
+
+// === Gap Calculation ===
+gapSize = (open - close[1]) / close[1] * 100  // Calculate the gap size in percentage
+
+// === Up Gap Condition ===
+upGapCondition = gapSize >= gapThreshold  // Condition for an up gap if gap size is >= threshold
+
+// === Long Entry Condition with Delay ===
+var float entryBar = na
+longCondition = upGapCondition and (na(entryBar) or bar_index > entryBar + delayPeriods)  // Enter after gap or delay
+entryDelayCondition = not na(entryBar) and bar_index >= entryBar + delayPeriods  // Delay after the gap
+
+// === Entry Trigger ===
+if longCondition
+    entryBar := bar_index  // Store the bar index after the gap
+    strategy.entry("Long", strategy.long)  // Enter long position
+
+// === Exit Trigger after Holding Period ===
+if (not na(entryBar) and bar_index >= entryBar + delayPeriods + holdingPeriods)
+    strategy.close("Long")  // Close the position after holding period
+
+// === Plot Up Gaps ===
+plotshape(upGapCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Up Gap", text="Up Gap")
+
+// === Optional: Change background color when Up Gap occurs ===
+bgcolor(upGapCondition ? color.new(color.green, 90) : na)
+
+// === Display Gap Size as Label on the Chart ===
+if upGapCondition
+    label.new(bar_index, low, text=str.tostring(gapSize, "#.##") + "%", color=color.green, style=label.style_label_up, yloc=yloc.belowbar)
+
+View in Pine Editor・37 lines
+Use on chart
+3
+0
+1 220
+This strategy, titled “Up Gap Strategy with Delay,” is based on identifying up gaps in the price action of an asset. A gap is defined as the percentage difference between the current bar’s open price and the previous bar’s close price. The strategy triggers a long position if the gap exceeds a user-defined threshold and includes a delay period before entering the position. After entering, the position is held for a set number of periods before being closed.
+
+Key Features:
+
+1. Gap Threshold: The strategy defines an up gap when the gap size exceeds a specified threshold (in percentage terms). The gap threshold is an input parameter that allows customization based on the user’s preference.
+
+2. Delay Period: After the gap occurs, the strategy waits for a delay period before initiating a long position. This delay can help mitigate any short-term volatility that might occur immediately after the gap.
+
+3. Holding Period: Once the position is entered, it is held for a user-defined number of periods (holdingPeriods). This is to capture the potential post-gap trend continuation, as gaps often indicate strong directional momentum.
+
+4. Gap Plotting: The strategy visually plots up gaps on the chart by placing a green label beneath the bar where the gap condition is met. Additionally, the background color turns green to highlight up-gap occurrences.
+
+5. Exit Condition: The position is exited after the defined holding period. The strategy ensures that the position is closed after this time, regardless of whether the price is in profit or loss.
+
+Scientific Background:
+
+The gap theory has been widely studied in financial literature and is based on the premise that gaps in price often represent areas of significant support or resistance. According to research by Kaufman (2002), gaps in price action can be indicators of future price direction, particularly when they occur after a period of consolidation or a trend reversal. Moreover, Gaps and their Implications in Technical Analysis (Murphy, 1999) highlights that gaps can reflect imbalances between supply and demand, leading to high momentum and potential price continuation or reversal.
+
+In trading strategies, utilizing gaps with specific conditions, such as delay and holding periods, can enhance the ability to capture significant price moves. The strategy’s delay period helps avoid potential market noise immediately after the gap, while the holding period seeks to capitalize on the price continuation that often follows gap formation.
+
+This methodology aligns with momentum-based strategies, which rely on the persistence of trends in financial markets. Several studies, including Jegadeesh & Titman (1993), have documented the existence of momentum effects in stock prices, where past price movements can be predictive of future returns.
+
+Conclusion:
+
+This strategy incorporates gap detection and momentum principles, supported by empirical research in technical analysis, to attempt to capitalize on price movements following significant gaps. By waiting for a delay period and holding the position for a specified time, it aims to mitigate the risk associated with early volatility while maximizing the potential for sustained price moves.

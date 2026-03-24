@@ -1,0 +1,149 @@
+//@version=5
+strategy("AB=CD Fibonacci Strategy (One Trade at a Time)", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+//─────────────────────────────
+// Inputs
+//─────────────────────────────
+swingLen = input.int(5, "Pivot Strength", minval=2)
+fibRetraceMin = input.float(0.5, "Min Retracement (C)", step=0.01)
+fibRetraceMax = input.float(0.786, "Max Retracement (C)", step=0.01)
+tpRR = input.float(1.5, "Take Profit (R multiple)", step=0.1)
+slRR = input.float(0.75, "Stop Loss (R multiple)", step=0.1)
+showLines = input.bool(true, "Show ABCD Lines")
+
+//─────────────────────────────
+// Pivots
+//─────────────────────────────
+pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+pivotLow = ta.pivotlow(low, swingLen, swingLen)
+
+//─────────────────────────────
+// Variables persistentes
+//─────────────────────────────
+var float A = na
+var float B = na
+var float C = na
+var float D = na
+var int A_bar = na
+var int B_bar = na
+var int C_bar = na
+var int D_bar = na
+var string pattern = na
+var bool patternFound = false
+var bool tradeActive = false  // 🔒 Controla una operación a la vez
+
+//─────────────────────────────
+// Detección de patrón AB=CD (solo si no hay operación abierta)
+//─────────────────────────────
+if not tradeActive
+    if not na(pivotHigh)
+        A := high[swingLen]
+        A_bar := bar_index[swingLen]
+    if not na(pivotLow)
+        B := low[swingLen]
+        B_bar := bar_index[swingLen]
+
+    if not na(A) and not na(B)
+        abRange = math.abs(A - B)
+
+        // 🔹 Bullish
+        if A > B
+            retrace = (high - B) / abRange
+            if retrace >= fibRetraceMin and retrace <= fibRetraceMax
+                C := high
+                C_bar := bar_index
+                D := C - abRange
+                D_bar := bar_index
+                pattern := "bullish"
+                patternFound := true
+
+        // 🔸 Bearish
+        if B > A
+            retrace = (B - low) / abRange
+            if retrace >= fibRetraceMin and retrace <= fibRetraceMax
+                C := low
+                C_bar := bar_index
+                D := C + abRange
+                D_bar := bar_index
+                pattern := "bearish"
+                patternFound := true
+
+//─────────────────────────────
+// Dibujar el patrón
+//─────────────────────────────
+if showLines and patternFound
+    line.new(A_bar, A, B_bar, B, color=color.new(color.blue, 0))
+    line.new(B_bar, B, C_bar, C, color=color.new(color.blue, 0))
+    line.new(C_bar, C, D_bar, D, color=color.new(color.purple, 0), style=line.style_dotted)
+    label.new(A_bar, A, "A", style=label.style_label_left)
+    label.new(B_bar, B, "B", style=label.style_label_left)
+    label.new(C_bar, C, "C", style=label.style_label_left)
+    label.new(D_bar, D, "D", style=label.style_label_left, color=color.new(color.purple, 0))
+
+//─────────────────────────────
+// Entrada al tocar D (solo si no hay operación abierta)
+//─────────────────────────────
+if not tradeActive and patternFound
+    if pattern == "bullish" and close <= D
+        strategy.entry("Long AB=CD", strategy.long)
+        tradeActive := true
+    if pattern == "bearish" and close >= D
+        strategy.entry("Short AB=CD", strategy.short)
+        tradeActive := true
+
+//─────────────────────────────
+// TP/SL y reinicio tras cierre
+//─────────────────────────────
+if tradeActive
+    if strategy.position_size > 0
+        strategy.exit("Exit Long", "Long AB=CD", profit=tpRR * slRR * 100, loss=slRR * 100)
+    if strategy.position_size < 0
+        strategy.exit("Exit Short", "Short AB=CD", profit=tpRR * slRR * 100, loss=slRR * 100)
+
+    // Cuando se cierra la operación, reiniciar todo
+    if strategy.position_size == 0 and strategy.closedtrades > 0
+        A := na
+        B := na
+        C := na
+        D := na
+        pattern := na
+        patternFound := false
+        tradeActive := false
+
+View in Pine Editor・114 lines
+Use on chart
+3
+2
+1 284
+
+AB=CD Fibonacci Strategy - Harmonic Pattern Trading Bot
+Description
+An automated trading strategy that identifies and trades the classic AB=CD harmonic pattern, one of the most reliable geometric price formations in technical analysis. This strategy detects perfectly proportioned Fibonacci retracement setups and executes trades with precise risk-reward management.
+How It Works
+The indicator scans for the AB=CD pattern structure:
+
+Leg AB: Initial swing from pivot point A to pivot point B
+Leg BC: Retracement to point C (customizable Fibonacci levels)
+Leg CD: Mirror projection equal to the AB leg length
+
+When price touches point D, the strategy automatically enters a position with predefined take-profit and stop-loss levels based on your risk-reward ratio.
+Key Features
+
+One Trade at a Time: Ensures disciplined position management by allowing only one active trade per pattern
+Customizable Fibonacci Retracement: Set your preferred retracement range for point C (default 50% - 78.6%)
+Risk-Reward Control: Adjust stop-loss and take-profit multiples to match your trading plan
+Visual Pattern Display: Clear labeling of A, B, C, D points with pattern lines for easy identification
+Both Directions: Identifies bullish and bearish AB=CD patterns automatically
+
+Ideal For
+
+Swing traders on higher timeframes (4H, Daily, Weekly)
+Harmonic pattern traders seeking automation
+Traders wanting precise entry and exit rules based on Fibonacci geometry
+Those looking to reduce emotional trading and increase consistency
+
+Default Settings Optimized For
+
+NASDAQ futures and currency pairs
+Medium timeframe analysis
+Conservative risk management (10% position size per trade)

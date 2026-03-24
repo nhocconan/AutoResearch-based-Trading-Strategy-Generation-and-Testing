@@ -1,0 +1,153 @@
+//@version=5
+strategy("Larry Williams Oops Strategy", overlay=true, initial_capital=100000, calc_on_every_tick=true, process_orders_on_close=true, pyramiding=0)
+
+//================== Inputs ==================
+filterTicks   = input.int(5, "Filter (ticks) para entrada", minval=0)
+enableLongs   = input.bool(true,  "Activar Largos")
+enableShorts  = input.bool(true,  "Activar Cortos")
+delaySLBars   = input.int(0, "Retardo armado SL al inicio del día (barras intradía)", minval=0, maxval=10)
+
+
+tick = syminfo.mintick
+
+if not (timeframe.isminutes or timeframe.isseconds)
+    runtime.error("Usa timeframe en MINUTOS o SEGUNDOS.")
+
+isFirstBarOfDay = ta.change(time("D"))
+
+// Series diarias (lookahead para usar la vela de HOY durante el día)
+dOpen  = request.security(syminfo.tickerid, "D", open,  barmerge.gaps_off, barmerge.lookahead_on)
+dHigh  = request.security(syminfo.tickerid, "D", high,  barmerge.gaps_off, barmerge.lookahead_on)
+dLow   = request.security(syminfo.tickerid, "D", low,   barmerge.gaps_off, barmerge.lookahead_on)
+dClose = request.security(syminfo.tickerid, "D", close, barmerge.gaps_off, barmerge.lookahead_on)
+
+
+prevHigh = dHigh[1]
+prevLow  = dLow[1]
+prevOpen = dOpen[1]
+prevClose= dClose[1]
+
+yestBear = prevClose < prevOpen
+yestBull = prevClose > prevOpen
+
+// Gap de hoy
+gapDown = dOpen < prevLow
+gapUp   = dOpen > prevHigh
+
+var dayHigh = high
+var dayLow  = low
+if isFirstBarOfDay
+    dayHigh := high
+    dayLow  := low
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow  := math.min(dayLow, low)
+
+
+var dayBars = 0
+if isFirstBarOfDay
+    dayBars := 0
+else
+    dayBars += 1
+
+
+if isFirstBarOfDay
+
+    strategy.cancel("LongStop")
+    strategy.cancel("ShortStop")
+    if strategy.position_size > 0
+        strategy.exit("XL", from_entry="LongStop", stop=na, limit=na)
+    if strategy.position_size < 0
+        strategy.exit("XS", from_entry="ShortStop", stop=na, limit=na)
+
+
+longStopPrice  = prevLow  + filterTicks * tick
+shortStopPrice = prevHigh - filterTicks * tick
+
+canPlaceLong  = enableLongs  and gapDown and yestBear and isFirstBarOfDay and strategy.position_size == 0
+canPlaceShort = enableShorts and gapUp   and yestBull and isFirstBarOfDay and strategy.position_size == 0
+
+if canPlaceLong
+    strategy.entry(id="LongStop",  direction=strategy.long,  stop=longStopPrice,  comment="LongStop")
+if canPlaceShort
+    strategy.entry(id="ShortStop", direction=strategy.short, stop=shortStopPrice, comment="ShortStop")
+
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+
+longSL  = dayLow
+shortSL = dayHigh
+
+
+if inLong
+    strategy.exit("XL", from_entry="LongStop", stop= longSL, limit=na)
+if inShort
+    strategy.exit("XS", from_entry="ShortStop", stop= shortSL, limit=na)
+
+
+IsLastBarSession(sessionTime, sessionTimeZone=syminfo.timezone) =>
+    var int lastBarHour   = na
+    var int lastBarMinute = na
+    var int lastBarSecond = na
+    inSess = not na(time(timeframe.period, sessionTime, sessionTimeZone))
+
+    if not inSess and inSess[1]
+        lastBarHour   := hour[1]
+        lastBarMinute := minute[1]
+        lastBarSecond := second[1]
+    
+    hour == lastBarHour and minute == lastBarMinute and second == lastBarSecond
+
+
+
+if IsLastBarSession("1530-2155")
+    if inLong
+        strategy.close("LongStop",  comment="Cierre fin de sesión (close)")
+    if inShort
+        strategy.close("ShortStop", comment="Cierre fin de sesión (close)")
+
+
+plot(prevHigh, "Máx Ayer (D)",  display=display.all, style=plot.style_stepline)
+plot(prevLow,  "Mín Ayer (D)",  display=display.all, style=plot.style_stepline)
+plot(longStopPrice,  "Buy Stop",  color=color.new(color.green, 30), style=plot.style_circles)
+plot(shortStopPrice, "Sell Stop", color=color.new(color.red,   30), style=plot.style_circles)
+plot(dayHigh, "Máx Día (SL cortos)", color=color.new(color.red, 60))
+plot(dayLow,  "Mín Día (SL largos)", color=color.new(color.green, 60))
+
+View in Pine Editor・117 lines
+Use on chart
+1
+1
+5
+1
+3 050
+This strategy is a modern take on Larry Williams’ classic Oops setup. It trades intraday while referencing daily bars to detect opening gaps and align entries with the prior day’s direction. Risk is managed with day-based stops, and—unlike the original—all positions are closed at the end of the session (or at the last bar’s close), not at a fixed profit target or the first profitable open.
+
+Entry Rules
+
+Long setup (bullish reversion): Today opens below yesterday’s low (down gap) and yesterday’s candle was bearish. Place a buy stop at yesterday’s low + Filter (ticks).
+
+Short setup (bearish reversion): Today opens above yesterday’s high (up gap) and yesterday’s candle was bullish. Place a sell stop at yesterday’s high − Filter (ticks).
+
+Longs are only taken on down-gap days; shorts only on up-gap days.
+
+
+
+Protective Stop
+
+
+If long, stop loss trails the current day’s low.
+
+If short, stop loss trails the current day’s high.
+
+
+
+Exit Logic
+Positions are force-closed at the end of the session (in the last bar), ensuring no overnight exposure. There is no take-profit; only stop loss or end-of-day flat.
+
+Notes
+This strategy is designed for intraday charts (minutes/seconds) using daily data for gaps and prior-day direction.
+
+Longs/shorts can be enabled or disabled independently.

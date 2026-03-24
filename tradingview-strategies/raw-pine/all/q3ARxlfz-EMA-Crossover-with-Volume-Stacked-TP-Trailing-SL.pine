@@ -1,0 +1,65 @@
+//@version=6
+strategy("EMA Crossover with Volume + Stacked TP & Trailing SL", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// 📊 Inputs
+fastLen = input.int(21, title="Fast EMA")
+slowLen = input.int(55, title="Slow EMA")
+volMultiplier = input.float(1.2, title="Volume Threshold Multiplier")
+atrLen = input.int(14, title="ATR Length")
+tp1Mult = input.float(1.5, title="TP1 ATR Multiplier")
+tp2Mult = input.float(2.5, title="TP2 ATR Multiplier")
+trailOffsetMult = input.float(1.5, title="Trailing SL Offset (ATR)")
+trailTriggerMult = input.float(1.5, title="Trailing SL Activation (ATR)")
+
+// 📈 Indicators
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+plot(fastEMA, color=color.blue, title="Fast EMA")
+plot(slowEMA, color=color.orange, title="Slow EMA")
+
+atr = ta.atr(atrLen)
+avgVolume = ta.sma(volume, 20)
+volumeCondition = volume > avgVolume * volMultiplier
+plot(avgVolume, color=color.gray, title="Average Volume")
+
+// 🚀 Entry Conditions
+longCondition = ta.crossover(fastEMA, slowEMA) and volumeCondition
+shortCondition = ta.crossunder(fastEMA, slowEMA) and volumeCondition
+
+// 📌 Entry
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// 🎯 Take Profit Targets
+tp1 = atr * tp1Mult
+tp2 = atr * tp2Mult
+
+// 🛡️ Trailing Stop Setup
+trailOffset = atr * trailOffsetMult
+trailTrigger = atr * trailTriggerMult
+
+// 📤 Exit Logic for Long
+if (strategy.position_size > 0)
+    strategy.exit("TP1", from_entry="Long", profit=tp1, qty_percent=33)
+    strategy.exit("TP2", from_entry="Long", profit=tp2, qty_percent=33)
+    strategy.exit("Trail", from_entry="Long", trail_offset=trailOffset, trail_price=trailTrigger, qty_percent=34)
+
+// 📤 Exit Logic for Short
+if (strategy.position_size < 0)
+    strategy.exit("TP1", from_entry="Short", profit=tp1, qty_percent=33)
+    strategy.exit("TP2", from_entry="Short", profit=tp2, qty_percent=33)
+    strategy.exit("Trail", from_entry="Short", trail_offset=trailOffset, trail_price=trailTrigger, qty_percent=34)
+
+// 🧠 Visual Debug
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.triangleup, title="Long Signal")
+plotshape(shortCondition, location=location.abovebar, color=color.red, style=shape.triangledown, title="Short Signal")
+
+View in Pine Editor・58 lines
+Use on chart
+1
+3
+889
+I am relatively new here. Here is my humble contribution to the community. Simple does it! Ema 21,55 with volume. Surprisingly high win rates and good profit factors on USDJPY, EURJPY, BTCUSD, XAGUSD,XAUUSD, USOIL, USDCAD, EURGBP and AUDNZD. I cannot write a single line of code. I used Copilot for this.

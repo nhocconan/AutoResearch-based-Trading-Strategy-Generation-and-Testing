@@ -1,0 +1,77 @@
+//@version=5
+strategy("Golden Cross + Support/Resistance + SL/TP + Signals", overlay=true, initial_capital=10000, pyramiding=0, calc_on_every_tick=true)
+
+// === Inputs ===
+fastLen   = input.int(50,  "Fast EMA", minval=1)
+slowLen   = input.int(200, "Slow EMA", minval=1)
+sl_percent = input.float(1.0, "Stop Loss %", step=0.1, minval=0.0)
+tp_percent = input.float(2.0, "Take Profit %", step=0.1, minval=0.0)
+pivotLen   = input.int(5, "Pivot Length", minval=1)
+nearPct    = input.float(1.0, "Near Support/Resistance %", step=0.1)  // khoảng cách 1%
+
+// === EMAs ===
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+
+// === Golden Cross signals ===
+longCond  = ta.crossover(fastEMA, slowEMA)
+shortCond = ta.crossunder(fastEMA, slowLen)
+
+// === Support & Resistance (Pivot High/Low) ===
+pivotLow  = ta.pivotlow(low, pivotLen, pivotLen)
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+
+// Lấy giá trị SR mới nhất
+var float lastSupport = na
+var float lastResistance = na
+
+if not na(pivotLow)
+    lastSupport := pivotLow
+if not na(pivotHigh)
+    lastResistance := pivotHigh
+
+// Điều kiện giá gần SR (±nearPct%)
+supportNear    = not na(lastSupport) and math.abs(close - lastSupport) / close < nearPct/100
+resistanceNear = not na(lastResistance) and math.abs(close - lastResistance) / close < nearPct/100
+
+// === Entry Conditions ===
+buySignal  = longCond  and supportNear
+sellSignal = shortCond and resistanceNear
+
+if buySignal
+    strategy.entry("Long", strategy.long)
+if sellSignal
+    strategy.entry("Short", strategy.short)
+
+// === Exits ===
+if strategy.position_size > 0
+    longSL = strategy.position_avg_price * (1 - sl_percent/100.0)
+    longTP = strategy.position_avg_price * (1 + tp_percent/100.0)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0
+    shortSL = strategy.position_avg_price * (1 + sl_percent/100.0)
+    shortTP = strategy.position_avg_price * (1 - tp_percent/100.0)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// === Plots ===
+plot(fastEMA, color=color.yellow, title="Fast EMA")
+plot(slowEMA, color=color.blue,   title="Slow EMA")
+plot(lastSupport, "Support", color=color.green, style=plot.style_linebr)
+plot(lastResistance, "Resistance", color=color.red, style=plot.style_linebr)
+
+// === Buy/Sell signals on chart ===
+plotshape(buySignal,  title="Buy Signal",  color=color.green, style=shape.triangleup,   size=size.large, location=location.belowbar, text="BUY")
+plotshape(sellSignal, title="Sell Signal", color=color.red,   style=shape.triangledown, size=size.large, location=location.abovebar, text="SELL")
+
+// === Alerts ===
+alertcondition(buySignal,  title="Buy Alert",  message="Buy Signal Golden Cross + Support")
+alertcondition(sellSignal, title="Sell Alert", message="Sell Signal Death Cross + Resistance")
+
+View in Pine Editor・69 lines
+Use on chart
+4
+5
+1 911
+Golden Cross + Support/Resistance + SL/TP + Signals
+Golden Cross + Support/Resistance + SL/TP + Signals

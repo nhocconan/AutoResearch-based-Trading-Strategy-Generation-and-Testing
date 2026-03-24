@@ -1,0 +1,102 @@
+//@version=5
+strategy("EMA Smooth", shorttitle="EMA Smooth", overlay=true, calc_on_every_tick=false, dynamic_requests=true)
+
+// EMA Inputs
+fast_len = input.int(6, minval=1, title="Fast Length (EMA)")
+src = input.source(close, title="Source")
+
+// Smoothing Inputs
+grp = "Smoothing"
+tt_bb = "Only applies when 'SMA + Bollinger Bands' is selected. Determines the distance between the SMA and the bands."
+ma_type = input.string("SMA", "Type", options=["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=grp)
+ma_len = input.int(8, "Length", group=grp)
+bb_mult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, tooltip=tt_bb, group=grp)
+enable_ma = ma_type != "None"
+is_bb = ma_type == "SMA + Bollinger Bands"
+
+// EMA Calculation
+ema_out = ta.ema(src, fast_len)
+
+// Smoothing MA Function
+ma(source, length, matype) =>
+    switch matype
+        "SMA"                   => ta.sma(source, length)
+        "SMA + Bollinger Bands" => ta.sma(source, length)
+        "EMA"                   => ta.ema(source, length)
+        "SMMA (RMA)"            => ta.rma(source, length)
+        "WMA"                   => ta.wma(source, length)
+        "VWMA"                  => ta.vwma(source, length)
+
+// Smoothing MA Calculation
+smooth_ma = enable_ma ? ma(ema_out, ma_len, ma_type) : na
+smooth_stdev = is_bb ? ta.stdev(ema_out, ma_len) * bb_mult : na
+
+// Plots
+plot(ema_out, title="EMA", color=color.blue)
+plot(smooth_ma, title="Smooth MA", color=color.yellow)
+upper_band = plot(smooth_ma + smooth_stdev, title="Upper Bollinger Band", color=color.green)
+lower_band = plot(smooth_ma - smooth_stdev, title="Lower Bollinger Band", color=color.green)
+fill(upper_band, lower_band, color=color.new(color.green, 90), title="Bollinger Bands Background Fill")
+
+// Strategy Parameters
+enable_delay = input.bool(true, title="Enable Reversal Delay")
+delay_bars = input.int(5, minval=0, title="Reversal Delay Bars (on 1-min)")
+bars_required = 20
+
+// Variables for delay logic
+var bool pending_long = false
+var bool pending_short = false
+var int lower_flat_index = na
+var bool flat_confirmed = false
+
+if bar_index >= bars_required
+    // Signals
+    long_signal = ta.crossover(ema_out, smooth_ma)
+    short_signal = ta.crossunder(ema_out, smooth_ma)
+
+    // Long Logic
+    if long_signal
+        if strategy.position_size < 0
+            strategy.close("Short", comment="ExitShortForReversal")
+            if enable_delay
+                pending_long := true
+                flat_confirmed := true
+                lower_flat_index := request.security(syminfo.tickerid, "1", bar_index)
+            else
+                strategy.entry("Long", strategy.long)
+        else if strategy.position_size == 0
+            strategy.entry("Long", strategy.long)
+
+    // Short Logic
+    if short_signal
+        if strategy.position_size > 0
+            strategy.close("Long", comment="ExitLongForReversal")
+            if enable_delay
+                pending_short := true
+                flat_confirmed := true
+                lower_flat_index := request.security(syminfo.tickerid, "1", bar_index)
+            else
+                strategy.entry("Short", strategy.short)
+        else if strategy.position_size == 0
+            strategy.entry("Short", strategy.short)
+
+    // Check for Pending Entries with Delay
+    if flat_confirmed and (pending_long or pending_short)
+        int current_lower_index = request.security(syminfo.tickerid, "1", bar_index)
+        int bars_since = current_lower_index - lower_flat_index
+        if bars_since >= delay_bars
+            if pending_long
+                strategy.entry("Long", strategy.long)
+                pending_long := false
+            if pending_short
+                strategy.entry("Short", strategy.short)
+                pending_short := false
+            flat_confirmed := false
+            lower_flat_index := na
+
+View in Pine Editor・95 lines
+Use on chart
+2
+0
+752
+EMA crossing over the smoothing of the ema using sma

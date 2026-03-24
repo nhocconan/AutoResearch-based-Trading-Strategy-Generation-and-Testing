@@ -1,0 +1,333 @@
+//@version=5
+
+var table watermark = table.new(position.middle_center, 1, 1)
+
+table.cell(watermark, 0, 0,"Open-Source Version\nFor Advanced / Invite-Only Systems\nContact: TV: @maheshxlent, X:@Mahesh071117",text_color = color.new(color.white, 30),bgcolor    = color.new(color.black, 85),text_size  = size.normal)
+
+strategy("Nifty Breakout Levels Strategy (v7 Hybrid – Compounding from Start Date)",
+     overlay           = true,
+     initial_capital   = 225000,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.cash_per_order, 
+     commission_value  = 275)
+
+// ======================================================================
+// INPUTS – tuned for current month NIFTY futures on 1H
+// ======================================================================
+
+// Breakout structure
+boxLookback   = input.int(10,  "Breakout Range Lookback Bars", minval=1)
+
+// Breakout buffer in % (about 0.3% works best for NIFTY futures 1H)
+bufferPct     = input.float(0.30, "Breakout Buffer % (NIFTY Futures, 1H)", minval=0.0)
+
+// EMA trend filter
+proximityPts  = input.float(500.0, "EMA Proximity (points, 1H)", minval=0.0)
+
+// Volatility filter (Balanced sweet spot ≈ 50)
+atrTradeThresh = input.float(50.0, "Min ATR(14, 1H) to Trade", minval=0.0)
+
+// Risk / reward
+slBasePoints  = input.float(100.0, "Base Stop Loss (points)", minval=10)
+tpPoints      = input.float(350.0, "Take Profit (points)",    minval=20)
+atrSLFactor   = input.float(1.0,  "ATR SL Multiplier",        minval=0.5, maxval=2.0)
+
+// Shorts
+enableShorts  = input.bool(true, "Enable Short Trades?")
+
+// ======================================================================
+// COMPOUNDING / POSITION SIZING INPUTS
+// ======================================================================
+startCapital   = input.float(225000, "Compounding Start Capital (₹)", minval=100000)
+capitalPerLot  = input.float(225000, "Capital per 1 NIFTY Futures Lot (₹)", minval=100000)
+
+// Compounding start date (set this to TODAY when you go live)
+startYear      = input.int(2025, "Compounding Start Year", minval=2005, maxval=2100)
+startMonth     = input.int(11,   "Compounding Start Month", minval=1, maxval=12)
+startDay       = input.int(26,   "Compounding Start Day", minval=1, maxval=31)
+
+// Drawdown-based lot reduction
+ddCut1         = input.float(10.0, "DD Level 1 (%) → -1 lot", minval=0.0, maxval=100.0)
+ddCut2         = input.float(15.0, "DD Level 2 (%) → -2 lots", minval=0.0, maxval=100.0)
+ddCut3         = input.float(20.0, "DD Level 3 (%) → 1 lot only", minval=0.0, maxval=100.0)
+
+// Misc
+enableEODExit  = input.bool(false, "Flatten at 3:15 PM? (optional intraday exit)")
+
+// ======================================================================
+// 1H LOGIC FUNCTION (runs on 1H via request.security)
+// ======================================================================
+f_hourSignals() =>
+    // --- ATR & EMAs on 1H ---
+    atrLen  = 14
+    atr1H   = ta.atr(atrLen)
+
+    ema10   = ta.ema(close, 10)
+    ema20   = ta.ema(close, 20)
+    ema50   = ta.ema(close, 50)
+    ema200  = ta.ema(close, 200)
+
+    // --- Breakout levels ---
+    breakoutHigh = ta.highest(high, boxLookback)
+    breakoutLow  = ta.lowest(low,  boxLookback)
+
+    // Buffer in points for NIFTY futures
+    bufferPoints = close * bufferPct / 100.0
+
+    // Breakout zones
+    buyZone  = close >= (breakoutHigh - bufferPoints) and close <= breakoutHigh
+    sellZone = close <= (breakoutLow  + bufferPoints) and close >= breakoutLow
+
+    // EMA trend + proximity
+    buyFilter =
+         (close > ema50  and (close - ema50)  <= proximityPts) or
+         (close > ema200 and (close - ema200) <= proximityPts)
+
+    sellFilter =
+         (close < ema50  and (ema50  - close) <= proximityPts) or
+         (close < ema200 and (ema200 - close) <= proximityPts)
+
+    // Time filter (1H entries till 15:15)
+    curHour   = hour(time)
+    curMinute = minute(time)
+    timeOK_1H = (curHour > 9) and (curHour < 15 or (curHour == 15 and curMinute < 15))
+
+    // Raw signals
+    rawBuy  = buyZone  and buyFilter  and timeOK_1H and barstate.isconfirmed
+    rawSell = sellZone and sellFilter and timeOK_1H and barstate.isconfirmed
+
+    // Volatility filter – skip dead regimes
+    volOK = atr1H > atrTradeThresh
+
+    // Strong downtrend for shorts (ema10 < ema20 < ema50 < ema200 & price under ema200)
+    bearTrendStrong = ema10 < ema20 and ema20 < ema50 and ema50 < ema200 and close < ema200
+
+    // Final 1H entries
+    longEntry_1H  = rawBuy  and close > ema50 and volOK
+    shortEntry_1H = rawSell and bearTrendStrong and volOK
+
+    [longEntry_1H, shortEntry_1H, ema10, ema20, ema50, ema200, close, atr1H]
+
+// ======================================================================
+// GET 1H SIGNALS & EMAs
+// ======================================================================
+[longEntryRaw_1H, shortEntryRaw_1H, ema10_1H, ema20_1H, ema50_1H, ema200_1H, close_1H, atr1H_series] = request.security(syminfo.tickerid, "60", f_hourSignals(), barmerge.gaps_on, barmerge.lookahead_off)
+
+// ======================================================================
+// PLOT 1H EMAs
+// ======================================================================
+plot(ema10_1H,  color=color.new(color.teal,   0), title="1H EMA 10")
+plot(ema20_1H,  color=color.new(color.blue,   0), title="1H EMA 20")
+plot(ema50_1H,  color=color.new(color.yellow, 0), title="1H EMA 50")
+plot(ema200_1H, color=color.new(color.orange, 0), title="1H EMA 200")
+
+// ======================================================================
+// DAILY TRADE LIMIT (1 trade per day)
+// ======================================================================
+curHour   = hour(time)
+curMinute = minute(time)
+curDay    = dayofmonth(time)
+
+cutoffTime = (curHour > 15) or (curHour == 15 and curMinute >= 0)
+
+var int tradesToday = 0
+var int lastDay     = curDay
+
+if curDay != lastDay
+    tradesToday := 0
+    lastDay     := curDay
+
+int  maxTradesPerDay = 1
+bool canTradeToday   = tradesToday < maxTradesPerDay
+
+// ======================================================================
+// COMPOUNDING START DATE & EFFECTIVE EQUITY
+// ======================================================================
+startTs = timestamp("Asia/Kolkata", startYear, startMonth, startDay, 9, 15)
+isAfterStart = time >= startTs
+
+// We rebase equity at start date to 'startCapital'
+var float eqAtStart     = na
+var float effEquity     = na
+var float maxEffEquity  = na
+
+if isAfterStart
+    if na(eqAtStart)
+        // first bar after start date
+        eqAtStart    := strategy.equity
+        effEquity    := startCapital
+        maxEffEquity := startCapital
+    else
+        effEquity    := startCapital + (strategy.equity - eqAtStart)
+        maxEffEquity := math.max(maxEffEquity, effEquity)
+else
+    // Before start date we just assume fixed 1 lot, equity = startCapital (for sizing)
+    effEquity    := startCapital
+    maxEffEquity := na
+
+// Drawdown % based on effective equity (only valid after start)
+ddPerc = (isAfterStart and not na(maxEffEquity) and maxEffEquity > 0)
+     ? (maxEffEquity - effEquity) / maxEffEquity * 100.0
+     : 0.0
+
+// ======================================================================
+// DYNAMIC LOT SIZING (ONLY AFTER START DATE)
+// ======================================================================
+baseLots = isAfterStart ? math.max(1, math.floor(effEquity / capitalPerLot)) : 1
+
+// Apply DD cuts
+lotsAfterDD = ddPerc >= ddCut3 ? 1 : ddPerc >= ddCut2 ? math.max(1, baseLots - 2) : ddPerc >= ddCut1 ? math.max(1, baseLots - 1) : baseLots
+
+// Final dynamic lot count
+dynLots = lotsAfterDD
+dynLots := math.max(dynLots, 1)
+
+// Quantity for orders (1 contract = 1 NIFTY futures lot in TV strategy)
+dynQty = dynLots
+
+// ======================================================================
+// FINAL ENTRY SIGNALS
+// ======================================================================
+newLong_1H  = longEntryRaw_1H  and not longEntryRaw_1H[1]
+newShort_1H = shortEntryRaw_1H and not shortEntryRaw_1H[1]
+
+longEntrySignal  = newLong_1H  and strategy.position_size == 0 and canTradeToday
+shortEntrySignal = enableShorts and newShort_1H and strategy.position_size == 0 and canTradeToday
+
+// Labels
+plotshape(longEntrySignal,  title="1H BUY",  style=shape.labelup,   location=location.belowbar,
+          color=color.new(color.green, 50), text="1H BUY",  textcolor=color.white, size=size.tiny)
+
+plotshape(shortEntrySignal, title="1H SELL", style=shape.labeldown, location=location.abovebar,
+          color=color.new(color.red, 50),   text="1H SELL", textcolor=color.white, size=size.tiny)
+
+// Orders with dynamic quantity
+if longEntrySignal
+    strategy.entry("Long", strategy.long, qty=dynQty)
+    tradesToday += 1
+
+if shortEntrySignal
+    strategy.entry("Short", strategy.short, qty=dynQty)
+    tradesToday += 1
+
+// ======================================================================
+// SL / TP – ATR-ADAPTIVE WITH BASE
+// ======================================================================
+atrSLpoints = math.max(slBasePoints, atr1H_series * atrSLFactor)
+
+if strategy.position_size > 0
+    longStop   = strategy.position_avg_price - atrSLpoints
+    longTarget = strategy.position_avg_price + tpPoints
+    strategy.exit("Long exit", "Long", stop = longStop, limit = longTarget)
+
+if strategy.position_size < 0
+    shortStop   = strategy.position_avg_price + atrSLpoints
+    shortTarget = strategy.position_avg_price - tpPoints
+    strategy.exit("Short exit", "Short", stop = shortStop, limit = shortTarget)
+
+// ======================================================================
+// TRAILING STATE VARIABLES
+// ======================================================================
+var float maxProfitLong = 0.0
+var float maxLossShort  = 0.0
+
+if strategy.position_size == 0
+    maxProfitLong := 0.0
+    maxLossShort  := 0.0
+
+// ======================================================================
+// STEPPED TRAILING PROFIT – LONGS ONLY
+// ======================================================================
+if strategy.position_size > 0
+    curProfitLong = close - strategy.position_avg_price
+    maxProfitLong := math.max(maxProfitLong, curProfitLong)
+
+    condLong_100 = maxProfitLong >= 100 and curProfitLong <= 70
+    condLong_150 = maxProfitLong >= 150 and curProfitLong <= 110
+    condLong_200 = maxProfitLong >= 200 and curProfitLong <= 140
+    condLong_250 = maxProfitLong >= 250 and curProfitLong <= 180
+    condLong_320 = maxProfitLong >= 320 and curProfitLong <= 280
+
+    if condLong_100 or condLong_150 or condLong_200 or condLong_250 or condLong_320
+        strategy.close("Long", comment = "step_trail_long")
+
+// ======================================================================
+// TRAILING LOSS – SHORTS ONLY
+// ======================================================================
+if strategy.position_size < 0
+    curLossShort = math.max(0.0, close - strategy.position_avg_price)
+    maxLossShort := math.max(maxLossShort, curLossShort)
+
+    condShort_80  = maxLossShort >= 80  and curLossShort <= 40
+    condShort_120 = maxLossShort >= 120 and curLossShort <= 80
+    condShort_140 = maxLossShort >= 140 and curLossShort <= 100
+
+    if condShort_80 or condShort_120 or condShort_140
+        strategy.close("Short", comment = "step_trail_short_loss")
+
+// ======================================================================
+// 1H EMA50 REVERSAL EXIT (2-BAR CONFIRMATION)
+// ======================================================================
+if strategy.position_size > 0 and close_1H < ema50_1H and close_1H[1] < ema50_1H
+    strategy.close("Long", comment = "1H_EMA50_short")
+
+if strategy.position_size < 0 and close_1H > ema50_1H and close_1H[1] > ema50_1H
+    strategy.close("Short", comment = "1H_EMA50_long")
+
+// ======================================================================
+// OPTIONAL EOD EXIT at 3:15 PM
+// ======================================================================
+if enableEODExit and cutoffTime and strategy.position_size != 0
+    strategy.close_all(comment = "EOD_3_15")
+
+// ======================================================================
+// ALERTS
+// ======================================================================
+alertcondition(longEntrySignal,  title="1H Long Entry",  message="BUY: Nifty Breakout v7 Hybrid (Compounding)")
+alertcondition(shortEntrySignal, title="1H Short Entry", message="SELL: Nifty Breakout v7 Hybrid (Compounding)")
+
+exitedLong  = strategy.position_size[1] > 0 and strategy.position_size == 0
+exitedShort = strategy.position_size[1] < 0 and strategy.position_size == 0
+
+alertcondition(exitedLong,  title="1H Long Exit",  message="EXIT LONG: Nifty Breakout v7 Hybrid (Compounding)")
+alertcondition(exitedShort, title="1H Short Exit", message="EXIT SHORT: Nifty Breakout v7 Hybrid (Compounding)")
+
+View in Pine Editor・294 lines
+Use on chart
+1
+3
+805
+Nov 26, 2025
+Nifty Breakout Levels Strategy (v7 Hybrid – Compounding from Start Date)
+
+Instrument / TF: Designed for current-month NIFTY futures on 1-hour timeframe, with at most 1 trade per day.
+
+Entry logic: Uses a 10-bar breakout box with a 0.3% buffer, plus EMA-based trend + proximity filter.
+
+Longs: price in breakout-high zone, above EMA50/EMA200 and within proximityPts.
+
+Shorts: price in breakout-low zone and strong downtrend (EMA10 < EMA20 < EMA50 < EMA200, price below EMA200).
+
+Trades only when ATR(14) > atrTradeThresh and during regular hours (till 15:15).
+
+Risk / exits: Stop loss is ATR-adaptive – max of slBasePoints (100 pts) and ATR * atrSLFactor; TP is fixed (tpPoints, e.g. 350 pts).
+
+Longs have stepped trailing profit levels (100/150/200/250/320 pts) that lock in gains on pullbacks.
+
+Shorts have trailing loss-reduction levels (80/120/140 pts) to cut improving losses.
+
+Additional exit: 1H EMA50 2-bar reversal against the position, plus optional EOD flatten at 3:15 PM.
+
+Compounding engine: From a chosen start date, equity is rebased to startCapital, and lot size scales dynamically as equity / capitalPerLot, with automatic lot reductions at three drawdown thresholds (ddCut1 / 2 / 3).
+
+Automation: All entries and exits are exposed via alertconditions (long/short entry & exit) so the strategy can be connected to broker/webhook automation.
+Jan 26
+Release Notes
+Updated WaterMark.
+
+This is an open-source reference implementation shared to demonstrate structure, discipline, and execution style.
+
+Advanced versions include additional filters, enhanced trade management, and protected logic, and are shared separately on an invite-only basis.
+
+If you’re interested in advanced systems, feel free to contact via the watermark details.

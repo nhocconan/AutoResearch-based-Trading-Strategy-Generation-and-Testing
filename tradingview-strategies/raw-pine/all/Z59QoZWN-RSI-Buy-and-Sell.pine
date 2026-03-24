@@ -1,0 +1,21 @@
+//@version=3
+///buy when rsi is above 70 and don't sell until rsi is below 30.
+strategy("RSI Buy and Sell", overlay=true)
+a = rsi(close,14)
+OB = input(70)
+OS = input(30)
+os = a > OB
+ob = a < OS
+strategy.entry("RSI", strategy.long, when = os)
+strategy.close_all(when = ob)
+
+View in Pine Editor・10 lines
+Use on chart
+6
+3
+0
+5
+32 180
+This is sooooooooo simple.
+
+Buy when RSI is above 70 and don't sell til it'sunder 30.

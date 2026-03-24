@@ -1,0 +1,42 @@
+//@version=3
+// Credit Indicator from KIVANC
+// author and idea: KIVANC @fr3762 on twitter
+// creator: Alan HULL
+// 
+strategy("Double HULL Moving Average Strategy", overlay=true)
+PDL=input(title="LongerPeriod", type=integer, defval=21, minval=1,maxval=500)
+PDS=input(title="ShorterPeriod", type=integer, defval=8, minval=1,maxval=500)
+
+// === INPUT BACKTEST RANGE ===
+FromYear  = input(defval = 2019, title = "From Year", minval = 2009)
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2009)
+ToMonth   = input(defval = 12, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+HmaL=wma(2*wma(close,round(PDL/2))-wma(close,PDL),round(sqrt(PDL)))
+HmaS=wma(2*wma(close,round(PDS/2))-wma(close,PDS),round(sqrt(PDS)))
+plot(HmaL,color=red, linewidth=2)
+plot(HmaS,color=blue, linewidth=2)
+
+Buy = HmaS > HmaL
+Sell = HmaS < HmaL
+
+strategy.entry("Buy",true,when=window() and Buy)
+strategy.close_all(when=window() and Sell)
+
+View in Pine Editor・32 lines
+Use on chart
+3
+8
+2 965
+// Credit Indicator from KIVANC
+// author and idea: KIVANC fr3762 on twitter
+// creator: Alan HULL
+// Strategy edited by teejk1986

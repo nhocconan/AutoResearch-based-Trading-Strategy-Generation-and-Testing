@@ -1,0 +1,184 @@
+//@version=6
+strategy("EURUSD M3 Scalping v6 (EMA Pullback + Engulfing + RSI + VWAP + SL/TP/BE)",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true)
+
+//================= Inputs =================
+emaFastLen   = input.int(20, "EMA rápida")
+emaSlowLen   = input.int(50, "EMA lenta")
+useVWAP      = input.bool(false, "Usar VWAP como filtro direccional")
+
+rsiLen       = input.int(14, "RSI longitud")
+rsiMin       = input.float(40.0, "RSI mínimo", step=0.1)
+rsiMax       = input.float(60.0, "RSI máximo", step=0.1)
+
+pipSize      = input.float(0.0001, "Tamaño de pip (EURUSD = 0.0001)")
+slPips       = input.float(6.0, "Stop Loss (pips)")
+tpPips       = input.float(10.0, "Take Profit (pips)")
+
+beOn         = input.bool(true, "Activar Break-Even")
+beTrigP      = input.float(6.0, "BE: activar a +pips", step=0.1)
+
+limitSess    = input.bool(true, "Limitar a sesión")
+sessString   = input.session("0700-1600", "Sesión (hora exchange)")
+skipNewsBars = input.int(0, "Saltar N barras tras inicio sesión")
+
+plotSLTP     = input.bool(true, "Dibujar líneas SL/TP")
+showLabels   = input.bool(true, "Etiquetas de Entrada/SL/TP")
+
+//================= Cálculos =================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwapVal = ta.vwap(hlc3)
+rsiVal  = ta.rsi(close, rsiLen)
+
+sessionOK = not limitSess or not na(time("", sessString))
+
+// Contador barras desde inicio sesión
+var int barsFromSession = 0
+inSess = not na(time("", sessString))
+barsFromSession := inSess ? (nz(barsFromSession[1]) + 1) : 0
+sessionBarsOK = barsFromSession > skipNewsBars or not limitSess
+
+// Filtros direccionales
+upTrend   = emaFast > emaSlow
+downTrend = emaFast < emaSlow
+vwapLongOK  = not useVWAP or close >= vwapVal
+vwapShortOK = not useVWAP or close <= vwapVal
+
+// Pullback a EMA20
+pullbackLong  = low <= emaFast and close > emaFast
+pullbackShort = high >= emaFast and close < emaFast
+
+// Engulfing
+bullEngulf = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearEngulf = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
+// Filtro RSI neutro
+rsiOK = rsiVal >= rsiMin and rsiVal <= rsiMax
+
+// Señales
+longSignal  = sessionOK and sessionBarsOK and upTrend and vwapLongOK  and pullbackLong  and bullEngulf and rsiOK
+shortSignal = sessionOK and sessionBarsOK and downTrend and vwapShortOK and pullbackShort and bearEngulf and rsiOK
+
+//================= Órdenes =================
+if longSignal
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+posPrice   = strategy.position_avg_price
+posSize    = strategy.position_size
+isLongPos  = posSize > 0
+isShortPos = posSize < 0
+
+// SL/TP
+longSL  = posPrice - slPips * pipSize
+longTP  = posPrice + tpPips * pipSize
+shortSL = posPrice + slPips * pipSize
+shortTP = posPrice - tpPips * pipSize
+
+// Break-even
+longToBE  = beOn and isLongPos  and (close - posPrice)  >= beTrigP * pipSize
+shortToBE = beOn and isShortPos and (posPrice - close) >= beTrigP * pipSize
+beLongSL  = longToBE  ? posPrice : longSL
+beShortSL = shortToBE ? posPrice : shortSL
+
+if isLongPos
+    strategy.exit("L-Stop",       from_entry="Long",  stop=beLongSL)
+    strategy.exit("L-TakeProfit", from_entry="Long",  limit=longTP)
+
+if isShortPos
+    strategy.exit("S-Stop",       from_entry="Short", stop=beShortSL)
+    strategy.exit("S-TakeProfit", from_entry="Short", limit=shortTP)
+
+//================= Visualización =================
+plot(emaFast, "EMA 20", color=color.teal, linewidth=2)
+plot(emaSlow, "EMA 50", color=color.orange, linewidth=2)
+plot(useVWAP ? vwapVal : na, "VWAP", color=color.purple)
+
+var float lastEntryPrice = na
+var label lblEntry = na
+var line  lnSL = na
+var line  lnTP = na
+
+enteredLong  = isLongPos  and nz(strategy.position_size[1]) <= 0
+enteredShort = isShortPos and nz(strategy.position_size[1]) >= 0
+flatNow      = posSize == 0 and nz(strategy.position_size[1]) != 0
+
+if enteredLong or enteredShort
+    if plotSLTP
+        if not na(lnSL)
+            line.delete(lnSL)
+        if not na(lnTP)
+            line.delete(lnTP)
+    if showLabels and not na(lblEntry)
+        label.delete(lblEntry)
+
+    lastEntryPrice := posPrice
+
+    // Textos preconstruidos
+    longTxt  = str.format("LONG\nEntrada: {0}\nSL: {1} ({2} pips)\nTP: {3} ({4} pips)",
+         str.tostring(posPrice,  format.price),
+         str.tostring(longSL,    format.price), str.tostring(slPips),
+         str.tostring(longTP,    format.price), str.tostring(tpPips))
+    shortTxt = str.format("SHORT\nEntrada: {0}\nSL: {1} ({2} pips)\nTP: {3} ({4} pips)",
+         str.tostring(posPrice,  format.price),
+         str.tostring(shortSL,   format.price), str.tostring(slPips),
+         str.tostring(shortTP,   format.price), str.tostring(tpPips))
+
+    if enteredLong
+        if plotSLTP
+            lnSL := line.new(x1=bar_index, y1=longSL, x2=bar_index + 50, y2=longSL, extend=extend.right, color=color.red)
+            lnTP := line.new(x1=bar_index, y1=longTP, x2=bar_index + 50, y2=longTP, extend=extend.right, color=color.green)
+        if showLabels
+            lblEntry := label.new(x=bar_index, y=posPrice, text=longTxt, style=label.style_label_up, color=color.teal, textcolor=color.white)
+
+    if enteredShort
+        if plotSLTP
+            lnSL := line.new(x1=bar_index, y1=shortSL, x2=bar_index + 50, y2=shortSL, extend=extend.right, color=color.red)
+            lnTP := line.new(x1=bar_index, y1=shortTP, x2=bar_index + 50, y2=shortTP, extend=extend.right, color=color.green)
+        if showLabels
+            lblEntry := label.new(x=bar_index, y=posPrice, text=shortTxt, style=label.style_label_down, color=color.orange, textcolor=color.white)
+
+if isLongPos and longToBE and showLabels
+    if not na(lblEntry)
+        label.delete(lblEntry)
+    beLongTxt = str.format("LONG (BE)\nEntrada/SL: {0}\nTP: {1} ({2} pips)", str.tostring(posPrice, format.price), str.tostring(longTP, format.price), str.tostring(tpPips))
+    lblEntry := label.new(x=bar_index, y=posPrice, text=beLongTxt, style=label.style_label_up, color=color.green, textcolor=color.white)
+
+if isShortPos and shortToBE and showLabels
+    if not na(lblEntry)
+        label.delete(lblEntry)
+    beShortTxt = str.format("SHORT (BE)\nEntrada/SL: {0}\nTP: {1} ({2} pips)", str.tostring(posPrice, format.price), str.tostring(shortTP, format.price), str.tostring(tpPips))
+    lblEntry := label.new(x=bar_index, y=posPrice, text=beShortTxt, style=label.style_label_down, color=color.red, textcolor=color.white)
+
+if flatNow
+    if showLabels and not na(lblEntry)
+        label.delete(lblEntry)
+        lblEntry := na
+    if plotSLTP
+        if not na(lnSL)
+            line.delete(lnSL)
+            lnSL := na
+        if not na(lnTP)
+            line.delete(lnTP)
+            lnTP := na
+
+//================= Alertas =================
+alertcondition(longSignal,  title="LONG Setup",  message="EURUSD Scalping LONG listo")
+alertcondition(shortSignal, title="SHORT Setup", message="EURUSD Scalping SHORT listo")
+
+View in Pine Editor・177 lines
+Use on chart
+1
+7
+1 636
+Estrategia para operar el EURUSD en temp de 3 min, indica sl y tp 6 pips sl y 10 pips tp

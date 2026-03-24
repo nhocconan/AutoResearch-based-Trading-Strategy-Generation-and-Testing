@@ -1,0 +1,60 @@
+//@version=5
+strategy("Adaptive RSI Strategy", shorttitle="ARSI_Strategy", overlay=true)
+
+// Inputs
+length = input.int(title="Length", defval=14)
+highlightMovements = input.bool(title="Highlight Movements ?", defval=true)
+src = input.source(title="Source", defval=close)
+
+// Calculations
+alpha = 2 * math.abs(ta.rsi(src, length) / 100 - 0.5)
+
+arsi = 0.0
+arsi := alpha * src + (1 - alpha) * nz(arsi[1])
+
+arsiColor = highlightMovements ? (arsi > arsi[1] ? color.green : color.red) : color.new(#6d1e7f, 0)
+plot(arsi, title="ARSI", linewidth=2, color=arsiColor)
+
+// Long and Short Entry Rules
+longCondition = ta.crossover(arsi, arsi[1])
+shortCondition = ta.crossunder(arsi, arsi[1])
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・26 lines
+Use on chart
+1
+4
+2
+4 394
+The Adaptive RSI Strategy is designed to give you an edge by adapting to changing market conditions more effectively than the traditional RSI. By adjusting dynamically to recent price movements, this strategy aims to provide more timely and accurate trade signals.
+
+How Does It Work?
+
+You can set the number of periods for the RSI calculation. The default is 14, but feel free to experiment with different lengths to suit your trading style.
+Choose the price data to base the RSI on, typically the closing price.
+Decide if you want the strategy to visually highlight upward and downward movements of the Adaptive RSI (ARSI) on the chart. This can help you quickly spot trends.
+
+Adaptive Calculation:
+
+Alpha: The strategy uses an adaptive factor called alpha, which changes based on recent RSI values. This makes the RSI more sensitive to recent market conditions.
+Adaptive RSI (ARSI): This is the core of our strategy. It calculates the ARSI using the adaptive alpha, making it more responsive to price changes compared to the traditional RSI.
+Trade Signals:
+
+Long Entry (Buy Signal): The strategy triggers a buy signal when the ARSI value crosses above its previous value. This indicates a potential upward trend, suggesting it's a good time to enter a long position.
+Short Entry (Sell Signal): Conversely, a sell signal is triggered when the ARSI value crosses below its previous value, indicating a potential downward trend and suggesting it's a good time to enter a short position.
+Visual Representation:
+
+If you enable the highlight movements feature, the ARSI line on the chart will change color: green for upward movements and red for downward movements. This makes it easier to see potential trade opportunities at a glance.
+
+Why Use the Adaptive RSI Strategy?
+
+Responsiveness: The adaptive nature of this strategy means it's more sensitive to market changes, helping you react quicker to new trends.
+
+Customization: You can tailor the length of the RSI period and decide whether to highlight movements, allowing you to adapt the strategy to your specific needs and preferences.
+
+Visual Clarity: Highlighting the ARSI movements on the chart makes it easier to spot trends and potential entry points, giving you a clearer picture of the market.

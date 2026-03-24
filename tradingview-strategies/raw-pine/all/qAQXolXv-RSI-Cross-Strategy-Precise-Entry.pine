@@ -1,0 +1,69 @@
+//@version=5
+strategy("RSI EMA Cross Strategy Precise Entry", overlay=false)
+
+// === RSI/EMA Calculation ===
+rsiLength = input.int(14, minval=1, title="RSI Length")
+rsiSource = input.source(close, "RSI Source")
+emaLen    = input.int(9, minval=1, title="EMA Length")
+
+change = ta.change(rsiSource)
+up = ta.rma(math.max(change, 0), rsiLength)
+down = ta.rma(-math.min(change, 0), rsiLength)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+emaRsi = ta.ema(rsi, emaLen)
+
+// === Candle color logic for SL/trail reference ===
+float prevRedLow = na
+float prevGreenHigh = na
+prevRedLow := close[1] < open[1] ? low[1] : prevRedLow[1]
+prevGreenHigh := close[1] > open[1] ? high[1] : prevGreenHigh[1]
+
+float prevCandleLow  = low[1]
+float prevCandleHigh = high[1]
+
+// === Count consecutive green/red bars in trade ===
+var int greenCandleCountLong = 0
+var int redCandleCountShort  = 0
+
+if strategy.position_size > 0
+    greenCandleCountLong := close > open ? greenCandleCountLong + 1 : 0
+else
+    greenCandleCountLong := 0
+
+if strategy.position_size < 0
+    redCandleCountShort := close < open ? redCandleCountShort + 1 : 0
+else
+    redCandleCountShort := 0
+
+// === Crossover/under detection for real-time -->
+// This triggers as soon as the crossover is detected intra-bar
+longCross  = rsi > emaRsi and rsi[1] <= emaRsi[1]
+shortCross = rsi < emaRsi and rsi[1] >= emaRsi[1]
+longExit   = rsi < emaRsi and rsi[1] >= emaRsi[1]
+shortExit  = rsi > emaRsi and rsi[1] <= emaRsi[1]
+
+// === SL Logic ===
+longSL  = greenCandleCountLong >= 3 ? prevCandleLow : prevRedLow
+shortSL = redCandleCountShort  >= 3 ? prevCandleHigh : prevGreenHigh
+
+// === Strategy Execution ===
+if longCross and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long SL", "Long", stop=longSL)
+
+if longExit and strategy.position_size > 0
+    strategy.close("Long")
+
+if shortCross and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short SL", "Short", stop=shortSL)
+
+if shortExit and strategy.position_size < 0
+    strategy.close("Short")
+
+View in Pine Editor・62 lines
+Use on chart
+2
+1
+1 141
+This is based on RSI movement. it generates buy and sell signals precisely

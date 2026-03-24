@@ -1,0 +1,127 @@
+//@version=5
+strategy("London Breakout", overlay=true, process_orders_on_close=false)
+
+// ====== INPUTS ======
+string TZ        = input.string("America/Chicago", "Timezone")
+string rangeSess = input.session("2200-0000", "Range Window (CST)", confirm=true)
+string tradeSess = input.session("0000-0400", "Trade Window (CST)", confirm=true)
+float  stopMult  = input.float(1.0, "Stop — x Range Size")
+float  tpMult    = input.float(1.0, "TP — x Range Size (R:R)")
+bool   showDebug = input.bool(true, "Show debug label")
+
+// ====== SESSION FLAGS ======
+bool inRange          = not na(time(timeframe.period, rangeSess, TZ))
+bool inTrade          = not na(time(timeframe.period, tradeSess, TZ))
+bool rangeJustStarted = inRange and not inRange[1]
+bool rangeJustEnded   = (not inRange) and inRange[1]
+
+// ====== STATE ======
+var float rHigh     = na
+var float rLow      = na
+var bool  locked    = false
+var bool  tradeOpen = false
+var line  highLine  = na
+var line  lowLine   = na
+var table dbgTable  = na
+
+// ====== RESET ======
+if rangeJustStarted
+    rHigh     := high
+    rLow      := low
+    locked    := false
+    tradeOpen := false
+    line.delete(highLine)
+    line.delete(lowLine)
+
+// ====== BUILD RANGE ======
+if inRange and not locked
+    if high > rHigh
+        rHigh := high
+    if low < rLow
+        rLow := low
+
+float rSize = rHigh - rLow
+
+// ====== LOCK AT MIDNIGHT ======
+if rangeJustEnded and not locked and not na(rHigh) and not na(rLow)
+    locked := true
+    line.delete(highLine)
+    line.delete(lowLine)
+
+    // Clean single-pixel rays extending right
+    highLine := line.new(bar_index, rHigh, bar_index + 1, rHigh,
+         xloc    = xloc.bar_index,
+         extend  = extend.right,
+         style   = line.style_solid,
+         color   = color.new(#000000, 20),
+         width   = 1)
+
+    lowLine := line.new(bar_index, rLow, bar_index + 1, rLow,
+         xloc    = xloc.bar_index,
+         extend  = extend.right,
+         style   = line.style_solid,
+         color   = color.new(#000000, 20),
+         width   = 1)
+
+// ====== DEBUG TABLE (top-right corner) ======
+if showDebug
+    if na(dbgTable)
+        dbgTable := table.new(position.top_right, 2, 6,
+             bgcolor      = color.new(color.navy, 10),
+             border_width = 1,
+             border_color = color.new(color.aqua, 40),
+             frame_width  = 1,
+             frame_color  = color.new(color.aqua, 20))
+
+    string status = locked ? "🟢 ARMED" : inRange ? "🟡 BUILDING" : "⚪ IDLE"
+
+    table.cell(dbgTable, 0, 0, "London Breakout", text_color=color.aqua,    text_size=size.small, bgcolor=color.new(color.navy, 0), tooltip="", text_halign=text.align_center)
+    table.cell(dbgTable, 1, 0, status,             text_color=color.white,   text_size=size.small, bgcolor=color.new(color.navy, 0), text_halign=text.align_center)
+    table.cell(dbgTable, 0, 1, "High",  text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 1, 1, locked ? str.tostring(rHigh, format.mintick) : "—", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 0, 2, "Low",   text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 1, 2, locked ? str.tostring(rLow,  format.mintick) : "—", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 0, 3, "Size",  text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 1, 3, locked ? str.tostring(rSize,  format.mintick) : "—", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 0, 4, "TP",    text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 1, 4, locked ? "+" + str.tostring(rSize * tpMult,   format.mintick) : "—", text_color=color.teal,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 0, 5, "Stop",  text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.navy, 20))
+    table.cell(dbgTable, 1, 5, locked ? "−" + str.tostring(rSize * stopMult, format.mintick) : "—", text_color=color.red,   text_size=size.small, bgcolor=color.new(color.navy, 20))
+
+// ====== BREAKOUT ENTRIES ======
+if locked and inTrade and not tradeOpen
+    if close > rHigh
+        strategy.entry("Long BO", strategy.long)
+        strategy.exit("Long Exit", "Long BO",
+             limit = rHigh + rSize * tpMult,
+             stop  = rHigh - rSize * stopMult)
+        tradeOpen := true
+
+    if close < rLow
+        strategy.entry("Short BO", strategy.short)
+        strategy.exit("Short Exit", "Short BO",
+             limit = rLow - rSize * tpMult,
+             stop  = rLow + rSize * stopMult)
+        tradeOpen := true
+
+// ====== CLOSE AT END OF TRADE WINDOW ======
+if not inTrade and tradeOpen
+    strategy.close_all(comment="Session End")
+    tradeOpen := false
+
+View in Pine Editor・110 lines
+Use on chart
+1
+1
+356
+Captures the initial momentum burst at the London session open by measuring a defined pre-session range and trading the first clean breakout above or below it.
+How it works:
+The strategy builds a high/low range during a configurable pre-session window (default 10PM–12AM CST), then locks those levels at midnight. Once the trade window opens (12AM–4AM CST), it enters long on a close above the range high or short on a close below the range low. Each trade has a fixed TP and stop scaled as a multiple of the range size. Any open position is closed automatically at the end of the trade window.
+Features:
+
+Fully customizable range and trade session windows with timezone support
+Configurable stop and TP multipliers (R:R)
+Clean range high/low rays drawn at lock time
+Live status table (Armed / Building / Idle) pinned to chart corner
+
+Best on: 15m | Micro Gold Futures (MGC) — works on any liquid futures or forex pair with a defined London open.

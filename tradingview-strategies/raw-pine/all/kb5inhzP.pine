@@ -1,0 +1,279 @@
+//@version=6
+strategy('Supertrend TP SL (PRO)',
+ overlay = true,
+ default_qty_type = strategy.percent_of_equity,
+ default_qty_value = 500,
+ max_labels_count = 500)
+
+// Moving Average Input
+// showMA = input.bool(true, 'Show Moving Average', group = 'Moving Average')
+// maLength = input.int(20, 'MA Length', group = 'Moving Average')
+// maType = input.string('EMA', 'MA Type', options = ['SMA', 'EMA'], group = 'Moving Average')
+
+// Calculate Moving Average
+//ma = maType == 'EMA' ? ta.ema(close, maLength) : ta.sma(close, maLength)
+
+// Plot Moving Average with style
+//plot(showMA ? ma : na, 'Moving Average', color = color.new(#2196F3, 0), linewidth = 2, style = plot.style_line)
+
+// Supertrend Settings
+atrPeriod      = input.int(10, 'ATR Length',             group = 'Supertrend')
+factor         = input.float(3.0, 'Factor', step = 0.01, group = 'Supertrend')
+showSupertrend = input.bool(true, 'Show Supertrend',     group = 'Supertrend')
+// Trade Settings
+TPPoints = input.float(1000, 'Take Profit Points',            group = 'Risk Management',  inline = "1")
+var isLongEnabled = input.bool(true, ' BUY Trades',    group = 'Risk Management' , inline = "1")
+var isStopLossEnabled = input.bool(true, ' Stop Loss', group = 'Risk Management',  inline = "1")
+SLPoints = input.float(2000, 'Stop Loss Points',                  group = 'Risk Management' , inline = "2")
+var isShortEnabled = input.bool(true, ' SELL Trades',      group = 'Risk Management' , inline = "2")
+var isTakeProfitEnabled = input.bool(true, ' Take Profit', group = 'Risk Management' , inline = "2")
+// Style Settings
+var lineStyle = input.string('Dashed', 'Line Style', options = ['Solid', 'Dashed', 'Dotted'], group = 'Style')
+var lineWidth = input.int(2, 'Line Width', minval = 1, maxval = 4, group = 'Style')
+var labelSize = input.string('Normal', 'Label Size', options = ['Small', 'Normal', 'Large'], group = 'Style')
+// Convert style settings
+var lineStyleValue = lineStyle == 'Solid' ? line.style_solid : lineStyle == 'Dashed' ? line.style_dashed : line.style_dotted
+var labelStyleValue = labelSize == 'Small' ? size.small : labelSize == 'Large' ? size.large : size.small
+// Colors
+bullColor = input.color(#00e676, 'Bullish Color', group = 'Colors'  , inline = "1")
+bearColor = input.color(#e60400, 'Bearish Color', group = 'Colors', inline = "1")
+tpColor = input.color(#00e676, 'Take Profit Color', group = 'Colors', inline = "2")
+slColor = input.color(#e60400, 'Stop Loss Color', group = 'Colors', inline = "2")
+// Calculate Supertrend
+[supertrendValue, direction] = ta.supertrend(factor, atrPeriod)
+// Plot Supertrend with style
+supertrendColor = direction < 0 ? #00e676 : #e60400
+plot(showSupertrend ? supertrendValue : na, 'Supertrend', color = supertrendColor, linewidth = 3, style = plot.style_line)
+
+// Dynamic Candle Colors
+barcolor(direction < 0 ? bullColor : bearColor)
+
+// Trading Logic
+if ta.change(direction) < 0 and isLongEnabled
+    strategy.entry('Long', strategy.long)
+    if isStopLossEnabled
+        sl = close - SLPoints * syminfo.mintick
+        strategy.exit('Long SL', 'Long', stop = sl)
+        line.new(bar_index, sl, bar_index + 10, sl,
+                 color = slColor,
+                 width = lineWidth,
+                 style = lineStyleValue)
+        label.new(bar_index + 10, sl, 'SL',
+                     style = label.style_label_left,
+                     color = color.new(slColor, 0),
+                     textcolor = color.white,
+                     size = labelStyleValue)
+
+    if isTakeProfitEnabled
+        tp = close + TPPoints * syminfo.mintick
+        strategy.exit('Long TP', 'Long', limit = tp)
+        line.new(bar_index, tp, bar_index + 10, tp,
+                 color = tpColor,
+                 width = lineWidth,
+                 style = lineStyleValue)
+        label.new(bar_index + 10, tp, 'TP',
+                 style = label.style_label_left,
+                 color = color.new(tpColor, 0),
+                 textcolor = color.white,
+                 size = labelStyleValue)
+
+if ta.change(direction) > 0 and isShortEnabled
+    strategy.entry('Short', strategy.short)
+    if isStopLossEnabled
+        sl = close + SLPoints * syminfo.mintick
+        strategy.exit('Short SL', 'Short', stop = sl)
+        line.new(bar_index, sl, bar_index + 10, sl,
+                 color = slColor,
+                 width = lineWidth,
+                 style = lineStyleValue)
+        label.new(bar_index + 10, sl, 'SL',
+                 style = label.style_label_left,
+                 color = color.new(slColor, 0),
+                 textcolor = color.white,
+                 size = labelStyleValue)
+
+    if isTakeProfitEnabled
+        tp = close - TPPoints * syminfo.mintick
+        strategy.exit('Short TP', 'Short', limit = tp)
+        line.new(bar_index, tp, bar_index + 10, tp,
+                 color = tpColor,
+                 width = lineWidth,
+                 style = lineStyleValue)
+        label.new(bar_index + 10, tp, 'TP',
+                 style = label.style_label_left,
+                 color = color.new(tpColor, 0),
+                 textcolor = color.white,
+                 size = labelStyleValue)
+
+// Plot buy/sell signals
+plotshape(ta.change(direction) < 0 and isLongEnabled ? low : na, 'Buy Signal', style = shape.triangleup, location = location.belowbar, color = bullColor, size = size.small)
+plotshape(ta.change(direction) > 0 and isShortEnabled ? high : na, 'Sell Signal', style = shape.triangledown, location = location.abovebar, color = bearColor, size = size.small)
+
+View in Pine Editor・113 lines
+Use on chart
+2
+2
+8
+4 418
+2. Main Components:
+
+Supertrend Indicator:
+
+Theoretical basis: The Supertrend indicator is based on two main concepts: Average True Range (ATR) and Factor. ATR measures the extent of price fluctuations in a given period of time, while Factor determines the sensitivity of the indicator to price changes.
+
+Mechanism of operation: The indicator calculates two possible lines: one line representing the potential support level and another line representing the potential resistance level. The selection of the appropriate line depends on the current price direction. When the price is above the line, the indicator is considered to be in an uptrend, and vice versa.
+
+Customizable inputs:
+
+atrPeriod: Allows the trader to specify the time period for calculating the ATR. Shorter periods make the indicator more sensitive to price changes, while longer periods reduce its sensitivity.
+
+factor: Allows the adjustment of the factor. Higher values ​​make the indicator less likely to give false signals, but they may also delay entry signals.
+
+Risk Management:
+
+Take Profit and Stop Loss Orders:
+
+TPPoints: Specifies the distance between the entry price and the take profit level. This distance is expressed in points, and is converted to an actual price value using syminfo.mintick (the smallest possible price movement of the traded asset).
+
+SLPoints: Specifies the distance between the entry price and the stop loss level.
+
+Importance: These orders allow the trader to specify the maximum loss he is willing to take and the profit target he is aiming to achieve, which helps in effective risk management.
+
+Activate/Disable Trades:
+
+isLongEnabled: Allows buy trades to be enabled or disabled, which allows the trader to trade in one direction only (for example, only trade in the uptrend during a bull market).
+
+isShortEnabled: Allows sell trades to be enabled or disabled.
+
+isTakeProfitEnabled: Allows take profit orders to be enabled or disabled. The trader may wish to disable them if he prefers to manage his trades manually.
+
+isStopLossEnabled: Allows you to enable or disable stop loss orders. Although disabling them may seem tempting in some cases, it is a very risky move.
+
+Visual Customization:
+
+Line Style and Width:
+
+lineStyle: Allows the trader to choose the style of lines used to draw TP and SL levels (Solid, Dashed, Dotted).
+
+lineWidth: Sets the thickness of the lines.
+
+Label Size:
+
+labelSize: Allows you to set the size of the labels that display TP and SL levels (Small, Normal, Large).
+
+Colors:
+
+bullColor, bearColor, tpColor, slColor: Allows the trader to customize the colors of the different elements on the chart, making visual analysis easier.
+
+3. Strategy Logic:
+Determining Entry Signals: The strategy relies on the Supertrend indicator to determine entry signals. When the Supertrend trend changes from bearish to bullish, a buy trade is triggered (if isLongEnabled is enabled). When the trend changes from bullish to bearish, a sell trade is triggered (if isShortEnabled is enabled).
+
+Order Execution: Once the entry signal is triggered, the strategy automatically places buy or sell orders.
+
+Trade Management: After opening a trade, the strategy monitors the price and automatically triggers Take Profit and Stop Loss orders if the price reaches the specified levels.
+
+Visualization: The strategy displays useful information on the chart, such as TP and SL lines, entry and exit signals, which helps the trader understand the strategy’s behavior and evaluate its performance.
+
+4. Advanced Tips:
+Optimizing Settings: The strategy’s performance can be improved by adjusting different input values. For example, the trader can experiment with different values ​​for atrPeriod and factor to improve the accuracy of Supertrend signals.
+
+Combining Indicators: This strategy can be combined with other indicators to improve the accuracy of entry signals. For example, the Relative Strength Index (RSI) can be used to confirm Supertrend signals.
+
+Time Analysis: The strategy’s performance can be analyzed over different time periods to evaluate its effectiveness in various market conditions.
+
+Strategy Testing: Before using the strategy in real trading, it should be tested on historical data (Backtesting) to evaluate its performance and determine the optimal settings.
+
+5. Associated Risks:
+False Signals: The Supertrend indicator may sometimes give false signals, especially in volatile markets.
+
+Losses: Even with the use of stop loss orders, the trader may be exposed to significant losses.
+
+Over-optimization: Over-optimization of settings on historical data may lead to misleading results. The trader should be careful about generalizing the results to future data.
+
+Over-reliance on automation: The automated strategy should not be relied upon completely. The trader should monitor the trades and make appropriate decisions when necessary.
+
+6. Disclaimer:
+I am not a licensed financial advisor. This strategy is provided for educational and illustrative purposes only and should not be considered as investment advice. Trading in financial markets involves significant risks and you may lose your invested capital. Before making any investment decisions, consult a qualified financial advisor and conduct your own research. You alone are responsible for your trading decisions and their results. By using this strategy, you acknowledge and agree that I am not responsible for any losses or damages you may incur.
+
+
+
+2. المكونات الرئيسية:
+مؤشر Supertrend:
+
+الأساس النظري: يعتمد مؤشر Supertrend على مفهومين رئيسيين هما: متوسط المدى الحقيقي (Average True Range - ATR) ومعامل الضرب (Factor). ATR يقيس مدى تقلبات الأسعار في فترة زمنية محددة، بينما Factor يحدد مدى حساسية المؤشر لتغيرات الأسعار.
+
+آلية العمل: يقوم المؤشر بحساب خطين محتملين: خط يمثل مستوى الدعم المحتمل وخط آخر يمثل مستوى المقاومة المحتمل. يعتمد اختيار الخط المناسب على اتجاه السعر الحالي. عندما يكون السعر أعلى من الخط، يعتبر المؤشر في اتجاه صاعد، والعكس صحيح.
+
+المدخلات القابلة للتخصيص:
+
+atrPeriod: يتيح للمتداول تحديد الفترة الزمنية لحساب ATR. الفترات الأقصر تجعل المؤشر أكثر حساسية لتغيرات الأسعار، بينما الفترات الأطول تقلل من حساسيته.
+
+factor: يسمح بتعديل معامل الضرب. القيم الأعلى تجعل المؤشر أقل عرضة لإعطاء إشارات خاطئة، ولكنها قد تؤخر أيضًا إشارات الدخول.
+
+إدارة المخاطر:
+
+أوامر جني الأرباح وإيقاف الخسارة:
+
+TPPoints: يحدد المسافة بين سعر الدخول ومستوى جني الأرباح. يتم التعبير عن هذه المسافة بالنقاط (Points)، ويتم تحويلها إلى قيمة سعرية فعلية باستخدام syminfo.mintick (أصغر حركة سعرية ممكنة للأصل المتداول).
+
+SLPoints: يحدد المسافة بين سعر الدخول ومستوى إيقاف الخسارة.
+
+الأهمية: تتيح هذه الأوامر للمتداول تحديد الحد الأقصى للخسارة التي يرغب في تحملها والهدف الربحي الذي يسعى لتحقيقه، مما يساعد على إدارة المخاطر بشكل فعال.
+
+تفعيل/تعطيل الصفقات:
+
+isLongEnabled: يسمح بتفعيل أو تعطيل صفقات الشراء، مما يمكن المتداول من التداول في اتجاه واحد فقط (على سبيل المثال، التداول فقط في الاتجاه الصاعد خلال سوق صاعدة).
+
+isShortEnabled: يسمح بتفعيل أو تعطيل صفقات البيع.
+
+isTakeProfitEnabled: يسمح بتفعيل أو تعطيل أوامر جني الأرباح. قد يرغب المتداول في تعطيلها إذا كان يفضل إدارة صفقاته يدويًا.
+
+isStopLossEnabled: يسمح بتفعيل أو تعطيل أوامر إيقاف الخسارة. على الرغم من أن تعطيلها قد يبدو مغريًا في بعض الحالات، إلا أنه يعتبر خطوة محفوفة بالمخاطر للغاية.
+
+التخصيص المرئي:
+
+نمط وعرض الخطوط:
+
+lineStyle: يتيح للمتداول اختيار نمط الخطوط المستخدمة لرسم مستويات TP و SL (Solid, Dashed, Dotted).
+
+lineWidth: يحدد سمك الخطوط.
+
+حجم الملصقات:
+
+labelSize: يسمح بتحديد حجم الملصقات التي تعرض مستويات TP و SL (Small, Normal, Large).
+
+الألوان:
+
+bullColor, bearColor, tpColor, slColor: تتيح للمتداول تخصيص ألوان العناصر المختلفة على الرسم البياني، مما يسهل عملية التحليل البصري.
+
+3. منطق عمل الاستراتيجية:
+تحديد إشارات الدخول: تعتمد الاستراتيجية على مؤشر Supertrend لتحديد إشارات الدخول. عندما يتغير اتجاه Supertrend من هابط إلى صاعد، يتم تفعيل صفقة شراء (إذا كانت isLongEnabled مفعلة). وعندما يتغير الاتجاه من صاعد إلى هابط، يتم تفعيل صفقة بيع (إذا كانت isShortEnabled مفعلة).
+
+تنفيذ الأوامر: بمجرد تفعيل إشارة الدخول، تقوم الاستراتيجية بوضع أوامر الشراء أو البيع تلقائيًا.
+
+إدارة الصفقات: بعد فتح الصفقة، تقوم الاستراتيجية بمراقبة السعر وتفعيل أوامر جني الأرباح وإيقاف الخسارة تلقائيًا في حالة وصول السعر إلى المستويات المحددة.
+
+التمثيل المرئي: تعرض الاستراتيجية معلومات مفيدة على الرسم البياني، مثل خطوط TP و SL وإشارات الدخول والخروج، مما يساعد المتداول على فهم سلوك الاستراتيجية وتقييم أدائها.
+
+4. نصائح متقدمة:
+تحسين الإعدادات: يمكن تحسين أداء الاستراتيجية من خلال تعديل قيم المدخلات المختلفة. على سبيل المثال، يمكن للمتداول تجربة قيم مختلفة لـ atrPeriod و factor لتحسين دقة إشارات Supertrend.
+
+الجمع بين المؤشرات: يمكن دمج هذه الاستراتيجية مع مؤشرات أخرى لتحسين دقة إشارات الدخول. على سبيل المثال، يمكن استخدام مؤشر القوة النسبية (RSI) لتأكيد إشارات Supertrend.
+
+التحليل الزمني: يمكن تحليل أداء الاستراتيجية على مدى فترات زمنية مختلفة لتقييم مدى فعاليتها في ظروف السوق المتنوعة.
+
+اختبار الاستراتيجية: قبل استخدام الاستراتيجية في التداول الحقيقي، يجب اختبارها على بيانات تاريخية (Backtesting) لتقييم أدائها وتحديد الإعدادات المثلى.
+
+5. المخاطر المرتبطة:
+الإشارات الخاطئة: قد يعطي مؤشر Supertrend إشارات خاطئة في بعض الأحيان، خاصة في الأسواق المتقلبة.
+
+الخسائر: حتى مع استخدام أوامر إيقاف الخسارة، قد يتعرض المتداول لخسائر كبيرة.
+
+التحسين المفرط: قد يؤدي التحسين المفرط للإعدادات على بيانات تاريخية إلى نتائج مضللة. يجب أن يكون المتداول حذرًا بشأن تعميم النتائج على البيانات المستقبلية.
+
+الاعتماد الزائد على الأتمتة: يجب عدم الاعتماد بشكل كامل على الاستراتيجية الآلية. يجب على المتداول مراقبة الصفقات واتخاذ القرارات المناسبة عند الضرورة.
+
+6. إخلاء المسؤولية:
+أنا لست مستشارًا ماليًا مرخصًا. هذه الاستراتيجية مقدمة لأغراض تعليمية وتوضيحية فقط، ولا ينبغي اعتبارها نصيحة استثمارية. التداول في الأسواق المالية ينطوي على مخاطر كبيرة، وقد تخسر رأس المال المستثمر. قبل اتخاذ أي قرارات استثمارية، استشر مستشارًا ماليًا مؤهلاً وقم بإجراء بحثك الخاص. أنت وحدك المسؤول عن قراراتك التجارية ونتائجها. باستخدام هذه الاستراتيجية، فإنك تقر وتوافق على أنني لست مسؤولاً عن أي خسائر أو أضرار قد تتكبدها.
+
+

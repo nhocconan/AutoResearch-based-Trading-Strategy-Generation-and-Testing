@@ -1,0 +1,37 @@
+//@version=2
+strategy("Outsidebar vs Insidebar, Illusion Strategy (by ChartArt)",overlay=true)
+
+// WARNING: This strategy does not work!
+// Please don't trade with this strategy. It's only shared for educational purpose.
+
+OutSideBar = high > high[1] and low < low[1] 
+InSideBar = high < high[1] and low > low[1] 
+
+TrendChange = OutSideBar[1] and InSideBar ? lime : InSideBar[1] and OutSideBar ? fuchsia : gray
+barcolor(TrendChange)
+TrendChangeBG = OutSideBar[1] and InSideBar ? green : InSideBar[1] and OutSideBar ? maroon : na
+bgcolor(TrendChangeBG,transp=90)
+
+if ( OutSideBar[1] and InSideBar )
+    strategy.entry("Long", strategy.long, comment="Out,In: Long")
+    
+if ( InSideBar[1] and OutSideBar )
+    strategy.entry("Short", strategy.short, comment="In,Out: Short")
+
+View in Pine Editor・19 lines
+Use on chart
+3
+3
+4
+12 122
+WARNING: This strategy does not work! Please don't trade with this strategy
+
+I'm sharing this strategy for the following three educational reasons:
+
+
+1. You can easily find 100% strategies, but if they only seem to work 100% on one asset, they actually don't work at all. Therefore never backtest your strategy only on one asset, especially forward testing is useless, because it tends to repeat the old patterns. Your strategy has to work on as many different assets as possible.
+
+2. The pyramiding of orders can have an impact on the strategy. In this case if you manually change the strategy settings by increasing it from 1 to 100 pyramiding orders changes the percent profitable on "UKOIL" monthly from 100% to 90% profitable. On other assets you can see very different results. Allowing much more pyramiding orders in this case results in opening orders where the background color highlights appear.
+
+3. The Tradingview backtest beta version currently does not close the last open trade during the backtest. In this case going long on "UKOIL" near the top in 2011 as this strategy did would result in a big loss in 2015. But since the trade is still open and not canceled out by a new short order it still appears as if this strategy works 100% profitable. Which it doesn't.
+

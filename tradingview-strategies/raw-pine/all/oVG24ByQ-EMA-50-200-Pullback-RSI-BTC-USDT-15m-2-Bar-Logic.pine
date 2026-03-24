@@ -1,0 +1,99 @@
+//@version=5
+strategy("EMA 50/200 Pullback + RSI (BTC/USDT 15m - 2 Bar Logic)", overlay=true, 
+     initial_capital=582, currency=currency.USDT, default_qty_value=10, default_qty_type=strategy.percent_of_equity)
+
+// ============== 1. INPUTS & PARAMETERS ==============
+// --- Indicator Lengths ---
+len_ema_short = input.int(50, title="EMA Short Length")
+len_ema_long = input.int(200, title="EMA Long Length")
+len_rsi = input.int(14, title="RSI Length")
+
+// --- Risk Management ---
+risk_per_trade = input.float(1.0, title="Risk % of Equity (Margin Used)", minval=0.1) // 1%
+stop_loss_percent = input.float(0.49, title="Stop Loss % from Entry", minval=0.01) // 0.49% SL
+rr_ratio = input.float(5.0, title="Risk:Reward Ratio", minval=1.0) // 1:5
+leverage = input.int(1, title="Leverage Multiplier", minval=1) // 10x
+
+// ============== 2. INDICATOR CALCULATIONS ==============
+ema50 = ta.ema(close, len_ema_short)
+ema200 = ta.ema(close, len_ema_long)
+rsi14 = ta.rsi(close, len_rsi)
+
+// ============== 3. POSITION SIZING & RISK MANAGEMENT ==============
+// Notional Value = 1% (Margin Used) * 10x (Leverage) = 10% ของ Equity
+position_notional_value = strategy.initial_capital * (risk_per_trade / 100) * leverage
+contracts = position_notional_value / close
+
+// ============== 4. LONG ENTRY LOGIC (Buy Signal) ==============
+
+// 1. Trend: EMA 50 เหนือ EMA 200
+trend_is_up = ema50 > ema200
+
+// 2. Pullback & Entry (2 แท่ง):
+// C[1]: ราคาปิดแท่งก่อนหน้า ต้องอยู่ใต้ EMA 50 (Pullback)
+pullback_close_below = close[1] < ema50[1]
+// C[0]: ราคาปิดแท่งปัจจุบัน ดีดกลับมาอยู่เหนือ EMA 50 (Entry)
+entry_close_above = close > ema50
+
+// 3. RSI Filter: RSI มากกว่า 50 ในแท่งปัจจุบัน
+rsi_is_bullish = rsi14 > 50
+
+// สัญญาณเข้า Long
+long_entry_condition = strategy.position_size == 0 and trend_is_up and pullback_close_below and entry_close_above and rsi_is_bullish
+
+// ============== 5. SHORT ENTRY LOGIC (Sell Signal) ==============
+
+// 1. Trend: EMA 50 ใต้ EMA 200
+trend_is_down = ema50 < ema200
+
+// 2. Pullback & Entry (2 แท่ง):
+// C[1]: ราคาปิดแท่งก่อนหน้า ต้องอยู่เหนือ EMA 50 (Pullback)
+pullback_close_above = close[1] > ema50[1]
+// C[0]: ราคาปิดแท่งปัจจุบัน ทุบลงมาอยู่ใต้ EMA 50 (Entry)
+entry_close_below = close < ema50
+
+// 3. RSI Filter: RSI น้อยกว่า 50 ในแท่งปัจจุบัน
+rsi_is_bearish = rsi14 < 50
+
+// สัญญาณเข้า Short
+short_entry_condition = strategy.position_size == 0 and trend_is_down and pullback_close_above and entry_close_below and rsi_is_bearish
+
+// ============== 6. EXECUTION & SINGLE POSITION CONSTRAINT ==============
+
+if long_entry_condition
+    // 6.1 คำนวณ SL & TP Price
+    long_stop_loss_price = close * (1 - (stop_loss_percent / 100))
+    long_take_profit_price = close * (1 + (stop_loss_percent / 100) * rr_ratio)
+
+    // 6.2 ส่งคำสั่ง Long
+    strategy.entry("Long", strategy.long, qty=contracts)
+    
+    // 6.3 ตั้ง SL/TP (Exit Order)
+    strategy.exit("Exit Long", from_entry="Long", stop=long_stop_loss_price, limit=long_take_profit_price)
+
+
+if short_entry_condition
+    // 6.1 คำนวณ SL & TP Price
+    short_stop_loss_price = close * (1 + (stop_loss_percent / 100))
+    short_take_profit_price = close * (1 - (stop_loss_percent / 100) * rr_ratio)
+
+    // 6.2 ส่งคำสั่ง Short
+    strategy.entry("Short", strategy.short, qty=contracts)
+    
+    // 6.3 ตั้ง SL/TP (Exit Order)
+    strategy.exit("Exit Short", from_entry="Short", stop=short_stop_loss_price, limit=short_take_profit_price)
+    
+// ============== 7. PLOTTING (Optional) ==============
+plot(ema50, color=color.blue, title="EMA 50")
+plot(ema200, color=color.red, title="EMA 200")
+
+View in Pine Editor・88 lines
+Use on chart
+1
+7
+1 141
+I recognize that combining indicators requires clear justification on how the components interact Therefore the new scripts description will explicitly detail the strategys operational logic
+
+Objective The strategy is a Trend Following Pullback System designed for high frequency time frames 15m
+
+Synergy The EMA50 EMA200 defines the primary Trend Direction Trend Filter It then utilizes a 2 Bar Pullback Logic to find an entry point where the price has momentarily reversed against the trendline and the RSI 14 serves as a Momentum Filter RSI greater than 50 for Long RSI less than 50 for Short to minimize false signals

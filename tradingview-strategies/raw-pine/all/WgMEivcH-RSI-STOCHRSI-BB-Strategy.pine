@@ -1,0 +1,65 @@
+//@version= 2
+strategy("RSI+STOCHRSI+BB Strategy", overlay=true)
+lengthrsi = input(6)
+overSold = input( 20 )
+overBought = input( 70 )
+price = close
+vrsi = rsi(price, lengthrsi)
+
+smoothK = input(3, minval=1)
+smoothD = input(3, minval=1)
+lengthRSI = input(14, minval=1)
+lengthStoch = input(14, minval=1)
+src = input(close, title="RSI Source")
+
+rsi1 = rsi(src, lengthRSI)
+k = sma(stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+d = sma(k, smoothD)
+
+bblength = input(50)
+bbupmult =input(1.5,title="Multiplier for BB Upper Band")
+bblowmult = input(1.5,title="Multiplier for BB Lower Band")
+
+basis =  sma(close,bblength)
+
+devup = bbupmult * stdev(close, bblength)
+devlow = bblowmult * stdev(close, bblength)
+
+upper = basis + devup
+lower = basis - devlow
+plot(basis, color=red)
+p1 = plot(upper, color=blue)
+p2 = plot(lower, color=blue)
+fill(p1, p2)
+
+
+yearfrom = input(2018)
+yearuntil =input(2019)
+monthfrom =input(6)
+monthuntil =input(12)
+dayfrom=input(1)
+dayuntil=input(31)
+
+
+
+if (  ( crossover(k,d)) and ( crossover(vrsi,overSold) or vrsi<overSold)  and (  (price<lower) or crossover(price,lower) )  and   year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil) 
+    strategy.entry("BUY", strategy.long, stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="BUY")
+    
+else
+    strategy.cancel(id="BUY")
+
+
+if ( ( crossunder(k,d) ) and ( (vrsi >overBought) or crossunder(vrsi,overBought) ) and  ( (price>upper) or crossunder(price,upper) ) and   year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil ) 
+
+    strategy.entry("SELL", strategy.short,stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="SELL")
+else
+    strategy.cancel(id="SELL")
+
+View in Pine Editor・56 lines
+Use on chart
+3
+1
+6
+3
+7 797
+Combination of RSI+BB+STOCHRSI

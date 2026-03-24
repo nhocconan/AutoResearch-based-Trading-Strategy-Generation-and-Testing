@@ -1,0 +1,5 @@
+//@version=3
+p=##input(defval=false,type='INPUT_BOOL',##id='in_3')
+b=p?50:0
+##root(root_metainfo,rm_0,b)
+##root(root_metainfo,rm_1,b)

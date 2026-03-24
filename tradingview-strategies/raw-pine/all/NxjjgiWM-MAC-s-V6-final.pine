@@ -1,0 +1,411 @@
+//@version=6
+strategy('MAC\'s V6 final', shorttitle = 'MAC\'s V6 final', overlay = true, initial_capital = 100000, margin_long = 0, margin_short = 0)
+
+//################################################################KC###################################################################################
+
+emaLen = input(55, title = 'KC Length')
+atr = input(34, title = 'KC ATR Length')
+multiplier = input.float(1.1, title = 'KC Multiplier', step = 0.1)
+src1 = input(hlc3, title = 'KC Source')
+shb = false
+sbh = false
+pt = false
+pc = false
+pttb = false
+kcs = input(true, title = 'Show KC ?')
+medchn = input(true, title = 'Show Median Channel KC ?')
+useCurrentResi = input(true, title = 'Corrent Resolution?')
+resCustomi = input.timeframe(title = 'KC Use Different Timeframe? Uncheck Box Above', defval = 'D')
+length = input.int(20, minval = 1)
+
+//Calculate Donchian channel
+atr10 = atr * 10
+Donchian_length = input.int(20, minval=2)
+Dopnchian_offset = input.int(0, "Offset")
+Donchian_lower =  ta.lowest(length) + ta.atr(atr) * 1.5
+Donchian_upper =  ta.highest(length) - ta.atr(atr) * 1.5
+
+//PPO
+
+fastLength = input.int(title="Fast Length", defval=12)
+slowLength = input.int(title="Slow Length", defval=26)
+signalLength = input.int(title="Signal Length", defval=9)
+src2 = input(title="Source", defval=close)
+//showHistogram = input(title="Show Histogram ?", type=bool, defval=true)
+//highlightCrossovers = input(title="Highlight PPO/Signal Crossovers ?", type=bool, defval=true)
+//highlightZeroCrossovers = input(title="Highlight Zero Line Crossovers ?", type=bool, defval=false)
+//applyFilling = input.bool(title="Apply Ribbon Filling ?", defval=false)
+
+ppo = 100 * (ta.ema(src2, fastLength) - ta.ema(src2, slowLength)) / ta.ema(src2, slowLength)
+signal = ta.ema(ppo, signalLength)
+
+//hist = ppo - signal
+//histColor = hist >= 0 ? (hist[1] < hist ? #26A69A : #B2DFDB) : (hist[1] < hist ? #FFCDD2 : #EF5350)
+
+//plot(showHistogram ? hist : na, title="Histogram", style=columns, color=histColor, transp=0)
+//hline(0, title="Zero Line", linestyle=dotted)
+
+//trendColor = ppo > signal ? #0ebb23 : color.red
+
+//ppoColor = applyFilling ? trendColor : #0094ff
+//signalColor = applyFilling ? trendColor : #ff6a00
+
+//ppoPlot = plot(ppo, title="PPO", color=ppoColor)
+//signalPlot = plot(signal, title="Signal", color=signalColor)
+
+transparent = color.white
+
+//fillColor = applyFilling ? trendColor : transparent
+//fill(ppoPlot, signalPlot, color=fillColor)
+
+//zeroCrossBgColor = highlightZeroCrossovers ? (ppo > 0 ? green : red) : transparent
+//bgcolor(zeroCrossBgColor, transp=90)
+
+//plotshape(highlightCrossovers and crossover(ppo, signal) ? ppo : na, title="Crossover", location=location.absolute, style=shape.circle, size=size.tiny, color=green, transp=0)
+//plotshape(highlightCrossovers and crossunder(ppo, signal) ? ppo : na, title="Crossunder", location=location.absolute, style=shape.circle, size=size.tiny, color=red, transp=0)
+
+// the risk management inputs
+inpTakeProfit = input(1300, title = 'Take Profit')
+inpStopLoss = input(550, title = 'Stop Loss')
+inpTrailStop = input(550, title = 'Trailing Stop Loss')
+inpTrailOffset = input(500, title = 'Trailing Stop Loss Offset')
+
+// === RISK MANAGEMENT VALUE PREP ===
+// if an input is less than 1, assuming not wanted so we assign 'na' value to disable it.
+useTakeProfit = inpTakeProfit >= 1 ? inpTakeProfit : na
+useStopLoss = inpStopLoss >= 1 ? inpStopLoss : na
+useTrailStop = inpTrailStop >= 1 ? inpTrailStop : na
+useTrailOffset = inpTrailOffset >= 1 ? inpTrailOffset : na
+
+//--------------------------------------------------------------------
+//                          MTF
+//--------------------------------------------------------------------
+
+resi = useCurrentResi ? timeframe.period : resCustomi
+
+//em = alma(src1, emaLen,0.85,6)
+//--------------------------------------------------------------------
+//                         Smooth
+//--------------------------------------------------------------------
+src = src1
+f = 1.414 * 3.14159 / emaLen
+a = math.exp(-f)
+c2 = 2 * a * math.cos(f)
+c3 = -a * a
+c1 = 1 - c2 - c3
+
+ema(src, emaLen) =>
+    ssf = 0.0
+    ssf := c1 * (src + src[1]) * 0.5 + c2 * nz(ssf[1]) + c3 * nz(ssf[2])
+    ssf
+
+em = ema(src, emaLen)
+
+//--------------------------------------------------------------------
+//                           ATR
+//--------------------------------------------------------------------
+
+mATRi = multiplier * ta.atr(atr)
+mATR = request.security(syminfo.tickerid, resi, mATRi)
+
+//--------------------------------------------------------------------
+//                           Upper
+//--------------------------------------------------------------------
+upperi = em + mATR
+upperiStop = em + mATR + mATR / 4
+upper = request.security(syminfo.tickerid, resi, upperi)
+upperStop = request.security(syminfo.tickerid, resi, upperiStop)
+
+//--------------------------------------------------------------------
+//                           Lower
+//--------------------------------------------------------------------
+loweri = em - mATR
+loweriStop = em - mATR - mATR / 4
+lower = request.security(syminfo.tickerid, resi, loweri)
+lowerStop = request.security(syminfo.tickerid, resi, loweriStop)
+
+//--------------------------------------------------------------------
+//                           Median
+//--------------------------------------------------------------------
+mediani = math.avg(upper, lower)
+median = request.security(syminfo.tickerid, resi, mediani)
+
+//--------------------------------------------------------------------
+//                           Plot
+//--------------------------------------------------------------------
+
+//code for Calculations
+var hld = 0
+var hld2 = 0
+
+hld := close > upper[1] ? 1 : close < lower[1] ? -1 : 0
+hlv = ta.valuewhen(hld != 0, hld, 1)
+hld2 := close < upper[1] ? 1 : close > lower[1] ? -1 : 0
+hlv2 = ta.valuewhen(hld2 != 0, hld2, 1)
+
+plot(upperStop, title = 'Gann Swing High Plots-Circles', color = color.maroon, style = plot.style_line, linewidth = 1)
+plot(lowerStop, title = 'Gann Swing High Plots-Circles', color = color.maroon, style = plot.style_line, linewidth = 1)
+
+//code for Plot Statements
+hi = hlv == -1 ? upper : na
+lo = hlv == 1 ? lower : na
+
+hi2 = hlv2 == -1 ? lower : na
+lo2 = hlv2 == 1 ? upper : na
+
+linecolor = median > median[1] ? color.blue : color.maroon
+linecolor2 = median > median[1] ? color.aqua : color.orange
+
+// Draw bands
+//plot(hi, title = 'Gann Swing High Plots-Circles', color = color.maroon, style = plot.style_linebr, linewidth = 1)
+//plot(lo, title = 'Gann Swing Low Plots-Circles', color = color.maroon, style = plot.style_linebr, linewidth = 1)
+plot(hi, title = 'Gann Swing High Plots-Circles', color = color.orange, style = plot.style_linebr, linewidth = 1)
+plot(lo, title = 'Gann Swing High Plots-Circles', color = color.aqua, style = plot.style_linebr, linewidth = 1)
+plot(Donchian_upper, title = 'Donchian Upper', color = color.rgb(55, 0, 255), style = plot.style_linebr, linewidth = 1)
+plot(Donchian_lower, title = 'Donchian Lower', color = color.rgb(55, 0, 255), style = plot.style_linebr, linewidth = 1)
+
+//plot(hi2,title="Upper Channel Shadow",  color=kcs?orange:na, style=linebr,linewidth=1)
+//plot(lo2,title="Lower Channel Sadow",  color=kcs?aqua:na,style=linebr,linewidth=1)
+
+//pa=plot(upper,title="pa",  color=kcs? color.aqua:na, linewidth=0, editable= false)
+//pb=plot(lower,title="pb",  color=kcs?orange:na,linewidth=0, transp=100, editable= false)
+
+//plot(median, title = 'Median KC Price Shadow', color = medchn ? linecolor : na, linewidth = 3)
+plot(median, title = 'Median KC Price', color = medchn ? linecolor2 : na, linewidth = 1)
+
+linecolor3 = median > median[1] ? color.navy : color.orange
+//fill(pa,pb, color=linecolor2,transp=90, title="Fill Channel")
+
+//Rules for coloring Background highlights & Highlight Bars
+closeAbove() =>
+    shb and close > hi and close[1] < hi
+BHcloseAbove = sbh and close > hi and close[1] < hi
+closeBelow() =>
+    shb and close < lo and close[1] > lo
+BHcloseBelow = sbh and close < lo and close[1] > lo
+
+//Highlight Bar Color Plots
+barcolor(closeAbove() ? color.yellow : na)
+barcolor(closeBelow() ? color.yellow : na)
+//Background Highlight Rules
+bgcolor(BHcloseAbove ? color.green : na)
+bgcolor(BHcloseBelow ? color.red : na)
+
+//Plot Statements for circles and Triangle Up/Down at Price Bars
+//plotshape(pt and hi ? hi : na,title="Gann Swing High Plots-Triangle Down", offset=0, style=shape.triangledown, location=location.abovebar, color=fuchsia, transp=0)
+//plotshape(pt and lo ? lo : na,title="Gann Swing Low Plots-Triangle Up", offset=0, style=shape.triangleup, location=location.belowbar, color=lime, transp=0)
+
+//Plot Statement for Triangles at Top and Bottom of Screen
+//plotshape(pttb and hi ? hi : na, title = 'Gann Swing High Plots-Triangles Down Top of Screen', offset = 0, style = shape.triangledown, location = location.top, color = color.red)
+//plotshape(pttb and lo ? lo : na, title = 'Gann Swing Low Plots-Triangles Up Bottom of Screen', offset = 0, style = shape.triangleup, location = location.bottom, color = color.lime)
+
+//------------------------------------------------------------------------------------------------------------------------
+//##########################################################CFB###########################################################
+//------------------------------------------------------------------------------------------------------------------------
+scfb = input.bool(defval = true, title = 'Show CFB ?')
+
+//Source
+srcP = input(defval = close, title = 'CFB Source')
+srcCFB = (srcP + 2 * srcP[1] + 2 * srcP[2] + srcP[3]) / 6
+//Sampling Period
+per = input.int(defval = 14, minval = 1, title = 'CFB Period')
+
+//Range Multiplier
+mult = input.float(defval = 3.8, minval = 0, title = 'CFB Range')
+bc = input.bool(defval = true, title = 'CFB Bar Color?')
+trendCFB = input.bool(true, title = ' Show CFB  alarm Signal?')
+offsetto = input.int(defval = 0, minval = -5, title = 'Offset or shift')
+bg1 = input.bool(true, title = ' Show BackGround?')
+
+//mtf
+useCurrentResCFB = input(false, title = 'CFB Current Resolution?')
+resCustomCFB = input.timeframe(title = 'Use CFB in Different Timeframe? Uncheck Box Above', defval = '240')
+
+overideCFB = input.bool(true, title = 'for NOT use of the recommended time, turn on box')
+
+newresCustom1CFB = overideCFB ? resCustomCFB : timeframe.period == '1' ? '5' : timeframe.period == '5' ? '15' : timeframe.period == '15' ? '45' : timeframe.period == '30' ? '120' : timeframe.period == '60' ? '180' : timeframe.period == 'D' ? 'W' : timeframe.period == 'W' ? 'M' : '240'
+
+resCFB = useCurrentResCFB ? timeframe.period : newresCustom1CFB
+
+var newSessionCFB = true
+
+startCFB = request.security(syminfo.tickerid, resCFB, srcCFB, lookahead = barmerge.lookahead_off)
+if bool(ta.change(startCFB))
+    newSessionCFB := true
+    newSessionCFB
+else
+    newSessionCFB := false
+    newSessionCFB
+
+barsInIntervalcCFB() =>
+    sinceNewSessionCFB = 0
+    barssince_1 = ta.barssince(newSessionCFB)
+    offsetCFB = useCurrentResCFB ? 0 : barssince_1
+    sinceNewSessionCFB := na(sinceNewSessionCFB[1]) or offsetCFB > nz(sinceNewSessionCFB[1]) ? offsetCFB : nz(sinceNewSessionCFB[1])
+    sinceNewSessionCFB
+barsInIntcCFB = barsInIntervalcCFB()
+
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//                                                                                      Definitions
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+//Smooth Average Range
+smoothrng(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ema(math.abs(x - x[1]), t)
+    smoothrng = ema(avrng, wper) * m
+    smoothrng
+smrng = smoothrng(srcCFB, per, mult)
+
+//Range Filter
+rngfilt(x, r) =>
+    rngfilt = x
+    rngfilt := x > nz(rngfilt[1]) ? x - r < nz(rngfilt[1]) ? nz(rngfilt[1]) : x - r : x + r > nz(rngfilt[1]) ? nz(rngfilt[1]) : x + r
+    rngfilt
+
+filti = rngfilt(srcCFB, smrng)
+
+//mtf filti
+resiCFB = useCurrentResCFB ? timeframe.period : newresCustom1CFB
+
+starti = request.security(syminfo.tickerid, resiCFB, filti, lookahead = barmerge.lookahead_off)
+var newSessioni = true
+if starti > starti[1] or starti < starti[1]
+    newSessioni := true
+    newSessioni
+else
+    newSessioni := false
+    newSessioni
+barsInIntervalcii() =>
+    sinceNewSessioni = 0
+    barssince_1 = ta.barssince(newSessioni)
+    offseti = useCurrentResCFB ? 0 : barssince_1
+    sinceNewSessioni := na(sinceNewSessioni[1]) or offseti > nz(sinceNewSessioni[1]) ? offseti : nz(sinceNewSessioni[1])
+    sinceNewSessioni
+barsInIntci = barsInIntervalcii()
+filt = request.security(syminfo.tickerid, resiCFB, filti, lookahead = barmerge.lookahead_off)
+
+//Filter Direction
+upward = 0.0
+upward := filt > filt[1] ? nz(upward[1]) + 1 : filt < filt[1] ? 0 : nz(upward[1])
+downward = 0.0
+downward := filt < filt[1] ? nz(downward[1]) + 1 : filt > filt[1] ? 0 : nz(downward[1])
+
+//Target Bands
+hband = filt + smrng
+lband = filt - smrng
+
+//Colors
+filtcolor = upward > 0 ? color.blue : downward > 0 ? color.red : color.gray
+filtcolor2 = upward > 0 ? color.aqua : downward > 0 ? color.orange : color.gray
+barcolor = srcCFB > filt and srcCFB > srcCFB[1] and upward > 0 ? color.lime : srcCFB > filt and srcCFB < srcCFB[1] and upward > 0 ? color.green : srcCFB < filt and srcCFB < srcCFB[1] and downward > 0 ? color.red : srcCFB < filt and srcCFB > srcCFB[1] and downward > 0 ? color.maroon : color.orange
+
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//                                                                                      Plots
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//Range Filter
+//filtplot = plot(filt, color = scfb ? filtcolor : na, linewidth = 8, title = 'CFB Range Filter', offset = offsetto)
+plot(filt, color = scfb ? filtcolor2 : na, linewidth = 1, title = 'CFB Range Filter', offset = offsetto)
+
+//Target
+//hbandplot = plot(hband, color = scfb ? color.green : na, title = 'CFB High Range', offset = offsetto)
+//lbandplot = plot(lband, color = scfb ? color.red : na, title = 'CFB Low Range', offset = offsetto)
+
+//Fills
+//fill(hbandplot, filtplot, color = scfb ? color.green : na, title = 'CFB High Target Range')
+//fill(lbandplot, filtplot, color = scfb ? color.red : na, title = 'CFB Low Target Range')
+
+//Bar Color
+//barcolor(color = bc ? barcolor : na)
+//bgcolor(color = bg1 ? filtcolor2 : na, title = 'BG')
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//                                                                                ALARM
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+var hi_cross = false
+var lo_cross = false
+hi_cross := ta.crossunder(ppo, signal)
+lo_cross := ta.crossover(ppo, signal)
+Close = request.security(syminfo.tickerid, resiCFB, close, lookahead = barmerge.lookahead_on)
+
+CFB_up = ta.crossover(upward, 0)
+CFB_down = ta.crossunder(0, downward)
+
+longCFB = bool(na)
+longCFB := CFB_up[1] ? true : CFB_down[1] ? false : longCFB[1]
+shortCFB = bool(na)
+shortCFB := CFB_down[1] ? true : CFB_up[1] ? false : shortCFB[1]
+
+long = longCFB and Close > hi and Close[1] < hi
+//exitLong = Close < lo and Close[1] > lo
+exitLong = Close < Donchian_lower or hi_cross//Close < Donchian_upper
+
+short = shortCFB and Close < lo and Close[1] > lo
+//exitShort = Close > hi and Close[1] < hi
+exitShort = Close > Donchian_lower or lo_cross// or Close > Donchian_upper
+
+// Show Break Alerts
+//plotshape(trendCFB and CFB_up ? CFB_up : false, title = 'BUY CFB', style = shape.arrowup, location = location.belowbar, size = size.auto, text = 'CFB', color = color.lime)
+//plotshape(trendCFB and CFB_down ? CFB_down : false, title = 'SELL CFB ', style = shape.arrowdown, location = location.abovebar, size = size.auto, text = 'CFB', color = color.orange)
+
+// Send alert to TV alarm sub-system
+//alertcondition(CFB_up or CFB_down, title="ALERT CFB", message=" CFB Cross ALERT")
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+if long
+    strategy.entry('Long', strategy.long) // use function or simple condition to decide when to get in
+if exitLong
+    strategy.close('Long') // ...and when to get out
+    // === STRATEGY - SHORT POSITION EXECUTION ===
+if short
+    strategy.entry('Short', strategy.short)
+if exitShort
+    strategy.close('Short')
+
+
+// === STRATEGY RISK MANAGEMENT EXECUTION ===
+// finally, make use of all the earlier values we got prepped
+//strategy.exit('Exit Long', from_entry = 'Long', profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+//strategy.exit('Exit Short', from_entry = 'Short', profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+
+
+//------------------------------------------------------------------------------------------------------------------------
+//                                                      Alert Plot
+//------------------------------------------------------------------------------------------------------------------------
+//plotshape(trend and longCondition ? longCondition : na, title="BUY", style=shape.arrowup, location=location.belowbar, size=size.auto, text="BUY", color=lime, transp=0)
+//plotshape(trend and shortCondition ? shortCondition : na, title="SELL", style=shape.arrowdown, location=location.abovebar, size=size.auto, text="SELL", color=orange, transp=0)
+//plotshape(trend and closeCondition ? closeCondition : na, title="CLOSE", style=shape.arrowup, location=location.belowbar, size=size.auto, text="CLOSE", color=yellow, transp=0)
+
+View in Pine Editor・377 lines
+Use on chart
+2
+6
+4
+12
+4 696
+Oct 11, 2025
+Breakout retest strategy
+Works best on a NQ 1 hour chart
+Also works on other futures charts
+Adjust the initial capital to 100000
+and the margin requirement percent to 0
+Oct 12, 2025
+Release Notes
+Breakout retest strategy
+Works best on a NQ 1 hour chart
+Also works on other futures charts
+Oct 12, 2025
+Release Notes
+Breakout, retest strategy
+Works best on NQ 1 hour chart.
+Returns are based on risk level.
+I trade one contract
+Oct 12, 2025
+Release Notes
+Fixed it thanks.
+Oct 14, 2025
+Release Notes
+update
+Oct 14, 2025
+Release Notes
+Updated exit criteria

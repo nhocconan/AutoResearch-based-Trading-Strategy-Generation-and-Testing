@@ -1,0 +1,247 @@
+//@version=4
+//@author=Daveatt
+
+SystemName = "BEST Trailing Profit Strategy"
+TradeId = "BEST"
+// These values are used both in the strategy() header and in the script's relevant inputs as default values so they match.
+// Unless these values match in the script's Inputs and the TV backtesting Properties, results between them cannot be compared.
+InitCapital = 1000000
+InitPosition = 100
+InitCommission = 0.075
+InitPyramidMax = 1
+CalcOnorderFills = true
+CalcOnTick = true
+DefaultQtyType = strategy.fixed
+DefaultQtyValue = strategy.fixed
+Precision = 2
+Overlay=true
+
+// strategy(title=SystemName, shorttitle=SystemName, overlay=Overlay, 
+//  pyramiding=InitPyramidMax, initial_capital=InitCapital, default_qty_type=DefaultQtyType, default_qty_value=InitPosition, commission_type=strategy.commission.percent, 
+//  commission_value=InitCommission, calc_on_order_fills=CalcOnorderFills, calc_on_every_tick=CalcOnTick, precision=2)
+
+
+strategy(title=SystemName, shorttitle=SystemName, overlay=true, 
+ pyramiding=0, default_qty_value=100, precision=7, currency=currency.USD,
+ commission_value=0.2,commission_type=strategy.commission.percent, initial_capital=10000)
+
+//
+//  Author:   Daveatt
+//  Revision: R0.1 Beta
+//  Date:     8-Dec-2019
+//
+
+// inputs
+
+src   = input(defval=close, type=input.source, title="Source")
+
+slowLength   = input(20, "Fast Length",minval=2,step=1)
+fastLength   = input(50, "Fast Length",minval=2,step=1)
+
+// Calculate moving averages
+fastSMA = sma(src, slowLength)
+slowSMA = sma(src, fastLength)
+
+// Calculate trading conditions
+enterLong  = crossover(fastSMA, slowSMA)
+enterShort = crossunder(fastSMA, slowSMA)
+
+// trend states
+since_buy  = barssince(enterLong)
+since_sell = barssince(enterShort)
+buy_trend  = since_sell > since_buy
+sell_trend = since_sell < since_buy 
+
+change_trend = (buy_trend and sell_trend[1]) or (sell_trend and buy_trend[1])
+
+// get the entry price
+entry_price = valuewhen(enterLong or enterShort, src, 0)
+
+// Plot moving averages
+plot(series=fastSMA, color=color.teal)
+plot(series=slowSMA, color=color.orange)
+
+// Plot the entries
+plotshape(enterLong, style=shape.circle, location=location.belowbar, color=color.green, size=size.small)
+plotshape(enterShort, style=shape.circle, location=location.abovebar, color=color.red, size=size.small)
+
+
+
+///////////////////////////////
+//======[ Take Profit ]======//
+///////////////////////////////
+
+// Use TP?
+useTP = input(true, "Use take profit")
+// TP trailing
+ProfitTrailPerc     = input(1.0, "Trailing Profit (%)",minval=0,step=0.5,type=input.float) * 0.01
+
+use_TP_Trigger = input(true, "Use Take Profit Trigger")
+// Will trigger the take profit trailing once reached
+takeProfitTrigger   = input(3.0, "Take Profit Trigger (%)",minval=0,step=0.5,type=input.float) * 0.01
+
+
+// ttp := ttp>tp ? tp : ttp
+
+takeprofitPriceTrigger = 0.0
+takeprofitPriceTrigger := if (use_TP_Trigger)
+    if (buy_trend)
+        entry_price * (1 + takeProfitTrigger) 
+    else
+        entry_price * (1 - takeProfitTrigger)
+else
+    -1
+
+//plot(entry_price, title='entry_price', transp=100)
+
+var TP_Trigger_Long_HIT = false
+TP_Trigger_Long_HIT := useTP and use_TP_Trigger and buy_trend and high >= takeprofitPriceTrigger
+ ? true : TP_Trigger_Long_HIT[1]
+
+
+var TP_Trigger_Short_HIT = false
+TP_Trigger_Short_HIT := useTP and use_TP_Trigger and sell_trend and low <= takeprofitPriceTrigger
+ ? true : TP_Trigger_Short_HIT[1]
+
+
+display_long_TP_trigger     = useTP and buy_trend  and TP_Trigger_Long_HIT == false 
+ and takeprofitPriceTrigger != -1
+display_short_TP_trigger    = useTP and sell_trend and TP_Trigger_Short_HIT == false 
+ and takeprofitPriceTrigger != -1
+display_TP_trigger          = display_long_TP_trigger or display_short_TP_trigger
+
+
+plot(display_TP_trigger ? takeprofitPriceTrigger : na, title='takeprofitPriceTrigger', transp=0, color=color.orange, 
+ style=plot.style_cross, linewidth=3)
+
+longTrailTP= 0.0, shortTrailTP = 0.0
+
+// Trailing Profit
+// Start trailing once trigger is reached
+longTrailTP := if useTP and buy_trend 
+    tpValue = high * (1 + ProfitTrailPerc)
+    max(tpValue, longTrailTP[1])
+else
+    0
+
+shortTrailTP := if useTP and sell_trend
+    tpValue = low * (1 - ProfitTrailPerc)
+    min(tpValue, shortTrailTP[1])
+else
+    999999
+
+//plot(longTrailTP, title='debug longTrailTP', transp=100)
+//plot(shortTrailTP, title='debug shortTrailTP', transp=100)
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//*** TRAILING TAKE PROFIT HIT CONDITIONS TO BE USED IN ALERTS  ***//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+cond_long_trail_tp_hit      = useTP and buy_trend   and crossover(high, longTrailTP[1]) 
+ and (TP_Trigger_Long_HIT or use_TP_Trigger == false)
+cond_short_trail_tp_hit     = useTP and sell_trend  and crossunder(low, shortTrailTP[1]) 
+ and (TP_Trigger_Short_HIT or use_TP_Trigger == false)
+
+
+
+// Plot take profits values for confirmation
+// Display the trailing TP until not hit
+plot(series= useTP and buy_trend and high <= longTrailTP and 
+ (TP_Trigger_Long_HIT or use_TP_Trigger == false) ? longTrailTP : na,
+ color=color.aqua, style=plot.style_circles,
+ linewidth=2, title="Long Trail TP")
+
+plot(series= useTP and sell_trend and low >= shortTrailTP and 
+ (TP_Trigger_Short_HIT or use_TP_Trigger == false) ? shortTrailTP : na,
+ color=color.aqua, style=plot.style_circles,
+ linewidth=2, title="Short Trail TP")
+
+
+close_long  = cond_long_trail_tp_hit
+close_short = cond_short_trail_tp_hit
+
+// Submit entry orders
+strategy.entry(TradeId + " L", long=true, when=enterLong)
+strategy.close(TradeId + " L", when=close_long)
+
+//if (enterShort)
+strategy.entry(TradeId + " S", long=false, when=enterShort)
+strategy.close(TradeId + " S", when=close_short)
+
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// ALERTS ////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////
+//* Put Entry Alerts below *//
+//////////////////////////////
+
+// IN STUDY MODE ONLY
+
+// ⚠️⚠️⚠️ For alerts on the signal itself ⚠️⚠️⚠️
+//alertcondition(buy_event, "Open Long", "LONG")
+//alertcondition(sell_event, "Open Short", "SHORT")
+
+// For the closes you will want to trigger these alerts on condition with alert 
+// option "Once Per Bar" for TP and SL
+
+if change_trend
+    TP_Trigger_Long_HIT := false
+    TP_Trigger_Short_HIT := false
+
+View in Pine Editor・195 lines
+Use on chart
+1.6 K
+21
+66 680
+Dec 9, 2019
+Hello traders
+
+Hope you enjoyed your weekend on my behalf. Was staying home working ... ^^
+This is my first strategy educational post I'm doing ever
+While I'm generally against posting strategies because it's very easy to fake performance numbers... I cannot prevent myself from sharing a few cool strategy snippets anyway.
+
+So from now on, I'll be sharing a few strategies also - generally not to showcase performance but only to show what pinescript can do.
+As once again strategy performance can be faked is so many ways... :)
+
+What's on the menu?
+
+We all know what a trailing-stop is. right? right? Ok... sharing the definition here :)
+
+A trailing stop is designed to protect gains by enabling a trade to remain open and continue to profit as long as the price is moving in the investor's favor. The order closes the trade if the price changes direction by a specified percentage or dollar amount.
+
+But...do you know what a trailing profit is?
+
+Short definition: Well the same but with your profit limit order.
+Long definition: A trailing profit is designed to increase your gains by enabling a trade to remain open and continue to profit as long as the price is moving in the investor's favor. The order closes the trade if the price hits the trailing profit level specified percentage or dollar amount.
+
+Some trading strategies used both a trailing stop AND trailing profit. Not making any recommendation here - only sharing what's possible in the realm of trading and pinescripting
+
+Trigger me I'm famous
+
+I developed many trading strategies in my career and often I've been asked to trigger a trailing-stop or trailing-profit once a certain % move has been made.
+I integrated here a Take Profit trigger - once hit, it will activate the trailing profit
+
+On the screenshot below, the TP trigger is plotted in orange. Once the price goes past that level for the first time, I'll start trailing the profit level.
+In other words, when we see a price makes an interesting move in percentage value - we decide to offset the profit as we concluded that once it reached such distance - then it leads often to more profit
+
+Of course, using only a trailing profit without stop/trailing-stop/invalidation isn't smart and the surest way to kiss goodbye a trading capital and trading and your good mood
+
+
+
+
+See you tomorrow for another strategy snippet
+
+All the BEST
+Dave
+Dec 9, 2019
+Release Notes
+- Removed some debug plots
+Dec 9, 2019
+Release Notes
+- Changed the strategy position names

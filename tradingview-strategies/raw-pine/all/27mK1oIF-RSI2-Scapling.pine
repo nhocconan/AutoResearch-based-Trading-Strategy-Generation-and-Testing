@@ -1,0 +1,22 @@
+//@version=3
+strategy("RSI-2 Strategy", overlay=true)
+
+if (rsi(close,2) < 5 and close > sma(close,200))
+    strategy.entry("BUY", strategy.long)
+if (close > sma(close,5))
+    strategy.close("BUY")
+
+View in Pine Editor・7 lines
+Use on chart
+8
+8
+6 554
+Dec 1, 2018
+Rule
+1. Price is above its 200-period moving average
+2. The 2-period RSI of price closes below 5
+3. Buy price on the close
+4. Exit when price closes above its 5-period moving average
+Jul 31, 2019
+Release Notes
+replace short to close

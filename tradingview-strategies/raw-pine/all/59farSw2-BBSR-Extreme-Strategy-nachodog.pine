@@ -1,0 +1,144 @@
+//@version=5
+strategy("BB Stochastic with Trailing Stop [nachodog] + JMA + Dynamic Trailing Stop", shorttitle="BBStoch TB + JMA + Trail", overlay=true)
+
+// JMA Parameters Group
+groupJMA = "JMA"
+lengthJMA = input.int(7, title="Length", group=groupJMA)
+phaseJMA = input.int(50, title="Phase", group=groupJMA)
+powerJMA = input.int(2, title="Power", group=groupJMA)
+srcJMA = input.source(close, title="Source", group=groupJMA)
+highlightMovements = input.bool(true, title="Highlight Movements ?", group=groupJMA)
+
+// JMA Calculation
+beta = 0.45 * (lengthJMA - 1) / (0.45 * (lengthJMA - 1) + 2)
+alpha = math.pow(beta, powerJMA)
+var float jma = na
+var float e0 = na
+var float e1 = na
+var float e2 = na
+e0 := na(srcJMA) ? na : (1 - alpha) * srcJMA + alpha * nz(e0[1])
+e1 := na(srcJMA) ? na : (srcJMA - e0) * (1 - beta) + beta * nz(e1[1])
+e2 := na(srcJMA) ? na : (e0 + phaseJMA / 100 + 1.5 * e1 - nz(jma[1])) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1])
+jma := na(srcJMA) ? na : e2 + nz(jma[1])
+jmaColor = jma > nz(jma[1]) ? color.green : color.red
+plot(jma, title="JMA", linewidth=2, color=jmaColor)
+
+// Original Strategy Inputs
+src = input(close, title="Source")
+offset = input.int(0, title="Offset", minval=-500, maxval=500)
+length = input.int(20, title="Bollinger Band Length", minval=1)
+mult = input.float(2.0, title="StdDev", minval=0.001, maxval=50)
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+p1 = plot(upper, "BB Upper", color=color.teal, offset=offset)
+p2 = plot(lower, "BB Lower", color=color.teal, offset=offset)
+fill(p1, p2, title="BB Background", color=color.new(#198787, 95))
+
+// Trailing Stop Logic Inputs
+groupTS = "Trailing Stop"
+atrLength = input.int(14, title="ATR Length", group=groupTS, minval=1)
+atrMultStop = input.float(2.0, title="ATR Multiplier for Stop", group=groupTS, step=0.1)
+atrMultProfit = input.float(3.0, title="ATR Multiplier for Profit", group=groupTS, step=0.1)
+
+// ATR calculations
+atrValueStop = atrMultStop * ta.atr(atrLength)
+atrValueProfit = atrMultProfit * ta.atr(atrLength)
+trailStopLong = strategy.position_avg_price - atrValueStop
+trailStopShort = strategy.position_avg_price + atrValueStop
+takeProfitLong = strategy.position_avg_price + atrValueProfit
+takeProfitShort = strategy.position_avg_price - atrValueProfit
+
+// Entry Conditions
+Bull = close[1] < lower[1] and close > lower and jma > nz(jma[1])
+Bear = close[1] > upper[1] and close < upper and jma < nz(jma[1])
+if (Bull)
+    strategy.entry("Bull Entry", strategy.long)
+if (Bear)
+    strategy.entry("Bear Entry", strategy.short)
+
+// Exit conditions using dynamic trailing stops and take profits
+strategy.exit("Exit Long", "Bull Entry", stop=trailStopLong, limit=takeProfitLong)
+strategy.exit("Exit Short", "Bear Entry", stop=trailStopShort, limit=takeProfitShort)
+
+// Define state variables for managing plot visibility
+var float plotTrailStopLong = na
+var float plotTrailStopShort = na
+var float plotTakeProfitLong = na
+var float plotTakeProfitShort = na
+
+// Update the plot variables on trade entry and reset on trade exit
+if (strategy.position_size > 0)
+    plotTrailStopLong := strategy.position_avg_price - atrValueStop
+    plotTakeProfitLong := strategy.position_avg_price + atrValueProfit
+else
+    plotTrailStopLong := na
+    plotTakeProfitLong := na
+
+if (strategy.position_size < 0)
+    plotTrailStopShort := strategy.position_avg_price + atrValueStop
+    plotTakeProfitShort := strategy.position_avg_price - atrValueProfit
+else
+    plotTrailStopShort := na
+    plotTakeProfitShort := na
+
+// Conditional plotting based on the state variables
+plot(strategy.position_size > 0 ? plotTrailStopLong : na, "Trailing Stop Long", color=color.red)
+plot(strategy.position_size < 0 ? plotTrailStopShort : na, "Trailing Stop Short", color=color.green)
+plot(strategy.position_size > 0 ? plotTakeProfitLong : na, "Take Profit Long", color=color.blue)
+plot(strategy.position_size < 0 ? plotTakeProfitShort : na, "Take Profit Short", color=color.blue)
+
+View in Pine Editor・90 lines
+Use on chart
+3
+3
+4
+3
+11 343
+Apr 11, 2024
+The Bollinger Bands Stochastic RSI Extreme Strategy is a comprehensive trading approach designed for use on the TradingView platform, employing a combination of Bollinger Bands and the Stochastic RSI to identify potential entry and exit points in the market. This strategy is converted into Pine Script version 5 and is specifically tailored as a strategy rather than a mere study, allowing traders to simulate and backtest their trades within the TradingView environment.
+
+Strategy Overview:
+Bollinger Bands serve as the primary tool for volatility and price level analysis. By calculating the standard deviation of price movements around a simple moving average (SMA), this strategy identifies the upper and lower bounds of price fluctuations, helping traders spot potential reversal points.
+Stochastic RSI is used to gauge the momentum by comparing the closing price's position relative to its price range over a certain period. This indicator helps in determining overbought or oversold conditions, providing insights into potential bullish or bearish momentum.
+Entry Signals:
+Bullish Entry: The strategy signals a long entry when the price moves from below to above the lower Bollinger Band, coupled with a Stochastic RSI indicating an exit from oversold conditions. This suggests an uptrend initiation, prompting a buy order.
+Bearish Entry: Conversely, a short entry is signaled when the price drops from above to below the upper Bollinger Band while the Stochastic RSI moves from overbought territory. This condition indicates a potential downtrend, triggering a sell order.
+Exit Criteria:
+Stop Loss: A key feature of this strategy is the inclusion of a user-defined stop loss percentage, which helps manage risk by specifying the maximum allowable loss per trade.
+Bearish Exit for Long Positions: Long positions are exited either when a bearish signal is detected or when the price crosses below the lower Bollinger Band, suggesting a reversal or weakening of the bullish trend.
+Bullish Exit for Short Positions: Short positions are closed upon a bullish signal or when the price crosses above the upper Bollinger Band, indicating a potential reversal or diminishing bearish momentum.
+Strategy Benefits:
+The strategy provides a structured framework for entering and exiting trades, leveraging the strengths of both Bollinger Bands and Stochastic RSI.
+It includes parameters for customization, such as the stop loss percentage, allowing traders to align the strategy with their risk tolerance and trading objectives.
+The ability to backtest and simulate trades on TradingView enhances its utility, offering insights into the strategy's performance under historical market conditions.
+Overall, the Bollinger Bands Stochastic RSI Extreme Strategy is designed for traders who seek to capitalize on trend reversals and momentum shifts, with built-in risk management features to safeguard against significant losses.
+Apr 11, 2024
+Release Notes
+Added SL
+May 2, 2024
+Release Notes
+Adds trailing stop
+May 3, 2024
+Release Notes
+This trading strategy is an advanced integration of Bollinger Bands, Stochastic oscillators, and the Jurik Moving Average (JMA), enhanced with a trailing stop mechanism for exits. The strategy operates on the principle of confluence, where multiple indicators are used to validate trading signals, thereby enhancing the reliability of trade entries and exits. This strategy is designed for trading on any asset class that exhibits volatility and trend characteristics suitable for technical analysis.
+
+Components:
+Bollinger Bands: Utilized to gauge market volatility and price levels relative to previous trades. The strategy looks for price interactions with the upper and lower bands to identify potential reversal zones.
+Stochastic Oscillator: A momentum indicator comparing a particular closing price of an asset to a range of its prices over a certain period of time. The sensitivity of the oscillator to market movements is reducible by adjusting the time period or by taking a moving average of the result.
+Jurik Moving Average (JMA): A sophisticated version of the moving average that aims to reduce the lag associated with traditional moving averages, providing a smoother and more responsive indicator. The JMA's color changes (green for up, red for down) are used as the primary trend filter in this strategy.
+Trailing Stop Loss: Enhances the strategy by allowing it to capture as much of the gains as possible without being stopped out too early. The stop levels are dynamically adjusted based on the Average True Range (ATR), providing a volatility-adjusted exit point.
+How It Works:
+Entry Conditions:
+Long Entry: A long position is initiated when the price closes above the lower Bollinger Band, the previous close was below the lower band, and both the K and D lines of the stochastic are below the oversold threshold, indicating potential upward momentum. Crucially, a long entry is only permitted when the JMA is green, signaling an uptrend.
+Short Entry: A short position is taken when the price closes below the upper Bollinger Band, the previous close was above the upper band, and both the K and D lines of the stochastic are above the overbought threshold, indicating potential downward momentum. A short entry is only executed when the JMA is red, indicating a downtrend.
+Exit Conditions:
+The strategy employs a trailing stop loss for both long and short positions. The stop loss levels are set using the ATR, providing a flexible stop that adjusts to current market volatility. This method helps to protect gains or minimize losses by allowing positions to remain open as long as the price moves favorably but closes the position if the price changes direction significantly.
+Benefits:
+Reduced Risk of False Signals: By using the JMA's trend indication to filter stochastic and Bollinger Band signals, the strategy aims to reduce false entries.
+Dynamic Exits: Trailing stops based on ATR adjust to the market's volatility, potentially increasing profitability during strong trends and reducing losses during reversals.
+Versatility: Applicable in various market conditions and trading instruments, offering flexibility to traders.
+May 4, 2024
+Release Notes
+small edits to SL and TP

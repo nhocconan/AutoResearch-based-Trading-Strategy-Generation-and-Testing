@@ -1,0 +1,568 @@
+//@version=6
+strategy("Macro Momentum – 4-Theme, Vol Target, Rebalance",
+     overlay=false, initial_capital=100000, currency=currency.USD,
+     commission_type=strategy.commission.percent, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_value=0.01,
+     calc_on_order_fills=true, calc_on_every_tick=false, pyramiding=1, slippage=0)
+
+//----------------------------------------------------
+// =============== Inputs & Proxies ==================
+//----------------------------------------------------
+
+// General
+grp_gen  = "General"
+tfSig    = input.timeframe("D", "Signal Timeframe",      group=grp_gen, tooltip="Timeframe for macro signals (daily/weekly).")
+rebal    = input.string("Monthly", "Rebalance Frequency", options=["Weekly","Monthly","Quarterly"], group=grp_gen)
+lookROC  = input.int(63, "Default ROC Lookback (days)", minval=5, group=grp_gen, tooltip="Used where a theme doesn’t define its own lookback.")
+smaBase  = input.int(200, "Long MA for Business-Cycle tilt", minval=50, group=grp_gen)
+useZ     = input.bool(true, "Z-score (tanh) normalization", group=grp_gen, tooltip="Map signal to ~[-1, +1] via tanh(z). If off, raw scaled ROC is used.")
+
+grp_winz = "Winsorization"
+useWinsor = input.bool(true, "Enable Winsorization", group=grp_winz)
+winsorLen = input.int(63, "Winsor lookback", group=grp_winz)
+winsorMult= input.float(3.0, "Clamp multiplier", step=0.5, group=grp_winz)
+winsorMAD = input.bool(true, "Use MAD (vs Stdev)", group=grp_winz)
+
+// Vol targeting
+grp_risk = "Risk / Sizing"
+targetVol = input.float(0.10, "Target Annualized Vol", step=0.01, group=grp_risk, tooltip="Position scales so realized vol aims near this level.")
+volLook  = input.int(21, "Realized Vol Lookback (bars)", minval=5, group=grp_risk)
+direction = input.string(defval = "Long", options = ["Long", "Short", "Both"], title = "Trade Direction", group = grp_risk)
+invdir = input.bool(false, title = "Reverse Long/Short", group = grp_risk)
+lev = input.bool(false, title = "Leverage On/Off", group = grp_risk)
+
+// === Profiles & knobs ===
+grp_prof = "24/7"
+profile  = input.string("9-5", "Annualized Returns",
+           options=["9-5", "24/7"], group=grp_prof)
+
+grp_adv  = "Advanced Thresholds"
+smoothTheme = input.int(10, "Theme Smoothing (SMA)", minval=1, group=grp_adv)
+smoothComp  = input.int(10, "Composite Smoothing (LSMA)", minval=1, group=grp_adv)
+entryBand   = input.float(0.25, "Entry band |comp|", step=0.01, group=grp_adv)
+exitBand    = input.float(0.12, "Exit band |comp|",  step=0.01, group=grp_adv, tooltip="Hysteresis: exit < entry")
+
+grp_reg = "Regime / Execution"
+longOnly  = input.bool(false, "Long only when price > 200MA", group=grp_reg)
+shortOnly = input.bool(false, "Short only when price < 200MA", group=grp_reg)
+maxExpLong  = input.float(8, "Max long exposure (×)", step=0.1, group=grp_reg)
+maxExpShort = input.float(2.0, "Max short exposure (×)", step=0.1, group=grp_reg)
+
+grp_risk2 = "Stops/TP (optional)"
+useStops  = input.bool(true, "Use ATR stop/TP on single stocks", group=grp_risk2)
+atrLen    = input.int(3, "ATR length", group=grp_risk2)
+atrMultSL = input.float(3.0, "Stop = ATR ×", step=0.5, group=grp_risk2)
+atrMultTP = input.float(6.0, "TakeProfit = ATR ×", step=0.5, group=grp_risk2)
+
+// Theme weights
+grp_w = "Theme Weights"
+wCycle  = input.float(1.0, "Business Cycle Weight", step=0.1, group=grp_w)
+wTrade  = input.float(1.0, "Trade / USD Weight",    step=0.1, group=grp_w)
+wPolicy = input.float(1.0, "Monetary Policy Weight",step=0.1, group=grp_w)
+wRisk   = input.float(1.0, "Risk Sentiment Weight", step=0.1, group=grp_w)
+
+// ---------------- Proxies (feel free to customize) ----------------
+// • Business Cycle: XLI/XLU and Copper/Gold, plus chart vs 200D MA
+// • Trade: DXY (or UUP) strength (USD up = tighter global financial conditions)
+// • Monetary Policy: 10Y–2Y slope + 10Y trend (yields); use TVC yields if available in your plan
+// • Risk Sentiment: VIX level/trend + HYG/IEF (credit vs duration)
+grp_pxy = "Macro Proxies (Symbols)"
+
+// Business Cycle
+symXLI = input.symbol("AMEX:XLI", "XLI (Industrials)", group=grp_pxy)
+symXLU = input.symbol("AMEX:XLU", "XLU (Utilities)",   group=grp_pxy)
+symHG  = input.symbol("COMEX:HG1!", "Copper (Front)",  group=grp_pxy)
+symGC  = input.symbol("COMEX:GC1!", "Gold (Front)",    group=grp_pxy)
+bcROC  = input.int(126, "Business Cycle ROC Lookback", minval=20, group=grp_pxy)
+
+// Trade / USD
+symDXY = input.symbol("TVC:DXY", "DXY (Dollar Index)", group=grp_pxy)
+usdROC = input.int(63, "USD ROC Lookback", minval=10, group=grp_pxy)
+
+// Monetary Policy
+symUS10Y = input.symbol("TVC:US10Y", "US 10Y Yield", group=grp_pxy)
+symUS02Y = input.symbol("TVC:US02Y", "US 2Y Yield",  group=grp_pxy)
+polROC   = input.int(63, "Policy ROC Lookback", minval=10, group=grp_pxy)
+
+// Risk Sentiment
+symVIX = input.symbol("TVC:VIX", "VIX", group=grp_pxy)
+symHYG = input.symbol("AMEX:HYG", "HYG (High Yield)", group=grp_pxy)
+symIEF = input.symbol("NASDAQ:IEF", "IEF (7-10Y UST)", group=grp_pxy)
+riskROC= input.int(21, "Risk ROC Lookback", minval=5, group=grp_pxy)
+
+//----------------------------------------------------
+// =============== Helpers & Fetchers ================
+//----------------------------------------------------
+get(srcSym, tf) =>
+    closeSym = request.security(srcSym, tf, close)
+    closeSym
+
+roc(series float x, int len) =>
+    nz(100.0 * (x/x[len] - 1.0))
+
+sma(series float x, int len) =>
+    ta.sma(x, len)
+
+stdev(series float x, int len) =>
+    ta.stdev(x, len)
+
+nzSafe(x) => nz(x, nz(x[1], 0))
+
+tanhNorm(series float x) =>
+    // constrain outliers softly to ~[-1, +1]
+    exp2x = math.exp(2.0 * x)
+    (exp2x - 1.0) / (exp2x + 1.0)
+
+// scale ROC to [-1, 1]-ish by dividing by a typical band (e.g., median abs dev or a constant)
+scaleROC(series float r, float div=10.0) =>
+    math.max(-3.0, math.min(3.0, r / div))  // clamp, then could pass to tanh
+
+// === Robust Z using MAD (less whipsaw than stdev) ===
+zscore(series float x, int len) =>
+    m  = ta.sma(x, len)
+    d  = math.abs(x - m)
+    mad = ta.sma(d, len) + 1e-9
+    (x - m) / (1.4826 * mad)
+
+// === Winsorization Helper ===
+// Clamp a series to +/- N * MAD or STDEV
+winsor(series float x, int len, float mult, bool useMAD) =>
+    mean = ta.sma(x, len)
+    dev  = useMAD ? ta.sma(math.abs(x - mean), len) * 1.4826 : ta.stdev(x, len)
+    hi   = mean + mult * dev
+    lo   = mean - mult * dev
+    math.min(math.max(x, lo), hi)
+
+// Wrap: choose robust-z then tanh
+normSig(series float v, int len) =>
+    useZ ? tanhNorm(zscore(v, len)) : tanhNorm(scaleROC(v))
+
+// ===== Colors & helpers =====
+colBull  = color.rgb( 14, 157,  31)   // green
+colBear  = color.rgb(203,  36,  49)   // red
+colFlat  = color.rgb(255, 251, 0)     // yellow
+colEdge  = color.rgb(  0, 189, 214)   // teal for thresholds
+colCycle = color.rgb( 53, 199,  89)   // Business Cycle line
+colTrade = color.rgb(255, 170,   0)   // Trade/USD line
+colPol   = color.rgb( 52, 104, 235)   // Monetary Policy line
+colRisk  = color.rgb(154,  90, 230)   // Risk Sentiment line
+
+// Opacity map:  |x| in [0..1] -> alpha in [85..5] (stronger = less transparent)
+alphaFromAbs(series float x) =>
+    strength = math.min(1.0, math.abs(x))
+    // 85 (light) down to 5 (bold)
+    math.round(85 - 80 * strength)
+
+// Signed color with strength-scaled opacity
+sigColor(series float s) =>
+    s > 0 ? color.new(colBull, alphaFromAbs(s)) :
+     s < 0 ? color.new(colBear, alphaFromAbs(s)) :
+             color.new(colFlat, 65)
+
+//----------------------------------------------------
+// ================= Theme Signals ===================
+//----------------------------------------------------
+// 1) Business Cycle (growth)
+//    - XLI/XLU momentum (cyclical vs defensive)
+//    - Copper/Gold momentum (growth vs safety)
+//    - Chart symbol vs 200D MA confirmation (breadth-ish)
+xli = get(symXLI, tfSig)
+xlu = get(symXLU, tfSig)
+hg  = get(symHG,  tfSig)
+gc  = get(symGC,  tfSig)
+ratioX = xli / xlu
+ratioM = hg  / gc
+
+rX = roc(ratioX, bcROC)
+rM = roc(ratioM, bcROC)
+
+bc_raw = 0.5 * rX + 0.5 * rM
+
+// confirmation using chart symbol vs SMA
+pSig  = request.security(syminfo.tickerid, tfSig, close)
+pSma  = request.security(syminfo.tickerid, tfSig, ta.sma(close, smaBase))
+conf  = pSig > pSma ? 1.0 : -1.0
+
+bc_sig_base = bc_raw * conf
+bc_sig_base  := nzSafe(bc_sig_base)
+bc_sig_base_w = useWinsor ? winsor(bc_sig_base, winsorLen, winsorMult, winsorMAD) : bc_sig_base
+
+bc_sig  = ta.sma(normSig(bc_sig_base_w,   math.max(20, bcROC/2)),   smoothTheme)
+
+// 2) Trade / USD (competitiveness, global liquidity tightness)
+dxy = get(symDXY, tfSig)
+usd_r = roc(dxy, usdROC)
+// Interpretation: USD ↑ tends to tighten global conditions -> risk-off tilt.
+// For the *chart* we flip sign so that USD↑ → bearish for risk assets (most charts)
+// If your chart is DXY itself, this flip will still work (it’ll bias short when rising).
+trade_sig_base = -usd_r
+trade_sig_base := nzSafe(trade_sig_base)
+trade_sig_base_w = useWinsor ? winsor(trade_sig_base, winsorLen, winsorMult, winsorMAD) : trade_sig_base
+
+trade_sig = ta.sma(normSig(trade_sig_base_w, math.max(20, usdROC/2)), smoothTheme)
+
+// 3) Monetary Policy (rates & curve)
+//    - Slope = 10Y - 2Y; steepening often pro-growth, flattening/inverting risk-off
+//    - 10Y trend: rising reals often tough for duration/growth
+y10 = get(symUS10Y, tfSig)
+y02 = get(symUS02Y, tfSig)
+slope = y10 - y02
+
+rSlope = roc(slope, polROC)
+r10    = roc(y10,   polROC)
+
+// Policy composite: steepening (+) and falling 10Y (–r10) are both risk-on; rising 10Y is risk-off
+pol_raw = 0.6 * rSlope - 0.4 * r10
+pol_raw      := nzSafe(pol_raw)
+pol_raw_w = useWinsor ? winsor(pol_raw, winsorLen, winsorMult, winsorMAD) : pol_raw
+
+pol_sig   = ta.sma(normSig(pol_raw_w,       math.max(20, polROC/2)), smoothTheme)
+
+// 4) Risk Sentiment
+//    - VIX level/trend (higher = risk-off)
+//    - Credit vs duration (HYG/IEF) momentum (tightening spread = risk-on)
+vix = get(symVIX, tfSig)
+hyg = get(symHYG, tfSig)
+ief = get(symIEF, tfSig)
+cred = hyg / ief
+
+rVix  = roc(vix,  riskROC)
+rCred = roc(cred, riskROC)
+
+// Risk composite: high/↑ VIX is bearish; strong credit is bullish
+risk_raw = (-rVix) * 0.6 + (rCred) * 0.4
+risk_raw     := nzSafe(risk_raw)
+risk_raw_w = useWinsor ? winsor(risk_raw, winsorLen, winsorMult, winsorMAD) : risk_raw
+
+risk_sig  = ta.sma(normSig(risk_raw_w,      math.max(20, riskROC/2)),smoothTheme)
+
+//----------------------------------------------------
+// ============== Composite & Position ===============
+//----------------------------------------------------
+// Weighted composite then smooth
+rawComposite = ((wCycle * bc_sig + wTrade * trade_sig + wPolicy * pol_sig + wRisk * risk_sig) /
+               math.max(1e-9, (wCycle + wTrade + wPolicy + wRisk)))
+composite = ta.linreg(rawComposite, smoothComp, 0)
+
+// Hysteresis gates (entry > exit)
+aboveEntry =  composite >=  entryBand
+belowEntry =  composite <= -entryBand
+aboveExit  =  composite <=  exitBand   and composite > 0
+belowExit  =  composite >= -exitBand   and composite < 0
+
+// Persistent direction
+var int dirOG = 0
+dirOG := dirOG == 0 ? (aboveEntry ? 1 : belowEntry ? -1 : 0)
+     : dirOG == 1 ? (aboveExit ? 0 : 1)
+     : dirOG ==-1 ? (belowExit ? 0 : -1) : na
+dir = invdir ? dirOG * -1 : dirOG 
+
+// Regime enforcement
+inBull = pSig > pSma
+inBear = not inBull
+if longOnly   and inBear  // kill longs in bear regime
+    dir := dir < 0 ? -1 : 0
+if shortOnly  and inBull  // kill shorts in bull regime
+    dir := dir > 0 ?  1 : 0
+
+// Realized vol on this chart (close-to-close). Annualize with sqrt(252)
+ret   = math.log(close / close[1]) * 100
+sig   = ta.stdev(ret, volLook) * (profile == "24/7" ? math.sqrt(360) : math.sqrt(252))
+tgtEx = targetVol / math.max(sig, 1e-6)
+cap   = dir > 0 ? maxExpLong : maxExpShort
+exposure = math.min(cap, tgtEx) * dir
+desiredPct = 100.0 * exposure
+int counter = 0
+for i = 0 to 100
+    if ret[i] * -1 > composite[i+100]
+        counter := counter + 1
+effect = (counter / 100) * 100
+
+// Rebalance timing
+isRebalWeekly()   =>
+    // rebalance on first bar of the week
+    weekChange = ta.change(weekofyear(time(tfSig))) != 0
+    weekChange
+
+isRebalMonthly()  =>
+    monthChange = ta.change(month(time(tfSig))) != 0
+    monthChange
+
+isRebalQuarterly() =>
+    q   = math.floor((month(time(tfSig)) - 1) / 3) + 1
+    qCh = ta.change(q) != 0
+    qCh
+
+rebNow =
+     rebal == "Weekly"    ? isRebalWeekly() :
+     rebal == "Monthly"   ? isRebalMonthly() :
+     isRebalQuarterly()
+
+// On rebalance bars (or when flipping sign), set position
+flip   = ta.change(math.sign(exposure)) != 0
+doTrade = rebNow or flip
+
+capital       = strategy.equity
+pctSize       = math.max(1, math.abs(effect) / 100.0)
+pctlev        = math.min(1, math.abs(desiredPct) / 100)
+positionValue = capital * pctSize
+qtyRaw        = (positionValue / close) * (lev ? pctlev : 1)
+// Futures often need integer; ETFs can accept fractional. Use both:
+qty = syminfo.type == "futures" ? math.max(1, math.round(qtyRaw)) : qtyRaw
+
+if doTrade
+    if dir > 0 and direction != "Short"
+        strategy.entry("Long",  strategy.long,  qty=qty)
+    else if dir < 0 and direction != "Long"
+        strategy.entry("Short", strategy.short, qty=qty)
+    else
+        strategy.close_all(comment="Rebalance/Flat")
+
+if useStops and doTrade and dir != 0
+    a = ta.atr(atrLen)
+    longSL = close - atrMultSL * a
+    longTP = close + atrMultTP * a
+    shortSL= close + atrMultSL * a
+    shortTP= close - atrMultTP * a
+    if dir > 0
+        strategy.exit("L-X", from_entry="Long",  stop=longSL,  limit=longTP)
+    else
+        strategy.exit("S-X", from_entry="Short", stop=shortSL, limit=shortTP)
+
+//----------------------------------------------------
+// =================== Plots & UI ====================
+//----------------------------------------------------
+// ===== Composite visualization =====
+plot(composite, "Composite (line)", color=sigColor(composite), linewidth=2)
+
+// Column underlay for quick polarity read
+plot(composite, "Composite (columns)", style=plot.style_columns, color=sigColor(composite))
+
+// Thresholds + fills (green above, red below)
+hU = plot(entryBand,  "Entry +",  color=color.new(colEdge, 30))
+hL = plot(-entryBand, "Entry –",  color=color.new(colEdge, 30))
+hXU = plot(exitBand,  "Exit +",   color=color.new(colEdge, 60))
+hXL = plot(-exitBand, "Exit –",   color=color.new(colEdge, 60))
+fill(hU, hXU, color=color.new(colBull, 90))
+fill(hXL, hL, color=color.new(colBear, 90))
+
+plot(bc_sig,    "Business Cycle",  color=color.new(colCycle,  0), display = display.none)
+plot(trade_sig, "Trade / USD",     color=color.new(colTrade,  0), display = display.none)
+plot(pol_sig,   "Monetary Policy", color=color.new(colPol,    0), display = display.none)
+plot(risk_sig,  "Risk Sentiment",  color=color.new(colRisk,   0), display = display.none)
+
+// Position/exposure diagnostics
+plot(effect, "Gross Exposure (%equity)", color=color.new(colEdge, 0), style=plot.style_stepline, display = display.none)
+plot(exposure, "Signed Exposure (×equity)", color=color.new(colEdge, 0), style=plot.style_stepline, display = display.none)
+plot(sig,      "Realized Vol (ann.)",       color=color.new(colFlat,  0), display = display.none)
+
+// Labels (optional minimal noise)
+showLbls = input.bool(true, "Show Rebalance Labels", group=grp_gen)
+if showLbls and doTrade
+    baseCol = dir > 0 ? colBull : dir < 0 ? colBear : colFlat
+    lblCol  = color.new(baseCol, alphaFromAbs(composite))  // match strength
+    txt     = (dir > 0 ? "LONG" : dir < 0 ? "SHORT" : "FLAT") +
+              "\nGross Exp. = " + str.tostring(effect, "#.##") + "%" +
+              "\nSigned Exp. = " + str.tostring(exposure, "#.##") + "x" +
+              "\nσ = "   + str.tostring(sig, "#.###")
+    label.new(bar_index, low, txt,
+         textcolor=color.white,
+         color=lblCol,
+         style=label.style_label_up, force_overlay = true)
+
+showBg = input.bool(true, "Background heatmap from Composite", group=grp_gen)
+
+bgcolor(showBg ? sigColor(composite) : na, title = "Heat Map", force_overlay = true)
+
+// Alerts
+alertcondition(dir > 0 and doTrade, "Enter/Inc LONG", "Composite crossed/up & rebalance – go/stay LONG.")
+alertcondition(dir < 0 and doTrade, "Enter/Inc SHORT","Composite crossed/down & rebalance – go/stay SHORT.")
+alertcondition(dir == 0 and doTrade, "Exit to FLAT",   "Composite near zero – flatten.")
+
+// End
+
+View in Pine Editor・384 lines
+Use on chart
+5
+4
+1 666
+Oct 3, 2025
+Macro Momentum — 4-Theme, Vol Target, Rebalance
+
+Purpose. A macro-aware strategy that blends four economic “themes”—Business Cycle, Trade/USD, Monetary Policy, and Risk Sentiment—into a single, smoothed Composite signal. It then:
+
+gates entries/exits with hysteresis bands,
+
+enforces optional regime filters (200-day bias), and
+
+sizes the position via volatility targeting with caps for long/short exposure.
+
+It’s designed to run on any chart (index, ETF, futures, single stocks) while reading external macro proxies on a chosen Signal Timeframe.
+
+How it works (high level)
+
+Build four theme signals from robust macro proxies:
+
+Business Cycle: XLI/XLU and Copper/Gold momentum, confirmed by the chart’s price vs a long SMA (default 200D).
+
+Trade / USD: DXY momentum (sign-flipped so a rising USD is bearish for risk assets).
+
+Monetary Policy: 10Y–2Y curve slope momentum and 10Y yield trend (steepening & falling 10Y = risk-on; rising 10Y = risk-off).
+
+Risk Sentiment: VIX momentum (bearish if higher) and HYG/IEF momentum (bullish if credit outperforms duration).
+
+Normalize & de-noise.
+
+Optional Winsorization (MAD or stdev) clamps outliers over a lookback window.
+
+Optional Z-score → tanh mapping compresses to ~[-1, +1] for stable weighting.
+
+Theme lines are SMA-smoothed; the final Composite is LSMA-smoothed (linreg).
+
+Decide direction with hysteresis.
+
+Enter/hold long when Composite ≥ Entry Band; enter/hold short when Composite ≤ −Entry Band.
+
+Exit bands are tighter than entry bands to avoid whipsaws.
+
+Apply regime & direction constraints.
+
+Optional Long-only above 200MA (chart symbol) and/or Short-only below 200MA.
+
+Global Direction control (Long / Short / Both) and Invert switch.
+
+Size via volatility targeting.
+
+Realized close-to-close vol is annualized (choose 9-5 or 24/7 market profile).
+
+Target exposure = TargetVol / RealizedVol, capped by Max Long/Max Short multipliers.
+
+Quantity is computed from equity; futures are rounded to whole contracts.
+
+Rebalance cadence & execution.
+
+Trades are placed on Weekly / Monthly / Quarterly rebalance bars or when the sign of exposure flips.
+
+Optional ATR stop/TP for single-stock style risk management.
+
+Inputs you’ll actually tweak
+
+General
+
+Signal Timeframe: Where macro is sampled (e.g., D/W).
+
+Rebalance Frequency: Weekly / Monthly / Quarterly.
+
+ROC & SMA lengths: Defaults for theme momentum and the 200D regime filter.
+
+Normalization: Z-score (tanh) on/off.
+
+Winsorization
+
+Toggle, lookback, multiplier, MAD vs Stdev.
+
+Risk / Sizing
+
+Target Annualized Vol & Realized Vol Lookback.
+
+Direction (Long/Short/Both) and Invert.
+
+Max long/short exposure caps.
+
+Advanced Thresholds
+
+Theme/Composite smoothing lengths.
+
+Entry/Exit bands (hysteresis).
+
+Regime / Execution
+
+Long-only above 200MA, Short-only below 200MA.
+
+Stops/TP (optional)
+
+ATR length and SL/TP multiples.
+
+Theme Weights
+
+Per-theme scalars so you can push/pull emphasis (e.g., overweight Policy during rate cycles).
+
+Macro Proxies
+
+Symbols for each theme (XLI, XLU, HG1!, GC1!, DXY, US10Y, US02Y, VIX, HYG, IEF). Swap to alternatives as needed (e.g., UUP for DXY).
+
+Signals & logic (under the hood)
+
+Business Cycle = ½ ROC(XLI/XLU) + ½ ROC(Copper/Gold), then confirmed by (price > 200SMA ? +1 : −1).
+
+Trade / USD = −ROC(DXY).
+
+Monetary Policy = 0.6·ROC(10Y–2Y) − 0.4·ROC(10Y).
+
+Risk Sentiment = −0.6·ROC(VIX) + 0.4·ROC(HYG/IEF).
+
+Each theme → (optional Winsor) → (robust z or scaled ROC) → tanh → SMA smoothing.
+Composite = weighted average → LSMA smoothing → compare to bands → dir ∈ {−1,0,+1}.
+
+Rebalance & flips. Orders fire on your chosen cadence or when the sign of exposure changes.
+Position size. exposure = clamp(TargetVol / realizedVol, maxLong/Short) × dir.
+
+Note: The script also exposes Gross Exposure (% equity) and Signed Exposure (× equity) as diagnostics. These can help you audit how vol-targeting and caps translate into sizing over time.
+
+Visuals & alerts
+
+Composite line + columns (color/intensity reflect direction & strength).
+
+Entry/Exit bands with green/red fills for quick polarity reads.
+
+Hidden plots for each Theme if you want to show them.
+
+Optional rebalance labels (direction, gross & signed exposure, σ).
+
+Background heatmap keyed to Composite.
+
+Alerts
+
+Enter/Inc LONG when Composite crosses up (and on rebalance bars).
+
+Enter/Inc SHORT when Composite crosses down (and on rebalance bars).
+
+Exit to FLAT when Composite returns toward neutral (and on rebalance bars).
+
+Practical tips
+
+Start higher timeframes. Daily signals with Monthly rebalance are a good baseline; weekly signals with quarterly rebalances are even cleaner.
+
+Tune Entry/Exit bands before anything else. Wider bands = fewer trades and less noise.
+
+Weights reflect regime. If policy dominates markets, raise Monetary Policy weight; if credit stress drives moves, raise Risk Sentiment.
+
+Proxies are swappable. Use UUP for USD, or futures-continuous symbols that match your data plan.
+
+Futures vs ETFs. Quantity auto-rounds for futures; ETFs accept fractional shares. Check contract multipliers when interpreting exposure.
+
+Caveats
+
+Macro proxies can repaint at the selected signal timeframe as higher-TF bars form; that’s intentional for macro sampling, but test live.
+
+Vol targeting assumes reasonably stationary realized vol over the lookback; if markets regime-shift, revisit volLook and targetVol.
+
+If you disable normalization/winsorization, themes can become spikier; expect more hysteresis band crossings.
+
+What to change first (quick start)
+
+Set Signal Timeframe = D, Rebalance = Monthly, Z-score on, Winsor on (MAD).
+
+Entry/Exit bands: 0.25 / 0.12 (defaults), then nudge until trade count and turnover feel right.
+
+TargetVol: try 10% for diversified indices; lower for single stocks, higher for vol-sell strategies.
+
+Leave weights = 1.0 until you’ve inspected the four theme lines; then tilt deliberately.
+Oct 3, 2025
+Release Notes
+I added alerts.
+Oct 3, 2025
+Release Notes
+...
+Oct 4, 2025
+Release Notes
+...

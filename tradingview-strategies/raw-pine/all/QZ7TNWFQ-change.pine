@@ -1,0 +1,32 @@
+//@version=3
+strategy(title="Change", shorttitle="Change", default_qty_type=strategy.percent_of_equity, default_qty_value=100, overlay=true)
+src = input(title="Source", type=source, defval=close)
+newbar(res) => change(time(res)) 
+cls1=src - fixnan(newbar("240")?src:na)
+cls2=src - fixnan(newbar("D")?src:na)
+cls3=src - fixnan(newbar("W")?src:na)
+cls4=src - fixnan(newbar("M")?src:na)
+c1=cls1>0?1:cls1<0?-1:0
+c2=cls2>0?1:cls2<0?-1:0
+c3=cls3>0?1:cls3<0?-1:0
+c4=cls4>0?1:cls4<0?-1:0
+signal1 = c1+c2+c3+c4
+signal = sma(signal1,60)
+color1=fixnan(signal>2?1:signal<0?0:na)
+color2=fixnan(signal<-2?-1:signal>0?0:na)
+bgcolor(color1>0?lime:color2<0?red:na, trnsp=85)
+if crossover(signal,2) 
+    strategy.entry("1", strategy.long, comment="BUY") 
+if  signal<0 
+    strategy.close("1")  
+if crossunder(signal,-2) 
+    strategy.entry("2", strategy.short, comment="SELL") 
+if signal>0 
+    strategy.close("2")
+
+View in Pine Editor・25 lines
+Use on chart
+5
+7
+1 556
+BTCUSD Trend strategy

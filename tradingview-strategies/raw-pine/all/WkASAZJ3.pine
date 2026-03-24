@@ -1,0 +1,5 @@
+//@version=5
+upperThreshold=##input(defval=-10.0,type='INPUT_FLOAT',##id='in_6')
+lowerThreshold=##input(defval=-90.0,type='INPUT_FLOAT',##id='in_7')
+##root(root_metainfo,rm_0,upperThreshold,input__float)
+##root(root_metainfo,rm_1,lowerThreshold,input__float)

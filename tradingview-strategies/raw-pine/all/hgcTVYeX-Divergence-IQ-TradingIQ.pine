@@ -1,0 +1,1257 @@
+//@version=6
+strategy("Divergence IQ [TradingIQ]",  overlay = false, precision = 3, slippage = 1, initial_capital = 1000, process_orders_on_close = true, calc_on_every_tick = true, default_qty_value = 5, default_qty_type = strategy.percent_of_equity, commission_type = strategy.commission.percent, commission_value = 0.02, max_lines_count = 500,  max_labels_count = 500, max_boxes_count = 500, max_polylines_count = 100)
+
+enum divInput 
+
+    pivotPoints = "Pivots"
+    immediate   = "Immediate"
+
+enum normalizationInput 
+
+    rollingMinMax = "Rolling Min Max"
+    rollingZscore = "Rolling Z-score"
+    robustScaling = "Robust Scaling"
+    none          = "None"
+
+enum exitInput 
+
+    atr = "ATR"
+    percent = "Percentage"
+
+src        = input.source(defval = close, title = "Indicator", group = "Divergence Detection Setup")
+divMethod  = input.enum(defval = divInput.pivotPoints, title = "Divergence Detection Method", options = [divInput.pivotPoints, divInput.immediate])
+useCloses  = input.bool(defval = false, title = "Use Closing Prices For Divergence Detection", group = "Divergence Detection Setup")
+
+leftLook   = input.int(defval = 6, minval = 1, title = "Left Lookback", group = "Divergence Detection Setup")
+rightLook  = input.int(defval = 6, minval = 1, title = "Right Lookahead", group = "Divergence Detection Setup")
+
+normMethod = input.enum(defval = normalizationInput.none, title = "Normalize Indicator", group = "Normalization", options =   
+             [normalizationInput.none, normalizationInput.robustScaling, normalizationInput.rollingZscore, normalizationInput.rollingMinMax])
+window     = input.int(defval = 50, minval = 2, title = "Normalization Window", group = "Normalization")
+showFinal  = input.bool(defval = true, title = "Plot Indicator (Required When Using Normalization)", group = "Normalization")
+showPrice  = input.bool(defval = true, title = "Plot Price", group = "Normalization")
+
+onChart       = input.bool(defval = true, title = "Show Divergences On Price", group = "Divergence Settings")
+
+bullDivShow  = input.bool(defval = true, title = "Bullish Divergence Color", group = "Divergence Settings", inline = "BullDiv")
+bearDivShow  = input.bool(defval = true, title = "Bearish Divergence Color", group = "Divergence Settings", inline = "BearDiv")
+bullHDivShow = input.bool(defval = true, title = "Bullish Hidden Divergence Color", group = "Divergence Settings", inline = "BullHDiv")
+bearHDivShow = input.bool(defval = true, title = "Bearish Hidden Divergence Color", group = "Divergence Settings", inline = "BearHDiv")
+
+bullDivCol  = input.color(defval = #74ffbc, title = "", group = "Divergence Settings", inline = "BullDiv")
+bearDivCol  = input.color(defval = color.rgb(255, 116, 116), title = "", group = "Divergence Settings", inline = "BearDiv")
+bullHDivCol = input.color(defval = #ffb674, title = "", group = "Divergence Settings", inline = "BullHDiv")
+bearHDivCol = input.color(defval = color.rgb(223, 116, 255), title = "", group = "Divergence Settings", inline = "BearHDiv")
+
+
+bullDivTrade  = input.bool(defval = true, title = "Trade", group = "Divergence Settings", inline = "BullDiv")
+bearDivTrade  = input.bool(defval = true, title = "Trade", group = "Divergence Settings", inline = "BearDiv")
+bullHDivTrade = input.bool(defval = true, title = "Trade", group = "Divergence Settings", inline = "BullHDiv")
+bearHDivTrade = input.bool(defval = true, title = "Trade", group = "Divergence Settings", inline = "BearHDiv")
+
+
+exitType         = input.enum (defval = exitInput.atr, title = "Stop Loss & Target Type", options = [exitInput.atr, exitInput.percent], group = "Strategy Settings")
+profitTargetMult = input.float(defval = 2, minval = 0, title = "Profit Target ATR Multiplier (Or Perecntage)", group = "Strategy Settings")
+stopLossMult     = input.float(defval = 2, minval = 0, title = "Stop Loss ATR Multiplier (Or Percentage)", group = "Strategy Settings")
+gradientFlow     = input.bool(defval = true, title = "Show Gradient Flow", group = "Gradient Flow Settings")
+gradientFlowCol  = input.color(defval = #f23645, title = "Gradient Flow Color", group = "Gradient Flow Settings")
+
+if not onChart and divMethod == divInput.immediate
+
+    bullDivCol  := color(na)
+    bearDivCol  := color(na)
+    bullHDivCol := color(na)
+    bearHDivCol := color(na)
+
+type pivotData
+
+    chart.point indicatorPiv
+    chart.point pricePiv
+
+type mapValuesString
+
+    string direction = "Direction"
+    string trades    = "Trades"
+    string wins      = "Wins"
+    string profit    = "Profit"
+    string grossGain = "Gross Gain"
+    string grossLoss = "Gross Loss"
+    string target    = "Target"
+    string stop      = "Stop"
+    string entry     = "Entry"
+
+type exitDrawings 
+
+    float targetPrice
+    float stopPrice 
+    label exitLabel
+
+var tradeMap  = map.new<string, float>()
+var mapValues = mapValuesString.new()
+atr = ta.atr(14)
+
+normalize() => 
+
+    normSrc = src
+
+    var srcArr = array.new<float>()
+
+    srcArr.push(src)
+
+    if srcArr.size() > window
+        srcArr.shift()
+
+    if normMethod == normalizationInput.rollingMinMax
+
+        srcMax = srcArr.max(), srcMin = srcArr.min()
+
+        normSrc := (src - srcMin) / (srcMax - srcMin)
+
+    if normMethod == normalizationInput.rollingZscore
+
+        mean = srcArr.avg(), stdDev = srcArr.stdev()
+
+        normSrc := switch stdDev 
+
+            0 => 0
+            =>   (src - mean) / stdDev
+
+    if normMethod == normalizationInput.robustScaling
+
+        median = srcArr.median()
+
+        devArr = array.new_float(srcArr.size(), na)
+
+        for [i, data] in devArr 
+
+            devArr.set(i, math.abs(srcArr.get(i) - median))
+
+        mad = devArr.median()
+
+        normSrc := switch mad != 0
+
+            true => 0.6745 * (src - median) / mad  
+            => 0
+
+
+    normSrc    
+
+method appendPivot(array<pivotData> id, float value, float price, bool upPivot) =>
+
+    if not na(value)
+
+        id.push(
+                 pivotData.new(
+                         chart.point.from_time(time[rightLook], value),
+                         chart.point.from_time(time[rightLook], price[rightLook])))
+
+method add(map<string, float> id, string key, float value, bool isShort) =>
+
+    finalValue = value
+
+    if isShort
+
+        finalValue *= -1
+
+    id.put(key, nz(id.get(key)) + finalValue)
+
+method addAll(map<string, float> id, bool isProfit, float getTarget, float getEntry, float getStop, bool isShort, exitDrawings exitData) => 
+
+    [ylocNow, textNow, tooltipNow, mult] = switch isShort 
+
+        false => [yloc.abovebar, "▽", "Long Exit At: ", 1]
+        =>       [yloc.belowbar, "△", "Short Exit At: ", -1]
+
+    switch isProfit
+
+        true => 
+
+             id.add(mapValues.wins  , 1, false), 
+             id.add(mapValues.trades, 1, false),
+             id.add(mapValues.profit, (getTarget / getEntry - 1) * 100, isShort),
+             id.add(mapValues.grossGain, math.abs(getTarget - getEntry), false),
+             id.put(mapValues.direction, 0), 
+
+             exitData.stopPrice := float(na),  exitData.targetPrice := float(na),
+
+             exitData.exitLabel  := label.new(bar_index, getTarget, yloc = ylocNow, 
+                                         color         = color.new(color.rgb(128, 116, 255), 80),
+                                         textcolor     = color.rgb(128, 116, 255), 
+                                         text          = textNow, 
+                                         style         = label.style_text_outline,
+                                         force_overlay = true,
+                                         tooltip       = tooltipNow + str.tostring(getTarget, format.mintick) 
+                                         + "\nReturn: " + str.tostring((getTarget / getEntry - 1) * 100 * mult, format.percent)
+                                         )
+
+        =>  
+
+             id.add(mapValues.trades, 1, false),
+             id.add(mapValues.profit, (getStop / getEntry - 1) * 100, isShort),
+             id.add(mapValues.grossLoss, math.abs(getStop - getEntry), false), 
+             id.put(mapValues.direction, 0),
+
+             exitData.stopPrice := float(na),  exitData.targetPrice := float(na),
+
+             exitData.exitLabel  := label.new(bar_index, getStop, yloc = ylocNow, 
+                                         color         = color.new(color.rgb(128, 116, 255), 80),
+                                         textcolor     = color.rgb(128, 116, 255), 
+                                         text          = textNow, 
+                                         style         = label.style_text_outline,
+                                         force_overlay = true,
+                                         tooltip       = tooltipNow + str.tostring(getStop, format.mintick) 
+                                         + "\nReturn: " + str.tostring((getStop / getEntry - 1) * 100 * mult, format.percent)
+                                         )
+
+
+var pivotsUp  = array.new<pivotData>(), var pivotsDn  = array.new<pivotData>()
+var pivotsUpH = array.new<pivotData>(), var pivotsDnH = array.new<pivotData>()
+
+finalSrc = normalize()
+
+getPH = ta.pivothigh(finalSrc, leftLook, rightLook)
+getPL = ta.pivotlow (finalSrc, leftLook, rightLook)
+
+[getHigh, getLow] = switch useCloses
+
+    true => [close, close]
+    =>      [high , low  ]
+
+pivotsUp .appendPivot(getPH, getHigh, true), pivotsDn .appendPivot(getPL, getLow, false)
+pivotsUpH.appendPivot(getPH, getHigh, true), pivotsDnH.appendPivot(getPL, getLow, false)
+
+[o, h, l, c] = request.security_lower_tf(syminfo.tickerid, "1", [open, high, low, close])
+var exitData = exitDrawings.new(float(na), float(na), label(na))
+
+method tradeExits(map<string, float> tradeMap) => 
+
+
+    if na(tradeMap.get(mapValues.direction))
+        tradeMap.put(mapValues.direction, 0)
+
+    if tradeMap.get(mapValues.direction) == 1
+
+        isShort = false 
+
+        getTarget = tradeMap.get(mapValues.target)
+        getStop   = tradeMap.get(mapValues.stop)
+        getEntry  = tradeMap.get(mapValues.entry)
+
+        if open >= getTarget 
+
+            tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+        else if open <= getStop 
+
+            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+            
+        else if high >= getTarget 
+
+            if low > getStop 
+
+                tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+            else 
+
+                if h.size() > 0
+
+                    for i = 0 to h.size() - 1
+
+                        ltfHigh = h.get(i), ltfLow = l.get(i), ltfClose = c.get(i), ltfOpen = o.get(i)
+
+                        if ltfHigh >= getTarget 
+
+                            if ltfLow > getStop 
+
+                                tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+                            else 
+                                
+                                closer2low = math.abs(ltfOpen - ltfHigh) > math.abs(ltfOpen - ltfLow)
+
+                                switch closer2low
+
+                                    true => 
+                            
+                                         tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+
+                                    =>       
+
+                                         tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+                            break 
+
+                        else if ltfLow <= getStop 
+
+                            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+
+                            break 
+
+
+                else 
+
+                    closer2low = math.abs(open - high) > math.abs(open - low)
+
+                    switch closer2low
+
+                        true => 
+                            
+                             tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+
+                        =>       
+                             tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+        else if low <= getStop
+
+            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+            
+
+    else if tradeMap.get(mapValues.direction) == -1
+
+
+        isShort = true
+
+        getTarget = tradeMap.get(mapValues.target)
+        getStop   = tradeMap.get(mapValues.stop)
+        getEntry  = tradeMap.get(mapValues.entry)
+
+        if open <= getTarget 
+
+            tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+        else if open >= getStop 
+
+            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+            
+        else if low <= getTarget 
+
+            if high < getStop 
+
+                tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+            else 
+
+                if h.size() > 0
+
+                    for i = 0 to h.size() - 1
+
+                        ltfHigh = h.get(i), ltfLow = l.get(i), ltfClose = c.get(i), ltfOpen = o.get(i)
+
+                        if ltfLow <= getTarget 
+
+                            if ltfHigh < getStop 
+
+                                tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+                            else 
+                                
+                                closer2low = math.abs(ltfOpen - ltfHigh) > math.abs(ltfOpen - ltfLow)
+
+                                switch closer2low
+
+                                    true => 
+                            
+                                         tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+                                    =>       
+
+                                         tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+                            break 
+
+                        else if ltfHigh >= getStop 
+
+                            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+
+                            break 
+
+
+                else 
+
+                    closer2low = math.abs(open - high) > math.abs(open - low)
+
+                    switch closer2low
+
+                        true => 
+                            
+                             tradeMap.addAll(true, getTarget, getEntry, getStop, isShort, exitData)
+
+                        =>       
+                             tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+
+        else if high >= getStop
+
+            tradeMap.addAll(false, getTarget, getEntry, getStop, isShort, exitData)
+            
+    float(na)
+
+pivotsMethod() =>
+    
+
+    bearDiv = false, bearHdiv = false 
+
+    tradeMap.tradeExits()
+
+    if barstate.isconfirmed
+
+        if not na(getPH) and pivotsUp.size() > 1
+
+            recentPiv = pivotsUp.last()
+            prevPiv   = pivotsUp.get(-2)
+
+            if bearDivShow or bearDivTrade
+
+                if recentPiv.pricePiv.price > prevPiv.pricePiv.price 
+
+                    if recentPiv.indicatorPiv.price < prevPiv.indicatorPiv.price
+
+                        bearDiv := true 
+
+                        if bearDivTrade and tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+                            [stop, target] = switch exitType
+
+                                exitInput.atr =>     [close + atr * stopLossMult, close - atr * profitTargetMult]
+                                exitInput.percent => [close * (1 + stopLossMult / 100), close * (1 - profitTargetMult / 100)]
+
+                            stop   := math.round_to_mintick(stop)
+                            target := math.round_to_mintick(target)
+
+                            strategy.entry("Short Bearish Divergence", strategy.short)
+                            strategy.exit("SB Exit", "Short Bearish Divergence", stop = stop, limit = target)
+
+                            label.new(bar_index, close, text = "▽", textcolor = color.rgb(255, 116, 116), 
+                                             color         = color.new(color.rgb(255, 116, 116), 80), 
+                                             style         = label.style_text_outline, 
+                                             size          = size.normal, 
+                                             tooltip       = "Bearish Divergence Short Entry At: " + str.tostring(close, format.mintick) 
+                                                             + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                             force_overlay = true,
+                                             yloc          = yloc.abovebar
+                                             )
+
+                            exitData.stopPrice := stop, exitData.targetPrice := target
+
+                            tradeMap.put(mapValues.direction, -1)
+                            tradeMap.put(mapValues.target, target)
+                            tradeMap.put(mapValues.stop  , stop)
+                            tradeMap.put(mapValues.entry , close)
+
+                        alert("Bearsih Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+
+            if bearHDivShow
+
+                if recentPiv.pricePiv.price < prevPiv.pricePiv.price 
+
+                    if recentPiv.indicatorPiv.price > prevPiv.indicatorPiv.price
+
+                        bearHdiv := true 
+
+                        if bearHDivTrade and tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+
+                            [stop, target] = switch exitType
+
+                                exitInput.atr =>     [close + atr * stopLossMult, close - atr * profitTargetMult]
+                                exitInput.percent => [close * (1 + stopLossMult / 100), close * (1 - profitTargetMult / 100)]
+
+                            stop   := math.round_to_mintick(stop)
+                            target := math.round_to_mintick(target)
+
+                            strategy.entry("Short Hidden Bearish Divergence", strategy.short)
+                            strategy.exit("SHB Exit", "Short Hidden Bearish Divergence", stop = stop, limit = target)
+
+                            label.new(bar_index, close, text = "▽", textcolor = color.rgb(255, 116, 116), 
+                                             color         = color.new(color.rgb(255, 116, 116), 80), 
+                                             style         = label.style_text_outline, 
+                                             size          = size.normal, 
+                                             tooltip       = "Hidden Bearish Divergence Short Entry At: " + str.tostring(close, format.mintick)
+                                                             + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+
+                                             force_overlay = true,
+                                             yloc          = yloc.abovebar
+                                             )
+
+
+                            exitData.stopPrice := stop, exitData.targetPrice := target
+
+                            tradeMap.put(mapValues.direction, -1)
+                            tradeMap.put(mapValues.target, target)
+                            tradeMap.put(mapValues.stop  , stop)
+                            tradeMap.put(mapValues.entry , close)
+
+                        alert("Hidden Bearsih Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+
+    bullDiv = false, bullHdiv = false
+
+    if barstate.isconfirmed
+
+        if not na(getPL) and pivotsDn.size() > 1
+
+            recentPiv = pivotsDn.last()
+            prevPiv   = pivotsDn.get(-2)
+
+            if bullDivShow
+
+                if recentPiv.pricePiv.price < prevPiv.pricePiv.price 
+
+                    if recentPiv.indicatorPiv.price > prevPiv.indicatorPiv.price
+
+                        bullDiv := true 
+
+                        if bullDivTrade and tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+
+                            [stop, target] = switch exitType
+
+                                exitInput.atr =>     [close - atr * stopLossMult, close + atr * profitTargetMult]
+                                exitInput.percent => [close * (1 - stopLossMult / 100), close * (1 + profitTargetMult / 100)]
+
+                            stop   := math.round_to_mintick(stop)
+                            target := math.round_to_mintick(target)
+
+                            strategy.entry("Long Bullish Divergence", strategy.long)
+                            strategy.exit("LB Exit", "Long Bullish Divergence", stop = stop, limit = target)
+
+                            label.new(bar_index, close, text = "△", textcolor = #74ffbc, 
+                                             color         = color.new(#74ffbc, 80), 
+                                             style         = label.style_text_outline, 
+                                             size          = size.normal, 
+                                             tooltip       = "Bullish Divergence Long Entry At: " + str.tostring(close, format.mintick)
+                                                             + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                             force_overlay = true,
+                                             yloc          = yloc.belowbar
+                                             )
+
+
+                            exitData.stopPrice := stop, exitData.targetPrice := target
+
+                            tradeMap.put(mapValues.direction, 1)
+                            tradeMap.put(mapValues.target, target)
+                            tradeMap.put(mapValues.stop  , stop)
+                            tradeMap.put(mapValues.entry , close)
+
+
+                        alert("Bullish Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+
+
+            if bullHDivShow
+
+                if recentPiv.pricePiv.price > prevPiv.pricePiv.price 
+
+                    if recentPiv.indicatorPiv.price < prevPiv.indicatorPiv.price
+
+                        bullHdiv := true 
+
+                        if bullHDivTrade and tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+
+                            [stop, target] = switch exitType
+
+                                exitInput.atr =>     [close - atr * stopLossMult, close + atr * profitTargetMult]
+                                exitInput.percent => [close * (1 - stopLossMult / 100), close * (1 + profitTargetMult / 100)]
+
+                            stop   := math.round_to_mintick(stop)
+                            target := math.round_to_mintick(target)
+
+                            strategy.entry("Long Hidden Bullish Divergence", strategy.long)
+                            strategy.exit("LHB Exit", "Long Hidden Bullish Divergence", stop = stop, limit = target)
+
+                            label.new(bar_index, close, text = "△", textcolor = #74ffbc, 
+                                             color         = color.new(#74ffbc, 80), 
+                                             style         = label.style_text_outline, 
+                                             size          = size.normal, 
+                                             tooltip       = "Hidden Bullish Divergence Long Entry At: " + str.tostring(close, format.mintick)
+                                                             + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                             force_overlay = true,
+                                             yloc          = yloc.belowbar
+                                             )
+
+
+                            exitData.stopPrice := stop, exitData.targetPrice := target
+
+                            tradeMap.put(mapValues.direction, 1)
+                            tradeMap.put(mapValues.target, target)
+                            tradeMap.put(mapValues.stop  , stop)
+                            tradeMap.put(mapValues.entry , close)
+
+                        alert("Hidden Bullish Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+
+
+    [bearDiv, bearHdiv, bullDiv, bullHdiv]
+
+
+immediateMethod() => 
+
+    bearDiv = false, bearHdiv = false, bullDiv = false, bullHdiv = false
+
+    tradeMap.tradeExits()
+
+    if barstate.isconfirmed
+
+        if pivotsUp.size() > 1
+
+            getRecent = pivotsUp.last(), getRecentHidden = pivotsUpH.last()
+
+            var includesTime = array.new<int>()
+            var divLine      = line(na)
+            var priceLine    = line(na)
+
+            var includesTimeHidden = array.new<int>()
+            var divLineHidden      = line(na)
+            var priceLineHidden    = line(na)
+
+            if finalSrc > getRecent.indicatorPiv.price 
+
+                pivotsUp.push(
+                         pivotData.new(
+                                 chart.point.from_time(time, finalSrc), 
+                                 chart.point.from_time(time, getHigh)))
+
+            if bearDivShow or bearDivTrade
+
+                if not includesTime.includes(getRecent.indicatorPiv.time) 
+
+                    if finalSrc[1] < getRecent.indicatorPiv.price and getHigh[1] > getRecent.pricePiv.price 
+
+                        if finalSrc[1] > finalSrc[2] and finalSrc[1] > finalSrc
+
+                            if na(divLine)
+
+                                divLine   := line.new(getRecent.indicatorPiv.time, getRecent.indicatorPiv.price, 
+                                                         time[1], 
+                                                         finalSrc [1], 
+                                                         xloc  = xloc.bar_time, 
+                                                         color = bearDivCol, 
+                                                         style = line.style_dotted,
+                                                         width = 2
+                                                         )
+
+                                priceLine := line.new(getRecent.pricePiv.time, getRecent.pricePiv.price, 
+                                                         time[1], 
+                                                         getHigh[1], 
+                                                         xloc          = xloc.bar_time, 
+                                                         color         = bearDivCol, 
+                                                         width         = 2, 
+                                                         style = line.style_dotted,
+                                                         force_overlay = true
+                                                         )
+
+                                if tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+                                    [stop, target] = switch exitType
+
+                                        exitInput.atr =>     [close + atr * stopLossMult, close - atr * profitTargetMult]
+                                        exitInput.percent => [close * (1 + stopLossMult / 100), close * (1 - profitTargetMult / 100)]
+
+                                    stop   := math.round_to_mintick(stop)
+                                    target := math.round_to_mintick(target)
+
+                                    strategy.entry("Short Bearish Divergence", strategy.short)
+                                    strategy.exit("SB Exit", "Short Bearish Divergence", stop = stop, limit = target)
+
+                                    label.new(bar_index, close, text = "▽", textcolor = color.rgb(255, 116, 116), 
+                                                     color         = color.new(color.rgb(255, 116, 116), 80), 
+                                                     style         = label.style_text_outline, 
+                                                     size          = size.normal, 
+                                                     tooltip       = "Bearish Divergence Short Entry At: " + str.tostring(close, format.mintick) 
+                                                                     + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                                     force_overlay = true,
+                                                     yloc          = yloc.abovebar
+                                                     )
+
+                                    exitData.stopPrice := stop, exitData.targetPrice := target
+
+                                    tradeMap.put(mapValues.direction, -1)
+                                    tradeMap.put(mapValues.target, target)
+                                    tradeMap.put(mapValues.stop  , stop)
+                                    tradeMap.put(mapValues.entry , close)
+
+
+                                alert("Bearish Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+                                bearDiv := true
+
+                            else 
+
+                                if finalSrc[1] > divLine.get_y2()
+
+                                    divLine  .set_xy2(time[1], finalSrc [1])
+                                    priceLine.set_xy2(time[1], getHigh[1])
+
+                    else 
+
+                        if not na(divLine)
+
+                            divLine := line(na), priceLine := line(na)
+                            includesTime.push(getRecent.indicatorPiv.time)
+
+
+            if bearHDivShow or bearHDivTrade
+
+                if not includesTimeHidden.includes(getRecentHidden.indicatorPiv.time)
+
+                    if finalSrc[1] > getRecentHidden.indicatorPiv.price and getHigh[1] < getRecentHidden.pricePiv.price 
+
+                        if finalSrc[1] > finalSrc[2] and finalSrc[1] > finalSrc
+
+                            if na(divLineHidden)
+
+                                divLineHidden   := line.new(getRecentHidden.indicatorPiv.time, getRecentHidden.indicatorPiv.price, 
+                                                         time[1], 
+                                                         finalSrc [1], 
+                                                         xloc  = xloc.bar_time, 
+                                                         color = bearHDivCol, 
+                                                         style = line.style_dotted,
+                                                         width = 2
+                                                         )
+
+                                priceLineHidden := line.new(getRecentHidden.pricePiv.time, getRecentHidden.pricePiv.price, 
+                                                         time[1], 
+                                                         getHigh[1], 
+                                                         xloc          = xloc.bar_time, 
+                                                         color         = bearHDivCol, 
+                                                         width         = 2, 
+                                                         style = line.style_dotted,
+                                                         force_overlay = true
+                                                         )
+
+
+                                if tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+                                    [stop, target] = switch exitType
+
+                                        exitInput.atr =>     [close + atr * stopLossMult, close - atr * profitTargetMult]
+                                        exitInput.percent => [close * (1 + stopLossMult / 100), close * (1 - profitTargetMult / 100)]
+
+                                    stop   := math.round_to_mintick(stop)
+                                    target := math.round_to_mintick(target)
+
+                                    strategy.entry("Short Hidden Bearish Divergence", strategy.short)
+                                    strategy.exit("SHB Exit", "Short Hidden Bearish Divergence", stop = stop, limit = target)
+
+
+                                    label.new(bar_index, close, text = "▽", textcolor = color.rgb(255, 116, 116), 
+                                                     color         = color.new(color.rgb(255, 116, 116), 80), 
+                                                     style         = label.style_text_outline, 
+                                                     size          = size.normal, 
+                                                     tooltip       = "Bearish Hidden Divergence Short Entry At: " + str.tostring(close, format.mintick) 
+                                                                     + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                                     force_overlay = true,
+                                                     yloc          = yloc.abovebar
+                                                     )
+
+                                    exitData.stopPrice := stop, exitData.targetPrice := target
+
+                                    tradeMap.put(mapValues.direction, -1)
+                                    tradeMap.put(mapValues.target, target)
+                                    tradeMap.put(mapValues.stop  , stop)
+                                    tradeMap.put(mapValues.entry , close)
+
+                                alert("Bearish Hidden Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+                                bearHdiv := true 
+
+                            else 
+
+                                if finalSrc[1] > divLineHidden.get_y2()
+
+                                    divLineHidden  .set_xy2(time[1], finalSrc[1])
+                                    priceLineHidden.set_xy2(time[1], getHigh[1])
+
+                    else 
+
+                        if not na(divLineHidden)
+
+                            divLineHidden := line(na), priceLineHidden := line(na)
+                            includesTimeHidden.push(getRecentHidden.indicatorPiv.time)
+
+
+
+        if pivotsDn.size() > 1
+
+            getRecent = pivotsDn.last(), getRecentHidden = pivotsDnH.last()
+
+            var includesTime = array.new<int>()
+            var divLine      = line(na)
+            var priceLine    = line(na)
+
+            var includesTimeHidden = array.new<int>()
+            var divLineHidden      = line(na)
+            var priceLineHidden    = line(na)
+
+
+            if finalSrc < getRecent.indicatorPiv.price 
+
+                getLast = pivotsDn.last()
+
+                getLast.indicatorPiv := chart.point.from_time(time, finalSrc)
+                getLast.pricePiv     := chart.point.from_time(time, getLow)
+
+
+            if bullDivShow or bullDivTrade
+
+                if not includesTime.includes(getRecent.indicatorPiv.time) 
+
+                    if finalSrc[1] > getRecent.indicatorPiv.price and getLow[1] < getRecent.pricePiv.price 
+
+                        if finalSrc[1] < finalSrc[2] and finalSrc[1] < finalSrc
+
+                            if na(divLine)
+
+                                divLine   := line.new(getRecent.indicatorPiv.time, getRecent.indicatorPiv.price, 
+                                                         time[1], 
+                                                         finalSrc [1], 
+                                                         xloc  = xloc.bar_time, 
+                                                         color = bullDivCol, 
+                                                         style = line.style_dotted,
+                                                         width = 2
+                                                         )
+
+                                priceLine := line.new(getRecent.pricePiv.time, getRecent.pricePiv.price, 
+                                                         time[1], 
+                                                         getLow [1], 
+                                                         xloc          = xloc.bar_time, 
+                                                         color         = bullDivCol, 
+                                                         width         = 2, 
+                                                         style = line.style_dotted,
+                                                         force_overlay = true
+                                                         )
+
+                                if tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+                                    [stop, target] = switch exitType
+
+                                        exitInput.atr =>     [close - atr * stopLossMult, close + atr * profitTargetMult]
+                                        exitInput.percent => [close * (1 - stopLossMult / 100), close * (1 + profitTargetMult / 100)]
+
+                                    stop   := math.round_to_mintick(stop)
+                                    target := math.round_to_mintick(target)
+
+                                    strategy.entry("Long Bullish Divergence", strategy.long)
+                                    strategy.exit("LB Exit", "Long Bullish Divergence", stop = stop, limit = target)
+
+                                    label.new(bar_index, close, text = "△", textcolor = #74ffbc, 
+                                                     color         = color.new(#74ffbc, 80), 
+                                                     style         = label.style_text_outline, 
+                                                     size          = size.normal, 
+                                                     tooltip       = "Bullish Divergence Long Entry At: " + str.tostring(close, format.mintick)
+                                                                     + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                                     force_overlay = true,
+                                                     yloc          = yloc.belowbar
+                                                     )
+
+
+
+                                    exitData.stopPrice := stop, exitData.targetPrice := target
+
+                                    tradeMap.put(mapValues.direction, 1)
+                                    tradeMap.put(mapValues.target, target)
+                                    tradeMap.put(mapValues.stop  , stop)
+                                    tradeMap.put(mapValues.entry , close)
+
+                                bullDiv := true 
+
+                                alert("Bullish Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+                            else 
+
+                                if finalSrc[1] < divLine.get_y2()
+
+                                    divLine  .set_xy2(time[1], finalSrc[1])
+                                    priceLine.set_xy2(time[1], getLow[1])
+
+                    else 
+
+                        if not na(divLine)
+
+                            divLine := line(na), priceLine := line(na)
+                            includesTime.push(getRecent.indicatorPiv.time)
+
+
+
+            if bullHDivShow or bullHDivTrade
+
+                if not includesTimeHidden.includes(getRecentHidden.indicatorPiv.time) 
+
+                    if finalSrc[1] < getRecentHidden.indicatorPiv.price and getLow[1] > getRecentHidden.pricePiv.price 
+
+                        if finalSrc[1] < finalSrc[2] and finalSrc[1] < finalSrc
+
+                            if na(divLineHidden)
+
+                                divLineHidden   := line.new(getRecentHidden.indicatorPiv.time, getRecentHidden.indicatorPiv.price, 
+                                                         time[1], 
+                                                         finalSrc [1], 
+                                                         xloc  = xloc.bar_time, 
+                                                         color = bullHDivCol, 
+                                                         style = line.style_dotted,
+                                                         width = 2
+                                                         )
+
+                                priceLineHidden := line.new(getRecentHidden.pricePiv.time, getRecentHidden.pricePiv.price, 
+                                                         time[1], 
+                                                         getLow [1], 
+                                                         xloc          = xloc.bar_time, 
+                                                         color         = bullHDivCol, 
+                                                         width         = 2, 
+                                                         style = line.style_dotted,
+                                                         force_overlay = true
+                                                         )
+
+                                if tradeMap.get(mapValues.direction) == 0 and not na(atr)
+
+
+                                    [stop, target] = switch exitType
+
+                                        exitInput.atr =>     [close - atr * stopLossMult, close + atr * profitTargetMult]
+                                        exitInput.percent => [close * (1 - stopLossMult / 100), close * (1 + profitTargetMult / 100)]
+
+                                    stop   := math.round_to_mintick(stop)
+                                    target := math.round_to_mintick(target)
+
+                                    strategy.entry("Long Hidden Bullish Divergence", strategy.long)
+                                    strategy.exit("LHB Exit", "Long Hidden Bullish Divergence", stop = stop, limit = target)
+
+                                    label.new(bar_index, close, text = "△", textcolor = #74ffbc, 
+                                                     color         = color.new(#74ffbc, 80), 
+                                                     style         = label.style_text_outline, 
+                                                     size          = size.normal, 
+                                                     tooltip       = "Bullish Hidden Divergence Long Entry At: " + str.tostring(close, format.mintick)
+                                                                     + "\nTarget: " + str.tostring(target) + "\nStop: " + str.tostring(stop),
+                                                     force_overlay = true,
+                                                     yloc          = yloc.belowbar
+                                                     )
+
+
+                                    exitData.stopPrice := stop, exitData.targetPrice := target
+
+                                    tradeMap.put(mapValues.direction, 1)
+                                    tradeMap.put(mapValues.target, target)
+                                    tradeMap.put(mapValues.stop  , stop)
+                                    tradeMap.put(mapValues.entry , close)
+
+                                bullHdiv := true 
+
+                                alert("Bullish Hidden Divergence Detected", freq = alert.freq_once_per_bar_close)
+
+                            else 
+
+                                if finalSrc[1] < divLineHidden.get_y2()
+
+                                    divLineHidden  .set_xy2(time[1], finalSrc[1])
+                                    priceLineHidden.set_xy2(time[1], getLow[1])
+
+                    else 
+
+                        if not na(divLineHidden)
+
+                            divLineHidden := line(na), priceLineHidden := line(na)
+                            includesTimeHidden.push(getRecentHidden.indicatorPiv.time)
+
+
+    [bearDiv, bearHdiv, bullDiv, bullHdiv]
+
+[bearDiv, bearHdiv, bullDiv, bullHdiv] = switch divMethod
+
+    divInput.pivotPoints => pivotsMethod()
+    divInput.immediate   => immediateMethod()
+
+
+if barstate.islast or barstate.islastconfirmedhistory
+
+    var performanceTable = table.new(position.bottom_right, 99, 99, bgcolor = #20222C, border_color = #363843, 
+                                         frame_color   = #363843, 
+                                         border_width  = 1, 
+                                         frame_width   = 1, 
+                                         force_overlay = true
+                                         )
+
+    textCol = switch math.sign(tradeMap.get(mapValues.profit))
+
+        1  => #74ffbc 
+        -1 => color.rgb(255, 116, 116)
+        =>    color.white
+
+    performanceTable.cell(0, 0, "Divergence IQ", text_color = #f874ff)
+
+    performanceTable.cell(0, 1, "Profit: ", text_color = color.white)
+    performanceTable.cell(0, 2, "Win Rate: ", text_color = color.white)
+    performanceTable.cell(0, 3, "PF: ", text_color = color.white)
+    performanceTable.cell(0, 4, "Trades: ", text_color = color.white)
+
+    performanceTable.cell(1, 1, str.tostring(tradeMap.get(mapValues.profit), format.percent), 
+                                                     text_color = textCol)
+    performanceTable.cell(1, 2, str.tostring(tradeMap.get(mapValues.wins) / tradeMap.get(mapValues.trades) * 100, format.percent), 
+                                                     text_color = color.white)
+    performanceTable.cell(1, 3, str.tostring(tradeMap.get(mapValues.grossGain) / tradeMap.get(mapValues.grossLoss), "###,###.##"), 
+                                                     text_color = textCol)
+    performanceTable.cell(1, 4, str.tostring(tradeMap.get(mapValues.trades), "###,###.##"), 
+                                                     text_color = textCol)
+
+    performanceTable.merge_cells(0, 0, 1, 0)
+
+    pricesArr = array.from(close, high, low, open, hl2, hlc3, ohlc4, hlcc4)
+
+    if pricesArr.includes(src) 
+
+        var warningTable = table.new(position.bottom_right, 99, 99, bgcolor = #20222C, border_color = #363843, 
+                             frame_color   = #363843, 
+                             border_width  = 1, 
+                             frame_width   = 1
+                             )
+
+        warningTable.cell(0, 0, "In The Divergence IQ Settings, Please Add An Indicator To Calculate Divergences On.\nThe Indicator Must Be On The Chart", 
+                                     text_color = color.white)
+
+plot(showFinal or normMethod != normalizationInput.none ? finalSrc : na, color = gradientFlowCol)
+plot(showFinal or normMethod != normalizationInput.none ? finalSrc : na, color = color.new(gradientFlowCol, 80), linewidth = 5)
+
+
+var showCond = divMethod == divInput.pivotPoints
+
+plot(showCond and not na(getPH) ? finalSrc[rightLook] : na, offset = -rightLook, color = bearDiv ? bearDivCol : na, display = display.pane)
+plot(showCond and not na(getPH) ? finalSrc[rightLook] : na, offset = -rightLook, color = bearDiv ? color.new(bearDivCol, 80) : na, linewidth = 5, display = display.pane)
+
+plot(showCond and not na(getPH) ? finalSrc[rightLook] : na, offset = -rightLook, color = bearHdiv ? bearHDivCol : na, display = display.pane)
+plot(showCond and not na(getPH) ? finalSrc[rightLook] : na, offset = -rightLook, color = bearHdiv ? color.new(bearHDivCol, 80) : na, linewidth = 5, display = display.pane)
+
+plot(showCond and not na(getPL) ? finalSrc[rightLook] : na, offset = -rightLook, color = bullDiv ? bullDivCol : na, display = display.pane)
+plot(showCond and not na(getPL) ? finalSrc[rightLook] : na, offset = -rightLook, color = bullDiv ? color.new(bullDivCol, 80) : na, linewidth = 5, display = display.pane)
+
+plot(showCond and not na(getPL) ? finalSrc[rightLook] : na, offset = -rightLook, color = bullHdiv ? bullHDivCol : na, display = display.pane)
+plot(showCond and not na(getPL) ? finalSrc[rightLook] : na, offset = -rightLook, color = bullHdiv ? color.new(bullHDivCol, 80) : na, linewidth = 5, display = display.pane)
+
+
+plot(showCond and not na(getPH) and onChart ? getHigh[rightLook] : na, offset = -rightLook, color = bearDiv ? bearDivCol : na, display = display.pane, force_overlay = true)
+plot(showCond and not na(getPH) and onChart ? getHigh[rightLook] : na, offset = -rightLook, color = bearDiv ? color.new(bearDivCol, 80) : na, linewidth = 5, display = display.pane, force_overlay = true)
+
+plot(showCond and not na(getPH) and onChart ? getHigh[rightLook] : na, offset = -rightLook, color = bearHdiv ? bearHDivCol : na, display = display.pane, force_overlay = true)
+plot(showCond and not na(getPH) and onChart ? getHigh[rightLook] : na, offset = -rightLook, color = bearHdiv ? color.new(bearHDivCol, 80) : na, linewidth = 5, display = display.pane, force_overlay = true)
+
+plot(showCond and not na(getPL) and onChart ? getLow[rightLook] : na, offset = -rightLook, color = bullDiv ? bullDivCol : na, display = display.pane, force_overlay = true)
+plot(showCond and not na(getPL) and onChart ? getLow[rightLook] : na, offset = -rightLook, color = bullDiv ? color.new(bullDivCol, 80) : na, linewidth = 5, display = display.pane, force_overlay = true)
+
+plot(showCond and not na(getPL) and onChart ? getLow[rightLook] : na, offset = -rightLook, color = bullHdiv ? bullHDivCol : na, display = display.pane, force_overlay = true)
+plot(showCond and not na(getPL) and onChart ? getLow[rightLook] : na, offset = -rightLook, color = bullHdiv ? color.new(bullHDivCol, 80) : na, linewidth = 5, display = display.pane, force_overlay = true)
+
+plot(showPrice ? close : na, color = gradientFlowCol, force_overlay = true)
+plot(showPrice ? close : na, color = color.new(gradientFlowCol, 80), linewidth = 5, force_overlay = true)
+
+
+var targetCol  = #74ffbc
+var stopCol    = color.rgb(255, 116, 116)
+
+target = plot(exitData.targetPrice, force_overlay = true, style = plot.style_linebr, offset = 1, color = targetCol)
+stop   = plot(exitData.stopPrice, force_overlay = true, style = plot.style_linebr, offset = 1, color = stopCol)
+
+plot(exitData.targetPrice, force_overlay = true, style = plot.style_linebr, offset = 1, color = color.new(targetCol, 80), linewidth = 5)
+plot(exitData.stopPrice, force_overlay = true, style = plot.style_linebr, offset = 1, color = color.new(stopCol, 80), linewidth = 5)
+
+getAvg = math.avg(exitData.targetPrice, exitData.stopPrice)
+
+avg = plot(getAvg, display = display.none, force_overlay = true, offset = 1)
+
+getDir = math.sign(exitData.targetPrice - getAvg)
+
+[topCol, botCol, topColStop, botColStop] = switch getDir
+
+    1 =>  [color.new(targetCol, 90), color.new(targetCol, 99), color.new(stopCol, 99), color.new(stopCol, 90)]
+    =>    [color.new(targetCol, 99), color.new(targetCol, 90), color.new(stopCol, 99), color.new(stopCol, 90)]
+
+
+fill(target, avg, top_value    = math.max(exitData.targetPrice, getAvg), 
+                  bottom_value = math.min(exitData.targetPrice, getAvg), 
+                  top_color    = topCol, 
+                  bottom_color = botCol
+                  )
+
+fill(stop, avg,   top_value    = math.max(exitData.stopPrice, getAvg), 
+                  bottom_value = math.min(exitData.stopPrice, getAvg), 
+                  top_color    = topColStop, 
+                  bottom_color = botColStop
+                  )
+
+highest   = ta.ema(ta.highest(finalSrc, 500), 500)
+lowest    = ta.ema(ta.lowest (finalSrc, 500), 500)
+priceAvg  = math.avg(highest, lowest)
+
+p1 = plot(gradientFlow ? highest : na, display = display.none)
+p2 = plot(gradientFlow ? lowest : na, display = display.none)
+p3 = plot(gradientFlow ? priceAvg : na, display = display.none)
+
+
+fill(p1, p3, top_value = highest, bottom_value = priceAvg, bottom_color = color.new(gradientFlowCol, 90), top_color = color.new(gradientFlowCol, 99))
+fill(p2, p3, top_value = priceAvg, bottom_value = lowest, bottom_color = color.new(gradientFlowCol, 99), top_color = color.new(gradientFlowCol, 90))
+
+View in Pine Editor・1090 lines
+Use on chart
+1.1 K
+5
+16 161
+Hello Traders!
+
+Introducing "Divergence IQ"
+
+Divergence IQ lets traders identify divergences between price action and almost ANY TradingView technical indicator. This tool is designed to help you spot potential trend reversals and continuation patterns with a range of configurable features.
+
+Features
+
+Divergence Detection
+
+
+Detects both regular and hidden divergences for bullish and bearish setups by comparing price movements with changes in the indicator.
+
+Offers two detection methods: one based on classic pivot point analysis and another that provides immediate divergence signals.
+
+Option to use closing prices for divergence detection, allowing you to choose the data that best fits your strategy.
+
+
+
+Normalization Options:
+
+
+Includes multiple normalization techniques such as robust scaling, rolling Z-score, rolling min-max, or no normalization at all.
+
+Adjustable normalization window lets you customize the indicator to suit various market conditions.
+
+Option to display the normalized indicator on the chart for clearer visual comparison.
+
+Allows traders to take indicators that aren't oscillators, and convert them into an oscillator - allowing for better divergence detection.
+
+
+
+Simulated Trade Management:
+
+
+Integrates simulated trade entries and exits based on divergence signals to demonstrate potential trading outcomes.
+
+Customizable exit strategies with options for ATR-based or percentage-based stop loss and profit target settings.
+
+Automatically calculates key trade metrics such as profit percentage, win rate, profit factor, and total trade count.
+
+
+
+Visual Enhancements and On-Chart Displays:
+
+
+Color-coded signals differentiate between bullish, bearish, hidden bullish, and hidden bearish divergence setups.
+
+On-chart labels, lines, and gradient flow visualizations clearly mark divergence signals, entry points, and exit levels.
+
+Configurable settings let you choose whether to display divergence signals on the price chart or in a separate pane.
+
+
+
+Performance Metrics Table:
+
+
+A performance table dynamically displays important statistics like profit, win rate, profit factor, and number of trades.
+
+This feature offers an at-a-glance assessment of how the divergence-based strategy is performing.
+
+
+
+
+
+
+The image above shows Divergence IQ successfully identifying and trading a bullish divergence between an indicator and price action!
+
+
+
+
+The image above shows Divergence IQ successfully identifying and trading a bearish divergence between an indicator and price action!
+
+
+
+
+The image above shows Divergence IQ successfully identifying and trading a hidden bullish divergence between an indicator and price action!
+
+
+
+
+The image above shows Divergence IQ successfully identifying and trading a hidden bearish divergence between an indicator and price action!
+
+The performance table is designed to provide a clear summary of simulated trade results based on divergence setups. You can easily review key metrics to assess the strategy’s effectiveness over different time periods.
+
+
+
+
+Customization and Adaptability
+
+Divergence IQ [TradingIQ] offers a wide range of configurable settings to tailor the indicator to your personal trading approach. You can adjust the lookback and lookahead periods for pivot detection, select your preferred method for normalization, and modify trade exit parameters to manage risk according to your strategy. The tool’s clear visual elements and comprehensive performance metrics make it a useful addition to your technical analysis toolbox.
+
+
+
+
+The image above shows Divergence IQ identifying divergences between price action and OBV with no normalization technique applied.
+
+While traders can look for divergences between OBV and price, OBV doesn't naturally behave like an oscillator, with no definable upper and lower threshold, OBV can infinitely increase or decrease.
+
+With Divergence IQ's ability to normalize any indicator, traders can normalize non-oscillator technical indicators such as OBV, CVD, MACD, or even a moving average.
+
+
+
+
+In the image above, the "Robust Scaling" normalization technique is selected. Consequently, the output of OBV has changed and is now behaving similar to an oscillator-like technical indicator. This makes spotting divergences between the indicator and price easier and more appropriate.
+
+The three normalization techniques included will change the indicator's final output to be more compatible with divergence detection.
+
+This feature can be used with almost any technical indicator.
+
+Stop Type
+
+Traders can select between ATR based profit targets and stop losses, or percentage based profit targets and stop losses.
+
+
+
+
+The image above shows options for the feature.
+
+Divergence Detection Method
+
+A natural pitfall of divergence trading is that it generally takes several bars to "confirm" a divergence. This makes trading the divergence complicated, because the entry at time of the divergence might look great; however, the divergence wasn't actually signaled until several bars later.
+
+To circumvent this issue, Divergence IQ offers two divergence detection mechanisms.
+
+
+
+
+Pivot Detection
+
+Pivot detection mode is the same as almost every divergence indicator on TradingView. The Pivots High Low indicator is used to detect market/indicator highs and lows and, consequently, divergences.
+
+This method generally finds the "best looking" divergences, but will always take additional time to confirm the divergence.
+
+Immediate Detection
+
+Immediate detection mode attempts to reduce lag between the divergence and its confirmation to as little as possible while avoiding repainting.
+
+Immediate detection mode still uses the Pivots Detection model to find the first high/low of a divergence. However, the most recent high/low does not utilize the Pivot Detection model, and instead immediately looks for a divergence between price and an indicator.
+
+Immediate Detection Mode will always signal a divergence one bar after it's occurred, and traders can set alerts in this mode to be alerted as soon as the divergence occurs.
+
+TradingView Backtester Integration
+
+Divergence IQ is fully compatible with the TradingView backtester!
+
+Divergence IQ isn’t designed to be a “profitable strategy” for users to trade. Instead, the intention of including the backtester is to let users backtest divergence-based trading strategies between the asset on their chart and almost any technical indicator, and to see if divergences have any predictive utility in that market.
+
+So while the backtester is available in Divergence IQ, it’s for users to personally figure out if they should consider a divergence an actionable insight, and not a solicitation that Divergence IQ is a profitable trading strategy. Divergence IQ should be thought of as a Divergence backtesting toolkit, not a full-feature trading strategy.
+
+Strategy Properties Used For Backtest
+
+Initial Capital: $1000 - a realistic amount of starting capital that will resonate with many traders
+Amount Per Trade: 5% of equity - a realistic amount of capital to invest relative to portfolio size
+Commission: 0.02% - a conservative amount of commission to pay for trade that is standard in crypto trading, and very high for other markets.
+Slippage: 1 tick - appropriate for liquid markets, but must be increased in markets with low activity.
+
+Once more, the backtester is meant for traders to personally figure out if divergences are actionable trading signals on the market they wish to trade with the indicator they wish to use.
+
+And that's all!
+
+If you have any cool features you think can benefit Divergence IQ - please feel free to share them!
+
+Thank you so much TradingView community!

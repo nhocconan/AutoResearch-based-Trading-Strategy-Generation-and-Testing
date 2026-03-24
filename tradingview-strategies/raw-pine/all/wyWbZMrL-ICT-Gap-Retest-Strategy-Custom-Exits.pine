@@ -1,0 +1,103 @@
+//@version=5
+strategy("ICT Gap Strategy [Custom Exits]", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------
+gapType     = input.string('NDOG', 'Gap Type' , options = ['NWOG', 'NDOG'])
+exitMode    = input.string('Trailing Stop', 'Exit Strategy', options = ['Trailing Stop', '2 PM Exit', '20 Tick TP'], group="Exit Settings")
+
+// Risk Params
+trailTicks  = input.int(40, 'Trailing Stop (Ticks)', minval = 1, group="Exit Settings")
+fixedTicks  = input.int(20, 'Fixed TP (Ticks)', minval = 1, group="Exit Settings")
+slOffset    = input.int(2, 'Stop Loss Offset (Ticks)', minval = 0, group="Risk Management")
+
+// Session Toggles
+useLondon   = input.bool(true, "Trade London Session?", group="Sessions")
+londonTime  = input.session("0300-0500", "London Time (EST)", group="Sessions")
+useNY       = input.bool(true, "Trade NY Silver Bullet?", group="Sessions")
+nyTime      = input.session("1000-1100", "NY Time (EST)", group="Sessions")
+
+//-----------------------------------------------------------------------------
+// Logic & Detection
+//-----------------------------------------------------------------------------
+isInSession = (useLondon and not na(time(timeframe.period, londonTime, "America/New_York"))) or 
+              (useNY and not na(time(timeframe.period, nyTime, "America/New_York")))
+
+// Time-based exit check (2 PM EST)
+is2PM = time(timeframe.period, "1400-1401", "America/New_York")
+
+var float gapTop = na
+var float gapBtm = na
+var bool tradeTakenToday = false
+var float swingPoint = na 
+
+if timeframe.change(gapType == 'NWOG' ? 'W' : 'D')
+    gapTop := math.max(close[1], open)
+    gapBtm := math.min(close[1], open)
+    tradeTakenToday := false
+    box.new(bar_index, gapTop, bar_index + 1, gapBtm, bgcolor=color.new(color.blue, 90), border_color=color.new(color.blue, 50), extend=extend.right)
+
+// Track price inside gap
+priceInGap = high >= gapBtm and low <= gapTop
+if priceInGap and strategy.position_size == 0
+    swingPoint := na(swingPoint) ? (close > gapTop ? low : high) : (close > gapTop ? math.min(swingPoint, low) : math.max(swingPoint, high))
+
+//-----------------------------------------------------------------------------
+// Entries & Exits
+//-----------------------------------------------------------------------------
+canTrade = not tradeTakenToday and not na(gapTop) and strategy.position_size == 0 and isInSession
+
+longCondition  = canTrade and not na(swingPoint) and close > gapTop and low[1] <= gapTop
+shortCondition = canTrade and not na(swingPoint) and close < gapBtm and high[1] >= gapBtm
+
+// Entry Execution
+if longCondition
+    strategy.entry("Long", strategy.long, comment="ICT Long")
+    tradeTakenToday := true
+
+if shortCondition
+    strategy.entry("Short", strategy.short, comment="ICT Short")
+    tradeTakenToday := true
+
+// Exit Logic Handling
+if strategy.position_size > 0
+    sl = swingPoint - (slOffset * syminfo.mintick)
+    tp = strategy.position_avg_price + (fixedTicks * syminfo.mintick)
+    
+    if exitMode == "Trailing Stop"
+        strategy.exit("Exit L", "Long", stop=sl, trail_points=trailTicks)
+    else if exitMode == "20 Tick TP"
+        strategy.exit("Exit L", "Long", stop=sl, limit=tp)
+    else // 2 PM Exit
+        strategy.exit("Exit L", "Long", stop=sl)
+        if not na(is2PM)
+            strategy.close("Long", comment="2PM Market Close")
+
+if strategy.position_size < 0
+    sl = swingPoint + (slOffset * syminfo.mintick)
+    tp = strategy.position_avg_price - (fixedTicks * syminfo.mintick)
+    
+    if exitMode == "Trailing Stop"
+        strategy.exit("Exit S", "Short", stop=sl, trail_points=trailTicks)
+    else if exitMode == "20 Tick TP"
+        strategy.exit("Exit S", "Short", stop=sl, limit=tp)
+    else // 2 PM Exit
+        strategy.exit("Exit S", "Short", stop=sl)
+        if not na(is2PM)
+            strategy.close("Short", comment="2PM Market Close")
+
+// Reset Swing Point
+if not isInSession and strategy.position_size == 0
+    swingPoint := na
+
+// Visuals
+bgcolor(isInSession ? color.new(color.green, 95) : na)
+bgcolor(not na(is2PM) ? color.new(color.red, 90) : na)
+
+View in Pine Editor・96 lines
+Use on chart
+1
+9
+775
+Gap Retest Strategy with customizable exit conditions and two adjustable trade windows. Enters on the candle following a retest and exit of the NDOG/NWOG. Written with Gemini.

@@ -1,0 +1,352 @@
+//@version=6
+strategy("Open Range Strategy",overlay = true,margin_long = 1,margin_short = 1,initial_capital = 1000,default_qty_type = strategy.percent_of_equity,default_qty_value = 50,calc_on_order_fills = true,process_orders_on_close = true,fill_orders_on_standard_ohlc = true)
+
+
+
+
+
+enum posTypes
+    l= "Long"
+    s= "Short"
+    b= "Both"
+
+type Range
+    box bx
+    bool crossed
+
+enum slTypes
+    edge = "Top/Bottom of Range"
+    mid = "Middle of Range"
+
+
+enum posStatus
+    pending = "Pending"
+    active = "Active"
+    completed = "Completed"
+    cancelled = "Cancelled"
+
+type Tp
+    int no
+    bool active
+    string code
+    float offset
+    float size 
+    float qPercent //%of total Position
+    bool breakeven //Be after Tp Triggered
+    float price //Calculated Price
+    bool filled
+    int filledIndex
+
+
+type Pos
+    string code
+    int dir
+    posTypes posType  // "long or short"
+    float entry
+    float sl
+    Tp[] tpArray
+    float posSize
+    int index = bar_index
+    bool tslActive = false
+    posStatus status
+    string exitCode
+
+gSess = "Session Settings"
+sess = input.session("0900-1000","Range",inline = "1",group = gSess)
+tZone = input.string("UTC-4","",inline = "1",options = ["UTC-12", "UTC-11", "UTC-10", "UTC-9", "UTC-8", "UTC-7", "UTC-6", "UTC-5", "UTC-4", "UTC-3", "UTC-2", "UTC-1", "UTC+0", "UTC+1", "UTC+2", "UTC+3", "UTC+3:30", "UTC+4", "UTC+4:30", "UTC+5", "UTC+5:30", "UTC+5:45", "UTC+6", "UTC+6:30", "UTC+7", "UTC+8", "UTC+9", "UTC+9:30", "UTC+10", "UTC+10:30", "UTC+11", "UTC+11:30", "UTC+12", "UTC+12:45", "UTC+13", "UTC+14","America/New_York"],group = gSess)
+
+tradeSess = input.session("0900-1530","Trade Session",group = gSess)
+
+
+
+
+//Strategy Settings
+gSt = "Strategy Settings"
+positionType = input.enum(posTypes.b,"Position Type",group = gSt)
+slType = input.enum(slTypes.mid,"SL Type",inline = "SL",group = gSt)
+onlyFirst = input(false,"Trade With Only First Breakout")
+
+
+
+var r = Range.new()
+var posArray = array.new<Pos>()
+
+
+
+var Tp tp1 = Tp.new(1)
+var Tp tp2 = Tp.new(2)
+
+
+gTp1 = "TP1"
+
+tp1.active := input(false,"Activate",group = gTp1)
+tp1.offset := input.float(1,"Ratio",minval=0,group = gTp1)
+tp1.qPercent := input.float(30,"Size(%)",minval=0,maxval=100,group = gTp1)
+tp1.breakeven := input(false,"Breakeven",group = gTp1)
+
+
+gTp2 = "TP2"
+
+tp2.active := input(true,"Activate",group = gTp2)
+tp2.offset := input.float(2,"Ratio",minval=0,group = gTp2)
+tp2.qPercent := input.float(100,"Size(%)",minval=0,maxval=100,group = gTp2)
+
+
+
+gC = "Customize Settings"
+pClr = input.color(color.green," ",inline = "trck",group = gC,display = display.data_window)
+mClr = input.color(color.red," ",inline = "trck",group = gC)
+nClr = input.color(color.gray," ",inline = "trck",group = gC,tooltip = "Tracker Colors")
+
+rBgClr = input.color(color.new(color.yellow,95)," ",inline = "Range",group = gC)
+rClr = input.color(color.yellow," ",inline = "Range",group = gC,tooltip = "Background/Border Color Of Range")
+
+sessFilter(string sess,string tZone=syminfo.timezone,bool active=true)=>
+    timeNow = time(timeframe.period, sess,tZone)
+    tradeZone= active ? time==timeNow and active : true
+    tradeZone
+
+isSess = sessFilter(sess,tZone,true)
+isTradeSess = sessFilter(tradeSess,tZone,true)
+
+getSl(Pos pos,float ref=na,tsl=false)=>
+    float sl = na
+    sl:= switch slType
+        slTypes.edge=> pos.dir>0 ? r.bx.get_bottom(): r.bx.get_top()
+        slTypes.mid => math.avg(r.bx.get_bottom(),r.bx.get_top()) 
+    log.info(pos.code+" " +"Sl Calculated: " + " " + str.tostring(sl))
+    sl
+
+calcTp(Pos pos,float ref =na)=>
+    price = na(ref) ? pos.entry : ref
+    for tp in pos.tpArray
+        tp.price:= price + math.abs(price-pos.sl)*pos.dir*tp.offset
+        log.info(pos.code+" " +"Exit "+ str.tostring(tp.no)  +"Calculated: " + " " + str.tostring(tp.price))
+
+
+createExitOrders(Pos pos)=>
+    sendExit = false
+    totalAmount =0.0
+    if pos.tpArray.size()>0  
+        for tp in pos.tpArray
+            tp.size := pos.posSize*tp.qPercent/100
+
+            if tp.active
+                totalAmount+=tp.size
+            else
+                continue
+
+            if na(tp.price)
+                sendExit:=true
+                continue
+            tp.code:= "Exit "+ str.tostring(tp.no) +" "+ pos.code
+            log.info(pos.code+" " +"Exit "+ str.tostring(tp.no)  +"Exit Order Sent, TP: " + str.tostring(tp.price)+" SL: " + str.tostring(pos.sl)+" Qty: " + str.tostring(tp.size))
+            strategy.exit(tp.code,pos.code,qty = tp.size,stop = pos.sl,limit=tp.price,comment = "Exit")
+    if totalAmount<pos.posSize or sendExit
+        pos.exitCode:="Exit "+pos.code
+        strategy.exit(pos.exitCode,pos.code,qty_percent = 100,stop = pos.sl,comment = "Exit")   
+
+createPos(posType)=>
+    Pos pos = Pos.new()
+    pos.dir := posType==posTypes.l ? 1 : -1
+    pos.posType := posType
+    pos.code := str.tostring(pos.posType) 
+
+    pos.entry := close
+    pos.sl :=  getSl(pos)
+    pos.tpArray := array.from(tp1.copy(),tp2.copy())
+    calcTp(pos)
+    pos.posSize := strategy.default_entry_qty(pos.entry)
+    pos.status := posStatus.active
+
+    posArray.push(pos)
+    orderDir = pos.posType==posTypes.l ? strategy.long : strategy.short
+    strategy.entry(pos.code,orderDir,pos.posSize)
+    createExitOrders(pos)
+    pos
+
+
+updateSl(Pos pos)=>
+
+    for tp in pos.tpArray
+        if na(tp.price) or tp.active==false
+            continue
+        strategy.exit(tp.code,pos.code,stop = pos.sl,limit = tp.price,qty = tp.size,comment = "Exit") 
+        log.info(pos.code+" " +"Exit "+ str.tostring(tp.no)  +" Exit Order Updated, TP: " + str.tostring(tp.price)+" SL: " + str.tostring(pos.sl)+" Qty: " + str.tostring(tp.size))
+
+    if na(pos.exitCode)==false
+        strategy.exit(pos.exitCode,pos.code,qty_percent = 100,stop = pos.sl,comment = "Exit")    
+        log.info(pos.code+" " + str.tostring(pos.exitCode)  +" Exit Order Updated SL: "+ str.tostring(pos.sl))
+
+controlTp(Pos pos)=>
+    filledCount = 0
+
+    for tp in pos.tpArray
+
+        if tp.filled or tp.active==false
+            filledCount+=1
+
+        if pos.index==bar_index or tp.filled
+            continue
+        
+        //Check Status        
+        //Price
+        if ((high>=tp.price and pos.posType==posTypes.l) or (low<=tp.price and pos.posType==posTypes.s)) and tp.filled==false
+            tp.filled:=true
+            log.info(pos.code+" " +"Exit #"+ str.tostring(tp.no))
+
+
+        //Update SL
+        if tp.filled
+            if tp.breakeven and ( (pos.posType==posTypes.l and close>pos.entry) or (pos.posType==posTypes.s and close<pos.entry) )
+                pos.sl:= pos.entry
+                log.info(pos.code+" " +"Breakeven #"+ str.tostring(tp.no))
+                updateSl(pos)
+
+        if tp.filled and tp.active
+            filledCount+=1
+    if filledCount==pos.tpArray.size()
+        pos.status:=posStatus.completed
+        log.warning(pos.code+" " +"Position completed")
+
+
+
+controlSt(posArray,cancelTp=false)=>
+    if posArray.size()>0
+        for i=posArray.size()-1 to 0
+            Pos pos = posArray.get(i)
+            //SL 
+            if (low<=pos.sl and na(pos.sl)==false and pos.posType==posTypes.l) or (high>=pos.sl and na(pos.sl)==false and pos.posType==posTypes.s)
+                pos.status:=posStatus.completed
+                posArray.remove(i)
+                log.warning(pos.code+" " +"STOPLOSS")
+                continue
+            //TP
+            controlTp(pos)
+
+        
+            if pos.status==posStatus.completed
+                posArray.remove(i)
+                continue
+            
+            if isTradeSess==false
+                strategy.close(pos.code,"Session Out")
+                posArray.remove(i)
+                continue
+
+
+if isSess
+    if isSess[1]==false
+        r.bx:= box.new(bar_index,high,bar_index+1,low,extend = extend.right,bgcolor = rBgClr,border_color = rClr)
+    else
+        r.bx.set_top(math.max(high,r.bx.get_top()))
+        r.bx.set_bottom(math.min(low,r.bx.get_bottom()))
+
+if isTradeSess==false and isTradeSess[1]
+    r.bx.set_right(bar_index)
+    r.bx.set_extend(extend.none)
+    r.crossed:=false
+    r.bx:=na
+
+controlSt(posArray)
+if posArray.size()==0
+    if isTradeSess
+        if ta.crossover(close,r.bx.get_top()) and math.max(close[1],open[1])<=r.bx.get_top() and positionType!=posTypes.s
+            if r.crossed==false or onlyFirst==false
+                createPos(posTypes.l)
+                r.crossed:=true
+        else if ta.crossunder(close,r.bx.get_bottom()) and math.min(close[1],open[1])>=r.bx.get_bottom() and positionType!=posTypes.l
+            if r.crossed==false or onlyFirst==false
+                createPos(posTypes.s)
+                r.crossed:=true
+
+longTracker = array.new_float(10,na)
+shortTracker = array.new_float(10,na)
+
+
+tslPlot(pos,trackerArr,arrNo,price)=>
+    plotPrice = price
+    if pos.dir>0
+        plotPrice:= math.max(pos.sl,price)
+    else
+        plotPrice:= math.min(pos.sl,price)
+
+    trackerArr.insert(arrNo,plotPrice)
+
+
+getTracker(arr,trackerArr,dir)=>
+    for pos in arr
+        if pos.dir!=dir
+            continue
+        if pos.status==posStatus.active
+            trackerArr.insert(0,pos.sl)
+            tslPlot(pos,trackerArr,1,pos.entry)
+            for i=0 to pos.tpArray.size()-1
+                tp = pos.tpArray.get(i)
+
+                price = tp.filled ? na : tp.price
+                
+                if pos.dir>0
+                    if tp.price>pos.sl
+                        trackerArr.insert(2+i,price)
+
+                else
+                    if tp.price<pos.sl
+                        trackerArr.insert(2+i,price)
+
+            float topPlot = na
+            if pos.dir>0
+                topPlot:= math.max(nz(trackerArr.get(2),hl2),nz(trackerArr.get(3),hl2))
+            else
+                topPlot:= math.min(nz(trackerArr.get(2),hl2),nz(trackerArr.get(3),hl2))
+
+            trackerArr.insert(9,topPlot)
+            break
+
+getTracker(posArray,longTracker,1)
+pLongSl = plot(longTracker.get(0),"Long SL",color = mClr,style = plot.style_linebr,force_overlay=true,editable = false,offset = 1) 
+pLongEntry = plot(longTracker.get(1),"Long Entry",color = nClr,style = plot.style_linebr,force_overlay=true,editable = false,offset = 1) 
+pLongTp1 = plot(longTracker.get(2),"Long TP1",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false,offset = 1) 
+pLongTp2 = plot(longTracker.get(3),"Long TP2",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false,offset = 1) 
+pLongTpTop = plot(longTracker.get(9),"TP",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false,offset = 1)
+fill(pLongSl,pLongEntry,color = color.new(mClr,85)) 
+fill(pLongEntry,pLongTpTop,color = color.new(pClr,85)) 
+
+
+getTracker(posArray,shortTracker,-1)
+pShortSl = plot(shortTracker.get(0),"Short SL",color = mClr,style = plot.style_linebr,force_overlay=true,editable = false) 
+pShortEntry = plot(shortTracker.get(1),"Short Entry",color = nClr,style = plot.style_linebr,force_overlay=true,editable = false) 
+pShortTp1 = plot(shortTracker.get(2),"Short TP1",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false) 
+pShortTp2 = plot(shortTracker.get(3),"Short TP2",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false) 
+pShortTpTop = plot(shortTracker.get(9),"TP",color = pClr,style = plot.style_linebr,force_overlay=true,editable = false)
+fill(pShortSl,pShortEntry,color = color.new(mClr,85)) 
+fill(pShortEntry,pShortTpTop,color = color.new(pClr,85))
+
+View in Pine Editor・326 lines
+Use on chart
+3
+4
+1
+1
+5 326
+Hello everyone,
+
+For a while, I’ve been wanting to develop new scripts, but I couldn’t decide what to create. Eventually, I came up with the idea of coding traditional and well-known trading strategies—while adding modern features such as multi–take profit options. For the first strategy in this series, I chose the Open Range Strategy.
+
+
+For those unfamiliar with it, the Open Range Strategy is a trading approach where you define a specific time period at the beginning of a trading session—such as the first 15 minutes, 30 minutes, or 1 hour—and mark the highest and lowest prices within that range. These levels then act as reference points for potential breakouts: if the price breaks above the range, it may signal a long entry; if it breaks below, it may indicate a short entry. This method is popular among day traders for capturing early momentum in the market.
+
+Since this strategy is generally used as an intraday strategy, I added a Trade Session feature. This allows you to define the exact time window during which trades can be opened. Once the session ends, all positions are automatically closed, ensuring trades remain within your chosen intraday period.
+
+Even though it’s a relatively simple concept, I’ve come across many different variations of it. That’s why I created a highly customizable project. Under the Session Settings, you can select the time window you want to define as your range. Whether it’s the first 15-minute candle or the entire first hour, the choice is entirely yours.
+
+
+For stop-loss placement, there are two different options:
+
+Middle of the Range – The stop loss is placed at the midpoint between the high and low of the defined range, offering a balanced buffer for both bullish and bearish setups.
+
+Top/Bottom of the Range – The stop loss is placed just beyond the range’s high for short trades or just below the range’s low for long trades, providing a more conservative risk approach.
+
+I’ve always been a big fan of the multi take-profit feature, so I added two different take-profit targets to this project. Take profits are calculated based on a Risk-to-Reward Ratio, which you can adjust in the settings. You can also set different position sizes for each target, allowing you to scale out of trades in a way that suits your strategy.
+
+The result is a flexible, user-friendly strategy script that brings together a classic approach with modern risk management tools—ready to be tailored to your trading style

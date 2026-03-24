@@ -1,0 +1,28 @@
+//@version=1
+Buy_stop = lowest(low[1],3) - atr(20)[1] / 3
+plot(Buy_stop, color=red, title="buy_stoploss")
+Sell_stop = highest(high[1],3) + atr(20)[1] / 3
+plot(Sell_stop, color=green, title="sell_stoploss")
+
+plot(dcLower, style=line, linewidth=3, color=red, offset=1)
+plot(dcUpper, style=line, linewidth=3, color=aqua, offset=1)
+
+plot(dcAverage, color=yellow, style=line, linewidth=3, title="Mid-Line Average")
+
+strategy.entry("simpleBuy", strategy.long, when=(close > dcAverage) and cross(close,dcAverage))
+strategy.close("simpleBuy",when=((close < dcAverage) and  cross(close,dcAverage)) or ( close< Buy_stop))
+    
+strategy.entry("simpleSell", strategy.short,when=(close < dcAverage) and cross(close,dcAverage) )
+strategy.close("simpleSell",when=((close > dcAverage) and cross(close,dcAverage)) or ( close > Sell_stop))
+    
+//strategy.exit("Exit simpleBuy", from_entry = "simpleBuy", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+//strategy.exit("Exit simpleSell", from_entry = "simpleSell", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+
+View in Pine Editor・49 lines
+Use on chart
+1
+8
+0
+5
+5 110
+doncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channeldoncanhin channel

@@ -1,0 +1,43 @@
+//@version=2
+//Author: smith26
+//This strategy is a simple buy and hold, which will enter Long at the beginning of price data, and exit at date specified below.  Useful for comparing against other strategies.
+
+strategy("Buy&Hold", overlay=true)
+
+//Set the following to desired END of your your Buy and Hold period.
+yr =  year == 2016
+mo = month == 09 //September
+wk = weekofyear == 36 //36th week of the year
+day = dayofmonth == 07 //in order for the 4hr and 1D charts to trigger, this must be at least TWO trading days ago.
+lastwk = (weekofyear == 35) and yr //For Weekly charts to Close poition, set this to ONE week PRIOR to current week.
+lastmo = (month == 07) and yr  //For Monthly charts to Close posotion, set this to TWO MONTHS PRIOR to current month.
+//
+today = yr and mo and day
+thisweek = yr and wk
+thismonth = yr and mo
+
+longCondition = barstate.isfirst
+
+sell1 = isintraday and today
+sell2 = isdaily and today
+sell3 = isweekly and lastwk
+sell4 = ismonthly and lastmo
+
+sellCondition = sell1 or sell2 or sell3 or sell4
+
+if (longCondition)
+    strategy.entry("long1", strategy.long)
+
+if (sellCondition)
+    strategy.close("long1")
+
+View in Pine Editor・32 lines
+Use on chart
+2
+6
+8
+1
+7 586
+A basic Buy and Hold strategy, which is useful for comparing against your other strategies. You have to specify when you want the strategy to exit in the code, because the built in 'barstate.islast' and 'barstate.isrealtime' functions don't seem to work properly.
+
+

@@ -1,0 +1,13 @@
+//@version=4
+longThreshold=##input(defval=-1.85,type='INPUT_FLOAT',##id='in_0')
+shortThreshold=##input(defval=1.85,type='INPUT_FLOAT',##id='in_1')
+exitLongThreshold=##input(defval=-0.05,type='INPUT_FLOAT',##id='in_2')
+exitShortThreshold=##input(defval=0.05,type='INPUT_FLOAT',##id='in_3')
+##root(root_metainfo,rm_0,longThreshold,input__float)
+##root(root_metainfo,rm_1,0,input__integer,hline,linestyle)
+##root(root_metainfo,rm_2,shortThreshold,input__float)
+##root(root_metainfo,rm_3,0,input__integer,hline,linestyle)
+##root(root_metainfo,rm_4,exitLongThreshold,input__float)
+##root(root_metainfo,rm_5,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_6,exitShortThreshold,input__float)
+##root(root_metainfo,rm_7,1,input__integer,hline,linestyle)

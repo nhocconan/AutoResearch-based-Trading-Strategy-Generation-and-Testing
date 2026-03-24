@@ -1,0 +1,26 @@
+//@version=3
+strategy(title = "rangebreak(total)", shorttitle = "rangebreak", overlay = true,pyramiding=1)
+timescale = (time > timestamp(2019, 1, 1, 00, 00) and time < timestamp(2019, 12, 31, 00, 00))
+
+total =  security("CRYPTOCAP:TOTAL", period, close)
+
+source = total
+
+//Logic
+term=input(44)
+
+Buy_IN = highest(source[1],term)<source
+Sell_IN = lowest(source[1],term)>source
+
+
+if Buy_IN 
+    strategy.entry("BUY", strategy.long, na, when=timescale)
+if Sell_IN
+    strategy.entry("SELL", strategy.short, na, when=timescale)
+
+View in Pine Editor・19 lines
+Use on chart
+4
+3
+2 000
+Range Break Strategy using Coin Market Cap

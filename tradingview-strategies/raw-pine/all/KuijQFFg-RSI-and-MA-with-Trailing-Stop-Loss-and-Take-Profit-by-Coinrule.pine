@@ -1,0 +1,88 @@
+//@version=5
+strategy("RSI and MA Strategy with Trailing Stop Loss and Take Profit",
+         overlay=true,
+         initial_capital=1000,
+         process_orders_on_close=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+showDate = input(defval=true, title='Show Date Range')
+timePeriod = time >= timestamp(syminfo.timezone, 2022, 1, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+
+//==================================Buy Conditions============================================
+
+//RSI
+length = input(14)
+rsi = ta.rsi(close, length)
+buyCondition1 = rsi > 50
+
+//MA
+SMA9 = ta.sma(close, 9)
+SMA50 = ta.sma(close, 50)
+SMA100 = ta.sma(close, 100)
+plot(SMA9, color = color.green)
+plot(SMA50, color = color.orange)
+plot(SMA100, color = color.blue)
+buyCondition2 = SMA9 > SMA50//ta.crossover(SMA9, SMA100)
+
+//RSI Increase
+increase = 5
+buyCondition3 = (rsi > rsi[1] + increase)
+
+
+if (buyCondition1 and buyCondition2 and buyCondition3 and timePeriod) //and buyCondition
+    strategy.entry("Long", strategy.long)
+
+//==================================Sell Conditions============================================
+
+//Trailing Stop Loss and Take Profit
+longTrailPerc = input.float(title='Trail Long Loss (%)', minval=0.0, step=0.1, defval=2) * 0.01
+shortTrailPerc = input.float(title='Trail Short Loss (%)', minval=0.0, step=0.1, defval=1) * 0.01
+
+longStopPrice = 0.0
+shortStopPrice = 0.0
+
+longStopPrice := if strategy.position_size > 0
+    stopValue = close * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999
+
+
+strategy.exit(id="Exit", stop = longStopPrice, limit = shortStopPrice)
+
+View in Pine Editor・61 lines
+Use on chart
+2
+8
+7
+1
+12 192
+The relative strength index is a momentum indicator used in technical analysis. It measures the speed and magnitude of a coin's recent price changes to evaluate overvalued or undervalued conditions in the price of that coin. The RSI is displayed as an oscillator (a line graph essentially) on a scale of zero to 100. When the RSI reaches oversold levels, it can provide a signal to go long. When the RSI reaches overbought levels, it can mark a good exit point or alternatively, an entry for a short position. Traditionally, an RSI reading of 70 or above indicates an overbought situation. A reading of 30 or below indicates an oversold condition.
+
+A moving average (MA) calculates the average of a selected range of prices, usually closing prices, by the number of periods in that range. Essentially it is used to help smooth out price data by creating a constantly updated average price.
+
+The Strategy enters and closes trades when the following conditions are met:
+
+Entry Conditions:
+RSI is greater than 50
+MA9 is greater than MA50
+RSI increases by 5
+
+Exit Conditions:
+Price increases by 1% trailing
+Price decreases by 2% trailing
+
+
+This strategy is back-tested from 1 January 2022 to simulate how the strategy would work in a bear market. The strategy provides good returns.
+
+The strategy assumes each order is using 30% of the available coins to make the results more realistic and to simulate you only ran this strategy on 30% of your holdings. A trading fee of 0.1% is also taken into account and is aligned to the base fee applied on Binance.

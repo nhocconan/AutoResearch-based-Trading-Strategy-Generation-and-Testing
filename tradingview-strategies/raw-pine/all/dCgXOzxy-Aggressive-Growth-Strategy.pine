@@ -1,0 +1,67 @@
+//@version=6
+strategy(
+     "Aggressive Growth Strategy (30k → 100k)",
+     overlay=true,
+     initial_capital=30000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=20,   // % of equity per trade (AGGRESSIVE)
+     pyramiding=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05 
+)
+// === INPUTS ===
+fastEMA = input.int(21, "Fast EMA")
+slowEMA = input.int(50, "Slow EMA")
+rsiLen  = input.int(14, "RSI Length")
+atrLen  = input.int(14, "ATR Length")
+
+riskATR = input.float(1.5, "Stop Loss ATR Multiplier")
+rewardATR = input.float(3.0, "Take Profit ATR Multiplier")
+
+// === INDICATORS ===
+emaFast = ta.ema(close, fastEMA)
+emaSlow = ta.ema(close, slowEMA)
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+
+// === TREND FILTER ===
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+
+// === ENTRY CONDITIONS ===
+longEntry =
+     bullTrend and
+     ta.crossover(rsi, 40) and
+     close > emaFast
+
+shortEntry =
+     bearTrend and
+     ta.crossunder(rsi, 60) and
+     close < emaFast
+
+// === STOPS & TARGETS ===
+longStop  = close - (atr * riskATR)
+longLimit = close + (atr * rewardATR)
+
+shortStop  = close + (atr * riskATR)
+shortLimit = close - (atr * rewardATR)
+
+// === EXECUTION ===
+if longEntry
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longStop, limit=longLimit)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortLimit)
+
+// === PLOTS ===
+plot(emaFast, color=color.green)
+plot(emaSlow, color=color.red)
+
+View in Pine Editor・60 lines
+Use on chart
+1
+1
+590
+agressive growth strategy for day trading sample script testing purpose only. do not copy this strategy

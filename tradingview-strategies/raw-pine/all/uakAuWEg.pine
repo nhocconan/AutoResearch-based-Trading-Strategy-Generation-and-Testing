@@ -1,0 +1,226 @@
+//@version=6
+//==================================================================================================
+// Publish Notes (short)
+// - Core: Convert % inputs into integer ticks using syminfo.mintick for strategy.exit() trailing params.
+// - Focus: Exit framework + on-chart visualization; entry logic is replaceable (MA cross is a demo).
+// - Limits: calc_on_every_tick affects realtime bars only; backtests may differ from realtime behavior.
+//==================================================================================================
+
+strategy(
+     "Percent-to-Tick Trailing Stop (strategy.exit Framework + Visualizer)",
+     overlay = true,
+     calc_on_every_tick = true,
+
+     // --- Publish-grade defaults (edit to match your exchange/market) ---
+     initial_capital = 10000,
+     currency = currency.USD,
+
+     // Default position sizing (conservative baseline)
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+
+     // Commission & slippage baseline (transparent defaults)
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,   // 0.1% per trade (example)
+     slippage = 1,             // 1 tick slippage baseline
+
+     // Order processing behavior
+     pyramiding = 0,
+     calc_on_order_fills = true,
+     process_orders_on_close = false
+)
+
+// ============================================================
+// 1. User Input Settings
+// ============================================================
+group_strat = "1. Trading Strategy Settings"
+useLong  = input.bool(true, "Allow Long Entries", group = group_strat, tooltip = "Enter a buy position when an uptrend is expected.")
+useShort = input.bool(true, "Allow Short Entries", group = group_strat, tooltip = "Enter a sell (short) position when a downtrend is expected.")
+
+// Moving Average Settings (Example Trend/Entry Logic)
+fastLen = input.int(14, "Fast MA Period", group = group_strat)
+slowLen = input.int(28, "Slow MA Period", group = group_strat)
+
+group_trail = "2. %-Based Profit Protection / Stop Loss"
+loss_pct     = input.float(2.0, "Fixed Stop Loss %", minval=0.0, step=0.1, group = group_trail, tooltip = "What % loss from the entry price should trigger a stop loss? (Converted to ticks)")
+t_points_pct = input.float(3.0, "Trailing Activation % (0=Immediate)", minval=0.0, step=0.1, group = group_trail, tooltip = "At what profit % should the trailing stop activate? (Converted to ticks)")
+t_offset_pct = input.float(1.0, "Trailing Offset %", minval=0.1, step=0.1, group = group_trail, tooltip = "How many % should the price retrace from its peak/low before exiting? (Converted to ticks)")
+
+// ============================================================
+// 2. Strategy Calculation and Execution (Entry logic is just an example)
+// ============================================================
+// SMA Calculation
+fastMA = ta.sma(close, fastLen)
+slowMA = ta.sma(close, slowLen)
+
+// Example signals (replaceable)
+longC  = ta.crossover(fastMA, slowMA)
+shortC = ta.crossunder(fastMA, slowMA)
+
+// Entries
+if useLong and longC
+    strategy.entry("Long", strategy.long)
+if useShort and shortC
+    strategy.entry("Short", strategy.short)
+
+// ============================================================
+// 2.1 Percent -> Tick conversion (Core framework)
+// strategy.exit() trailing parameters are tick-based, so we convert % distances into ticks.
+// ============================================================
+avg_p  = strategy.position_avg_price  // Current position average entry price
+m_tkck = syminfo.mintick              // Minimum tick size of the symbol
+pos_v  = strategy.position_size       // Current position size (0 means flat)
+
+// Convert % to ticks (rounded to integer ticks)
+int loss_ticks_int = math.round((avg_p * (loss_pct / 100)) / m_tkck)
+int t_points_int   = math.round((avg_p * (t_points_pct / 100)) / m_tkck)
+int t_offset_int   = math.round((avg_p * (t_offset_pct / 100)) / m_tkck)
+
+// Automatic Exit Orders
+if pos_v != 0
+    strategy.exit("Exit Long", from_entry = "Long",
+         trail_points = t_points_int, trail_offset = t_offset_int,
+         loss = loss_pct > 0 ? loss_ticks_int : na)
+
+    strategy.exit("Exit Short", from_entry = "Short",
+         trail_points = t_points_int, trail_offset = t_offset_int,
+         loss = loss_pct > 0 ? loss_ticks_int : na)
+
+// ============================================================
+// 3. Chart Visualization (Lines and Fills)
+// ============================================================
+var float LtrailStopLine  = na  // Trailing line for Long
+var float StrailStopLine  = na  // Trailing line for Short
+var float highestHigh     = na  // Record highest point since entry (Long)
+var float lowestLow       = na  // Record lowest point since entry (Short)
+var float activationPrice = na  // Activation threshold line
+var float fixedStopLine   = na  // Fixed stop-loss line
+
+inLong   = pos_v > 0
+inShort  = pos_v < 0
+newLong  = inLong  and pos_v[1] <= 0   // Long started this bar
+newShort = inShort and pos_v[1] >= 0   // Short started this bar
+
+// Exit bar detection (helps reduce line gaps on the exit candle)
+isExitBar = (strategy.closedtrades > 0) and (strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index)
+
+// Long visualization
+if inLong
+    highestHigh     := math.max(newLong ? high : highestHigh, high)
+    activationPrice := avg_p * (1 + t_points_pct / 100)
+    fixedStopLine   := avg_p * (1 - loss_pct / 100)
+
+    float longStopPrice = highestHigh * (1 - t_offset_pct / 100)
+    LtrailStopLine  := newLong ? avg_p : math.max(nz(LtrailStopLine, longStopPrice), longStopPrice)
+    StrailStopLine  := na
+
+// Short visualization
+else if inShort
+    lowestLow       := math.min(newShort ? low : lowestLow, low)
+    activationPrice := avg_p * (1 - t_points_pct / 100)
+    fixedStopLine   := avg_p * (1 + loss_pct / 100)
+
+    float shortStopPrice = lowestLow * (1 + t_offset_pct / 100)
+    StrailStopLine  := newShort ? avg_p : math.min(nz(StrailStopLine, shortStopPrice), shortStopPrice)
+    LtrailStopLine  := na
+
+// Preserve values at close moment (outside conditional blocks)
+val_entry_p = ta.valuewhen(pos_v != 0, avg_p, 0)
+val_L_trail = ta.valuewhen(inLong, LtrailStopLine, 0)
+val_S_trail = ta.valuewhen(inShort, StrailStopLine, 0)
+val_f_stop  = ta.valuewhen(pos_v != 0, fixedStopLine, 0)
+val_act_p   = ta.valuewhen(pos_v != 0, activationPrice, 0)
+
+// Actual exit price (align visuals on exit candle)
+float actualExitPrice = (strategy.closedtrades > 0) ? strategy.closedtrades.exit_price(strategy.closedtrades - 1) : na
+
+// --- Plot section ---
+
+// 1) Entry average price
+_entry_draw = (pos_v != 0 or isExitBar) ? val_entry_p : na
+p_entry = plot(_entry_draw, "Entry Avg Price", color = color.white, linewidth = 2, style = plot.style_linebr)
+
+// 2) Trailing line (force to actual exit price on exit bar to reduce gaps)
+_L_draw = isExitBar and pos_v[1] > 0 ? actualExitPrice : (inLong  ? val_L_trail : na)
+_S_draw = isExitBar and pos_v[1] < 0 ? actualExitPrice : (inShort ? val_S_trail : na)
+
+p_trail_L = plot(_L_draw, color = color.green, linewidth = 2, style = plot.style_linebr, title = "Long Trail Stop")
+p_trail_S = plot(_S_draw, color = color.red,   linewidth = 2, style = plot.style_linebr, title = "Short Trail Stop")
+
+// 3) Fixed stop loss line
+_stop_draw = (pos_v != 0 or isExitBar) ? val_f_stop : na
+p_stop = plot(_stop_draw, color = color.new(color.red, 30), style = plot.style_cross, linewidth = 2, title = "Fixed Stop Loss")
+
+// Fills: Profit/Loss zones
+fill(p_entry, p_trail_L, color = (_L_draw > _entry_draw) ? color.new(color.green, 85) : na, title = "Long Profit Zone")
+fill(p_entry, p_trail_S, color = (_S_draw < _entry_draw) ? color.new(color.green, 85) : na, title = "Short Profit Zone")
+fill(p_entry, p_stop,    color = (pos_v != 0 or isExitBar) ? color.new(color.red, 85) : na, title = "Loss Zone")
+
+// 4) Activation line
+plot((pos_v != 0 or isExitBar) ? val_act_p : na, color = color.new(color.yellow, 0), style = plot.style_linebr, title = "Trailing Activation Line")
+
+// 5) Example entry indicators (MAs)
+plot(fastMA, color = color.blue,   title = "Fast MA")
+plot(slowMA, color = color.orange, title = "Slow MA")
+
+// Reset after trade completes and script advances to next bar
+if not (pos_v != 0 or isExitBar)
+    highestHigh := na, lowestLow := na, activationPrice := na, fixedStopLine := na, LtrailStopLine := na, StrailStopLine := na
+
+View in Pine Editor・168 lines
+Use on chart
+3
+3
+1 093
+Percent-to-Tick Trailing Stop (strategy.exit Framework + Visualizer)
+
+Overview
+This script focuses on exit management and visualization, not entry performance. The included MA crossover entry is intentionally simple and replaceable.
+
+Core idea (Percent → Tick conversion)
+strategy.exit() trailing parameters are tick-based (trail_points, trail_offset, and loss).
+This script lets you input distances in percent (%) and converts them into integer ticks using syminfo.mintick, making the same exit logic portable across most tick-based symbols/exchanges with different tick sizes.
+
+//==What it provides==//
+
+1. % → tick conversion for:
+
+- Fixed stop loss (loss)
+- Trailing activation distance (trail_points)
+- Trailing offset distance (trail_offset)
+
+2. On-chart visualization:
+
+- Entry average price
+- Trailing activation threshold
+- Fixed stop-loss line
+- Trailing stop line (with an exit-bar alignment attempt to reduce gaps)
+
+//==How to use==//
+
+1. Keep the included MA crossover entries, or replace them with your own entries.
+
+2. Configure:
+
+- Fixed Stop Loss % (loss_pct)
+- Trailing Activation % (t_points_pct)
+- Trailing Offset % (t_offset_pct)
+
+3. Adjust commission/slippage defaults to match your market.
+
+//==Important limitations (must read)==//
+
+- calc_on_every_tick=true recalculates on realtime bars only; historical bars are evaluated differently. Backtests can differ from realtime behavior and may change after reload.
+
+- Tick rounding: percent distances are rounded to integer ticks, so small differences can occur depending on tick size and price level.
+
+- For more realistic intrabar backtesting, consider enabling Bar Magnifier in Strategy Properties (if available).
+
+# Average Entry Price (Basis):
+"Calculations are based on the position's average entry price (strategy.position_avg_price)."
+# Pine Script v6:
+"Written in the latest Pine Script v6."
+
+[KOR] 요약
+이 스크립트의 핵심은 “진입 전략”이 아니라 **strategy.exit()의 tick 기반 트레일링 파라미터를 % 입력으로 일반화(%→ticks 변환)**하여, 다양한 심볼/거래소의 서로 다른 tick size 환경에서도 동일한 exit 로직을 재사용할 수 있게 만든 “청산 프레임워크”입니다. 또한 calc_on_every_tick=true 환경에서 트리거/손절/트레일 라인을 실시간에 가깝게 시각화하는 데 중점을 두었습니다.
+단, calc_on_every_tick은 실시간 바에서만 틱 단위 재계산이 적용되며, 히스토리 바/백테스트는 평가 방식이 달라 결과가 다를 수 있습니다.

@@ -1,0 +1,47 @@
+//@version=2
+strategy("Strategy for DPMO", overlay=true)
+
+src=input(close, title="Source")
+length1=input(35, title="First Smoothing")
+length2=input(20, title="Second Smoothing")
+siglength=input(10, title="Signal Smoothing")
+ebc=input(false, title="Enable Bar Colors")
+
+upSign = '↑' // indicates the indicator shows uptrend
+downSign = '↓' // incicates the indicator showing downtrend
+exitSign ='x' //indicates the indicator uptrend/downtrend ending
+
+calc_csf(src, length) => 
+    sm = 2.0/length
+    csf=(src - nz(csf[1])) * sm + nz(csf[1])
+    csf
+i=(src/nz(src[1], src))*100
+pmol2=calc_csf(i-100, length1)
+pmol=calc_csf( 10 * pmol2, length2)
+pmols=ema(pmol, siglength)
+d=pmol-pmols
+hc=d>0?d>d[1]?lime:green:d<d[1]?red:orange
+
+buyDPMO = hc==lime and hc[1]!=lime
+closeBuyDPMO = hc==green and hc[1]!=green
+sellDPMO = hc==red and hc[1]!=red
+closeSellDPMO = hc==orange and hc[1]!=orange
+
+plotshape(buyDPMO, color=lime, style=shape.labelup, textcolor=#000000, text="DPMO", location=location.belowbar, transp=0)
+plotshape(closeBuyDPMO, color=green, style=shape.labelup, textcolor=#ffffff,  text="X", location=location.belowbar, transp=0)
+plotshape(sellDPMO, color=red, style=shape.labeldown, textcolor=#000000, text="DPMO", location=location.abovebar, transp=0)
+plotshape(closeSellDPMO, color=orange, style=shape.labeldown, textcolor=#ffffff,  text="X", location=location.abovebar, transp=0)
+barcolor(ebc?hc:na)
+
+
+strategy.entry("Long", strategy.long, when=buyDPMO)
+strategy.close("Long", when=closeBuyDPMO or sellDPMO)   
+strategy.entry("Short", strategy.short, when=sellDPMO)
+strategy.close("Short", when=closeSellDPMO or buyDPMO)
+
+View in Pine Editor・40 lines
+Use on chart
+7
+1
+2 164
+Strategy for DPMO

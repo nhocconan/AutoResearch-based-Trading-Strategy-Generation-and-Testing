@@ -1,0 +1,3 @@
+//@version=5
+##root(root_metainfo,rm_0,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_1,hline.style_dashed,cb__hline_style__integer,hline,linestyle)

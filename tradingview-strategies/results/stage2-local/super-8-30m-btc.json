@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-03-23T04:50:47.934929+00:00",
+  "queue_rank": 2175,
+  "page": 91,
+  "name": "Super 8 - 30M BTC",
+  "slug": "super-8-30m-btc",
+  "chart_url": "https://www.tradingview.com/script/zFPZofwt/",
+  "pine_file": "raw-pine/bulk/zFPZofwt.pine",
+  "symbol_name": "OKX:BTCUSDT.P",
+  "repo_timeframe_hint": "30m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "30m",
+  "reason": "process_orders_on_close=true conflicts with repo next-bar open fills; trailing stops and pyramiding require stateful approximation; dynamic equity sizing must be normalized.",
+  "adaptations": [
+    "Strip UI elements (tables, plots, alerts)",
+    "Convert close-bar execution to next-bar open semantics",
+    "Approximate trailing stops as next-bar signal changes",
+    "Normalize dynamic equity sizing to fixed target positions",
+    "Remove backtest date filters",
+    "Manually track average price for stop/profit logic"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [
+    "Converted Pine strategy to Python with next-bar execution semantics",
+    "Stripped UI elements (tables, plots, alerts, webhooks)",
+    "Removed backtest date filters for fair-comparison mode",
+    "Normalized dynamic equity sizing to fixed target positions (+1, -1, 0)",
+    "Approximated trailing stops as next-bar signal changes using bar high/low",
+    "Manually track average entry price for stop/profit calculations",
+    "All indicators implemented with pandas/numpy only (no talib, ta, pandas_ta)",
+    "Signal array length matches input prices length exactly",
+    "Warmup period set to max indicator length to avoid NaN signals",
+    "Classification: partial (process_orders_on_close and pyramiding approximated)"
+  ],
+  "python_file": "python-strategies/stage2-local/super-8-30m-btc.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "Super 8 - 30M BTC",
+    "module_timeframe": "30m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 7249,
+    "non_zero_signals": 4676,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

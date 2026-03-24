@@ -1,0 +1,469 @@
+//@version=6
+strategy(
+    title = "Volume Vigilante | Long-Only Opening Range Breakout (ORB) with Pivot Points",
+    shorttitle = "",
+    overlay = true,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 100,
+    initial_capital = 10000,
+    pyramiding = 0,
+    process_orders_on_close = true
+)
+
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+const string SL_TYPE_PCT  = "Percentage"
+const string SL_TYPE_PREV = "Previous Low"
+
+const color  BULL_COLOR    = #26A69A
+const color  NEUTRAL_COLOR = #787B86
+const color  STOP_COLOR    = #FF0000
+
+// ─────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────
+string sessionGroupInput   = "Session Settings"
+string riskGroupInput      = "Risk Settings"
+string tradeGroupInput     = "Trade Limits"
+string backtestGroupInput  = "Backtest Window"
+string displayGroupInput   = "Display"
+
+string openingSessionInput = input.session(
+    defval = "0930-0945",
+    title = "Opening Session",
+    group = sessionGroupInput,
+    tooltip = "Opening range window used to calculate the ORB high. Default: 09:30–09:45 (exchange time)."
+)
+
+int maxTradesPerDayInput = input.int(
+    defval = 1,
+    title = "Max Trades per Day",
+    minval = 0,
+    group = tradeGroupInput,
+    tooltip = "Maximum number of entries allowed per day."
+)
+
+string initialSlTypeInput = input.string(
+    defval = SL_TYPE_PCT,
+    title = "Initial SL Type",
+    options = [SL_TYPE_PCT, SL_TYPE_PREV],
+    group = riskGroupInput,
+    tooltip = "Percentage: stop from entry price. Previous Low: stop uses the prior bar's low from the setup."
+)
+
+float stopLossPctInput = input.float(
+    defval = 3.0,
+    title = "Stop Loss %",
+    minval = 0.0,
+    step = 0.1,
+    group = riskGroupInput,
+    tooltip = "Stop loss percent used when Initial SL Type = Percentage."
+)
+
+int startTimeInput = input.time(
+    defval = timestamp("01 Sep 2000 13:30 +0000"),
+    title = "Backtesting Start Time",
+    group = backtestGroupInput,
+    tooltip = "Trades will only be taken after this timestamp."
+)
+
+int endTimeInput = input.time(
+    defval = timestamp("30 Sep 2099 19:30 +0000"),
+    title = "Backtesting End Time",
+    group = backtestGroupInput,
+    tooltip = "Trades will only be taken before this timestamp."
+)
+
+bool showPivotsInput = input.bool(
+    defval = true,
+    title = "Show Pivot Levels",
+    group = displayGroupInput,
+    tooltip = "Plots daily pivot resistance levels (R1–R5) and mid-levels."
+)
+
+bool showOrbInput = input.bool(
+    defval = true,
+    title = "Show ORB High",
+    group = displayGroupInput,
+    tooltip = "Plots the opening range high after the opening session ends."
+)
+
+bool showStopInput = input.bool(
+    defval = true,
+    title = "Show Stop Line",
+    group = displayGroupInput,
+    tooltip = "Plots the active stop level while in position."
+)
+
+// ─────────────────────────────────────────────────────────────
+// Functions
+// ─────────────────────────────────────────────────────────────
+isNewBar(string res) =>
+    series int t = time(res)
+    not na(t) and (na(t[1]) or t > t[1])
+
+// ─────────────────────────────────────────────────────────────
+// Calculations
+// ─────────────────────────────────────────────────────────────
+bool newDay = isNewBar("D")
+bool isExchangeDayEnd = time_close == time_close("D")
+bool timeOk = time > startTimeInput and time < endTimeInput
+
+// ORB session flags
+string orbSessionString = openingSessionInput + ":1234567"
+bool inOrbSession = not na(time(timeframe.period, orbSessionString))
+bool orbSessionStart = inOrbSession and not inOrbSession[1]
+bool orbSessionJustEnded = not inOrbSession and inOrbSession[1]
+
+// Real position state
+bool inPosition = strategy.position_size > 0
+bool justEntered = inPosition and not inPosition[1]
+
+// Track ORB high + ensure it’s only valid for the current day
+var float orbHigh = na
+var bool  orbBuiltToday = false
+
+if newDay
+    orbHigh := na
+    orbBuiltToday := false
+
+if orbSessionStart
+    orbHigh := high
+else if inOrbSession
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+
+if orbSessionJustEnded and not na(orbHigh)
+    orbBuiltToday := true
+
+bool orbReadyToday = orbBuiltToday and not na(orbHigh)
+
+// Daily pivots (previous day values)
+series float prevCloseD = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+series float prevHighD  = request.security(syminfo.tickerid, "D", high[1],  lookahead = barmerge.lookahead_on)
+series float prevLowD   = request.security(syminfo.tickerid, "D", low[1],   lookahead = barmerge.lookahead_on)
+
+series float pivot  = (prevHighD + prevLowD + prevCloseD) / 3.0
+series float range1 = prevHighD - prevLowD
+
+series float r1 = pivot + pivot - prevLowD
+series float r2 = pivot + range1
+series float r3 = pivot * 2.0 + prevHighD - 2.0 * prevLowD
+series float r4 = pivot * 3.0 + prevHighD - 3.0 * prevLowD
+series float r5 = pivot * 4.0 + prevHighD - 4.0 * prevLowD
+
+series float r0_5 = orbHigh + math.abs(r1 - orbHigh) / 2.0
+series float r1_5 = r1 + math.abs(r1 - r2) / 2.0
+series float r2_5 = r2 + math.abs(r2 - r3) / 2.0
+series float r3_5 = r3 + math.abs(r3 - r4) / 2.0
+series float r4_5 = r4 + math.abs(r4 - r5) / 2.0
+
+// Entry rule (unchanged, but cannot trigger until ORB is built today)
+bool longSignal = orbReadyToday and open < orbHigh and high > orbHigh and r1 > orbHigh
+
+// Trade counter (keeps your “reset during ORB session, count outside” behavior)
+var int tradesCounter = 0
+tradesCounter := inOrbSession ? 0 : (longSignal and not inPosition ? tradesCounter[1] + 1 : tradesCounter[1])
+
+bool canEnter = not inPosition and tradesCounter[1] < maxTradesPerDayInput
+
+// Capture setup low for "Previous Low" mode (from the setup bar)
+var float prevLowAtSetup = na
+if longSignal and canEnter
+    prevLowAtSetup := low[1]
+
+// Capture true fill price on entry (prevents stop above entry)
+var float entryPrice = na
+if justEntered
+    entryPrice := strategy.position_avg_price
+else if not inPosition
+    entryPrice := na
+
+// Initial stop (anchored correctly)
+// - Percentage uses actual fill price
+// - Previous Low uses stored setup low
+float slPct = stopLossPctInput > 0 ? stopLossPctInput / 100.0 : 99999.0
+
+float initialStopRaw =
+     initialSlTypeInput == SL_TYPE_PCT  ? (entryPrice * (1.0 - slPct)) :
+     initialSlTypeInput == SL_TYPE_PREV ? prevLowAtSetup :
+     na
+
+// Clamp so initial stop can never be above the entry
+float initialStop = (inPosition and not na(entryPrice) and not na(initialStopRaw)) ? math.min(initialStopRaw, entryPrice) : na
+
+// Trailing ladder (same logic, only active while in position)
+var float trailLong = 0.0
+
+if justEntered
+    trailLong := 0.0
+else if not inPosition
+    trailLong := 0.0
+else
+    float prevTrail = nz(trailLong[1], 0.0)
+    trailLong :=
+         high > r5   and r4   > prevTrail ? r4   :
+         high > r4_5 and r3_5 > prevTrail ? r3_5 :
+         high > r4   and r3   > prevTrail ? r3   :
+         high > r3_5 and r2_5 > prevTrail ? r2_5 :
+         high > r3   and r2   > prevTrail ? r2   :
+         high > r2_5 and r1_5 > prevTrail ? r1_5 :
+         high > r2   and r1   > prevTrail ? r1   :
+         high > r1_5 and r0_5 > prevTrail ? r0_5 :
+         high > r0_5 and orbHigh > prevTrail ? orbHigh :
+         prevTrail
+
+// Final stop while in position
+series float slLong = inPosition ? math.max(initialStop, trailLong) : na
+
+// Exchange day end cleanup
+if isExchangeDayEnd
+    strategy.close_all(comment = "DayEnd", alert_message = "EndofDay SELL ALERT")
+    strategy.cancel("long")
+    orbHigh := na
+    orbBuiltToday := false
+    trailLong := 0.0
+    tradesCounter := 0
+    prevLowAtSetup := na
+    entryPrice := na
+
+// ─────────────────────────────────────────────────────────────
+// Strategy Calls
+// ─────────────────────────────────────────────────────────────
+if orbReadyToday and canEnter and timeOk and open < orbHigh
+    strategy.entry("long", strategy.long, stop = orbHigh, alert_message = "BUY ALERT")
+
+// Preserve your “cancel if not triggered next bar” behavior
+if (longSignal and canEnter)[1]
+    strategy.cancel("long")
+
+// Always keep stop working while in position
+strategy.exit(
+    "SL/TP",
+    from_entry = "long",
+    stop = inPosition ? slLong : na,
+    alert_message = "SELL ALERT"
+)
+
+// ─────────────────────────────────────────────────────────────
+// Visuals
+// ─────────────────────────────────────────────────────────────
+series float r1Plot  = showPivotsInput and not newDay ? r1   : na
+series float r2Plot  = showPivotsInput and not newDay ? r2   : na
+series float r3Plot  = showPivotsInput and not newDay ? r3   : na
+series float r4Plot  = showPivotsInput and not newDay ? r4   : na
+series float r5Plot  = showPivotsInput and not newDay ? r5   : na
+
+series float r05Plot = showPivotsInput and not newDay ? r0_5 : na
+series float r15Plot = showPivotsInput and not newDay ? r1_5 : na
+series float r25Plot = showPivotsInput and not newDay ? r2_5 : na
+series float r35Plot = showPivotsInput and not newDay ? r3_5 : na
+series float r45Plot = showPivotsInput and not newDay ? r4_5 : na
+
+series float orbPlot  = showOrbInput and orbReadyToday ? orbHigh : na
+series float stopPlot = showStopInput and inPosition ? slLong : na
+
+plot(r1Plot, style = plot.style_linebr, title = "R1")
+plot(r2Plot, style = plot.style_linebr, title = "R2")
+plot(r3Plot, style = plot.style_linebr, title = "R3")
+plot(r4Plot, style = plot.style_linebr, title = "R4")
+plot(r5Plot, style = plot.style_linebr, title = "R5")
+
+plot(r05Plot, style = plot.style_linebr, color = color.new(NEUTRAL_COLOR, 0), title = "R0.5")
+plot(r15Plot, style = plot.style_linebr, color = color.new(NEUTRAL_COLOR, 0), title = "R1.5")
+plot(r25Plot, style = plot.style_linebr, color = color.new(NEUTRAL_COLOR, 0), title = "R2.5")
+plot(r35Plot, style = plot.style_linebr, color = color.new(NEUTRAL_COLOR, 0), title = "R3.5")
+plot(r45Plot, style = plot.style_linebr, color = color.new(NEUTRAL_COLOR, 0), title = "R4.5")
+
+plot(orbPlot, title = "ORB High", style = plot.style_linebr, color = color.new(BULL_COLOR, 0), linewidth = 2)
+plot(stopPlot, title = "Stop", style = plot.style_linebr, color = color.new(STOP_COLOR, 0))
+
+View in Pine Editor・282 lines
+Use on chart
+5
+8
+8
+6
+19 426
+Sep 27, 2023
+Intraday Trading Strategy: Long-Only Opening Range Breakout (ORB) with Pivot Points
+
+Background:
+
+Opening Range Breakout (ORB) is a popular long-only trading strategy that capitalizes on the early morning volatility in financial markets. It's based on the idea that the initial price movements during the first few minutes or hours of the trading day can set the tone for the rest of the session. The strategy involves identifying a price range within which the asset trades during the opening period and then taking long positions when the price breaks out to the upside of this range.
+
+Pivot Points are a widely used technical indicator in trading. They represent potential support and resistance levels based on the previous day's price action. Pivot points are calculated using the previous day's high, low, and close prices and can help traders identify key price levels for making trading decisions.
+
+How to Use the Script:
+
+Initialization: This script is written in Pine Script, a domain-specific language for trading strategies on the TradingView platform. To use this script, you need to have access to TradingView.
+
+Apply the Script: You can do this by adding it to your favorites, then selecting the script in the indicators list under favorites or by searching for it by name under community scripts.
+
+Customize Settings: The script allows you to customize various settings through the TradingView interface. These settings include:
+
+Opening Session: You can set the time frame for the opening session.
+
+Max Trades per Day: Specify the maximum number of long trades allowed per trading day.
+
+Initial Stop Loss Type: Choose between using a percentage-based stop loss or the previous candles low for stop loss calculations.
+
+Stop Loss Percentage: If you select the percentage-based stop loss, specify the percentage of the entry price for the stop loss.
+
+Backtesting Start and End Time: Set the time frame for backtesting the strategy.
+
+
+
+Strategy Signals:
+
+
+The script will display pivot points in blue (R1, R2, R3, R4, R5) and half-pivot points in gray (R0.5, R1.5, R2.5, R3.5, R4.5) on your chart.
+
+The green line represents the opening range.
+
+The script generates long (buy) signals based on specific conditions:
+
+---The open price is below the opening range high (h).
+
+---The current high price is above the opening range high.
+
+---Pivot point R1 is above the opening range high.
+
+---It's a long-only strategy designed to capture upside breakouts.
+
+---It also respects the maximum number of long trades per day.
+
+The script manages long positions, calculates stop losses, and adjusts long positions according to the defined rules.
+
+
+
+Trailing Stop Mechanism
+
+The script incorporates a dynamic trailing stop mechanism designed to protect and maximize profits for long positions. Here's how it works:
+
+1. Initialization:
+
+The script allows you to choose between two types of initial stop loss:
+
+---Percentage-based: This option sets the initial stop loss as a percentage of the entry price.
+
+---Previous day's low: This option sets the initial stop loss at the previous day's low.
+
+
+
+2. Setting the Initial Stop Loss (`sl_long0`):
+
+The initial stop loss (`sl_long0`) is calculated based on the chosen method:
+
+---If "Percentage" is selected, it calculates the stop loss as a percentage of the entry price.
+
+---If "Previous Low" is selected, it sets the stop loss at the previous day's low.
+
+
+
+3. Dynamic Trailing Stop (`trail_long`):
+
+The script then monitors price movements and uses a dynamic trailing stop mechanism (`trail_long`) to adjust the stop loss level for long positions.
+
+If the current high price rises above certain pivot point levels, the trailing stop is adjusted upwards to lock in profits.
+
+The trailing stop levels are calculated based on pivot points (`r1`, `r2`, `r3`, etc.) and half-pivot points (`r0.5`, `r1.5`, `r2.5`, etc.).
+
+The script checks if the high price surpasses these levels and, if so, updates the trailing stop accordingly.
+
+This dynamic trailing stop allows traders to secure profits while giving the position room to potentially capture additional gains.
+
+
+
+4. Final Stop Loss (`sl_long`):
+
+The script calculates the final stop loss level (`sl_long`) based on the following logic:
+
+---If no position is open (`pos == 0`), the stop loss is set to zero, indicating there is no active stop loss.
+
+---If a position is open (`pos == 1`), the script calculates the maximum of the initial stop loss (`sl_long0`) and the dynamic trailing stop (`trail_long`).
+
+---This ensures that the stop loss is always set to the more conservative of the two values to protect profits.
+
+
+
+5. Plotting the Stop Loss:
+
+The script plots the stop loss level on the chart using the `plot` function.
+
+It will only display the stop loss level if there is an open position (`pos == 1`) and it's not a new trading day (`not newday`).
+
+The stop loss level is shown in red on the chart.
+
+
+
+By combining an initial stop loss with a dynamic trailing stop based on pivot points and half-pivot points, the script aims to provide a comprehensive risk management mechanism for long positions. This allows traders to lock in profits as the price moves in their favor while maintaining a safeguard against adverse price movements.
+
+End of Day (EOD) Exit:
+
+The script includes an "End of Day" (EOD) exit mechanism to automatically close any open positions at the end of the trading day. This feature is designed to manage and control positions when the trading day comes to a close. Here's how it works:
+
+1. Initialization:
+
+At the beginning of each trading day, the script identifies a new trading day using the `is_newbar('D')` condition.
+
+When a new trading day begins, the `newday` variable becomes `true`, indicating the start of a new trading session.
+
+
+
+2. Plotting the "End of Day" Signal:
+
+The script includes a plot on the chart to visually represent the "End of Day" signal. This is done using the `plot` function.
+
+The plot is labeled "DayEnd" and is displayed as a comment on the chart. It signifies the EOD point.
+
+
+
+3. EOD Exit Condition:
+
+When the script detects that a new trading day has started (`newday == true`), it triggers the EOD exit condition.
+
+At this point, the script proceeds to close all open positions that may have been active during the trading day.
+
+
+
+4. Closing Open Positions:
+
+The `strategy.close_all` function is used to close all open positions when the EOD exit condition is met.
+
+This function ensures that any remaining long positions are exited, regardless of their current profit or loss.
+
+The function also includes an `alert_message`, which can be customized to send an alert or notification when positions are closed at EOD.
+
+
+
+Purpose of EOD Exit
+
+The "End of Day" exit mechanism serves several essential purposes in the trading strategy:
+
+
+Risk Management: It helps manage risk by ensuring that positions are not left open overnight when markets can experience increased volatility.
+
+Capital Preservation: Closing positions at EOD can help preserve trading capital by avoiding potential adverse overnight price movements.
+
+Rule-Based Exit: The EOD exit is rule-based and automatic, ensuring that it is consistently applied without emotions or manual intervention.
+
+Scalability: It allows the strategy to be applied to various markets and timeframes where EOD exits may be appropriate.
+
+
+
+By incorporating an EOD exit mechanism, the script provides a comprehensive approach to managing positions, taking profits, and minimizing risk as each trading day concludes. This can be especially important in volatile markets like cryptocurrencies, where overnight price swings can be significant.
+
+Backtesting: The script includes a backtesting feature that allows you to test the strategy's performance over historical data. Set the start and end times for backtesting to see how the long-only strategy would have performed in the past.
+
+Trade Execution: If you choose to use this script for live trading, make sure you understand the risks involved. It's essential to set up proper risk management, including position sizing and stop loss orders.
+
+Monitoring: Monitor the long-only strategy's performance over time and be prepared to make adjustments as market conditions change.
+
+Disclaimer: Trading carries a risk of capital loss. This script is provided for educational purposes and as a starting point for your own long-only strategy development. Always do your own research and consider seeking advice from a qualified financial professional before making trading decisions.
+Feb 22
+Release Notes
+Updated to v6. Author name corrected.
+Feb 22
+Release Notes
+Cleanup update: inputs/tooltips + alert titles standardized. Core logic unchanged. Day-end + ORB reset refined and stop-loss placement corrected.

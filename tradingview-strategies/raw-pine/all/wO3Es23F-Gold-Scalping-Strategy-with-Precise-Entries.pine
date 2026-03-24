@@ -1,0 +1,98 @@
+//@version=5
+strategy("Gold Scalping Strategy with Precise Entries", overlay=true)
+
+// Inputs for EMAs and ATR
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+atr = ta.atr(14)
+rsi = ta.rsi(close, 14)
+
+// Set 50 pips for gold (assuming 1 pip = 0.10 movement in XAU/USD)
+pip_target = 20 * 0.10
+
+// Bullish/Bearish Engulfing Pattern
+bullish_engulfing = close > open and close[1] < open[1] and close > close[1] and open < close[1]
+bearish_engulfing = close < open and close[1] > open[1] and close < close[1] and open > close[1]
+
+// Define trend and exact entry conditions
+longCondition = (ema50 > ema200) and (rsi >= 45 and rsi <= 55) and (bullish_engulfing) and (close > ema50)
+shortCondition = (ema50 < ema200) and (rsi >= 45 and rsi <= 55) and (bearish_engulfing) and (close < ema50)
+
+// ATR-based stop loss
+longStopLoss = close - atr
+shortStopLoss = close + atr
+
+// Entry Conditions with precise points
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss", "Long", limit=close + pip_target, stop=longStopLoss)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit/Stop Loss", "Short", limit=close - pip_target, stop=shortStopLoss)
+
+// Plot EMAs
+plot(ema50, color=color.green, title="50 EMA")
+plot(ema200, color=color.red, title="200 EMA")
+
+// Plot Buy/Sell Signals
+plotshape(series=longCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal", text="BUY")
+plotshape(series=shortCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal", text="SELL")
+
+View in Pine Editor・40 lines
+Use on chart
+7
+4
+7
+23 751
+Oct 12, 2024
+The Gold Scalping Strategy with Precise Entries is designed to take advantage of short-term price movements in the gold market (XAU/USD). This strategy uses a combination of technical indicators and chart patterns to identify precise buy and sell opportunities during times of consolidation and trend continuation.
+
+Key Elements of the Strategy:
+Exponential Moving Averages (EMAs):
+
+50 EMA: Used as the shorter-term moving average to detect the recent price trend.
+200 EMA: Used as the longer-term moving average to determine the overall market trend.
+Trend Identification:
+A bullish trend is identified when the 50 EMA is above the 200 EMA.
+A bearish trend is identified when the 50 EMA is below the 200 EMA.
+Average True Range (ATR):
+
+ATR (14) is used to calculate the market's volatility and to set a dynamic stop loss based on recent price movements. Higher ATR values indicate higher volatility.
+ATR helps define a suitable stop-loss distance from the entry point.
+Relative Strength Index (RSI):
+
+RSI (14) is used as a momentum oscillator to detect overbought or oversold conditions.
+However, in this strategy, the RSI is primarily used as a consolidation filter to look for neutral zones (between 45 and 55), which may indicate a potential breakout or trend continuation after a consolidation phase.
+Engulfing Patterns:
+
+Bullish Engulfing: A bullish signal is generated when the current candle fully engulfs the previous bearish candle, indicating potential upward momentum.
+Bearish Engulfing: A bearish signal is generated when the current candle fully engulfs the previous bullish candle, signaling potential downward momentum.
+Precise Entry Conditions:
+
+Long (Buy):
+The 50 EMA is above the 200 EMA (bullish trend).
+The RSI is between 45 and 55 (neutral/consolidation zone).
+A bullish engulfing pattern occurs.
+The price closes above the 50 EMA.
+Short (Sell):
+The 50 EMA is below the 200 EMA (bearish trend).
+The RSI is between 45 and 55 (neutral/consolidation zone).
+A bearish engulfing pattern occurs.
+The price closes below the 50 EMA.
+Take Profit and Stop Loss:
+
+Take Profit: A fixed 20-pip target (where 1 pip = 0.10 movement in gold) is used for each trade.
+Stop Loss: The stop-loss is dynamically set based on the ATR, ensuring that it adapts to current market volatility.
+Visual Signals:
+
+Buy and sell signals are visually plotted on the chart using green and red labels, indicating precise points of entry.
+Advantages of This Strategy:
+Trend Alignment: The strategy ensures that trades are taken in the direction of the overall trend, as indicated by the 50 and 200 EMAs.
+Volatility Adaptation: The use of ATR allows the stop loss to adapt to the current market conditions, reducing the risk of premature exits in volatile markets.
+Precise Entries: The combination of engulfing patterns and the neutral RSI zone provides a high-probability entry signal that captures momentum after consolidation.
+Quick Scalping: With a fixed 20-pip profit target, the strategy is designed to capture small price movements quickly, which is ideal for scalping.
+This strategy can be applied to lower timeframes (such as 1-minute, 5-minute, or 15-minute charts) for frequent trade opportunities in gold trading, making it suitable for day traders or scalpers. However, proper risk management should always be used due to the inherent volatility of gold.
+Oct 15, 2024
+Release Notes
+Do your own research before investing your own money.

@@ -1,0 +1,75 @@
+//@version=5
+strategy("Inyerneck Sniper Engine v4.2 — FINAL WORKING 2025", overlay=true, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.075)
+
+// ─────────────────── PENNY SNIPER SETTINGS ──────────────────
+group = "Penny Sniper Settings"
+
+emaLen      = input.int(5,   "EMA Length",          minval=1,   group=group)
+atrLen      = input.int(10,  "ATR Length",          minval=1,   group=group)
+volLen      = input.int(20,  "Volume Lookback",     minval=1,   group=group)
+
+volMult     = input.float(5.0,  "Volume Surge × Avg",      step=0.1, group=group)
+bodyMin     = input.float(0.8,  "Min Body × ATR",          step=0.05, group=group)
+distMin     = input.float(0.6,  "Min Distance EMA × ATR",  step=0.05, group=group)
+slopeMin    = input.float(0.08, "Min EMA Slope × ATR",     step=0.01, group=group)
+blowoffMult = input.float(4.5,  "Blowoff Range × Avg",     step=0.1, group=group)
+
+useLongs    = input.bool(true,  "Enable Longs",  group=group)
+useShorts   = input.bool(true,  "Enable Shorts", group=group)
+
+// ────────────────── CALCULATIONS ──────────────────
+ema      = ta.ema(close, emaLen)
+atr      = ta.atr(atrLen)
+volEMA   = ta.ema(volume, volLen)
+rangeEMA = ta.ema(high - low, volLen)
+
+volSurge   = volume > volEMA * volMult
+bodySize   = math.abs(close - open)
+distEMA    = math.abs(close - ema)
+emaSlope   = math.abs(ema - ema[1])
+
+strongBody = bodySize > atr * bodyMin
+goodDist   = distEMA   > atr * distMin
+fastSlope  = emaSlope  > atr * slopeMin
+blowoff    = (high - low) > rangeEMA * blowoffMult and volSurge
+
+rawLong  = close > ema and strongBody and goodDist and fastSlope and volSurge
+rawShort = close < ema and strongBody and goodDist and fastSlope and volSurge
+
+longSignal  = useLongs  and rawLong  and not blowoff
+shortSignal = useShorts and rawShort and not blowoff
+
+// ────────────────── ENTRIES & EXITS ──────────────────
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+
+strategy.exit("TP/SL Long",  "Long",  profit=3, loss=1)
+strategy.exit("TP/SL Short", "Short", profit=3, loss=1)
+
+// ────────────────── PLOTS ──────────────────
+plot(ema, "EMA", color.orange, 2)
+
+plotshape(longSignal,  title="LONG",  location=location.belowbar, color=color.new(#00ff00, 0), style=shape.triangleup,   size=size.large, text="LONG")
+plotshape(shortSignal, title="SHORT", location=location.abovebar, color=color.new(#ff0000, 0), style=shape.triangledown, size=size.large, text="SHORT")
+
+bgcolor(longSignal  ? color.new(#00ff00, 90) : na)
+bgcolor(shortSignal ? color.new(#ff0000, 90) : na)
+
+// ────────────────── ALERTS ──────────────────
+alertcondition(longSignal or shortSignal, title="Inyerneck Sniper ANY", message="Inyerneck Sniper Signal")
+
+View in Pine Editor・64 lines
+Use on chart
+1
+6
+1
+898
+yer momUltra-aggressive momentum sniper built for pennies & BTC.
+Fires on every volume explosion + EMA snap. No mercy, no filters.
+50+ trades per month. Use small size or die trying.
+Private alpha —

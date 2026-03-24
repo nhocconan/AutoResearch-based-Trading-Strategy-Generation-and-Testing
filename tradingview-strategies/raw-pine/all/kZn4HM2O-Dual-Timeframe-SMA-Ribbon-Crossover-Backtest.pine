@@ -1,0 +1,136 @@
+//@version=3
+strategy(title="Dual Timeframe SMA Ribbon Crossover", shorttitle="SMA Ribbon", overlay=true, pyramiding = 11, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, currency = currency.USD)
+
+//  Copyright by RJ 4/2018
+//  v4 - backtesting and time limiting
+//  Should be used with lower timeframe and higher timeframe charts
+//  First set your chart to the lower timeframe you'd like to analyze
+//  see https://f.bpcdn.co/original/3X/5/1/51dda579d7dc8204e8fc07dc4f67efb3d995dceb.pdf
+//  For this method, low timeframe/high suitable timeframe pairs are:
+//  5min with 30min parent
+//  15min with 1hr parent
+//  30min with 4hr parent
+//  4hr with daily parent
+//  daily with weekly parent
+//  weekly with monthly parent
+//  On lower timeframe chart - Plot of 2 smas length 6, 1 Offset
+//  If smas cross - and bar crosses the sma convergence
+//  and full body of bar crosses SMAs - then this is a
+//  buy or sell opportunity
+//  For confirmation - on the higher timeframe chart, check if bar is
+//  above or below the smas for that day
+
+// User inputs
+smaLen = input(6, minval=2, title="SMA Length")
+smaOs = input(1, minval=1, title="SMA Offset")
+hiTf = input(title="Higher Timeframe", defval="D", options=["5","15","30","60","240","D","W","M"])
+roundLevel100 = input(10000, 'Round Level, pips') //Calculate gap for JPY vs other currencies - 1000 for JPY 10000 for others
+
+// Time limiting
+// a toggle for enabling/disabling
+useTimeLimit    = input(defval = true, title = "Use Start Time Limiter?")
+// set up where we want to run from
+startYear       = input(defval = 2016, title = "Start From Year", type = integer, minval = 0, step = 1)
+startMonth      = input(defval = 05, title = "Start From Month", type = integer, minval = 0,step = 1)
+startDay        = input(defval = 01, title = "Start From Day", type = integer, minval = 0,step = 1)
+startHour       = input(defval = 00, title = "Start From Hour", type = integer, minval = 0,step = 1)
+startMinute     = input(defval = 00, title = "Start From Minute", type = integer, minval = 0,step = 1)
+
+// Time limit checking
+// using a multi line function to return true or false depending on our input selection
+// multi line function logic must be indented.
+startTimeOk() =>
+    // get our input time together
+    inputTime   = timestamp(syminfo.timezone, startYear, startMonth, startDay, startHour, startMinute)
+    // check the current time is greater than the input time and assign true or false
+    timeOk      = time > inputTime ? true : false
+    // last line is the return value, we want the strategy to execute if..
+    // ..we are using the limiter, and the time is ok -OR- we are not using the limiter
+    r = (useTimeLimit and timeOk) or not useTimeLimit
+        
+// Calculate strategy sl and tp        
+//SL should be above high of the most recent 3-4 bars
+//TP should be double the SL in the direction of the trade
+highestHigh = highest(high, 3)[1] //should be 3 pips higher
+lowestLow   = lowest(low, 3)[1] //should be 3 pips lower
+//Calculate sl tp
+gapHigh = highestHigh - close + (3 * (1/roundLevel100))
+gapLow = lowestLow - close - (3 * (1/(roundLevel100)))
+stopLossShort = abs(gapHigh * 100000) //convert to pipette
+stopLossLong = abs(gapLow * 100000) //convert to pipette
+takeProfitShort =  abs(stopLossShort * 2)
+takeProfitLong = abs(stopLossLong * 2)
+
+// Create smas
+sma1 = sma(hlc3, smaLen)
+sma2 = offset(sma1, smaOs)
+//rsi1 = rsi(close, 14)
+
+// Calculations and plotting
+crosscondition = crossover(sma1,sma2) or crossover(sma2,sma1)
+crossconditionLow = close < sma1 and close < sma2 and open > sma1 and open > sma2
+crossconditionLowprev = close[1] < sma1 and close[1] < sma2 and open[1] > sma1 and open[1] > sma2
+crossconditionHi = close > sma1 and close > sma2 and open < sma1 and open < sma2
+crossconditionHiprev = close[1] > sma1 and close[1] > sma2 and open[1] < sma1 and open[1] < sma2
+
+isNewbar(res) =>
+    t = time(res)
+    change(t) != 0 ? 1 : 0
+    
+// Get hi lo for daily session
+dailyHi = na
+dailyLo = na
+dailyHi := isNewbar(hiTf) ? high : (high > dailyHi[1] ? high : nz(dailyHi[1], high))
+dailyLo  := isNewbar(hiTf) ? low  : (low  < dailyLo[1]  ? low  : nz(dailyLo[1],  low))
+// Daily smas used to confirm direction of market against higher timeframe
+sma1day1 = security(tickerid, hiTf, sma1)
+sma1day2 = security(tickerid, hiTf, sma2)
+
+// Calculate conditionals for entry
+enterShort = crosscondition and (crossconditionLow or (crossconditionLow and crossconditionHiprev) or (crossconditionLow and crossconditionLowprev)) and (dailyHi < sma1day1 and dailyLo < sma1day1 and dailyHi < sma1day2 and dailyLo < sma1day2)
+enterLong = crosscondition and (crossconditionHi or (crossconditionHi and crossconditionLowprev) or (crossconditionHi and crossconditionHiprev)) and (dailyHi > sma1day1 and dailyLo > sma1day1 and dailyHi > sma1day2 and dailyLo > sma1day2)
+
+// Plot chart
+plot(sma1, color=red, linewidth=3)
+plot(sma2, color=blue, linewidth=3)
+//plot(gapHigh, style = histogram, color=purple) 
+//plot(gapLow, style = histogram, color=yellow) 
+//plot(stopLossShort, style = histogram, color=purple) 
+//plot(stopLossLong, style = histogram, color=yellow)
+//plot(takeProfitShort, style = histogram, color=purple) 
+//plot(takeProfitLong, style = histogram, color=yellow)
+
+plotshape(enterShort, color=red, style=shape.arrowdown, text="Sell")
+plotshape(enterLong, color=lime, style=shape.arrowup, text="Buy")
+
+// Execute backtesting
+// Wrap our strategy execution in an if statement which calls the time checking function to validate entry
+// Like the function logic, content to be included in the if statement must be indented.
+executeTrade(enterLong, enterShort, takeProfitShort, takeProfitLong, stopLossShort, stopLossLong) =>
+    if( startTimeOk() )
+        strategy.entry( id = "Long", long = true, when = enterLong )
+        strategy.entry( id = "Short", long = false, when = enterShort )
+        
+        strategy.exit("Long", from_entry = "Long", profit = takeProfitLong, loss = stopLossLong)
+        strategy.exit("Short", from_entry = "Short", profit = takeProfitShort, loss = stopLossShort)
+        
+executeTrade(enterLong, enterShort, takeProfitShort, takeProfitLong, stopLossShort, stopLossLong)
+
+View in Pine Editor・117 lines
+Use on chart
+3
+8
+2 288
+Apr 15, 2018
+// Backtesting Dual SMA Ribbon Crossover Strategy
+// see f.bpcdn.co/original/3X/5/1/51dda579d7dc8204e8fc07dc4f67efb3d995dceb.pdf
+
+// including time limiting
+
+Turned this study into a backtest.
+Apr 16, 2018
+Release Notes
+Updated calculations for SL and TP
+Apr 16, 2018
+Release Notes
+Cleanup

@@ -1,0 +1,168 @@
+//@version=5
+//
+// @author LazyBear + PineIndicators
+// List of all my indicators: https://www.tradingview.com/v/4IneGo8h/
+
+strategy(shorttitle='SQZMOM_LB Strategy', title='Squeeze Momentum Indicator Strategy [LazyBear + PineIndicators]', overlay=false)
+
+length = input(20, title='BB Length')
+mult = input(2.0, title='BB MultFactor')
+lengthKC = input(20, title='KC Length')
+multKC = input(1.5, title='KC MultFactor')
+
+useTrueRange = input(true, title='Use TrueRange (KC)')
+
+// Calculate BB
+source = close
+basis = ta.sma(source, length)
+dev = multKC * ta.stdev(source, length)
+upperBB = basis + dev
+lowerBB = basis - dev
+
+// Calculate KC
+ma = ta.sma(source, lengthKC)
+range_1 = useTrueRange ? ta.tr : high - low
+rangema = ta.sma(range_1, lengthKC)
+upperKC = ma + rangema * multKC
+lowerKC = ma - rangema * multKC
+
+sqzOn = lowerBB > lowerKC and upperBB < upperKC
+sqzOff = lowerBB < lowerKC and upperBB > upperKC
+noSqz = sqzOn == false and sqzOff == false
+
+val = ta.linreg(source - math.avg(math.avg(ta.highest(high, lengthKC), ta.lowest(low, lengthKC)), ta.sma(close, lengthKC)), lengthKC, 0)
+
+iff_1 = val > nz(val[1]) ? color.lime : color.green
+iff_2 = val < nz(val[1]) ? color.red : color.maroon
+bcolor = val > 0 ? iff_1 : iff_2
+scolor = noSqz ? color.blue : sqzOn ? color.black : color.gray
+plot(val, color=bcolor, style=plot.style_histogram, linewidth=4)
+plot(0, color=scolor, style=plot.style_cross, linewidth=2)
+
+qty = strategy.equity * 8 / close
+
+if scolor == color.gray and scolor[1] == color.black and val > val[1] and val > ta.lowest(val, 100)[1] and close > close[1] and close > ta.ema(close, 100)
+    strategy.entry('L', strategy.long, qty=qty)
+
+if val < val[1]
+    strategy.close('L')
+
+
+if scolor == color.black and scolor[1] == color.gray and val < val[1] and val < ta.highest(val, 100)[1] and close < close[1] and close < ta.ema(close, 100)
+    strategy.entry('S', strategy.short, qty=qty)
+
+if val > val[1]
+    strategy.close('S')
+
+View in Pine Editor・55 lines
+Use on chart
+4
+0
+2
+2
+13 743
+The Squeeze Momentum Indicator Strategy (SQZMOM_LB Strategy) is an automated trading strategy based on the Squeeze Momentum Indicator developed by LazyBear, which itself is a modification of John Carter's "TTM Squeeze" concept from his book Mastering the Trade (Chapter 11). This strategy is designed to identify low-volatility phases in the market, which often precede explosive price movements, and to enter trades in the direction of the prevailing momentum.
+
+Concept & Indicator Breakdown
+The strategy employs a combination of Bollinger Bands (BB) and Keltner Channels (KC) to detect market squeezes:
+
+Squeeze Condition:
+
+
+When Bollinger Bands are inside the Keltner Channels (Black Crosses), volatility is low, signaling a potential upcoming price breakout.
+
+When Bollinger Bands move outside Keltner Channels (Gray Crosses), the squeeze is released, indicating an expansion in volatility.
+
+
+
+Momentum Calculation:
+
+
+A linear regression-based momentum value is used instead of traditional momentum indicators.
+
+The momentum histogram is color-coded to show strength and direction:
+
+Lime/Green: Increasing bullish momentum
+
+Red/Maroon: Increasing bearish momentum
+
+
+
+Signal Colors:
+
+
+Black: Market is in a squeeze (low volatility).
+
+Gray: Squeeze is released, and volatility is expanding.
+
+Blue: No squeeze condition is present.
+
+
+
+Strategy Logic
+
+The script uses historical volatility conditions and momentum trends to generate buy/sell signals and manage positions.
+
+1. Entry Conditions
+
+Long Position (Buy)
+
+The squeeze just released (Gray Cross after Black Cross).
+
+The momentum value is increasing and positive.
+
+The momentum is at a local low compared to the past 100 bars.
+
+The price is above the 100-period EMA.
+
+The closing price is higher than the previous close.
+
+
+
+Short Position (Sell)
+
+The squeeze just released (Gray Cross after Black Cross).
+
+The momentum value is decreasing and negative.
+
+The momentum is at a local high compared to the past 100 bars.
+
+The price is below the 100-period EMA.
+
+The closing price is lower than the previous close.
+
+
+
+2. Exit Conditions
+
+Long Exit:
+
+The momentum value starts decreasing (momentum lower than previous bar).
+
+
+
+Short Exit:
+
+The momentum value starts increasing (momentum higher than previous bar).
+
+
+
+Position Sizing
+
+Position size is dynamically adjusted based on 8% of strategy equity, divided by the current closing price, ensuring risk-adjusted trade sizes.
+
+How to Use This Strategy
+
+Apply on Suitable Markets:
+Best for stocks, indices, and forex pairs with momentum-driven price action.
+Works on multiple timeframes but is most effective on higher timeframes (1H, 4H, Daily).
+
+Confirm Entries with Additional Indicators:
+The author recommends ADX or WaveTrend to refine entries and avoid false signals.
+
+Risk Management:
+Since the strategy dynamically sizes positions, it's advised to use stop-losses or risk-based exits to avoid excessive drawdowns.
+
+Final Thoughts
+
+The Squeeze Momentum Indicator Strategy provides a systematic approach to trading volatility expansions, leveraging the classic TTM Squeeze principles with a unique linear regression-based momentum calculation. Originally inspired by John Carter’s method, LazyBear's version and this strategy offer a refined, adaptable tool for traders looking to capitalize on market momentum shifts.

@@ -1,0 +1,9 @@
+//@version=4
+highlightColor=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_13')
+##root(root_metainfo,rm_0,0,input__integer,plot,style)
+##root(root_metainfo,rm_1,0,input__integer,plot,style)
+##root(root_metainfo,rm_2,7,input__integer,plot,style)
+##root(root_metainfo,rm_3,7,input__integer,plot,style)
+textColor=##input(defval=#2196F3,type='INPUT_COLOR',##id='in_21')
+##root(root_metainfo,bgcolor_0_0,highlightColor,input__color)
+##root(root_metainfo,rm_ic_0,textColor,input__color)

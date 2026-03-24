@@ -1,0 +1,150 @@
+//@version=5
+strategy("EMA Stack Strategy (EMA 1–6)", overlay=true, initial_capital=10000, pyramiding=0, process_orders_on_close=true, commission_type=strategy.commission.percent, commission_value=0.10, slippage=1)
+
+// ============================================================================
+// EMA Stack Strategy (EMA 1–6)
+// Educational use only. Not financial advice.
+//
+// - EMA lengths are user-configurable, so labels are EMA 1–6.
+// - Plot toggles control visibility of each EMA.
+// - Bias toggles control which EMAs participate in the stack/alignment filter.
+// - Entries/exits are still executed via EMA1/EMA2 cross logic, but whether EMA1
+//   and EMA2 are *required* for bias alignment is controlled by the bias toggles.
+// ============================================================================
+
+// === Plot Toggles ===
+showEma1 = input.bool(true, "Show EMA 1")
+showEma2 = input.bool(true, "Show EMA 2")
+showEma3 = input.bool(true, "Show EMA 3")
+showEma4 = input.bool(true, "Show EMA 4")
+showEma5 = input.bool(true, "Show EMA 5")
+showEma6 = input.bool(true, "Show EMA 6")
+
+// === Bias Logic Toggles ===
+useEma1 = input.bool(true, "Use EMA 1 In Bias")
+useEma2 = input.bool(true, "Use EMA 2 In Bias")
+useEma3 = input.bool(true, "Use EMA 3 In Bias")
+useEma4 = input.bool(true, "Use EMA 4 In Bias")
+useEma5 = input.bool(true, "Use EMA 5 In Bias")
+useEma6 = input.bool(true, "Use EMA 6 In Bias")
+
+// === Length Inputs (defaults match your original 5/20/50/90/140/200) ===
+ema1Len = input.int(5,   "EMA 1 Length", minval=1, maxval=500)
+ema2Len = input.int(20,  "EMA 2 Length", minval=1, maxval=500)
+ema3Len = input.int(50,  "EMA 3 Length", minval=1, maxval=500)
+ema4Len = input.int(90,  "EMA 4 Length", minval=1, maxval=500)
+ema5Len = input.int(140, "EMA 5 Length", minval=1, maxval=500)
+ema6Len = input.int(200, "EMA 6 Length", minval=1, maxval=500)
+
+// === EMA Calculations ===
+ema1 = ta.ema(close, ema1Len)
+ema2 = ta.ema(close, ema2Len)
+ema3 = ta.ema(close, ema3Len)
+ema4 = ta.ema(close, ema4Len)
+ema5 = ta.ema(close, ema5Len)
+ema6 = ta.ema(close, ema6Len)
+
+// === Plot EMAs (colors kept consistent with earlier versions) ===
+plot(showEma1 ? ema1 : na, title="EMA 1", color=color.blue, linewidth=2)
+plot(showEma2 ? ema2 : na, title="EMA 2", color=color.green, linewidth=2)
+plot(showEma3 ? ema3 : na, title="EMA 3", color=color.red, linewidth=2)
+plot(showEma4 ? ema4 : na, title="EMA 4", color=color.white, linewidth=2)
+plot(showEma5 ? ema5 : na, title="EMA 5", color=color.purple, linewidth=2)
+plot(showEma6 ? ema6 : na, title="EMA 6", color=color.yellow, linewidth=2)
+
+// === Build enabled bias EMA list in EMA1→EMA6 order ===
+var float[] biasVals = array.new_float()
+array.clear(biasVals)
+if useEma1
+    array.push(biasVals, ema1)
+if useEma2
+    array.push(biasVals, ema2)
+if useEma3
+    array.push(biasVals, ema3)
+if useEma4
+    array.push(biasVals, ema4)
+if useEma5
+    array.push(biasVals, ema5)
+if useEma6
+    array.push(biasVals, ema6)
+
+// === Bias evaluation: strict stacking across enabled set ===
+int n = array.size(biasVals)
+bool bullBias = true
+bool bearBias = true
+
+if n >= 2
+    for i = 0 to n - 2
+        bullBias := bullBias and (array.get(biasVals, i) > array.get(biasVals, i + 1))
+        bearBias := bearBias and (array.get(biasVals, i) < array.get(biasVals, i + 1))
+
+// === Bias state changes (for re-entry behavior) ===
+newBullBias = bullBias and not nz(bullBias[1], false)
+newBearBias = bearBias and not nz(bearBias[1], false)
+
+// === Optional fast alignment requirement (only if BOTH EMA1 and EMA2 are in bias) ===
+fastBullOk = (useEma1 and useEma2) ? (ema1 > ema2) : true
+fastBearOk = (useEma1 and useEma2) ? (ema1 < ema2) : true
+
+fullBull = bullBias and fastBullOk
+fullBear = bearBias and fastBearOk
+
+// === Entry Signals ===
+// - Enter on EMA1/EMA2 cross into alignment, OR when bias turns on while already aligned
+longSignal  = fullBull and (ta.crossover(ema1, ema2) or newBullBias)
+shortSignal = fullBear and (ta.crossunder(ema1, ema2) or newBearBias)
+
+// === Exit Signals (pure EMA1/EMA2 cross) ===
+exitLongSignal  = strategy.position_size > 0 and ta.crossunder(ema1, ema2)
+exitShortSignal = strategy.position_size < 0 and ta.crossover(ema1, ema2)
+
+// === Order Execution ===
+if longSignal and strategy.position_size <= 0
+    strategy.close("Short", comment="Close Short")
+    strategy.entry("Long", strategy.long, comment="Long Entry")
+
+if shortSignal and strategy.position_size >= 0
+    strategy.close("Long", comment="Close Long")
+    strategy.entry("Short", strategy.short, comment="Short Entry")
+
+if exitLongSignal and not shortSignal
+    strategy.close("Long", comment="Long Exit")
+
+if exitShortSignal and not longSignal
+    strategy.close("Short", comment="Short Exit")
+
+View in Pine Editor・114 lines
+Use on chart
+8
+472
+This strategy uses a configurable exponential moving average (EMA) stack to define directional bias and an EMA cross to manage entries and exits.
+
+The script calculates six user-defined EMAs (EMA 1 through EMA 6). Each EMA can be shown or hidden on the chart independently, and each can also be included or excluded from the bias filter. When multiple EMAs are enabled for bias, the script requires them to be strictly aligned in sequence:
+
+Bullish bias: shorter enabled EMAs must be above longer enabled EMAs
+
+Bearish bias: shorter enabled EMAs must be below longer enabled EMAs
+
+Trade execution is driven by the EMA 1 / EMA 2 cross:
+
+Long entries occur when bullish bias is active and EMA 1 crosses above EMA 2, or when bullish bias becomes active while EMA 1 is already above EMA 2
+
+Short entries occur when bearish bias is active and EMA 1 crosses below EMA 2, or when bearish bias becomes active while EMA 1 is already below EMA 2
+
+Long exits occur when EMA 1 crosses below EMA 2
+
+Short exits occur when EMA 1 crosses above EMA 2
+
+Default script settings use 0.10% commission and 1 tick of slippage. These are baseline placeholders for testing and should be adjusted to match the instrument, market, and timeframe being evaluated.
+
+This is a simple, transparent trend-following baseline designed for testing EMA alignment behavior across different symbols and timeframes. The main configurable element is not a proprietary signal model, but the ability to control which EMAs participate in the bias stack and which EMA plots are visible on the chart. That makes it useful as a flexible template for studying how stricter or looser EMA alignment changes trade frequency and behavior.
+
+Default strategy properties currently include commission and slippage. Those settings should be reviewed and adjusted to fit the market being tested. TradingView’s strategy rules require realistic cost assumptions, and if you change the defaults used in the script, the publication description should match the settings shown in your published backtest.
+
+Important notes:
+
+This is not presented as a complete trading system or a promise of performance
+
+Results will vary by symbol, timeframe, market conditions, fees, slippage, and position sizing
+
+This script is intended as an educational and analytical baseline that users can test and adapt to their own process

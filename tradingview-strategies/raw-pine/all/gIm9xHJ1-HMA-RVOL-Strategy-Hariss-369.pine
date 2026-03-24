@@ -1,0 +1,83 @@
+//@version=5
+strategy("HMA+RVOL Strategy Hariss 369", 
+     overlay=true, initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ---------------- INPUTS ----------------
+hma_len      = input.int(89, "HMA Length")
+rvol_len     = input.int(20, "RVOL Lookback")
+rvol_thresh  = input.float(1.5, "RVOL Threshold")
+use_sl_tp    = input.bool(true, "Use SL/TP?")
+sl_percent   = input.float(1.0, "Stop Loss %")
+tp_percent   = input.float(2.0, "Take Profit %")
+
+// ---------------- FUNCTIONS ----------------
+f_hma(_src, _len) =>
+    half = math.round(_len / 2)
+    sqr  = math.round(math.sqrt(_len))
+    w1 = ta.wma(_src, half)
+    w2 = ta.wma(_src, _len)
+    ta.wma(2 * w1 - w2, sqr)
+
+// ---------------- HMA & RVOL ----------------
+hma = f_hma(close, hma_len)
+
+// Automatic HMA Color (Trend coloring)
+hma_color = close > hma ? color.green : color.red
+
+plot(hma, "HMA89", color=hma_color, linewidth=2)
+
+// RVOL
+avg_vol_prev = ta.sma(volume, rvol_len)[1]
+rvol = na(avg_vol_prev) or avg_vol_prev == 0 ? na : volume / avg_vol_prev
+
+// ---------------- SIGNALS ----------------
+longSignal  = (close > hma) and (rvol > rvol_thresh)
+shortSignal = (close < hma) and (rvol > rvol_thresh)
+
+// ---------------- STRATEGY EXECUTION ----------------
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+
+// ---------------- RISK MANAGEMENT ----------------
+if use_sl_tp
+    long_sl  = strategy.position_avg_price * (1 - sl_percent / 100)
+    long_tp  = strategy.position_avg_price * (1 + tp_percent / 100)
+    short_sl = strategy.position_avg_price * (1 + sl_percent / 100)
+    short_tp = strategy.position_avg_price * (1 - tp_percent / 100)
+
+    strategy.exit("Exit Long",  from_entry="Long",  stop=long_sl,  limit=long_tp)
+    strategy.exit("Exit Short", from_entry="Short", stop=short_sl, limit=short_tp)
+
+// ---------------- BUY / SELL PLOTS ----------------
+plotshape(longSignal, title="Buy Signal", location=location.belowbar,
+          style=shape.triangleup, size=size.small, color=color.green, text="BUY", textcolor=color.white)
+
+plotshape(shortSignal, title="Sell Signal", location=location.abovebar,
+          style=shape.triangledown, size=size.small, color=color.red, text="SELL", textcolor=color.white)
+
+// ---------------- LABELS ----------------
+if longSignal
+    label.new(bar_index, low, "BUY\nRVOL: " + str.tostring(rvol, "#.##"),
+              style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+
+if shortSignal
+    label.new(bar_index, high, "SELL\nRVOL: " + str.tostring(rvol, "#.##"),
+              style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+
+View in Pine Editor・69 lines
+Use on chart
+1
+9
+713
+The Hull Moving Average (HMA) is a smooth, fast, and highly responsive moving average created by Alan Hull. It reduces lag significantly while still maintaining smoothness, making it one of the most popular tools for trend detection and entries. It is widely used for trend filter. Hull Moving Average(HMA) with RVOL strengthens the trend as volume is prime factor of price movement.
+
+Trading with HMA: Simple method is buy when price closes above HMA , stop less below the low of last candle and target is 1.5 or 2 times of stop loss. The reverse is for sell. The HMA automatically turns to green on bull trend and red on bear trend for better visual confirmation.
+
+Adding RVOL to HMA is better method of trading. Buy signal is initiated when price closes above HMA and RVOL is greater than 1.2. Sell signal is initiated when price closes below 89 HMA and rovl is greater than 1.2. One can change the value of RVOL according to trading style and type asset being traded.
+
+
+It is a back tested strategy.

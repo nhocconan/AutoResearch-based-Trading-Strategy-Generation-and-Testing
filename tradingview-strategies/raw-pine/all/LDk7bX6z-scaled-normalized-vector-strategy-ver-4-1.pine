@@ -1,0 +1,185 @@
+//@version=5
+strategy("Normalized Vector Strategy [5] (mod+ts)", 'NVS[5] mod+ts', false, precision=2,
+         initial_capital=1000, pyramiding=0, margin_long=10, margin_short=10, process_orders_on_close=true, 
+         slippage=10, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=80)  
+
+import TradingView/ta/7
+
+// Description:
+
+// This modification of the Scaled Normalized Vector Strategy uses trailing stops and is optimized for lower TFs
+// original: Drkhodakarami (https://www.tradingview.com/script/Fxv2xFWe-Normalized-Vector-Strategy-By-Drkhodakarami-Opensource/)
+
+StartDate  = input.time (timestamp('01 Dec 2023 00:00:00'), 'Start Date')
+StopDate   = input.time (timestamp('31 Dec 2025 23:45:00'), 'Stop Date')
+Data       = input.source(close,   'Data')
+TF1        = input.int   (2,       'Timeframe 1', 1, 1440)
+TF2        = input.int   (10,      'Timeframe 2', 1, 1440) 
+Sense      = input.float (13000.0, 'Sensitivity [0.1..n]', minval=0.1, step=0.1) / 100000000
+Method     = input.string('Swish', 'Transform', ['LReLU', 'Step', 'Swish', 'ZScore', 'None'])
+Period     = input.int   (13,      'Karobein Oscillator Period', 2)
+Holding    = input.int   (4,       'Holding Period', 1, tooltip='Set to 100+ to remove all the stops')
+Backtest   = input.bool  (false,   'Backtest',       inline='bool')
+TrailStops = input.bool  (false,   'Trailing Stops', inline='bool')
+SLOffset   = input.int   (100,     'Stop Loss Trail Offset', 1) 
+
+//-- Constants
+
+color green = color.new(color.teal, 10),   color red  = color.new(color.red, 10), 
+color black = color.new(color.black, 100), color gray = color.new(color.gray, 50)
+
+//-- Types
+
+type Signal
+    int BUY   = 1
+    int SELL  =-1
+    int CLEAR = 0
+
+//-- Variables
+
+var Signal stype      = Signal.new()
+var int    signal     = stype.CLEAR
+var int    hp_counter = 0     // holding period counter
+var int    timebuy    = 0
+var int    timesell   = 0
+
+//-- Methods
+
+method minimax(float u, float min, float max, int p=0) => 
+    float hi = p==0 ? ta.max(u) : ta.highest(u, p)
+    float lo = p==0 ? ta.min(u) : ta.lowest(u, p)
+    (max - min) * (u - lo)/(hi - lo) + min
+
+method karo(float u, int p) => // Karobein Oscillator
+    float data        = ta.ema(u, p) 
+    float a           = ta.ema(data < data[1] ? data / data[1] : 0, p)
+    float b           = ta.ema(data > data[1] ? data / data[1] : 0, p)
+    float c           = (data / data[1]) / (data / data[1] + b)
+    2 * ((data / data[1]) / (data / data[1] + c * a)) - 1
+
+method relu(float u) => math.max(u, 0)
+method lrelu(float u, alpha) => relu(u) - alpha * relu(-u)
+method step(float u) => u >= 0 ? 1 : -1
+method sigmoid(float u) => 1 / (1 + math.exp(-u))
+method swish(float u) => u * sigmoid(u)
+method z_score(float u) => // all-time znorm
+    float mean     = ta.cum(u) / bar_index
+    float variance = math.pow(u - mean / (bar_index - 1), 2) 
+    (u - mean) / math.sqrt(variance) 
+
+//-- Logic
+
+int timeframe1 = math.min(TF1, TF2)
+int timeframe2 = math.max(TF1, TF2)
+
+if timeframe1 == timeframe2 
+    timeframe2 += 1
+
+lower_close  = request.security('', str.tostring(timeframe1), close)
+higher_close = request.security('', str.tostring(timeframe2), close)
+
+float ratio = lower_close / higher_close - 1  
+float upper =  Sense 
+float lower = -Sense 
+
+float karo = Data.karo(Period).minimax(-1, 1)
+
+float trf_ratio = switch Method
+    'LReLU'   => ratio.lrelu(0.8) 
+    'Step'    => ratio.step()
+    'Swish'   => ratio.swish()
+    'ZScore'  => ratio.z_score()
+    => ratio
+
+//-- Signals
+
+bool long  = ta.crossover(trf_ratio, upper)  and karo > 0 and timebuy  != time_close
+bool short = ta.crossunder(trf_ratio, lower) and karo < 0 and timesell != time_close
+bool clear = not(long and short)
+
+// assemble a signal
+signal :=  long  ? stype.BUY   : 
+           short ? stype.SELL  : 
+           //clear ? stype.CLEAR : 
+           nz(signal)
+
+bool changed = bool(ta.change(signal))
+
+hp_counter := changed ? 0 : hp_counter + 1
+
+bool longCondition   = changed and signal==stype.BUY
+bool shortCondition  = changed and signal==stype.SELL
+bool end_long_cond   = signal==stype.BUY  and hp_counter==Holding 
+bool end_short_cond  = signal==stype.SELL and hp_counter==Holding  
+bool clear_condition = end_long_cond or end_short_cond
+
+//
+
+upper := upper.minimax(-1, 1)
+lower := lower.minimax(-1, 1)
+ratio := trf_ratio.minimax(-1, 1)
+
+color bg = longCondition ? green : shortCondition ? red : black
+color cl = ratio > upper ? color.teal : ratio < lower ? color.red : color.silver
+
+//-- Visuals
+
+hline(0,    '', gray, hline.style_dotted, editable=false)
+plot(upper, '', green, editable=false)
+plot(lower, '', red,   editable=false)
+
+plot(end_long_cond  ? 0  : na, 'StopBuy',  color.yellow, 3, plot.style_cross)
+plot(end_short_cond ? 0  : na, 'StopSell', color.yellow, 3, plot.style_cross)
+
+plot(ratio, '', color.new(cl,70), 1, plot.style_histogram, editable=false)
+plot(ratio, 'Prediction', cl, 1, plot.style_linebr, editable=false)
+plot(karo, color=color.orange)
+bgcolor(bg, editable=false)
+
+//-- Notificaction
+
+alertcondition(longCondition,  'Long', 'Long Signal!')
+alertcondition(shortCondition, 'Short', 'Short Signal!')
+alert("NVS[5]: " +  (longCondition ? "🡅" : shortCondition ? "🡇" : 'Hold!'), alert.freq_once_per_bar_close)
+
+//-- Backtest
+
+if Backtest and time >= StartDate and time <= StopDate ? true : false
+    if longCondition   
+        timebuy := time_close
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long)   
+        if TrailStops
+            strategy.exit("Exit Long", from_entry="Long", trail_price=high+high*0.00001, trail_offset=SLOffset)
+    if shortCondition   
+        timesell := time_close
+        strategy.close("Long") 
+        strategy.entry("Short", strategy.short)  
+        if TrailStops
+            strategy.exit("Exit Short", from_entry="Short", trail_price=low-low*0.00001, trail_offset=SLOffset)
+    if clear_condition //and Clear
+        timesell := time_close
+        strategy.close_all()
+
+View in Pine Editor・166 lines
+Use on chart
+3
+4
+8
+17
+9 285
+Aug 18, 2019
+This modification of the Scaled Normalized Vector Strategy uses trailing stops and is optimized for lower TFs.
+Apr 5, 2021
+Release Notes
+Major fix accounting for changes in Pine introduced since the time this script was published.
+Apr 10, 2024
+Release Notes
+Major fixes. Updated to PneScript version 5.
+Apr 10, 2024
+Release Notes
+Minor fix to trail stops.
+Apr 10, 2024
+Release Notes
+Minor fix related to trailing setup.

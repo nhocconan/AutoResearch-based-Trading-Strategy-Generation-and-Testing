@@ -1,0 +1,66 @@
+//@version=4
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+// Wilder's Volatility Trailing Stop Strategy with various MA's
+// by SparkyFlary
+
+//For Educational Purposes
+//Results can differ on different markets and can fail at any time. Profit is not guaranteed.
+strategy(title="Wilder's Volatility Trailing Stop Strategy with various MA's", shorttitle="Trailing Stop Strategy", overlay=true)
+
+AtrMult = input(3.0, title="ATR multiplier")
+ATRlength = input(7, title="ATR length")
+ATRavgType = input("RMA", title="ATR moving average type", options=["RMA", "EMA", "SMA", "HULL"])
+sicType = input("close", title="significant close type for trail calculation", options=["close", "high-low"])
+
+//function for choosing moving averages
+f_ma(type, src, len) =>
+    float result = 0
+    if type == "RMA" // Wilder's moving averaege or Running moving average
+        result := rma(src, len)
+    if type == "EMA" // Exponential moving average
+        result := ema(src, len)
+    if type == "SMA" // Simple moving average
+        result := sma(src, len)
+    if type == "HULL" // Hull moving average
+        result := wma(2 * wma(src, len / 2) - wma(src, len), round(sqrt(len)))
+    result
+
+ATR = f_ma(ATRavgType, tr, ATRlength)
+upperTrail = lowest(sicType=="close"?close:low, ATRlength) + AtrMult * ATR
+lowerTrail = highest(sicType=="close"?close:high, ATRlength) - AtrMult * ATR
+
+float TS = 0
+TS := close < TS[1] ? upperTrail[1] : close > TS[1] ? lowerTrail[1] : TS
+
+//plot
+plot(TS<=0?TS[1]:TS, title="trailing stop", color=close<TS?color.red:color.green)
+
+//Strategy
+buy = crossover(close, TS)
+//sell = close < TS
+short = crossunder(close, TS)
+//cover = close > TS
+
+strategy.entry(id="enter long", long=true, when=buy)
+//strategy.close(id="enter long", comment="exit long", when=sell)
+strategy.entry(id="enter short", long=false, when=short)
+//strategy.close(id="enter short", comment="exit short", when=cover)
+
+View in Pine Editor・48 lines
+Use on chart
+1
+2
+2
+6 445
+Oct 21, 2020
+For Educational Purposes. Results can differ on different markets and can fail at any time. Profit is not guaranteed.
+
+This only works in a few markets and in certain situations. Changing the settings can give better or worse results for other markets. This strategy is based on Wilder's Volatility System. It is an ATR trailing stop that is used for long term trends. This strategy focuses on the trailing stop alone and goes long and short only when it goes above or below the trailing line. It is similar to Donchian channels except it does not include the certain period channel breakout, only the trailing signal. This is only the trailing stop and an attempt to show how well it works standalone as Wilder described.
+
+In his book, Wilder recommends a multiplier of 2.8-3.1 and an ATR lookback of 7 periods along with a running moving average or otherwise known as Wilder's moving average. The calculation and programming part for the trailing stop varies everywhere. I opted to keep it as simple and accurate as I could think of and interpret from the book. The variations to these types of indicators are numerous unfortunately, but Wilder seems to be the original author of ATR and this ATR-based trailing stop. In his book he says to use the significant closing price or highest/lowest closing price for the calculation part but I also included the option of choosing the highest high and lowest low, and the option to choose various moving averages in case anyone wants to experiment.
+
+Comparing this and Donchian channels, it seems that a 2.5 multiplier is somewhat similar to the middle band of DCs and a 3.0 multiplier is somewhat similar to a double length middle band of DCs. It's hard to say which is the better trailing stop for a long term strategy. It's hard to beat the simplicity of DCs but maybe some might find a need for more inputs in a trailing stop or maybe an ATR based one like Wilder's can work better depending on what setting or strategy it's used in.
+Oct 23, 2020
+Release Notes
+fixed problem with the start of the chart hitting zero

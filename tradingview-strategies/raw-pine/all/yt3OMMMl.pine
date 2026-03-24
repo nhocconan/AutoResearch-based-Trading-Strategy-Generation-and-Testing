@@ -1,0 +1,76 @@
+//@version=6
+strategy("EMA50 + RSI + Trailing (No TP) + Cooldown",
+     overlay=true, pyramiding=0, initial_capital=1000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100) // %100 sermaye ile işlem
+
+// === Inputs ===
+emaLen        = input.int(50,  "EMA Uzunluğu")
+rsiLen        = input.int(14,  "RSI Uzunluğu")
+rsiLongMin    = input.float(55,"Long RSI alt sınır", step=0.1)
+rsiShortMax   = input.float(45,"Short RSI üst sınır", step=0.1)
+trailPct      = input.float(1.5,"Trailing Stop %", step=0.1, minval=0.1)
+cooldownBars  = input.int(20,  "Çıkış sonrası bekleme (bar)", minval=0)
+
+enableLongs   = input.bool(true,  "Long açık")
+enableShorts  = input.bool(false, "Short açık") // short zayıfsa kapalı
+useAtrFilter  = input.bool(false, "ATR filtresi (opsiyonel)")
+atrLen        = input.int(14, "ATR uzunluğu", minval=1)
+minAtrPct     = input.float(0.0, "Min ATR % / Fiyat", step=0.1)
+
+// === Göstergeler ===
+ema50 = ta.ema(close, emaLen)
+rsi   = ta.rsi(close, rsiLen)
+atr   = ta.atr(atrLen)
+atrPct= atr/close*100.0
+volOK = not useAtrFilter or atrPct >= minAtrPct
+
+// === Sinyaller ===
+longCond  = enableLongs  and close > ema50 and rsi > rsiLongMin and volOK
+shortCond = enableShorts and close < ema50 and rsi < rsiShortMax and volOK
+
+// === Cooldown ===
+var int cooldownUntil = na
+exitedThisBar = strategy.position_size[1] != 0 and strategy.position_size == 0
+if exitedThisBar
+    cooldownUntil := bar_index + cooldownBars
+
+inCooldown   = not na(cooldownUntil) and bar_index < cooldownUntil
+entryAllowed = not inCooldown and barstate.isconfirmed
+
+// === Girişler ===
+if entryAllowed and strategy.position_size == 0
+    if longCond
+        strategy.entry("LE", strategy.long)
+    else if shortCond
+        strategy.entry("SE", strategy.short)
+
+// === Trailing Stop (TP yok) ===
+// trail_points = ort. maliyet * (yüzde/100)
+trailPts = strategy.position_size != 0 ? strategy.position_avg_price * (trailPct/100.0) : na
+
+if not na(trailPts)
+    strategy.exit("LX", from_entry="LE", trail_points = trailPts, trail_offset = trailPts)
+    strategy.exit("SX", from_entry="SE", trail_points = trailPts, trail_offset = trailPts)
+
+// === Görsellik ===
+plot(ema50, "EMA50", color=color.new(color.teal, 0))
+bgcolor(inCooldown ? color.new(color.red, 85) : na)
+
+// === Sinyal Etiketleri (yalnızca görsel) ===
+longEntry  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+shortEntry = strategy.position_size < 0 and strategy.position_size[1] >= 0
+longExit   = strategy.position_size == 0 and strategy.position_size[1] > 0
+shortExit  = strategy.position_size == 0 and strategy.position_size[1] < 0
+
+plotshape(longEntry,  title="LE", style=shape.labelup,   text="LE", location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+plotshape(longExit,   title="LX", style=shape.labeldown, text="LX", location=location.abovebar, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+plotshape(shortEntry, title="SE", style=shape.labeldown, text="SE", location=location.abovebar, color=color.new(color.red,   0), textcolor=color.white, size=size.tiny)
+plotshape(shortExit,  title="SX", style=shape.labelup,   text="SX", location=location.belowbar, color=color.new(color.red,   0), textcolor=color.white, size=size.tiny)
+
+View in Pine Editor・69 lines
+Use on chart
+5
+0
+1 243
+hi, my first strategy. Rsi and ma combination. You must check it. After that you can use .

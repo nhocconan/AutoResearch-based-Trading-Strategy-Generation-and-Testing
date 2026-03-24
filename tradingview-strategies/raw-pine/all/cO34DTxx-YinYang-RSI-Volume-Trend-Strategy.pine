@@ -1,0 +1,212 @@
+//@version=5
+strategy("YinYang RSI Volume Trend Strategy", shorttitle="YinYang RSVT Strategy", overlay=true, initial_capital=1000000, default_qty_type=strategy.cash, default_qty_value=1000000)
+// ~~~~~~~~~~~ INPUTS ~~~~~~~~~~~ //
+len = input.int(80, "Trend Length:", tooltip="How far back should we span this indicator?\nThis length effects all lengths of the indicator")
+purchaseSrc = input.source(close, "Purchase Source (Long and Short):", tooltip="What source needs to exit the purchase zone for a purchase to happen?")
+exitSrc = input.source(close, "Exit Source (Long and Short):", tooltip="What source needs to hit a exit condition to stop the trade (Take profit, Stop Loss or hitting the other sides Purchase Zone)?")
+useTakeProfit = input.bool(true, "Use Take Profit", tooltip="Should we take profit IF we cross the basis line and then cross it AGAIN?")
+useStopLoss = input.bool(true, "Use Stop Loss", tooltip="Stop loss will ensure you don't lose too much if its a bad call")
+stopLossMult = input.float(0.1, "Stoploss Multiplier %:", tooltip="How far from the purchase lines should the stop loss be")
+resetCondition = input.string("Entry", "Reset Purchase Availability After:", options=["Entry", "Stop Loss", "None"],
+ tooltip="If we reset after a condition is hit, this means we can purchase again when the purchase condition is met. \n" +
+ "Otherwise, we will only purchase after an opposite signal has appeared.\n" +
+ "Entry: means when the close enters the purchase zone (buy or sell).\n" +
+ "Stop Loss: means when the close hits the stop loss location (even when were out of a trade)\n" +
+ "This allows us to get more trades and also if our stop loss initally was hit but it WAS a good time to purchase, we don't lose that chance.")
+
+// ~~~~~~~~~~~ VARIABLES ~~~~~~~~~~~ //
+var bool longStart = na
+var bool longAvailable = na
+var bool longTakeProfitAvailable = na
+var bool longStopLoss = na
+var bool shortStart = na
+var bool shortAvailable = na
+var bool shortTakeProfitAvailable = na
+var bool shortStopLoss = na
+
+resetAfterStopLoss = resetCondition == "Stop Loss"
+resetAfterEntry = resetCondition == "Entry"
+
+// ~~~~~~~~~~~ CALCULATIONS ~~~~~~~~~~~ //
+// Mid Line
+midHigh = ta.vwma(ta.highest(high, len), len)
+midLow = ta.vwma(ta.lowest(low, len), len)
+mid = math.avg(midHigh, midLow)
+midSmoothed = ta.ema(mid, len)
+
+//Volume Filtered
+avgVol = ta.vwma(volume, len)
+volDiff = volume / avgVol
+midVolSmoothed = ta.vwma(midSmoothed * volDiff, 3)
+
+//RSI Filtered
+midDifference = ta.sma(midHigh - midLow, len)
+midRSI = ta.rsi(midVolSmoothed, len) * 0.01
+midAdd = midRSI * midDifference
+
+//Calculate Zones
+purchaseZoneHigh = midSmoothed + midAdd
+purchaseZoneLow = midSmoothed - midAdd
+purchaseZoneBasis = math.avg(purchaseZoneHigh, purchaseZoneLow)
+
+//Create Stop Loss Locations
+stopLossHigh = purchaseZoneHigh * (1 + (stopLossMult * 0.01))
+stopLossLow = purchaseZoneLow * (1 - (stopLossMult * 0.01))
+
+// ~~~~~~~~~~~ PURCHASE CALCULATIONS ~~~~~~~~~~~ //
+//Long
+longEntry = ta.crossunder(purchaseSrc, purchaseZoneLow)
+longStart := ta.crossover(purchaseSrc, purchaseZoneLow) and longAvailable
+longAvailable := ta.crossunder(purchaseSrc, purchaseZoneHigh) or (resetAfterStopLoss and longStopLoss) or (resetAfterEntry and longEntry) ? true : longStart ? false : longAvailable[1]
+longEnd = ta.crossover(exitSrc, purchaseZoneHigh)
+longStopLoss := ta.crossunder(exitSrc, stopLossLow)
+longTakeProfitAvailable := ta.crossover(exitSrc, purchaseZoneBasis) ? true : longEnd ? false : longTakeProfitAvailable[1]
+longTakeProfit = ta.crossunder(exitSrc, purchaseZoneBasis) and longTakeProfitAvailable
+
+//Short
+shortEntry = ta.crossover(purchaseSrc, purchaseZoneHigh)
+shortStart := ta.crossunder(purchaseSrc, purchaseZoneHigh) and shortAvailable
+shortAvailable := ta.crossover(purchaseSrc, purchaseZoneLow) or (resetAfterStopLoss and shortStopLoss) or (resetAfterEntry and shortEntry)? true : shortStart ? false : shortAvailable[1]
+shortEnd = ta.crossunder(exitSrc, purchaseZoneLow)
+shortStopLoss := ta.crossover(exitSrc, stopLossHigh)
+shortTakeProfitAvailable := ta.crossunder(exitSrc, purchaseZoneBasis) ? true : shortEnd ? false : shortTakeProfitAvailable[1]
+shortTakeProfit = ta.crossover(exitSrc, purchaseZoneBasis) and shortTakeProfitAvailable
+
+// ~~~~~~~~~~~ PLOTS ~~~~~~~~~~~ //
+shortLine = plot(purchaseZoneHigh, color=color.green)
+shortStopLossLine = plot(stopLossHigh, color=color.green) //color=color.rgb(0, 97, 3)
+fill(shortLine, shortStopLossLine, color = color.new(color.green, 90))
+plot(purchaseZoneBasis, color=color.white)
+longLine = plot(purchaseZoneLow, color=color.red)
+longStopLossLine = plot(stopLossLow, color=color.red) //color=color.rgb(105, 0, 0)
+fill(longLine, longStopLossLine, color=color.new(color.red, 90))
+
+// ~~~~~~~~~~~ STRATEGY ~~~~~~~~~~~ //
+if (longStart)
+    strategy.entry("buy", strategy.long)
+else if (longEnd or (useStopLoss and longStopLoss) or (useTakeProfit and longTakeProfit))
+    strategy.close("buy")
+
+if (shortStart)
+    strategy.entry("sell", strategy.short)
+else if (shortEnd or (useStopLoss and shortStopLoss) or (useTakeProfit and shortTakeProfit))
+    strategy.close("sell")
+
+// ~~~~~~~~~~~ ALERTS ~~~~~~~~~~~ //
+if longStart or (longEnd or (useStopLoss and longStopLoss) or (useTakeProfit and longTakeProfit)) or shortStart or (shortEnd or (useStopLoss and shortStopLoss) or (useTakeProfit and shortTakeProfit))
+    alert("{{strategy.order.action}} | {{ticker}} | {{close}}", alert.freq_once_per_bar)
+
+View in Pine Editor・132 lines
+Use on chart
+7
+5
+1
+13
+18 818
+There are many strategies that use RSI or Volume but very few that take advantage of how useful and important the two of them combined are. This strategy uses the Highs and Lows with Volume and RSI weighted calculations on top of them. You may be wondering how much of an impact Volume and RSI can have on the prices; the answer is a lot and we will discuss those with plenty of examples below, but first…
+
+How does this strategy work?
+
+It’s simple really, when the purchase source crosses above the inner low band (red) it creates a Buy or Long. This long has a Trailing Stop Loss band (the outer low band that's also red) that can be adjusted in the Settings. The Stop Loss is based on a % of the inner low band’s price and by default it is 0.1% lower than the inner band’s price. This Stop Loss is not only a stop loss but it can also act as a Purchase Available location.
+
+
+
+
+You can get back into a trade after a stop loss / take profit has been hit when your Reset Purchase Availability After condition has been met. This can either be at Stop Loss, Entry or None.
+
+
+
+
+It is advised to allow it to reset in case the stop loss was a fake out but the call was right. Sometimes it may trigger stop loss multiple times in a row, but you don’t lose much on stop loss and you gain lots when the call is right.
+
+
+
+
+The Take Profit location is the basis line (white). Take Profit occurs when the Exit Source (close, open, high, low or other) crosses the basis line and then on a different bar the Exit Source crosses back over the basis line. For example, if it was a Long and the bar’s Exit Source closed above the basis line, and then 2 bars later its Exit Source closed below the basis line, Take Profit would occur. You can disable Take Profit in Settings, but it is very useful as many times the price will cross the Basis and then correct back rather than making it all the way to the opposing zone.
+
+
+
+
+Longs:
+If for instance your Long doesn’t need to Take Profit and instead reaches the top zone, it will close the position when it crosses above the inner top line (green).
+
+Please note you can change the Exit Source too which is what source (close, open, high, low) it uses to end the trades.
+
+
+
+
+The Shorts work the same way as the Long but just opposite, they start when the purchase source crosses under the inner upper band (green).
+
+
+
+
+Shorts:
+Shorts take profit when it crosses under the basis line and then crosses back.
+
+
+
+
+Shorts will Stop loss when their outer upper band (green) is crossed with the Exit Source.
+
+
+
+
+Short trades are completed and closed when its Exit Source crosses under the inner low red band.
+
+
+
+
+So, now that you understand how the strategy works, let’s discuss why this strategy works and how it is profitable.
+
+First we will discuss Volume as we deem it plays a much bigger role overall and in our strategy:
+
+As I’m sure many of you know, Volume plays a huge factor in how much something moves, but it also plays a role in the strength of the movement. For instance, let’s look at two scenarios:
+
+
+Bitcoin’s price goes up $1000 in 1 Day but the Volume was only 10 million
+
+Bitcoin’s price goes up $200 in 1 Day but the Volume was 40 million
+
+
+
+If you were to only look at the price, you’d say #1 was more important because the price moved x5 the amount as #2, but once you factor in the volume, you know this is not true. The reason why Volume plays such a huge role in Price movement is because it shows there is a large Limit Order battle going on. It means that both Bears and Bulls believe that price is a good time to Buy and Sell. This creates a strong Support and Resistance price point in this location. If we look at scenario #2, when there is high volume, especially if it is drastically larger than the average volume Bitcoin was displaying recently, what can we decipher from this? Well, the biggest take away is that the Bull’s won the battle, and that likely when that happens we will see bullish movement continuing to happen as most of the Bears Limit Orders have been fulfilled. Whereas with #2, when large price movement happens and Bitcoin goes up $1000 with low volume what can we deduce? The main takeaway is that Bull’s pressured the price up with Market Orders where they purchased the best available price, also what this means is there were very few people who were wanting to sell. This generally dictates that Whale Limit orders for Sells/Shorts are much higher up and theres room for movement, but it also means there is likely a whale that is ready to dump and crash it back down.
+
+You may be wondering, what did this example have to do with YinYang RSI Volume Trend Strategy? Well the reason we’ve discussed this is because we use Volume multiple times to apply multiplications in our calculations to add large weight to the price when there is lots of volume (this is applied both positively and negatively). For instance, if the price drops a little and there is high volume, our strategy will move its bounds MUCH lower than the price actually dropped, and if there was low volume but the price dropped A LOT, our strategy will only move its bounds a little. We believe this reflects higher levels of price accuracy than just price alone based on the examples described above.
+
+Don’t believe us?
+
+Here is with Volume NOT factored in (VWMA = SMA and we remove our Volume Filter calculation):
+
+
+Which produced -$2880 Profit
+
+Here is with our Volume factored in:
+
+
+Which produced $553,000 (55.3%)
+
+As you can see, we wen’t from $-2800 profit with volume not factored to $553,000 with volume factored. That's quite a big difference! (Please note previous success does not predict future success we are simply displaying the $ amounts as example).
+
+Now how about RSI and why does it matter in this strategy?
+
+As I’m sure most of you are aware, RSI is one of the leading indicators used in trading. For this reason we figured it would only make sense to incorporate it into our calculations. We fiddled with RSI for quite awhile and sometimes what logically seems to be the right way to use it isn’t. Now, because of this, our RSI calculation is a little odd, but basically what we’re doing is we calculate the RSI, then turn it into a percentage (between 0-1) that can easily be multiplied to the price point we need. The price point we use is the difference between our high purchase zone and our low purchase zone. This allows us to see how much price movement there is between zones. We multiply our zone size with our RSI multiplication and we get the amount we will add +/- to our basis line (white line). This officially creates the NEW high and low purchase zones that we are actually using and displaying in our trades.
+
+If you found that confusing, here are some examples to why it is an important calculation for this strategy:
+
+Before RSI factored in:
+
+
+Which produced 27.8% Profit
+
+After RSI factored in:
+
+
+Which produced 553% Profit
+
+As you can see, the RSI makes not only the purchase zones more accurate, but it also greatly increases the profit the strategy is able to make. It also helps ensure an relatively linear profit slope so you know it is reliable with its trades.
+
+This strategy can work on pretty much anything, but you should tweak the values a bit for each pair you are trading it with for best results.
+
+We hope you can find some use out of this simple but effective strategy, if you have any questions, comments or concerns please let us know.
+
+HAPPY TRADING!

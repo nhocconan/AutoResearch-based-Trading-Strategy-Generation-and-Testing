@@ -1,0 +1,251 @@
+//@version=6
+strategy("NY OR Sweep + Big FVG Test → Entry + BE at 50% (v6)",
+     overlay=true,
+     process_orders_on_close=true,
+     pyramiding=0,
+     max_bars_back=5000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1)
+
+//==================== Inputs ====================
+tz          = input.string("America/New_York", "Timezone")
+
+orSess      = input.session("0930-0935", "Opening Range (OR) session")
+tradeSess   = input.session("0935-1200", "Trade window AFTER OR")
+
+minFvgPts   = input.float(5.0, "Min FVG size (points)", step=0.25)
+
+slPts       = input.float(50.0, "Stop Loss (points)", step=0.25)
+tpPts       = input.float(100.0, "Take Profit (points)", step=0.25)
+beTriggerPts= input.float(50.0, "Move SL to BE after profit (points)", step=0.25)
+
+firstSweepOnly = input.bool(true, "Use first sweep direction only")
+showLevels  = input.bool(true, "Plot OR + active FVG")
+
+//==================== Helpers ====================
+inOR     = not na(time(timeframe.period, orSess, tz))
+inTrade  = not na(time(timeframe.period, tradeSess, tz))
+enoughBars = bar_index >= 3
+tick = syminfo.mintick
+
+// Reset daily state at NY day change
+newDay = ta.change(time("D", "0000-2359", tz)) != 0
+
+//==================== Build Opening Range ====================
+var float orHigh = na
+var float orLow  = na
+var bool  orLocked = false
+
+if newDay
+    orHigh := na
+    orLow := na
+    orLocked := false
+
+if inOR
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow,  low)
+
+if not orLocked and inTrade and not inOR
+    orLocked := true
+
+//==================== Detect OR sweep (opening manipulation) ====================
+var int sweepDir = 0   // +1 sell-side swept -> look LONG, -1 buy-side swept -> look SHORT, 0 none
+
+if newDay
+    sweepDir := 0
+
+canDetectSweep = orLocked and inTrade
+
+if canDetectSweep
+    // buy-side sweep (above ORH) -> look SHORT
+    if high > orHigh
+        if not firstSweepOnly or sweepDir == 0
+            sweepDir := -1
+
+    // sell-side sweep (below ORL) -> look LONG
+    if low < orLow
+        if not firstSweepOnly or sweepDir == 0
+            sweepDir := +1
+
+//==================== FVG detection (3-candle) ====================
+bullFVG_raw = enoughBars and (high[2] < low)
+bearFVG_raw = enoughBars and (low[2]  > high)
+
+bull_gapBot = high[2]
+bull_gapTop = low
+bear_gapBot = high
+bear_gapTop = low[2]
+
+bull_size = bull_gapTop - bull_gapBot
+bear_size = bear_gapTop - bear_gapBot
+
+bullFVG = bullFVG_raw and (bull_size >= minFvgPts)
+bearFVG = bearFVG_raw and (bear_size >= minFvgPts)
+
+// FVG maker candle = middle candle C2 (bar[1])
+makerHighNow = high[1]
+makerLowNow  = low[1]
+
+//==================== Setup State ====================
+var bool  setupActive = false
+var int   dir         = 0     // +1 long, -1 short
+var float gapBot      = na
+var float gapTop      = na
+var bool  tested      = false
+var float makerHigh   = na
+var float makerLow    = na
+
+if newDay
+    setupActive := false
+    dir := 0
+    gapBot := na
+    gapTop := na
+    tested := false
+    makerHigh := na
+    makerLow := na
+
+canStartNew = inTrade and strategy.position_size == 0 and sweepDir != 0 and not setupActive
+
+// Long after sell-side sweep
+if canStartNew and sweepDir == +1 and bullFVG
+    setupActive := true
+    dir := +1
+    gapBot := bull_gapBot
+    gapTop := bull_gapTop
+    tested := false
+    makerHigh := makerHighNow
+    makerLow  := makerLowNow
+
+// Short after buy-side sweep
+if canStartNew and sweepDir == -1 and bearFVG
+    setupActive := true
+    dir := -1
+    gapBot := bear_gapBot
+    gapTop := bear_gapTop
+    tested := false
+    makerHigh := makerHighNow
+    makerLow  := makerLowNow
+
+//==================== Require test into FVG ====================
+if setupActive and not tested and strategy.position_size == 0
+    if dir == +1 and low <= gapTop
+        tested := true
+    if dir == -1 and high >= gapBot
+        tested := true
+
+//==================== Inversion rule (cancel BEFORE entry) ====================
+if setupActive and dir == +1 and strategy.position_size == 0
+    if close < gapBot
+        setupActive := false
+        dir := 0
+
+if setupActive and dir == -1 and strategy.position_size == 0
+    if close > gapTop
+        setupActive := false
+        dir := 0
+
+//==================== Entry trigger ====================
+longTrigger  = math.max(high[1], makerHigh)
+shortTrigger = math.min(low[1],  makerLow)
+
+longEntry  = inTrade and setupActive and dir == +1 and tested and close > longTrigger  and strategy.position_size == 0
+shortEntry = inTrade and setupActive and dir == -1 and tested and close < shortTrigger and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("L", strategy.long)
+    setupActive := false
+    dir := 0
+
+if shortEntry
+    strategy.entry("S", strategy.short)
+    setupActive := false
+    dir := 0
+
+//==================== Breakeven Management ====================
+var bool beArmed = false
+if newDay
+    beArmed := false
+
+// Arm BE per trade when a new position opens
+posOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if posOpened
+    beArmed := false
+if posClosed
+    beArmed := false
+
+// Determine BE trigger price and dynamic stop/limit
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    // trigger when high reaches entry + beTriggerPts
+    if not beArmed and high >= entry + beTriggerPts
+        beArmed := true
+
+    stopPrice  = beArmed ? entry : (entry - slPts)
+    limitPrice = entry + tpPts
+    strategy.exit("L-Exit", "L", stop=stopPrice, limit=limitPrice)
+
+if strategy.position_size < 0
+    entry = strategy.position_avg_price
+    // trigger when low reaches entry - beTriggerPts
+    if not beArmed and low <= entry - beTriggerPts
+        beArmed := true
+
+    stopPrice  = beArmed ? entry : (entry + slPts)
+    limitPrice = entry - tpPts
+    strategy.exit("S-Exit", "S", stop=stopPrice, limit=limitPrice)
+
+//==================== Plotting ====================
+plot(showLevels and orLocked ? orHigh : na, "OR High", style=plot.style_linebr)
+plot(showLevels and orLocked ? orLow  : na, "OR Low",  style=plot.style_linebr)
+
+plot(showLevels and setupActive ? gapTop : na, "FVG Top", style=plot.style_linebr)
+plot(showLevels and setupActive ? gapBot : na, "FVG Bot", style=plot.style_linebr)
+
+View in Pine Editor・204 lines
+Use on chart
+1
+8
+547
+Strategy Description
+NY Opening Manipulation + Liquidity Sweep + Large FVG Retrace Strategy
+
+Overview
+This strategy applies Smart Money Concepts (SMC) logic to capture NY open reversals after a liquidity sweep, using only large Fair Value Gaps (FVGs), a required retrace/test, and a confirmation-based entry.
+
+Core Logic
+1) Opening Range (OR)
+• OR is defined as 09:30–09:35 (New York time).
+• OR High and OR Low are recorded.
+
+2) Opening Manipulation / Liquidity Sweep
+• Sweep above OR High = buy-side liquidity taken.
+• Sweep below OR Low = sell-side liquidity taken.
+• Optional: use first sweep direction only (prevents bias flipping).
+
+3) Large FVG Filter
+• FVG size must be at least 5 points.
+• FVG must form after the sweep.
+
+4) FVG Test Required
+• Price must retrace into the FVG zone (test) before any entry is allowed.
+
+5) Invalidation (No Inversion Before Entry)
+• Long setup invalid if price closes below the bottom of the FVG before entry.
+• Short setup invalid if price closes above the top of the FVG before entry.
+
+6) Entry Trigger (Confirmation)
+Entry occurs when a candle closes:
+• Above the higher of (previous candle high, FVG maker candle high) for longs, OR
+• Below the lower of (previous candle low, FVG maker candle low) for shorts.
+
+Risk Management
+• Stop Loss: 50 points from entry
+• Take Profit: 100 points from entry
+• Breakeven: stop moves to entry price after price reaches +50 points (50% to TP)
+
+Best Use
+• MNQ / NQ
+• 1-minute timeframe
+• NY session volatility

@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-03-23T08:08:00+00:00",
+  "queue_rank": 2980,
+  "page": 125,
+  "name": "BTC Candle Correlation Strategy ",
+  "slug": "bp053p4r-btc-candle-correlation-strategy",
+  "chart_url": "https://www.tradingview.com/script/Bp053p4R-BTC-Candle-Correlation-Strategy/",
+  "pine_file": "raw-pine/bulk/Bp053p4R-BTC-Candle-Correlation-Strategy.pine",
+  "symbol_name": "BINANCE:ETHUSDT",
+  "repo_timeframe_hint": "4h",
+  "status": "unsupported",
+  "classification": "unsupported",
+  "timeframe": "4h",
+  "reason": "Uses multi-exchange BTC OHLC via security() symbols (BITFINEX/POLONIEX/BITSTAMP/COINBASE/BITMEX/KRAKEN/BINANCE); required cross-symbol/exchange data is not available in the local repo data contract, so conversion would be dishonest.",
+  "adaptations": [
+    "Would require adding synchronized OHLC datasets for all referenced exchanges/symbols at runtime timeframe.",
+    "Would require deterministic cross-exchange alignment logic before signal computation.",
+    "Pine date-window inputs can be mapped, but core signal source still depends on unavailable external feeds."
+  ],
+  "attempts_used": 1,
+  "attempt_log": [
+    "manual_codex_classification: unsupported due to unavailable required cross-exchange security() data"
+  ],
+  "conversion_notes": [],
+  "python_file": null,
+  "failed_python_files": [],
+  "validation": null,
+  "last_error": null
+}

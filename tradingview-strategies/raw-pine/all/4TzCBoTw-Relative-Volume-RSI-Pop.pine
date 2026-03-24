@@ -1,0 +1,57 @@
+//@version=4
+strategy(title="Relative Volume & RSI Pop", shorttitle="VOL & RSI Pop", overlay=false, precision=2, margin_long=100, margin_short=100)
+
+//RSI
+RSIlength = input(14, title="RSI Period")
+RSItop = input(70, title="RSI buy", minval= 69, maxval=100)
+RSIbottom = input(35, title="RSI short", minval= 0, maxval=35)
+price = close
+vrsi = rsi(price, RSIlength)
+RSIco = crossover(vrsi, RSItop)
+RSIcu = crossunder(vrsi, RSIbottom)
+plot(vrsi, "RSI", color=color.purple)
+band1 = hline(70, "Upper Band", color=#C0C0C0)
+bandm = hline(50, "Middle Band", color=color.new(#C0C0C0, 50))
+band0 = hline(30, "Lower Band", color=#C0C0C0)
+fill(band1, band0, color=color.purple, transp=90, title="Background")
+
+//RELATIVE VOLUME
+RVOLlen = input(14, minval=1, title="RV Period")
+av = sma(volume, RVOLlen)
+RVOL = volume / av
+RVOLthreshold = input(1.5,title="RV Threshold", minval=0.5, maxval=10)
+
+//TRADE TRIGGERS
+LongCondition = RSIco and RVOL > RVOLthreshold
+CloseLong = vrsi < 69
+
+ShortCondition = RSIcu and RVOL > RVOLthreshold
+CloseShort = vrsi > 35
+
+if (LongCondition)
+    strategy.entry("Long", strategy.long)
+    
+strategy.close("Long", when = CloseLong)    
+
+if (ShortCondition)
+    strategy.entry("Short", strategy.short)
+    
+strategy.close("Short", when = CloseShort)
+
+View in Pine Editor・44 lines
+Use on chart
+3
+1
+0
+6
+9 572
+This is a basic idea/script designed to take a breakout trade by taking advantage of volume spikes when price/strength is extended (either long or short).
+
+The script only utilises two indicators, the Relative Volume (RV) and the Relative Strength Index (RSI). The script allows the user to select a RSI value between 69 up to 100 for a long trade and between 35 down to 0 for short trade and then pair this with RV from 0 - 10. The period for both the RSI and RV can also be amended by the user but I found in most cases there was no benefit gained by changing away from normal "14" period lookback. The script typically only has small draw downs as the script is designed to exit the trade when the RSI returns back to "normalised" level, therefore the trades are generally quite short. The exit condition for a long trade is when RSI crosses back below 69 (which is why you cannot enter a long below this value) and for a short the, trade will close when RSI crosses back above 35 (which is why you cannot enter a short above this value). These exit values are locked.
+
+By allowing RSI value to go all the way up to "100" on the long side and "0" on the short side this in effect is a way of eliminating the script from taking either longs or shorts if lets say you wanted to back test the script for long only spikes or short only spike. E.G. By setting RSI upper value to "75" the RV to "1" and RSI lower value to "0" then no short trades will not be taken in your back test as the RSI never really gets down to zero.
+
+I put this together with meme stocks in mind and back tested it on day charts for AMC and then a few trending style stocks too. It typically worked best as long only and with RSI settings between 71 - 75 and RV at 1 or 1.5. I also found it had okay results on some lower 1hr timeframe futures markets and weekly time frames too (albeit trades were few and far between on weekly timeframe).
+
+The beauty of such a basic script you could easily set up a trading view screener to look for these opportunities everyday and perhaps even add in an ADX filter on the screener to see if the trend is increasing. Then use this script to run a back test on the stocks that you've selected from the screener.
+

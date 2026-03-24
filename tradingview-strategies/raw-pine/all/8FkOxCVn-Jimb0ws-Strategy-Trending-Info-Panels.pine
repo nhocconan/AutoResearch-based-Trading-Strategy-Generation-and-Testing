@@ -1,0 +1,730 @@
+//@version=6
+strategy("Jimb0ws Strategy + All Bubble Zones + Golden Candles + Limited Signals", overlay=true, calc_on_every_tick=true, max_bars_back=5000)
+
+
+
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+pipBodyTol          = input.float(0, title="Pip Tolerance for Body Touch", step=0.0001)
+pipWickTol          = input.float(0.002, title="Pip Tolerance for Wick Touch", step=0.0001)
+maxBodyDrive        = input.float(0,   title="Max Drive from EMA for Body", step=0.0001)
+maxWickDrive        = input.float(0.002, title="Max Drive from EMA for Wick", step=0.0001)
+fractalSizeOpt      = input.string("small", title="Fractal Size", options=["tiny","small","normal","large"])
+minBodySize         = input.float(0,       title="Min Body Size for Golden Candle", step=0.0001)
+
+
+
+
+longOffsetPips      = input.int(25, title="Long Label Offset (pips)", minval=0)
+shortOffsetPips     = input.int(25, title="Short Label Offset (pips)", minval=0)
+consolOffsetPips    = input.int(25, title="Consolidation Label Offset (pips)", minval=0)
+
+
+
+
+longSignType        = input.string("Label Down", title="Long Bubble Sign Type", options=["Label Up","Label Down","Circle"])
+shortSignType       = input.string("Label Up",   title="Short Bubble Sign Type", options=["Label Up","Label Down","Circle"])
+consolSignType      = input.string("Label Down", title="Consolidation Bubble Sign Type", options=["Label Up","Label Down","Circle"])
+
+
+
+
+enable1hEmaFilter     = input.bool(true,  title="Disable Signals beyond 1H EMA50")
+showZones           = input.bool(true, title="Show Bubble Zones")
+showSigns           = input.bool(true, title="Show Bubble Signs")
+maxSignalsPerBubble = input.int(3,    title="Max Signals Per Bubble", minval=1)
+// Toggle for session filter
+enableSessionFilter = input.bool(true, title="Enable Active Trading Session Filter")
+
+
+sessionInput        = input.session("0100-1900", title="Active Trading Session")
+tzInput             = input.string("Europe/London", title="Session Timezone",
+                                   options=["Exchange","UTC","Europe/London","America/New_York","Asia/Tokyo"])
+actualTZ            = tzInput == "Exchange" ? syminfo.timezone : tzInput
+infoOffsetPips      = input.int(5,  title="Info Line Offset Above Price (pips)", minval=0)
+warnOffsetPips      = input.int(10, title="Warning Label Offset Above Infobar (pips)", minval=0)
+show1HInfo          = input.bool(true, title="Show 1H Bubble Info")
+bufferLimit         = 5000 - 1
+
+
+
+
+enableProxFilter = input.bool(true,  title="Disable Signals Near 1H EMA50")
+proxRangePips    = input.int(10,    title="Proximity Range (pips)", minval=0)
+
+
+
+
+enableWickFilter     = input.bool(true,   title="Filter Golden-Candle Wick Overdrive")
+wickOverdrivePips    = input.int(0,       title="Wick Overdrive Range (pips)", minval=0)
+
+
+// turn Robin candles on/off
+enableRobin = input.bool(true, title="Enable Robin Candles")
+
+
+
+
+// ATR panel attached to 4H info
+showPrevDayATR      = input.bool(true, title="Show Previous Day ATR Panel")
+atrLenPrevDay       = input.int(14,   title="ATR Length (Daily)", minval=1)
+atrPanelOffsetPips  = input.int(3,    title="ATR Panel Offset Above 4H Info (pips)", minval=0)
+
+// ─── STRATEGY TRADES (EMA200 SL, RR=2 TP) ───────────────────────────────────
+enableAutoTrades = input.bool(true,  title="Enable Strategy Entries/Exits")
+takeProfitRR     = input.float(2.0,  title="TP Risk:Reward (x)", step=0.1, minval=0.1)
+
+// ─── SL/TP info label on signals ─────────────────────────────────────────────
+showSLTPPanel   = input.bool(true, title="Show SL/TP Info Above Signals")
+sltpOffsetPips  = input.int(4,    title="SL/TP Label Offset (pips)", minval=0)
+
+
+// Previous Day ATR (D1, lookahead OFF) -> lock to yesterday with [1]
+dailyATR    = request.security(syminfo.tickerid, "D", ta.atr(atrLenPrevDay),
+                               lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+prevDayATR  = dailyATR[1]
+
+
+// Convert to pips (FX: pip ≈ mintick*10)
+pipValueFX        = syminfo.mintick * 10.0
+prevATR_pips_1d   = na(prevDayATR) ? na : math.round((prevDayATR / pipValueFX) * 10.0) / 10.0
+
+
+
+
+// Create table once
+var table atrPanel = na
+if barstate.isfirst and na(atrPanel)
+    // columns=1, rows=2 (title row + value row)
+    atrPanel := table.new(position.top_right, 1, 2, border_width=1,
+                          frame_color=color.new(color.gray, 0), border_color=color.new(color.gray, 0))
+
+
+// Update cells each last bar
+if barstate.islast and not na(atrPanel)
+    if showPrevDayATR
+        titleTxt = "Prev Day ATR (" + str.tostring(atrLenPrevDay) + ")"
+        valTxt   = na(prevDayATR) ? "n/a"
+                 : str.tostring(prevATR_pips_1d) + " pips\n(" + str.tostring(prevDayATR, format.mintick) + ")"
+        table.cell(atrPanel, 0, 0, titleTxt, text_color=color.white, bgcolor=color.new(color.blue, 25))
+        table.cell(atrPanel, 0, 1, valTxt,   text_color=color.white, bgcolor=color.new(color.black, 0))
+    else
+        // Hide panel by writing empty strings
+        table.cell(atrPanel, 0, 0, "")
+        table.cell(atrPanel, 0, 1, "")
+
+// Visuals for orders
+showSLTP = input.bool(true, title="Show SL/TP Lines & Labels")
+
+
+
+// ─── EMA CALCULATIONS & PLOTTING ──────────────────────────────────────────────
+ema20    = ta.ema(close, 20)
+ema50    = ta.ema(close, 50)
+ema100   = ta.ema(close, 100)
+ema200   = ta.ema(close, 200)  
+ema50_1h = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_on)
+
+
+
+
+plot(ema20,    color=color.white,   linewidth=4, title="EMA20")
+plot(ema50,    color=color.yellow,  linewidth=4, title="EMA50")
+plot(ema100,   color=color.blue,    linewidth=4, title="EMA100")
+plot(ema200,   color=color.purple,  linewidth=6, title="EMA200")   // ← and this
+plot(ema50_1h, title="EMA50 (1H)",   color=color.yellow, linewidth=2)
+
+
+
+
+// pip-unit helper
+pipUnit1h   = syminfo.mintick * proxRangePips * 10
+upperBand1h  = ema50_1h + pipUnit1h
+lowerBand1h  = ema50_1h - pipUnit1h
+// draw top/bottom lines in one-liner plots, then fill the gap
+p_top    = plot(enableProxFilter ? upperBand1h : na, title="Prox Zone Top",    color=color.new(color.yellow,90), linewidth=1)
+p_bottom = plot(enableProxFilter ? lowerBand1h : na, title="Prox Zone Bottom", color=color.new(color.yellow,90), linewidth=1)
+fill(p_top, p_bottom, color.new(color.yellow,90))
+
+
+
+
+
+
+
+
+
+
+
+
+// ─── BUBBLE CONDITIONS & ZONES ───────────────────────────────────────────────
+longBub  = ema20 > ema50 and ema50 > ema100
+shortBub = ema20 < ema50 and ema50 < ema100
+consolOn = not longBub and not shortBub
+
+
+
+
+longCol  = color.new(color.green,  85)
+shortCol = color.new(color.red,    85)
+consCol  = color.new(color.orange, 85)
+
+
+
+
+bgcolor(showZones ? (longBub ? longCol : shortBub ? shortCol : consCol) : na)
+
+
+
+
+// convert pips to price‐units
+wickOverUnit = syminfo.mintick * wickOverdrivePips * 10
+
+
+
+
+// detect when the wick “pierces” EMA50 by more than that amount
+overdriveLong  = low  < ema50 - wickOverUnit   // long bubble: wick dipped below EMA50
+overdriveShort = high > ema50 + wickOverUnit   // short bubble: wick rose above EMA50
+
+
+
+
+// ─── GOLDEN-CANDLE LOGIC & COLORING ──────────────────────────────────────────
+trendLong    = longBub
+trendShort   = shortBub
+bodySize     = math.abs(close - open)
+hasBigBody   = bodySize >= minBodySize
+bodyLow      = math.min(open, close)
+bodyHigh     = math.max(open, close)
+wickLow      = low
+wickHigh     = high
+
+
+
+
+bOK20_L      = bodyLow <= ema20 + pipBodyTol and bodyLow >= ema20 - maxBodyDrive and close > ema20
+bOK50_L      = bodyLow <= ema50 + pipBodyTol and bodyLow >= ema50 - maxBodyDrive and close > ema50
+wOK20_L      = wickLow <= ema20 + pipWickTol and wickLow >= ema20 - maxWickDrive and close > ema20
+wOK50_L      = wickLow <= ema50 + pipWickTol and wickLow >= ema50 - maxWickDrive and close > ema50
+isGoldenLong = trendLong and hasBigBody and (bOK20_L or bOK50_L or wOK20_L or wOK50_L)
+
+
+
+
+bOK20_S      = bodyHigh >= ema20 - pipBodyTol and bodyHigh <= ema20 + maxBodyDrive and close < ema20
+bOK50_S      = bodyHigh >= ema50 - pipBodyTol and bodyHigh <= ema50 + maxBodyDrive and close < ema50
+wOK20_S      = wickHigh >= ema20 - pipWickTol and wickHigh <= ema20 + maxWickDrive and close < ema20
+wOK50_S      = wickHigh >= ema50 - pipWickTol and wickHigh <= ema50 + maxWickDrive and close < ema50
+isGoldenShort= trendShort and hasBigBody and (bOK20_S or bOK50_S or wOK20_S or wOK50_S)
+
+
+
+
+
+
+
+
+// ─── WICK-OVERDRIVE VETO ────────────────────────────────────────────────────
+
+
+
+
+if enableWickFilter
+    // veto any golden on which the wick over-drove the EMA50
+    isGoldenLong  := isGoldenLong  and not overdriveLong
+    isGoldenShort := isGoldenShort and not overdriveShort
+
+
+
+
+barcolor((isGoldenLong or isGoldenShort) ? color.new(#FFD700, 0) : na)
+
+
+
+
+// ─── ROBIN CANDLES ──────────────────────────────────────────────────────────
+goldShort1 = isGoldenShort[1]
+goldLong1  = isGoldenLong[1]
+goldLow1   = math.min(open[1], close[1])
+goldHigh1  = math.max(open[1], close[1])
+robinShort = shortBub and goldShort1 and math.min(open, close) < goldLow1
+robinLong  = longBub and goldLong1 and math.max(open, close) > goldHigh1
+barcolor(enableRobin and (robinShort or robinLong) ? color.purple : na)
+
+
+
+
+// ─── FRACTALS ─────────────────────────────────────────────────────────────────
+pL = ta.pivotlow(low, 2, 2)
+pH = ta.pivothigh(high, 2, 2)
+
+
+
+
+plotshape(not shortBub and not consolOn and not na(pL) and fractalSizeOpt == "tiny",
+          style=shape.triangleup, location=location.belowbar, offset=-2, color=color.green, size=size.tiny)
+plotshape(not shortBub and not consolOn and not na(pL) and fractalSizeOpt == "small",
+          style=shape.triangleup, location=location.belowbar, offset=-2, color=color.green, size=size.small)
+plotshape(not shortBub and not consolOn and not na(pL) and fractalSizeOpt == "normal",
+          style=shape.triangleup, location=location.belowbar, offset=-2, color=color.green, size=size.normal)
+plotshape(not shortBub and not consolOn and not na(pL) and fractalSizeOpt == "large",
+          style=shape.triangleup, location=location.belowbar, offset=-2, color=color.green, size=size.large)
+
+
+
+
+plotshape(not longBub and not consolOn and not na(pH) and fractalSizeOpt == "tiny",
+          style=shape.triangledown, location=location.abovebar, offset=-2, color=color.red, size=size.tiny)
+plotshape(not longBub and not consolOn and not na(pH) and fractalSizeOpt == "small",
+          style=shape.triangledown, location=location.abovebar, offset=-2, color=color.red, size=size.small)
+plotshape(not longBub and not consolOn and not na(pH) and fractalSizeOpt == "normal",
+          style=shape.triangledown, location=location.abovebar, offset=-2, color=color.red, size=size.normal)
+plotshape(not longBub and not consolOn and not na(pH) and fractalSizeOpt == "large",
+          style=shape.triangledown, location=location.abovebar, offset=-2, color=color.red, size=size.large)
+
+
+
+
+// ─── BUY/SELL SIGNALS & LIMIT ─────────────────────────────────────────────────
+var int buyCount  = 0
+var int sellCount = 0
+
+
+
+
+if longBub and not longBub[1]
+    buyCount := 0
+if shortBub and not shortBub[1]
+    sellCount := 0
+
+
+
+
+goldLong2  = isGoldenLong[2]
+goldShort2 = isGoldenShort[2]
+roofCheck  = math.max(open[1], close[1]) >= math.max(open[2], close[2])
+floorCheck = math.min(open[1], close[1]) <= math.min(open[2], close[2])
+
+
+
+
+buySignal  = goldLong2 and not na(pL) and roofCheck
+sellSignal = goldShort2 and not na(pH) and floorCheck
+// Original: inSession  = not na(time(timeframe.period, sessionInput, actualTZ))
+inSessionRaw = not na(time(timeframe.period, sessionInput, actualTZ))
+sessionOK    = enableSessionFilter ? inSessionRaw : true
+
+
+
+
+// Apply 1H EMA50 filter
+disableBy1h = enable1hEmaFilter and ((request.security(syminfo.tickerid, "60", ema20<ema50 and ema50<ema100) and close > ema50_1h) or (request.security(syminfo.tickerid, "60", ema20>ema50 and ema50>ema100) and close < ema50_1h))
+// ─── PROXIMITY VETO ────────────────────────────────────────────────
+near1hZone = enableProxFilter and close >= lowerBand1h and close <= upperBand1h
+
+
+
+
+validBuy  = buySignal  and sessionOK and buyCount  < maxSignalsPerBubble and not disableBy1h and not near1hZone
+validSell = sellSignal and sessionOK and sellCount < maxSignalsPerBubble and not disableBy1h and not near1hZone
+
+
+
+
+plotshape(validBuy, title="BUY", style=shape.labelup, location=location.belowbar,
+          color=color.green, text="BUY $", textcolor=color.white, size=size.large)
+plotshape(validSell, title="SELL", style=shape.labeldown, location=location.abovebar,
+          color=color.red,   text="SELL $", textcolor=color.white, size=size.large)
+
+
+
+
+if validBuy
+    buyCount += 1
+if validSell
+    sellCount += 1
+
+
+
+
+// ─── 4H BUBBLE INFO LINE ──────────────────────────────────────────────────────
+var line   infoLine4h        = na
+var label  infoLbl4h         = na
+var label  atrPrevLbl        = na   // ATR label handle
+var string bubble4hType      = na
+var int    bubble4hStartTime = na
+var int    bubble4hStartIdx  = na
+
+time4h    = request.security(syminfo.tickerid, "240", time,              lookahead=barmerge.lookahead_on)
+ema20_4h  = request.security(syminfo.tickerid, "240", ta.ema(close, 20), lookahead=barmerge.lookahead_on)
+ema50_4h  = request.security(syminfo.tickerid, "240", ta.ema(close, 50), lookahead=barmerge.lookahead_on)
+ema100_4h = request.security(syminfo.tickerid, "240", ta.ema(close,100), lookahead=barmerge.lookahead_on)
+
+long4h  = ema20_4h > ema50_4h and ema50_4h > ema100_4h
+short4h = ema20_4h < ema50_4h and ema50_4h < ema100_4h
+cons4h  = not long4h and not short4h
+
+if long4h and not long4h[1]
+    bubble4hType      := "LONG"
+    bubble4hStartTime := time4h
+    bubble4hStartIdx  := bar_index
+else if short4h and not short4h[1]
+    bubble4hType      := "SHORT"
+    bubble4hStartTime := time4h
+    bubble4hStartIdx  := bar_index
+else if cons4h and not cons4h[1]
+    bubble4hType      := "CONS"
+    bubble4hStartTime := time4h
+    bubble4hStartIdx  := bar_index
+
+active4h = ((bubble4hType=="LONG" and long4h) or (bubble4hType=="SHORT" and short4h) or (bubble4hType=="CONS" and cons4h)) and not na(bubble4hStartTime)
+
+if active4h
+    durH4      = math.floor((time - bubble4hStartTime) / 3600000)
+    ts4        = str.format("{0,date,yyyy-MM-dd} {0,time,HH:mm}", bubble4hStartTime)
+    txt4       = "4H " + bubble4hType + " Bubble\nsince " + ts4 + "\nDur: " + str.tostring(durH4) + "h"
+    col4       = bubble4hType=="LONG" ? color.green : bubble4hType=="SHORT" ? color.red : color.orange
+    pipUnit4   = syminfo.mintick * 10
+    infoPrice4 = high + (infoOffsetPips + warnOffsetPips + 5) * pipUnit4
+    xStart4    = math.max(bubble4hStartIdx, bar_index - bufferLimit)
+
+    if na(infoLine4h)
+        infoLine4h := line.new(xStart4, infoPrice4, bar_index, infoPrice4, extend=extend.none, color=col4, width=2)
+    else
+        line.set_xy1(infoLine4h, xStart4, infoPrice4)
+        line.set_xy2(infoLine4h, bar_index, infoPrice4)
+        line.set_color(infoLine4h, col4)
+
+    if na(infoLbl4h)
+        infoLbl4h := label.new(bar_index, infoPrice4, txt4, xloc.bar_index, yloc.price, col4, label.style_label_left, color.white, size.small)
+    else
+        label.set_xy(infoLbl4h, bar_index, infoPrice4)
+        label.set_text(infoLbl4h, txt4)
+        label.set_color(infoLbl4h, col4)
+
+    // Prev Day ATR label just above the 4H info panel
+    if showPrevDayATR
+        atrValTxt = na(prevDayATR) ? "n/a" : str.tostring(prevATR_pips_1d) + " pips (" + str.tostring(prevDayATR, format.mintick) + ")"
+        atrTxt    = "Prev Day ATR (" + str.tostring(atrLenPrevDay) + ")\n" + atrValTxt
+        atrY      = infoPrice4 + pipUnit4 * atrPanelOffsetPips
+        if na(atrPrevLbl)
+            atrPrevLbl := label.new(bar_index, atrY, atrTxt, xloc.bar_index, yloc.price, color.new(color.blue, 25), label.style_label_left, color.white, size.small)
+        else
+            label.set_xy(atrPrevLbl, bar_index, atrY)
+            label.set_text(atrPrevLbl, atrTxt)
+            label.set_color(atrPrevLbl, color.new(color.blue, 25))
+    else
+        if not na(atrPrevLbl)
+            label.delete(atrPrevLbl)
+            atrPrevLbl := na
+else
+    // Cleanup when 4H panel is not active
+    if not na(infoLine4h)
+        line.delete(infoLine4h)
+        infoLine4h := na
+    if not na(infoLbl4h)
+        label.delete(infoLbl4h)
+        infoLbl4h := na
+    bubble4hType := na
+    if not na(atrPrevLbl)
+        label.delete(atrPrevLbl)
+        atrPrevLbl := na
+
+
+// ─── 1H BUBBLE INFO & WARNING PANEL ─────────────────────────────────────────
+var line   infoLine1h         = na
+var label  infoLbl1h          = na
+var label  warnLbl1h          = na
+var string bubble1hType      = na
+var int    bubble1hStartTime = na
+var int    bubble1hStartIdx  = na
+var float  pipUnit           = na
+var color  col               = na
+var int    xStart            = na
+var float  infoPrice         = na
+var string txt               = ""
+
+
+
+
+// 1H trend state (kept same logic as your original)
+long1h   = request.security(syminfo.tickerid, "60", ema20>ema50 and ema50>ema100, lookahead=barmerge.lookahead_on)
+short1h  = request.security(syminfo.tickerid, "60", ema20<ema50 and ema50<ema100, lookahead=barmerge.lookahead_on)
+cons1h   = request.security(syminfo.tickerid, "60", not long1h and not short1h,  lookahead=barmerge.lookahead_on)
+
+startLong1h  = request.security(syminfo.tickerid, "60", long1h  and not long1h[1]  ? time : na, lookahead=barmerge.lookahead_on)
+startShort1h = request.security(syminfo.tickerid, "60", short1h and not short1h[1] ? time : na, lookahead=barmerge.lookahead_on)
+startCons1h  = request.security(syminfo.tickerid, "60", cons1h  and not cons1h[1]  ? time : na, lookahead=barmerge.lookahead_on)
+
+if not na(startLong1h)
+    bubble1hType      := "LONG"
+    bubble1hStartTime := startLong1h
+    bubble1hStartIdx  := bar_index
+else if not na(startShort1h)
+    bubble1hType      := "SHORT"
+    bubble1hStartTime := startShort1h
+    bubble1hStartIdx  := bar_index
+else if not na(startCons1h)
+    bubble1hType      := "CONS"
+    bubble1hStartTime := startCons1h
+    bubble1hStartIdx  := bar_index
+
+if show1HInfo and ((bubble1hType=="LONG" and long1h) or (bubble1hType=="SHORT" and short1h) or (bubble1hType=="CONS" and cons1h)) and not na(bubble1hStartTime)
+    durMin = math.floor((time - bubble1hStartTime)/60000)
+    durH   = math.floor(durMin/60)
+    durM   = durMin % 60
+    tsStr  = str.format("{0,date,yyyy-MM-dd} {0,time,HH:mm}", bubble1hStartTime)
+    durStr = str.format("{0}h {1}m", durH, durM)
+    txt1h  = "1H " + bubble1hType + " Bubble\nsince " + tsStr + "\nDur: " + durStr
+    col1h  = bubble1hType=="LONG" ? color.green : bubble1hType=="SHORT" ? color.red : color.orange
+
+    pipUnit1h   = syminfo.mintick * 10
+    infoPrice1h = high + infoOffsetPips * pipUnit1h
+    xStart1h    = math.max(bubble1hStartIdx, bar_index - bufferLimit)
+
+    if na(infoLine1h)
+        infoLine1h := line.new(xStart1h, infoPrice1h, bar_index, infoPrice1h, extend=extend.none, color=col1h, width=2)
+    else
+        line.set_xy1(infoLine1h, xStart1h, infoPrice1h)
+        line.set_xy2(infoLine1h, bar_index, infoPrice1h)
+        line.set_color(infoLine1h, col1h)
+
+    if na(infoLbl1h)
+        infoLbl1h := label.new(bar_index, infoPrice1h, txt1h, xloc.bar_index, yloc.price, col1h, label.style_label_left, color.white, size.small)
+    else
+        label.set_xy(infoLbl1h, bar_index, infoPrice1h)
+        label.set_text(infoLbl1h, txt1h)
+        label.set_color(infoLbl1h, col1h)
+
+    // Warning when SHORT bubble but price above 1H EMA50
+    if bubble1hType=="SHORT" and short1h and close > ema50_1h
+        warnY = infoPrice1h + warnOffsetPips * pipUnit1h
+        if na(warnLbl1h)
+            warnLbl1h := label.new(bar_index, warnY, "Potential\nConsolidation\nWarning",
+                                   xloc.bar_index, yloc.price, color.new(color.yellow,0),
+                                   label.style_label_up, color.black, size.small)
+        else
+            label.set_xy(warnLbl1h, bar_index, warnY)
+            label.set_text(warnLbl1h, "Potential\nConsolidation\nWarning")
+    else
+        if not na(warnLbl1h)
+            label.delete(warnLbl1h)
+            warnLbl1h := na
+else
+    if not na(infoLine1h)
+        line.delete(infoLine1h)
+        infoLine1h := na
+    if not na(infoLbl1h)
+        label.delete(infoLbl1h)
+        infoLbl1h := na
+    if not na(warnLbl1h)
+        label.delete(warnLbl1h)
+        warnLbl1h := na
+    bubble1hType := na
+
+// ─── ALERTS ─────────────────────────────────────────────────────────────────
+alertcondition(validBuy,  title="Jimb0ws Strategy – BUY",  message="🔥 BUY signal on {{ticker}} at {{close}}")
+alertcondition(validSell, title="Jimb0ws Strategy – SELL", message="🔻 SELL signal on {{ticker}} at {{close}}")
+
+
+if validBuy  
+    alert("🔥 BUY signal on " + syminfo.ticker + " at " + str.tostring(close), alert.freq_once_per_bar_close)
+if validSell
+    alert("🔻 SELL signal on " + syminfo.ticker + " at " + str.tostring(close), alert.freq_once_per_bar_close)
+
+// ─── SL/TP drawing handles (globals) ────────────────────────────────────────
+var line  slLine  = na
+var line  tpLine  = na
+var label slLabel = na
+var label tpLabel = na
+var float slPrice = na
+var float tpPrice = na
+
+// Working vars so they exist on all bars
+var float longEntry  = na
+var float longSL     = na
+var float longTP     = na
+var float riskL      = na
+
+var float shortEntry = na
+var float shortSL    = na
+var float shortTP    = na
+var float riskS      = na
+
+// last SL/TP info label so we can replace it each time
+var label sltpInfoLbl = na
+
+
+// ─── Draw SL/TP info label exactly when a signal fires ──────────────────────
+if showSLTPPanel and (validBuy or validSell)
+    // delete prior info label
+    if not na(sltpInfoLbl)
+        label.delete(sltpInfoLbl)
+
+    float pipUnit = syminfo.mintick * 10.0
+    float yAbove  = high + sltpOffsetPips * pipUnit
+
+    // Entry is the close of the signal bar
+    float entry = close
+
+    // Choose SL by your rule:
+    //  - LONG:  if ema200 > ema100 -> SL = ema100, else SL = ema200
+    //  - SHORT: if ema200 < ema100 -> SL = ema100, else SL = ema200
+    bool  isLong = validBuy
+    float sl     = isLong ? (ema200 > ema100 ? ema100 : ema200)
+                          : (ema200 < ema100 ? ema100 : ema200)
+
+    // Compute TP using RR; guard for bad risk
+    float rr   = takeProfitRR   // your RR input (e.g., 2.0)
+    float risk = isLong ? (entry - sl) : (sl - entry)
+    float tp   = na
+    if risk > syminfo.mintick
+        tp := isLong ? (entry + rr * risk) : (entry - rr * risk)
+
+    // Build label text (mintick formatting)
+    string slTxt = "SL " + str.tostring(sl, format.mintick)
+    string tpTxt = na(tp) ? "TP n/a" : "TP " + str.tostring(tp, format.mintick)
+    string txt   = slTxt + "\n" + tpTxt
+
+    // Color by side and draw
+    color bgCol = isLong ? color.new(color.green, 10) : color.new(color.red, 10)
+    sltpInfoLbl := label.new(bar_index, yAbove, txt,
+                             xloc.bar_index, yloc.price,
+                             bgCol, label.style_label_left, color.white, size.small)
+
+// ─── ORDERS: dynamic SL (EMA100 vs EMA200), TP = RR * risk + draw SL/TP ─────
+if enableAutoTrades and barstate.isconfirmed and not na(ema100) and not na(ema200)
+
+    // LONGS — if EMA200 > EMA100 ⇒ SL = EMA100; else ⇒ SL = EMA200
+    if validBuy and strategy.position_size <= 0
+        longEntry := close
+        longSL    := ema200 > ema100 ? ema100 : ema200
+        if longSL < longEntry - syminfo.mintick
+            riskL  := longEntry - longSL
+            longTP := longEntry + takeProfitRR * riskL
+
+            if strategy.position_size < 0
+                strategy.close("Short", comment="Flip→Long")
+            strategy.entry("Long", strategy.long)
+            strategy.exit("Long-EXIT", from_entry="Long", stop=longSL, limit=longTP)
+
+            // store & draw
+            slPrice := longSL
+            tpPrice := longTP
+            if showSLTP
+                if not na(slLine)
+                    line.delete(slLine)
+                if not na(tpLine)
+                    line.delete(tpLine)
+                if not na(slLabel)
+                    label.delete(slLabel)
+                if not na(tpLabel)
+                    label.delete(tpLabel)
+
+                // lines
+                slLine := line.new(bar_index, slPrice, bar_index + 1, slPrice, extend=extend.right, color=color.red,   width=2)
+                tpLine := line.new(bar_index, tpPrice, bar_index + 1, tpPrice, extend=extend.right, color=color.green, width=2)
+                // labels with exact prices
+                slLabel := label.new(bar_index + 1, slPrice, "SL " + str.tostring(slPrice, format.mintick), xloc.bar_index, yloc.price, color.new(color.red, 10),   label.style_label_right, color.white, size.small)
+                tpLabel := label.new(bar_index + 1, tpPrice, "TP " + str.tostring(tpPrice, format.mintick), xloc.bar_index, yloc.price, color.new(color.green, 10), label.style_label_right, color.white, size.small)
+
+    // SHORTS — if EMA200 < EMA100 ⇒ SL = EMA100; else ⇒ SL = EMA200
+    if validSell and strategy.position_size >= 0
+        shortEntry := close
+        shortSL    := ema200 < ema100 ? ema100 : ema200
+        if shortSL > shortEntry + syminfo.mintick
+            riskS   := shortSL - shortEntry
+            shortTP := shortEntry - takeProfitRR * riskS
+
+            if strategy.position_size > 0
+                strategy.close("Long", comment="Flip→Short")
+            strategy.entry("Short", strategy.short)
+            strategy.exit("Short-EXIT", from_entry="Short", stop=shortSL, limit=shortTP)
+
+            // store & draw
+            slPrice := shortSL
+            tpPrice := shortTP
+            if showSLTP
+                if not na(slLine)
+                    line.delete(slLine)
+                if not na(tpLine)
+                    line.delete(tpLine)
+                if not na(slLabel)
+                    label.delete(slLabel)
+                if not na(tpLabel)
+                    label.delete(tpLabel)
+
+                slLine := line.new(bar_index, slPrice, bar_index + 1, slPrice, extend=extend.right, color=color.red,   width=2)
+                tpLine := line.new(bar_index, tpPrice, bar_index + 1, tpPrice, extend=extend.right, color=color.green, width=2)
+                slLabel := label.new(bar_index + 1, slPrice, "SL " + str.tostring(slPrice, format.mintick), xloc.bar_index, yloc.price, color.new(color.red, 10),   label.style_label_right, color.white, size.small)
+                tpLabel := label.new(bar_index + 1, tpPrice, "TP " + str.tostring(tpPrice, format.mintick), xloc.bar_index, yloc.price, color.new(color.green, 10), label.style_label_right, color.white, size.small)
+
+// Keep labels pinned to the right of current bar while trade is open
+if showSLTP and strategy.position_size != 0 and not na(slPrice) and not na(tpPrice)
+    label.set_xy(slLabel, bar_index + 1, slPrice)
+    label.set_text(slLabel, "SL " + str.tostring(slPrice, format.mintick))
+    label.set_xy(tpLabel, bar_index + 1, tpPrice)
+    label.set_text(tpLabel, "TP " + str.tostring(tpPrice, format.mintick))
+
+// Clean up drawings when flat
+if strategy.position_size == 0
+    slPrice := na
+    tpPrice := na
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+    if not na(tpLine)
+        line.delete(tpLine)
+        tpLine := na
+    if not na(slLabel)
+        label.delete(slLabel)
+        slLabel := na
+    if not na(tpLabel)
+        label.delete(tpLabel)
+        tpLabel := na
+
+View in Pine Editor・685 lines
+Use on chart
+3
+5
+2 433
+Jimb0ws Strategy — Golden Candles + Bubble Zones
+
+A price-action/EMA strategy built for FX scalping and intraday swings. It colors Golden Candles when strong bodies touch/skim EMA20/50 in trend (“bubble”) and optionally highlights Robin Candles (break of the prior golden body). Signals are throttled per bubble and filtered by multiple higher-timeframe conditions.
+
+How it trades
+
+Trend bubbles: Uses EMA20/50/100/200 alignment on the chart timeframe; also reads 1H & 4H bubbles for context.
+
+Entries: BUY/SELL labels appear only when a golden setup aligns with fractal/structure checks and all active filters pass.
+
+Stops/Targets (strategy mode):
+• Longs: SL = EMA100 if EMA200 > EMA100, else SL = EMA200.
+• Shorts: SL = EMA100 if EMA200 < EMA100, else SL = EMA200.
+• TP = RR × risk (default 2R).
+An on-chart SL/TP info label prints the exact prices at each signal.
+
+Risk filter options: disable beyond 1H EMA50, proximity band around 1H EMA50, wick overdrive veto, session filter (toggle on/off), max signals per bubble.
+
+Visuals & tools
+
+Colored EMAs (20/50/100/200), bubble zone background.
+
+4H info panel (state, start time, duration); Prev-Day ATR panel sits above it.
+
+Optional 1H info panel and consolidation warning.
+
+Fractal markers (size selectable).
+
+Alerts
+
+1H bubble state change (Long/Short/Consolidation).
+
+BUY/SELL signals.
+
+Inputs worth checking
+Session & timezone, min body size, pip tolerances, proximity/WOD filters, max signals per bubble, RR, SL/TP label offset.
+
+Notes
+Best on FX pairs; pip = mintick × 10. Backtest and adjust to your instrument and session. This is not financial advice.

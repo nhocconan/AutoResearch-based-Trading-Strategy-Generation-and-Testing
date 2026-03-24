@@ -1,0 +1,40 @@
+//@version=4
+strategy("EVWMA VWAP Cross [QuantNomad]", shorttitle="EVWMA_VWAP_Cross[QN]", overlay=true)
+
+// Inputs
+sum_length     = input(30, title = "EVWMA Length",   type = input.integer)
+vwap_smoothing = input(1,  title = "VWAP Smoothing", type = input.integer)
+
+// Calculate EVWMA
+vol_period = sum(volume, sum_length)
+
+evwma = 0.0
+evwma := ((vol_period - volume) * nz(evwma[1], close) + volume * close) / (vol_period)
+
+vwap_smooth = ema(vwap, vwap_smoothing)
+
+long  = crossover( vwap_smooth, evwma)
+short = crossunder(vwap_smooth, evwma)
+
+plot(evwma,       color = color.blue)
+plot(vwap_smooth, color = color.red)
+
+strategy.entry("Long",  true,  when = long)
+strategy.entry("Short", false, when = short)
+
+View in Pine Editor・23 lines
+Use on chart
+1.4 K
+6
+33 183
+Continue to experiement with VWAP and EVWMA.
+It seems that just simple crosses between VWAP and EVWMA can be pretty good signals. VWAP is a bit choppy so you can use VWAP smoothing input to smoth it a bit.
+
+Here are few other strategies based on EVWMA:
+
+EVWMA VWAP MACD Strategy [QuantNomad]
+
+
+
+QuantNomad - EVWMA MACD Strategy
+

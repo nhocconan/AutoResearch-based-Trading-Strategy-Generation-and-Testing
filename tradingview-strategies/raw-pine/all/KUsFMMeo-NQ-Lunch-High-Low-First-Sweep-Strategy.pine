@@ -1,0 +1,148 @@
+//@version=5
+strategy("NQ - Lunch FIRST Sweep + Strong Close Cancel", overlay=true, pyramiding=0)
+
+// =======================================================
+// SETTINGS
+// =======================================================
+tz = "America/New_York"
+
+// Lunch session (NY time)
+lunchSession  = input.session("1200-1300", "Lunch Session (NY)")
+// Trade window after lunch
+tradeWindow   = input.session("1300-1600", "After Lunch Window (NY)")
+
+// Optional: allow/disallow the cancel rule
+enableStrongCloseCancel = input.bool(true, "Cancel day if sweep bar closes at its High/Low")
+
+// =======================================================
+// GUARDS (TF) + SOFT SYMBOL CHECK
+// =======================================================
+tfOk  = timeframe.isminutes and timeframe.multiplier == 5
+symOk = str.contains(syminfo.tickerid, "NQ") or str.contains(syminfo.ticker, "NQ")
+
+// =======================================================
+// SESSION FLAGS
+// =======================================================
+inLunch  = not na(time(timeframe.period, lunchSession, tz))
+inTrade  = not na(time(timeframe.period, tradeWindow, tz))
+
+// =======================================================
+// STATE VARIABLES
+// =======================================================
+var float lunchHigh = na
+var float lunchLow  = na
+var bool  lunchDone = false
+var bool  lockedForDay = false   // locks trading for the day after first valid signal OR cancel condition
+
+// =======================================================
+// DAILY RESET
+// =======================================================
+newDay = ta.change(time("D"))
+if newDay
+    lunchHigh := na
+    lunchLow  := na
+    lunchDone := false
+    lockedForDay := false
+
+// =======================================================
+// BUILD LUNCH HIGH / LOW
+// =======================================================
+if inLunch
+    lunchHigh := na(lunchHigh) ? high : math.max(lunchHigh, high)
+    lunchLow  := na(lunchLow)  ? low  : math.min(lunchLow,  low)
+    lunchDone := false
+
+// Lunch just ended
+lunchJustEnded = not inLunch and inLunch[1]
+if lunchJustEnded
+    lunchDone := true
+
+// =======================================================
+// SWEEP CONDITIONS (WICK OUT + CLOSE BACK INSIDE)
+// =======================================================
+highSweep = lunchDone and inTrade and not na(lunchHigh) and high > lunchHigh and close < lunchHigh
+lowSweep  = lunchDone and inTrade and not na(lunchLow)  and low  < lunchLow  and close > lunchLow
+
+// =======================================================
+// STRONG CLOSE CANCEL (bar closes at its own high/low)
+// Use mintick tolerance to avoid float issues
+// =======================================================
+closeAtHigh = close >= high - syminfo.mintick
+closeAtLow  = close <= low  + syminfo.mintick
+
+// If a sweep happens but the sweep bar closes at an extreme, cancel for the day
+invalidShort = enableStrongCloseCancel and highSweep and closeAtHigh
+invalidLong  = enableStrongCloseCancel and lowSweep  and closeAtLow
+
+// Valid signals
+validShort = highSweep and not invalidShort
+validLong  = lowSweep  and not invalidLong
+
+// Only first event of the day (either valid entry OR invalid cancel)
+canAct = symOk and tfOk and not lockedForDay
+
+// =======================================================
+// ACTIONS: CANCEL DAY OR ENTER (NEXT BAR OPEN)
+// =======================================================
+if canAct and (invalidShort or invalidLong)
+    alert("NO TRADE TODAY: Sweep bar closed at its High/Low (strong close).", alert.freq_once_per_bar_close)
+    lockedForDay := true
+
+if canAct and validShort
+    alert("FIRST LUNCH SWEEP → SHORT | Entry: NEXT 5m OPEN", alert.freq_once_per_bar_close)
+    strategy.entry("SHORT_LunchHighSweep", strategy.short)
+    lockedForDay := true
+
+if canAct and validLong
+    alert("FIRST LUNCH SWEEP → LONG | Entry: NEXT 5m OPEN", alert.freq_once_per_bar_close)
+    strategy.entry("LONG_LunchLowSweep", strategy.long)
+    lockedForDay := true
+
+// =======================================================
+// VISUALS
+// =======================================================
+plot(lunchHigh, "Lunch High", color=color.new(color.fuchsia, 0), linewidth=2)
+plot(lunchLow,  "Lunch Low",  color=color.new(color.aqua, 0), linewidth=2)
+bgcolor(inLunch ? color.new(color.yellow, 85) : na)
+
+plotshape(canAct and validShort, title="FIRST SHORT", style=shape.triangledown,
+     location=location.abovebar, size=size.small, text="SHORT")
+
+plotshape(canAct and validLong, title="FIRST LONG", style=shape.triangleup,
+     location=location.belowbar, size=size.small, text="LONG")
+
+plotshape(canAct and (invalidShort or invalidLong), title="CANCEL DAY", style=shape.xcross,
+     location=location.top, size=size.tiny, text="NO TRADE")
+
+View in Pine Editor・115 lines
+Use on chart
+3
+1
+1 076
+Dec 19, 2025
+This script identifies the FIRST liquidity sweep of the Lunch session high or low
+after the Lunch session has ended, based on ICT / Killzone concepts.
+
+Logic summary:
+• Tracks Lunch session High and Low (New York time)
+• After Lunch session closes, monitors the market on 5-minute timeframe
+• Triggers ONLY on the first sweep:
+– Price wicks beyond Lunch High and closes back below → SHORT signal
+– Price wicks beyond Lunch Low and closes back above → LONG signal
+• Generates an alert at the exact bar where entry is expected
+• Designed specifically for Nasdaq (NQ) futures
+• One trade per day – no overtrading
+
+Notes:
+• Intended for 5-minute charts only
+• Uses New York session timing
+• This script does NOT manage exits (TP/SL) – entry logic only
+• Best used as a confluence tool, not a standalone system
+
+Educational & discretionary use only.
+Dec 19, 2025
+Release Notes
+// v1.1.0
+// - Added strong close cancel logic
+// - Fixed first sweep detection
+

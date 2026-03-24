@@ -1,0 +1,36 @@
+//@version=3
+strategy("Strong Potential Asset Strategy (EMA + EMA)", overlay=true)
+fastPeriod = input(5, minval=1, title="Fast EMA Length")
+slowPeriod = input(9, minval=1, title="Slow EMA Length")
+minDiff = input(0.01, minval=0.01, title="Difference")
+crossoverTolerance = input(5, minval=0.01, title="Exit tolerance")
+
+fastEMA = ema(close, fastPeriod)
+slowEMA = ema(close, slowPeriod)
+plot(fastEMA, color=green)
+plot(slowEMA, color=red)
+difference = fastEMA - slowEMA
+
+yearsToTest = input(2, minval=1, title="Years to test")
+start = timenow - (31540000000 * yearsToTest)
+window() => time >= start and time <= timenow ? true : false
+
+if (difference >= minDiff)
+    strategy.entry("My Long Entry Id", strategy.long, when=strategy.position_size == 0 and window())
+
+if (difference <= 0 and difference <= (crossoverTolerance * -1))
+    strategy.close("My Long Entry Id")
+
+View in Pine Editor・22 lines
+Use on chart
+1
+8
+7
+3
+14 029
+During experiments with the market, I found out that simple strategy is the best solution. However, I decided to bring some of my ideas on the 2 MA strategy.
+- Instead of SMA - there will be 2 EMA, so the strategy will be more sensitive to the latest data;
+- There is an option, which regulates the difference between those 2 EMAs, this should protect us from false trend enter;
+- There is an option "Exit tolerance", which regulates how much could be the difference between 2 EMAs after crossover. This supposed to protect us from the false trend exit.
+
+Hope this will be helpful :)

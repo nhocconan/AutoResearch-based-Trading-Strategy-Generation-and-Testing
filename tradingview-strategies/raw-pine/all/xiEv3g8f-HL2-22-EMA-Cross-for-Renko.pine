@@ -1,0 +1,49 @@
+//@version=3
+strategy("HL2 - 22 Cross", overlay=true, max_bars_back=4000, default_qty_value=50000)
+
+// Stops and Profit inputs
+inpTakeProfit   = input(defval = 300, title = "Take Profit", minval = 0)
+inpStopLoss     = input(defval = 200, title = "Stop Loss", minval = 0)
+inpTrailStop    = input(defval = 200, title = "Trailing Stop", minval = 0)
+inpTrailOffset  = input(defval = 0, title = "Trailing Stop Offset", minval = 0)
+
+// Stops and Profit Targets
+useTakeProfit   = inpTakeProfit  >= 1 ? inpTakeProfit  : na
+useStopLoss     = inpStopLoss    >= 1 ? inpStopLoss    : na
+useTrailStop    = inpTrailStop   >= 1 ? inpTrailStop   : na
+useTrailOffset  = inpTrailOffset >= 1 ? inpTrailOffset : na
+
+//Specific Time to Trade
+myspecifictradingtimes = input('0500-1600', type=session, title="My Defined Hours")
+
+longCondition1 = crossover(close, ema(hl2, 22))
+longCondition2 = time(period, myspecifictradingtimes) != 0
+if longCondition1 and longCondition2
+    strategy.entry("Long", strategy.long, comment="LongEntry")
+
+shortCondition1 = crossunder(close, ema(hl2, 22))
+shortCondition2 = time(period, myspecifictradingtimes) != 0
+if shortCondition1 and shortCondition2
+    strategy.entry("Short", strategy.short, comment="ShortEntry")
+
+strategy.exit("Exit Long", from_entry = "Long", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+strategy.exit("Exit Short", from_entry = "Short", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+
+View in Pine Editor・30 lines
+Use on chart
+3
+0
+3
+4
+12 660
+EURUSD
+
+This is a simple strategy to use for those who like Renko bars. I ONLY use it on Renko.
+
+Basic idea is that when the Renko bar closes above or below the 22 EMA, you go long or short.
+
+However, some of the frustrations I've had with any strategy shared in Tradingview is so few folks put in the ability to set a stop or a profit target or the ability to set a specific time to trade. I have added those to this strategy. (And I for the life of me can not remember where I got the code for the the time, I need to find you!).
+
+Special note: If you have never used the Renko bars in Tradingview, make sure you click the Format option next to whatever pair you are looking at and change it from Traditional to ATR. You can set it for a static pip amount if you want. But ATR at first will help you decide which amount of pips you should throw in.
+
+This is my first published strategy so if I screwed up on anything or didn't explain it very well, please let me know!!

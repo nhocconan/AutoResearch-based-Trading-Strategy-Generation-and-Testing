@@ -1,0 +1,27 @@
+{
+  "slug": "ultimate-t3-fibonacci-btc-scalping",
+  "chart_url": "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/",
+  "name": "Ultimate T3 Fibonacci for BTC Scalping. Look at backtest report!",
+  "pine_file": "raw-pine/bulk/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report.pine",
+  "classification": "partial",
+  "strategy_name": "ultimate-t3-fibonacci-btc-scalping",
+  "timeframe": "30m",
+  "reason": "Uses strategy.exit with limit/stop requiring intrabar fill approximation in Python; custom T3 function needs manual implementation",
+  "adaptations": [
+    "Approximate strategy.exit limit/stop using bar High/Low",
+    "Implement custom T3 indicator calculation",
+    "Track position average price manually for dynamic TP/SL"
+  ],
+  "queue_rank": 27,
+  "updated_at": "2026-03-22T08:18:33.374525+00:00",
+  "conversion_notes": [
+    "Implemented custom T3 indicator using numpy loops for EMA cascades.",
+    "Approximated strategy.exit TP/SL using bar High/Low checks within stateful loop.",
+    "Signals returned as numpy array matching input prices length.",
+    "Module-level name, timeframe, and leverage variables defined.",
+    "Date range filtering omitted for general reusability."
+  ],
+  "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py",
+  "repair_attempts_used": 0,
+  "import_ok": true
+}

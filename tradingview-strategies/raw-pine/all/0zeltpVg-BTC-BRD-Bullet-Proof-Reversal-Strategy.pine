@@ -1,0 +1,80 @@
+//@version=5
+strategy("BTC BRD – Bullet-Proof Reversal Strategy", overlay=true, max_labels_count=500)
+
+// ——— USER INPUTS ———
+rr      = input.float(2, title="Risk-Reward Ratio", minval=0.5)
+sl_type = input.string("ATR", title="Stop Loss Type", options=["ATR", "Percent"])
+atr_mult= input.float(1.5, title="ATR Multiplier", minval=0.5)
+sl_pct  = input.float(2, title="Stop Loss Percent", minval=0.5)
+atr_len = input.int(14, title="ATR Length")
+
+len = 4
+
+pivotLow  = low[len] == ta.lowest(low, len * 2 + 1)
+pivotHigh = high[len] == ta.highest(high, len * 2 + 1)
+
+var float lastLow  = na
+var float lastHigh = na
+
+if pivotLow
+    lastLow := low[len]
+
+if pivotHigh
+    lastHigh := high[len]
+
+// ——— Market Structure Shift ———
+bullHL = pivotLow and lastLow < nz(lastLow[1])
+bullBOS = close > nz(lastHigh[1])
+finalLong = bullHL and bullBOS
+
+bearLH = pivotHigh and lastHigh > nz(lastHigh[1])
+bearBOS = close < nz(lastLow[1])
+finalShort = bearLH and bearBOS
+
+plotshape(finalLong, title="Bull Reversal", style=shape.triangleup,
+     color=color.new(color.green, 0), location=location.belowbar, size=size.large)
+plotshape(finalShort, title="Bear Reversal", style=shape.triangledown,
+     color=color.new(color.red, 0), location=location.abovebar, size=size.large)
+
+// ——— ATR and Stop Loss / Take Profit Calculation ———
+atr_val = ta.atr(atr_len)
+
+long_sl = sl_type == "ATR" ? close - atr_val * atr_mult : close * (1 - sl_pct / 100)
+long_tp = close + (close - long_sl) * rr
+
+short_sl = sl_type == "ATR" ? close + atr_val * atr_mult : close * (1 + sl_pct / 100)
+short_tp = close - (short_sl - close) * rr
+
+// ——— Entries and Exits ———
+if finalLong
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=long_sl, limit=long_tp)
+
+if finalShort
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=short_sl, limit=short_tp)
+
+View in Pine Editor・55 lines
+Use on chart
+1
+9
+652
+BTC BRD – Bullet-Proof Reversal Strategy is a price-action based reversal system that turns your existing “Bullet-Proof Reversal Detector” into a fully backtestable TradingView strategy with built-in risk management. It is designed to catch clean swing reversals using pure market structure, then automatically place stop-loss and take-profit orders based on your preferred risk-reward settings.
+
+## Core concept
+
+The strategy identifies true swing highs and lows using pivots and then waits for a clear market structure shift before entering any trade. It looks for a higher low followed by a break of structure for longs, and a lower high followed by a break of structure for shorts, helping filter out many random spikes and fakeouts. This makes it suitable for traders who prefer clean, rule-based entries grounded in market structure rather than noisy, indicator-heavy setups.
+
+## Entries and exits
+
+- Long trades are triggered after a bullish higher-low plus a confirmed break above the last swing high.
+- Short trades are triggered after a bearish lower-high plus a confirmed break below the last swing low.
+- Every position is protected with an automatic stop-loss and a calculated take-profit, so each trade has a predefined risk and reward from the moment it is opened.
+
+## Risk management
+
+The strategy lets you control your risk with a configurable risk-reward ratio (RR) and flexible stop-loss options. You can choose between an ATR-based stop (ATR × multiplier) or a fixed percentage stop relative to the entry price. Once the stop distance is known, the take-profit level is automatically derived from your RR value, making trade sizing and evaluation more consistent across different pairs and timeframes.
+
+## Use cases and recommendations
+
+This script is ideal for swing and intraday traders who want to systematically test market-structure reversals on assets like Bitcoin or other volatile instruments. For best results, experiment with different timeframes and ATR/percentage settings, and always validate performance using the Strategy Tester before deploying it on live markets. Remember that no strategy is guaranteed to be profitable, so use proper risk management and adapt settings to your own style and risk tolerance.

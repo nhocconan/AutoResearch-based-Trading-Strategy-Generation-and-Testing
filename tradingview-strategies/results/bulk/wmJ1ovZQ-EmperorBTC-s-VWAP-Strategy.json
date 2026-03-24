@@ -1,0 +1,11 @@
+{
+  "chart_url": "https://www.tradingview.com/script/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy/",
+  "name": "EmperorBTC's VWAP Strategy",
+  "pine_file": "raw-pine/bulk/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy.pine",
+  "classification": "unsupported",
+  "timeframe": "5m",
+  "strategy_name": "wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy",
+  "reason": "uses higher-timeframe lookahead_on",
+  "adaptations": [],
+  "python_code": ""
+}

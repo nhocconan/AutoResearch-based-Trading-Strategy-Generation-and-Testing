@@ -1,0 +1,156 @@
+//@version=5
+strategy("Buy&Hold Profitcalculator in Euro", 
+     overlay=true, 
+     initial_capital=1000, 
+     default_qty_type=strategy.cash)
+
+// === Eingabe für Investitionskapital ===
+investAmountEUR = input.float(300, "Investiertes Kapital in €")
+
+// === Eingaben für Start- und Endzeit ===
+startYear  = input.int(2020, "Startjahr")
+startMonth = input.int(1, "Startmonat")
+startDay   = input.int(1, "Starttag")
+startHour  = input.int(0, "Startstunde")
+startMin   = input.int(0, "Startminute")
+
+endYear  = input.int(2025, "Endjahr")
+endMonth = input.int(10, "Endmonat")
+endDay   = input.int(27, "Endtag")
+endHour   = input.int(23, "Endstunde")
+endMin    = input.int(59, "Endminute")
+
+// === Zeitstempel ===
+startTime = timestamp(startYear, startMonth, startDay, startHour, startMin)
+endTime   = timestamp(endYear, endMonth, endDay, endHour, endMin)
+
+// === Variablen initialisieren ===
+var bool positionOpened = false
+var bool positionClosed = false
+var float positionValueEUR = na
+var float profitEUR = na
+var float returnPct = na
+var float btcAmount = na
+var label endLabel = na
+
+// === Einstieg EINMAL ===
+if not positionOpened and time >= startTime and time < endTime
+    btcAmount := investAmountEUR / close
+    strategy.entry("Long", strategy.long, qty=btcAmount)
+    positionOpened := true
+
+// === Ausstieg EINMAL ===
+if positionOpened and not positionClosed and time >= endTime
+    // Endwert berechnen
+    positionValueEUR := btcAmount * close
+    profitEUR := positionValueEUR - investAmountEUR
+    returnPct := profitEUR / investAmountEUR * 100
+
+    strategy.close("Long")
+    positionClosed := true
+
+// === Label nach Exit erzeugen ===
+if positionClosed and na(endLabel)
+    atrValue = ta.atr(14)
+    lookback = 100
+    highestRecent = ta.highest(high, lookback)
+    lowestRecent  = ta.lowest(low, lookback)
+    priceRange = highestRecent - lowestRecent
+    showBelow = (highestRecent - high) < (priceRange * 0.05)
+    yOffset = atrValue * 1.5
+    labelText = "Endwert: " + str.tostring(positionValueEUR, "#.##") + " €\nGewinn/Verlust: " + str.tostring(profitEUR, "#.##") + " €\nRendite: " + str.tostring(returnPct, "#.##") + " %"
+    endLabel := label.new(bar_index, showBelow ? low - yOffset : high + yOffset, labelText, 
+                          style=showBelow ? label.style_label_up : label.style_label_down, 
+                          color=showBelow ? color.new(color.orange, 0) : color.new(color.blue, 0), 
+                          textcolor=color.white, 
+                          size=size.normal, 
+                          yloc=showBelow ? yloc.belowbar : yloc.abovebar)
+
+// === Visualisierung ===
+plot(positionValueEUR, color=color.new(color.blue, 0), title="Positionswert in €")
+plot(profitEUR, color=color.new(color.orange, 0), title="Gewinn/Verlust in €")
+bgcolor(time >= startTime and time <= endTime ? color.new(color.green, 85) : na)
+plotshape(time == startTime, title="Start", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="BUY")
+plotshape(time == endTime, title="Ende", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+
+View in Pine Editor・74 lines
+Use on chart
+1
+3
+792
+Nov 2, 2025
+Title: Buy & Hold Strategy in Euro
+
+Description:
+This Pine Script implements a simple yet flexible Buy & Hold strategy denominated in Euros, suitable for a wide range of assets including cryptocurrencies, forex pairs, and stocks.
+
+Key Features:
+
+Custom Investment Amount: Define your invested capital in Euros.
+
+Flexible Start & End Dates: Specify exact entry and exit dates for the strategy.
+
+Automatic Currency Conversion: Supports assets priced in USD or USDT, converting the invested capital to chart currency using the EUR/USD exchange rate.
+
+Single Entry and Exit: Executes a one-time Buy & Hold position based on the defined timeframe.
+
+Profit and Performance Tracking: Calculates total profit/loss in Euros and percentage returns.
+
+Smart Exit Label: Displays a dynamic label at the exit showing final position value, net profit/loss, and return percentage. The label automatically adjusts its position above or below the price bar for optimal visibility.
+
+Visual Enhancements:
+
+Position value and profit/loss plotted on the chart.
+
+Background color highlights the active investment period.
+
+Buy and Sell markers clearly indicate entry and exit points.
+
+This strategy is ideal for traders and investors looking to simulate long-term positions and evaluate performance in Euro terms, even when trading USD-denominated assets.
+
+Usage Notes:
+
+Best used on daily charts for medium- to long-term analysis.
+
+Adjust start and end dates, as well as invested capital, to simulate different scenarios.
+
+Works with any asset, but currency conversion is optimized for USD or USDT-pegged instruments.
+Nov 2, 2025
+Release Notes
+
+Title: Buy & Hold Strategy in Euro
+
+Description:
+This Pine Script implements a simple yet flexible Buy & Hold strategy denominated in Euros, suitable for a wide range of assets including cryptocurrencies, forex pairs, and stocks.
+
+Key Features:
+
+Custom Investment Amount: Define your invested capital in Euros.
+
+Flexible Start & End Dates: Specify exact entry and exit dates for the strategy.
+
+Automatic Currency Conversion: Supports assets priced in USD or USDT, converting the invested capital to chart currency using the EUR/USD exchange rate.
+
+Single Entry and Exit: Executes a one-time Buy & Hold position based on the defined timeframe.
+
+Profit and Performance Tracking: Calculates total profit/loss in Euros and percentage returns.
+
+Smart Exit Label: Displays a dynamic label at the exit showing final position value, net profit/loss, and return percentage. The label automatically adjusts its position above or below the price bar for optimal visibility.
+
+Visual Enhancements:
+
+Position value and profit/loss plotted on the chart.
+
+Background color highlights the active investment period.
+
+Buy and Sell markers clearly indicate entry and exit points.
+
+This strategy is ideal for traders and investors looking to simulate long-term positions and evaluate performance in Euro terms, even when trading USD-denominated assets.
+
+Usage Notes:
+
+Best used on daily charts for medium- to long-term analysis.
+
+Adjust start and end dates, as well as invested capital, to simulate different scenarios.
+
+Works with any asset, but currency conversion is optimized for USD or USDT-pegged instruments.

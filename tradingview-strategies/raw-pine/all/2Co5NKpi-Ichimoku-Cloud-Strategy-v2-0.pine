@@ -1,0 +1,62 @@
+//@version=4
+strategy("Ichimoku Cloud Strategy v2.0", overlay=true)
+
+//@version=4
+// study(title="Ichimoku Cloud", shorttitle="Ichimoku", overlay=true)
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(26, minval=1, title="Displacement")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+plot(conversionLine, color=#0496ff, title="Conversion Line")
+plot(baseLine, color=#991515, title="Base Line")
+plot(close, offset = -displacement + 1, color=#459915, title="Lagging Span")
+
+p1 = plot(leadLine1, offset = displacement - 1, color=color.green,
+ title="Lead 1")
+p2 = plot(leadLine2, offset = displacement - 1, color=color.red, 
+ title="Lead 2")
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.green : color.red)
+
+// Strategy
+
+
+longCondition = crossover(conversionLine,baseLine)
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+shortCondition = crossover(baseLine, conversionLine)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+View in Pine Editor・41 lines
+Use on chart
+1
+2
+3
+4 207
+Trend following trading strategy “Ichimoku Crossover” is a popular Ichimoku trading strategy that uses the cloud and crossover of two base lines to define the market reverse point. Ichimoku crossover trading strategy has appeared to be a profitable trading strategy.
+
+
+The indicator has 5 base lines and to read Ichimoku indicator it is required to understand the meaning of these lines first of all:
+Tenkan-Sen line, also called the Conversion Line, represents the midpoint of the last 9 candlesticks . It is calculated with the following Ichimoku formula: .
+Kijun-Sen line, also called the Base Line, represents the midpoint of the last 26 candlesticks . It is calculated with the following formula: .
+Chiou Span, also called the Lagging Span, lags behind the price (as the name suggests). The Lagging Span is plotted 26 periods back.
+Senkou Span A, also called the Leading Span A, represents one of the two Cloud boundaries and it’s the midpoint between the Conversion Line and the Base Line: . This value is plotted 26 periods into the future and it’s the faster Cloud boundary.
+Senkou Span B, or the Leading Span B, represents the second Cloud boundaries and it’s the midpoint of the last 52 price bars: . This value is plotted 52 periods into the future and it is the slower Cloud boundary.
+
+Trading with Ichimoku is very simple.
+
+
+
+The Conversion Line needs to break above the Base Line. This will be a buy signal.
+
+For a bearish (sell) signal a trader should wait for the Conversion line crosses the Base line downwards it is a sell signal.
+

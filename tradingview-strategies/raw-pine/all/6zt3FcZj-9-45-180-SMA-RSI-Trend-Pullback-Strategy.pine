@@ -1,0 +1,98 @@
+//@version=5
+strategy("9/45/180 SMA + RSI Trend Pullback Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Inputs
+smaFastLen   = input.int(9, "Fast SMA")
+smaMidLen    = input.int(45, "Medium SMA")
+smaLongLen   = input.int(180, "Long SMA")
+rsiLen       = input.int(14, "RSI Length")
+rsiBullLevel = input.int(50, "Bullish RSI Level")
+rsiBearLevel = input.int(50, "Bearish RSI Level")
+rrRatio      = input.float(2.0, "Risk Reward Ratio", step=0.1)
+swingBars    = input.int(5, "Swing Lookback for Stop Loss")
+
+// Indicators
+smaFast = ta.sma(close, smaFastLen)
+smaMid  = ta.sma(close, smaMidLen)
+smaLong = ta.sma(close, smaLongLen)
+rsiVal  = ta.rsi(close, rsiLen)
+
+// Plot SMAs
+plot(smaFast, title="9 SMA", linewidth=2)
+plot(smaMid, title="45 SMA", linewidth=2)
+plot(smaLong, title="180 SMA", linewidth=2)
+
+// Trend conditions
+bullTrend = close > smaLong and close > smaMid
+bearTrend = close < smaLong and close < smaMid
+
+// Pullback conditions
+pullbackBuy  = low <= smaMid
+pullbackSell = high >= smaMid
+
+// Entry trigger
+buyTrigger  = close > smaFast and close > open
+sellTrigger = close < smaFast and close < open
+
+// RSI confirmation
+rsiBuyConfirm  = rsiVal >= rsiBullLevel
+rsiSellConfirm = rsiVal <= rsiBearLevel
+
+// Market structure filter
+upStructure   = smaFast > smaMid and smaMid > smaLong
+downStructure = smaFast < smaMid and smaMid < smaLong
+
+// Final entry conditions
+buyCondition  = bullTrend and upStructure and pullbackBuy and buyTrigger and rsiBuyConfirm
+sellCondition = bearTrend and downStructure and pullbackSell and sellTrigger and rsiSellConfirm
+
+// Stop loss and take profit based on recent swing
+longStop  = ta.lowest(low, swingBars)
+shortStop = ta.highest(high, swingBars)
+
+longRisk  = close - longStop
+shortRisk = shortStop - close
+
+longTarget  = close + (longRisk * rrRatio)
+shortTarget = close - (shortRisk * rrRatio)
+
+// Entries
+if buyCondition and longRisk > 0
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("Buy Exit", from_entry="Buy", stop=longStop, limit=longTarget)
+
+if sellCondition and shortRisk > 0
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("Sell Exit", from_entry="Sell", stop=shortStop, limit=shortTarget)
+
+// Plot signals
+plotshape(buyCondition, title="Buy Signal", location=location.belowbar, style=shape.labelup, text="BUY", size=size.small)
+plotshape(sellCondition, title="Sell Signal", location=location.abovebar, style=shape.labeldown, text="SELL", size=size.small)
+
+// Alerts
+alertcondition(buyCondition, title="Buy Alert", message="Buy setup confirmed")
+alertcondition(sellCondition, title="Sell Alert", message="Sell setup confirmed")
+alertcondition(ta.crossover(close, smaLong), title="Bullish Bias", message="Price crossed above 180 SMA")
+alertcondition(ta.crossunder(close, smaLong), title="Bearish Bias", message="Price crossed below 180 SMA")
+
+View in Pine Editor・76 lines
+Use on chart
+6
+220
+Below is a clean Pine Script strategy for TradingView based on the system we discussed:
+
+It uses:
+
+9 SMA
+
+45 SMA
+
+180 SMA
+
+RSI 14
+
+Buy/Sell signals
+
+Basic backtesting
+
+Alert conditions

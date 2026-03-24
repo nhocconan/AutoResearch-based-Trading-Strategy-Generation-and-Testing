@@ -1,0 +1,326 @@
+//@version=5
+strategy("Capitulation Detector Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ============================================================================
+// STRATEGY INPUTS
+// ============================================================================
+// Entry Settings
+minScore        = input.int(4, "Minimum Score for Entry", minval=2, maxval=6, group="Strategy Settings", tooltip="Total factors that must align (max 6)")
+requireVolSpike = input.bool(true, "Require Volume Spike for Entry", group="Strategy Settings")
+
+// Exit Settings
+useStopLoss     = input.bool(true, "Use Stop Loss", group="Exit Settings")
+stopLossATR     = input.float(2.0, "Stop Loss (ATR)", minval=0.5, maxval=5.0, step=0.1, group="Exit Settings")
+useTakeProfit   = input.bool(true, "Use Take Profit", group="Exit Settings")
+takeProfitATR   = input.float(3.0, "Take Profit (ATR)", minval=1.0, maxval=10.0, step=0.5, group="Exit Settings")
+useTrailingStop = input.bool(false, "Use Trailing Stop", group="Exit Settings")
+trailATR        = input.float(1.5, "Trailing Stop (ATR)", minval=0.5, maxval=5.0, step=0.1, group="Exit Settings")
+
+// Time Filter
+useTimeFilter   = input.bool(false, "Use Time Filter", group="Time Filter")
+startHour       = input.int(9, "Start Hour", minval=0, maxval=23, group="Time Filter")
+startMinute     = input.int(30, "Start Minute", minval=0, maxval=59, group="Time Filter")
+endHour         = input.int(15, "End Hour", minval=0, maxval=23, group="Time Filter")
+endMinute       = input.int(30, "End Minute", minval=0, maxval=59, group="Time Filter")
+
+// ============================================================================
+// INDICATOR INPUTS
+// ============================================================================
+// Trend Settings
+slowEmaLen      = input.int(38, "Slow EMA (Trend)", minval=10, maxval=100, group="Trend Settings")
+fastEmaLen      = input.int(5, "Fast EMA (Acceleration)", minval=3, maxval=20, group="Trend Settings")
+trendBarsMin    = input.int(12, "Min Bars on Trend Side (Slow EMA)", minval=5, maxval=50, group="Trend Settings")
+accelBarsMin    = input.int(3, "Min Bars on Accel Side (Fast EMA)", minval=2, maxval=10, group="Trend Settings")
+
+// Volume Settings  
+volAvgLen       = input.int(20, "Volume Average Length", minval=5, maxval=50, group="Volume Settings")
+volSpikeMulti   = input.float(2.0, "Volume Spike Multiplier", minval=1.2, maxval=5.0, step=0.1, group="Volume Settings")
+
+// Candle Settings
+bodyExpLen      = input.int(10, "Body Expansion Lookback", minval=5, maxval=30, group="Candle Settings")
+bodyExpMulti    = input.float(1.5, "Body Expansion Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Candle Settings")
+
+// Extension Settings
+extensionLen    = input.int(20, "Extension Lookback (ATR)", minval=5, maxval=50, group="Extension Settings")
+extensionMulti  = input.float(2.0, "Extension ATR Multiplier", minval=1.0, maxval=5.0, step=0.1, group="Extension Settings")
+
+// Visual
+showTable       = input.bool(true, "Show Score Table", group="Visual")
+showEMAs        = input.bool(true, "Show EMAs", group="Visual")
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+slowEma = ta.ema(close, slowEmaLen)
+fastEma = ta.ema(close, fastEmaLen)
+atr = ta.atr(extensionLen)
+volAvg = ta.sma(volume, volAvgLen)
+bodySize = math.abs(close - open)
+avgBody = ta.sma(bodySize, bodyExpLen)
+
+// ============================================================================
+// FACTOR 1: TREND PERSISTENCE
+// ============================================================================
+barsAboveSlowEma = ta.barssince(close < slowEma)
+barsBelowSlowEma = ta.barssince(close > slowEma)
+bullishTrendPersist = barsBelowSlowEma >= trendBarsMin
+bearishTrendPersist = barsAboveSlowEma >= trendBarsMin
+
+// ============================================================================
+// FACTOR 2: ACCELERATION
+// ============================================================================
+barsAboveFastEma = ta.barssince(close < fastEma)
+barsBelowFastEma = ta.barssince(close > fastEma)
+bullishAccel = barsBelowFastEma >= accelBarsMin and bullishTrendPersist
+bearishAccel = barsAboveFastEma >= accelBarsMin and bearishTrendPersist
+
+// ============================================================================
+// FACTOR 3: VOLUME SPIKE
+// ============================================================================
+volumeSpike = volume >= (volAvg * volSpikeMulti)
+volRatio = volume / volAvg
+
+// ============================================================================
+// FACTOR 4: BODY EXPANSION
+// ============================================================================
+bodyExpanded = bodySize >= (avgBody * bodyExpMulti)
+bodyRatio = bodySize / avgBody
+expandingBodies = bodySize > bodySize[1] and bodySize[1] > bodySize[2]
+
+// ============================================================================
+// FACTOR 5: EXTENSION FROM MEAN
+// ============================================================================
+distFromSlowEma = close - slowEma
+extensionATRs = math.abs(distFromSlowEma) / atr
+bullishExtension = distFromSlowEma < 0 and extensionATRs >= extensionMulti
+bearishExtension = distFromSlowEma > 0 and extensionATRs >= extensionMulti
+
+// ============================================================================
+// FACTOR 6: MULTIPLE LEGS
+// ============================================================================
+swingLow = low < low[1] and low < low[2] and low[1] < low[2] and low[1] < low[3]
+swingHigh = high > high[1] and high > high[2] and high[1] > high[2] and high[1] > high[3]
+
+var int lowerLowCount = 0
+var int higherHighCount = 0
+var float lastSwingLow = na
+var float lastSwingHigh = na
+
+if swingLow
+    if na(lastSwingLow) or low < lastSwingLow
+        lowerLowCount := lowerLowCount + 1
+        lastSwingLow := low
+    else
+        lowerLowCount := 1
+        lastSwingLow := low
+
+if swingHigh
+    if na(lastSwingHigh) or high > lastSwingHigh
+        higherHighCount := higherHighCount + 1
+        lastSwingHigh := high
+    else
+        higherHighCount := 1
+        lastSwingHigh := high
+
+if ta.crossover(close, slowEma)
+    lowerLowCount := 0
+    lastSwingLow := na
+    
+if ta.crossunder(close, slowEma)
+    higherHighCount := 0
+    lastSwingHigh := na
+
+multiLegBull = lowerLowCount >= 3
+multiLegBear = higherHighCount >= 3
+
+// ============================================================================
+// COMPOSITE SCORE
+// ============================================================================
+bullFactors = (bullishTrendPersist ? 1 : 0) + (bullishAccel ? 1 : 0) + (volumeSpike ? 1 : 0) + (bodyExpanded ? 1 : 0) + (bullishExtension ? 1 : 0) + (multiLegBull ? 1 : 0)
+bearFactors = (bearishTrendPersist ? 1 : 0) + (bearishAccel ? 1 : 0) + (volumeSpike ? 1 : 0) + (bodyExpanded ? 1 : 0) + (bearishExtension ? 1 : 0) + (multiLegBear ? 1 : 0)
+
+// ============================================================================
+// TIME FILTER
+// ============================================================================
+currentTime = hour * 60 + minute
+startTime = startHour * 60 + startMinute
+endTime = endHour * 60 + endMinute
+inTimeWindow = not useTimeFilter or (currentTime >= startTime and currentTime <= endTime)
+
+// ============================================================================
+// ENTRY SIGNALS
+// ============================================================================
+volCondition = requireVolSpike ? volumeSpike : true
+
+bullSignal = bullFactors >= minScore and close < open and volCondition and close < slowEma and inTimeWindow
+bearSignal = bearFactors >= minScore and close > open and volCondition and close > slowEma and inTimeWindow
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+// Calculate stop and target levels
+longStop = close - (atr * stopLossATR)
+longTarget = close + (atr * takeProfitATR)
+shortStop = close + (atr * stopLossATR)
+shortTarget = close - (atr * takeProfitATR)
+
+// Long Entry
+if bullSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    if useStopLoss and useTakeProfit
+        strategy.exit("Long Exit", "Long", stop=longStop, limit=longTarget)
+    else if useStopLoss
+        strategy.exit("Long SL", "Long", stop=longStop)
+    else if useTakeProfit
+        strategy.exit("Long TP", "Long", limit=longTarget)
+
+// Short Entry
+if bearSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    if useStopLoss and useTakeProfit
+        strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortTarget)
+    else if useStopLoss
+        strategy.exit("Short SL", "Short", stop=shortStop)
+    else if useTakeProfit
+        strategy.exit("Short TP", "Short", limit=shortTarget)
+
+// Trailing Stop (if enabled)
+if useTrailingStop and strategy.position_size != 0
+    trailOffset = atr * trailATR
+    if strategy.position_size > 0
+        strategy.exit("Trail Long", "Long", trail_points=trailOffset, trail_offset=trailOffset)
+    else
+        strategy.exit("Trail Short", "Short", trail_points=trailOffset, trail_offset=trailOffset)
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+plot(showEMAs ? slowEma : na, "Slow EMA", color=color.new(color.orange, 30), linewidth=2)
+plot(showEMAs ? fastEma : na, "Fast EMA", color=color.new(color.blue, 50), linewidth=1)
+
+plotshape(bullSignal, "Bullish Capitulation", shape.labelup, location.belowbar, color.new(color.green, 20), text="CAP", textcolor=color.white, size=size.small)
+plotshape(bearSignal, "Bearish Capitulation", shape.labeldown, location.abovebar, color.new(color.red, 20), text="CAP", textcolor=color.white, size=size.small)
+
+bgcolor(bullSignal ? color.new(color.green, 85) : bearSignal ? color.new(color.red, 85) : na)
+
+// ============================================================================
+// INFO TABLE
+// ============================================================================
+var table infoTable = table.new(position.top_right, 3, 9, bgcolor=color.new(color.black, 80))
+
+if barstate.islast and showTable
+    table.cell(infoTable, 0, 0, "CAPITULATION", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "BULL", text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 2, 0, "BEAR", text_color=color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 1, "Trend Persist", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, bullishTrendPersist ? "✓ " + str.tostring(barsBelowSlowEma) + " bars" : "✗", text_color=bullishTrendPersist ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 1, bearishTrendPersist ? "✓ " + str.tostring(barsAboveSlowEma) + " bars" : "✗", text_color=bearishTrendPersist ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 2, "Acceleration", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, bullishAccel ? "✓ " + str.tostring(barsBelowFastEma) + " bars" : "✗", text_color=bullishAccel ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 2, bearishAccel ? "✓ " + str.tostring(barsAboveFastEma) + " bars" : "✗", text_color=bearishAccel ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 3, "Volume Spike", text_color=color.gray, text_size=size.tiny)
+    volText = str.tostring(volRatio, "#.#") + "x"
+    table.cell(infoTable, 1, 3, volumeSpike ? "✓ " + volText : volText, text_color=volumeSpike ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 3, volumeSpike ? "✓ " + volText : volText, text_color=volumeSpike ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 4, "Body Expand", text_color=color.gray, text_size=size.tiny)
+    bodyText = str.tostring(bodyRatio, "#.#") + "x"
+    table.cell(infoTable, 1, 4, bodyExpanded ? "✓ " + bodyText : bodyText, text_color=bodyExpanded ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 4, bodyExpanded ? "✓ " + bodyText : bodyText, text_color=bodyExpanded ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 5, "Extension", text_color=color.gray, text_size=size.tiny)
+    extText = str.tostring(extensionATRs, "#.#") + " ATR"
+    table.cell(infoTable, 1, 5, bullishExtension ? "✓ " + extText : extText, text_color=bullishExtension ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 5, bearishExtension ? "✓ " + extText : extText, text_color=bearishExtension ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 6, "Multi-Leg", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, str.tostring(lowerLowCount) + " legs" + (multiLegBull ? " ✓" : ""), text_color=multiLegBull ? color.green : color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 6, str.tostring(higherHighCount) + " legs" + (multiLegBear ? " ✓" : ""), text_color=multiLegBear ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 2, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 8, "SCORE", text_color=color.white, text_size=size.tiny)
+    bullScoreColor = bullFactors >= minScore ? color.green : color.gray
+    bearScoreColor = bearFactors >= minScore ? color.red : color.gray
+    table.cell(infoTable, 1, 8, str.tostring(bullFactors) + "/6", text_color=bullScoreColor, text_size=size.tiny)
+    table.cell(infoTable, 2, 8, str.tostring(bearFactors) + "/6", text_color=bearScoreColor, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(bullSignal, "Bullish Capitulation", "🟢 BULLISH CAPITULATION - Long entry")
+alertcondition(bearSignal, "Bearish Capitulation", "🔴 BEARISH CAPITULATION - Short entry")
+
+View in Pine Editor・260 lines
+Use on chart
+1
+2
+623
+A multi-factor capitulation detector designed to identify exhaustion points in extended trends. It focuses on fading capitulation moves after multi-leg trends with extreme volume and price extension.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE CONCEPT
+Capitulation occurs when the last holders give up — panic selling into lows or euphoric buying into highs. These moments create asymmetric opportunities because:
+
+Sentiment becomes maximally skewed
+Weak hands are flushed out
+Price deviates far from equilibrium
+The "fuel" for continuation is exhausted
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE 6 FACTORS
+
+Trend Persistence — Price stays on one side of 38 EMA for 12+ bars, confirming a sustained directional move
+Acceleration — Price stays on one side of 5 EMA for 3+ bars, showing the move is accelerating into exhaustion
+Volume Spike — Current bar volume ≥ 2x the 20-bar average
+Body Expansion — Candle body ≥ 1.5x average, showing conviction/panic in the move
+Extension — Price is 2+ ATR away from the 38 EMA, indicating overextension from equilibrium
+Multi-Leg Structure — At least 3 consecutive lower lows (for longs) or higher highs (for shorts)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL LOGIC
+
+Bullish Capitulation: 4+ factors align + price below 38 EMA + down candle + volume spike
+Bearish Capitulation: 4+ factors align + price above 38 EMA + up candle + volume spike
+
+The strategy enters counter-trend, fading the exhaustion move.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXIT OPTIONS
+
+ATR-based stop loss (default: 2 ATR)
+ATR-based take profit (default: 3 ATR)
+Optional trailing stop
+Time filter for session-specific trading
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BEST PRACTICES
+
+Works best on liquid instruments with clean trends
+More reliable after 3+ legs in the trend
+Higher conviction when daily AND intraday timeframes align
+"The bigger and more extended, the better"
+Consider VWAP as additional confirmation (not coded here)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SETTINGS GUIDE
+
+Min Score: Increase for fewer, higher-quality signals
+Volume Spike Multiplier: 2x; increase for stricter filter
+Extension ATR: Higher values = more overextended setups only
+Trend Bars Min: Higher values = longer established trends required
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALERTS
+
+Bullish Capitulation (potential long)
+Bearish Capitulation (potential short)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DISCLAIMER
+This is a counter-trend strategy — inherently higher risk than trend-following. Always use proper position sizing and risk management. Backtest thoroughly on your specific instruments and timeframes.
+

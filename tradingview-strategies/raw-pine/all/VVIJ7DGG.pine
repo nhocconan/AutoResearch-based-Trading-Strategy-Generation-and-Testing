@@ -1,0 +1,66 @@
+//@version=5
+strategy("MA Crossover Buy Entry - Surachai Book", overlay=true)
+
+// --- 1. การตั้งค่า (Input Settings) ---
+// อ้างอิงบทที่ 6: การเลือกจำนวนวันที่ใช้คำนวณ (หน้า 62)
+shortLength = input.int(10, minval=1, title="เส้นค่าเฉลี่ยระยะสั้น (Short MA)")
+longLength = input.int(25, minval=1, title="เส้นค่าเฉลี่ยระยะยาว (Long MA)")
+maType = input.string("EMA", title="ประเภทค่าเฉลี่ย", options=["SMA", "EMA"])
+
+// --- 2. ฟังก์ชันคำนวณค่าเฉลี่ย (Calculation) ---
+// อ้างอิงหน้า 60-61: รูปแบบของค่าเฉลี่ยเคลื่อนที่ (SMA, EMA)
+getMA(source, len) =>
+    maType == "SMA" ? ta.sma(source, len) : ta.ema(source, len)
+
+// คำนวณเส้นค่าเฉลี่ยทั้งสอง
+maShort = getMA(close, shortLength)
+maLong = getMA(close, longLength)
+
+// --- 3. เงื่อนไขการเข้าซื้อ (Buy Condition) ---
+// อ้างอิงหน้า 59: สัญญาณซื้อเกิดขึ้นเมื่อเส้นสั้นตัดเส้นยาวจากล่างขึ้นบน
+buySignal = ta.crossover(maShort, maLong)
+
+// เงื่อนไขการขาย (เผื่อไว้สำหรับปิดสถานะ)
+// อ้างอิงหน้า 59: สัญญาณขายเกิดขึ้นเมื่อเส้นสั้นตัดเส้นยาวจากบนลงล่าง
+sellSignal = ta.crossunder(maShort, maLong)
+
+// --- 4. การส่งคำสั่งซื้อขาย (Execution) ---
+if (buySignal)
+    strategy.entry("Buy", strategy.long, comment="MA Cross Buy")
+
+if (sellSignal)
+    strategy.close("Buy", comment="MA Cross Sell")
+
+// --- 5. การแสดงผลบนกราฟ (Plotting) ---
+// วาดเส้นค่าเฉลี่ย
+plot(maShort, color=color.green, linewidth=2, title="Short MA")
+plot(maLong, color=color.red, linewidth=2, title="Long MA")
+
+// แสดงสัญลักษณ์จุดซื้อบนกราฟ
+plotshape(buySignal, style=shape.labelup, location=location.belowbar, color=color.green, size=size.small, title="Buy Signal", text="BUY")
+plotshape(sellSignal, style=shape.labeldown, location=location.abovebar, color=color.red, size=size.small, title="Sell Signal", text="SELL")
+
+// --- คำอธิบายเพิ่มเติมจากตำรา ---
+// หน้า 59: "สัญญาณซื้อ เกิดขึ้นเมื่อ... เส้นค่าเฉลี่ยเคลื่อนที่ที่มีระยะเวลาสั้นกว่าได้ตัดเส้นค่าเฉลี่ยเคลื่อนที่ที่มีระยะเวลายาวนานกว่า จากข้างล่างขึ้นข้างบน"
+
+View in Pine Editor・44 lines
+Use on chart
+2
+1
+864
+Here is the English translation for the alert setup instructions:
+
+**How to Set Up Alerts (After Adding the Code)**
+
+1. Click the **Add to chart** button to apply the indicator to your graph.
+2. Click the **Alarm Clock icon (Alerts)** on the top right toolbar of TradingView, or press `Alt + A`.
+3. In the **Condition** field:
+* Select the indicator named **"MA Crossover Buy Alert..."**
+* Select **"แจ้งเตือนซื้อ (Buy Alert)"** to receive only buy signals.
+
+
+4. In the **Trigger** (or Options) section: Select **Once per bar close**.
+*(This is recommended per the textbook to confirm that the closing price actually crossed the line, avoiding false signals during intraday volatility.)*
+5. Check **Notify on App** (for mobile) or **Show pop-up** as desired, then click **Create**.
+
+Now, when the moving averages cross according to the textbook's conditions, the system will send you an alert immediately!

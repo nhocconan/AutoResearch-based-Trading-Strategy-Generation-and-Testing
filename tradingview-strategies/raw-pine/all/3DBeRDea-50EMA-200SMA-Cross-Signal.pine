@@ -1,0 +1,24 @@
+//@version=2
+strategy("MovingAvg2Line Cross", overlay=true)
+fastLength = input(200)
+slowLength = input(50)
+price = close
+
+mafast = sma(price, fastLength)
+maslow = ema(price, slowLength)
+
+if (crossover(maslow, mafast))
+    strategy.entry("MA2CrossLE", strategy.long, comment="Buy")
+
+if (crossunder(maslow, mafast))
+    strategy.entry("MA2CrossSE", strategy.short, comment="Sell")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=3, style=line)
+
+View in Pine Editor・16 lines
+Use on chart
+2
+9
+1
+6 639
+Simple 50ema cross over/under 200sma to signal buy/sell, works better on Daily charts

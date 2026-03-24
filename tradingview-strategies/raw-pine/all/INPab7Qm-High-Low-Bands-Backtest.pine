@@ -1,0 +1,58 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 28/02/2018
+// As the name suggests, High low bands are two bands surrounding the underlying’s 
+// price. These bands are generated from the triangular moving averages calculated 
+// from the underlying’s price. The triangular moving average is, in turn, shifted 
+// up and down by a fixed percentage. The bands, thus formed, are termed as High 
+// low bands. The main theme and concept of High low bands is based upon the triangular 
+// moving average. 
+//
+// To fix do not correct to interpret a signal.
+//
+// You can change long to short in the Input Settings
+// WARNING:
+//  - For purpose educate only
+//  - This script to change bars colors.
+////////////////////////////////////////////////////////////
+strategy(title="High Low Bands", overlay = true)
+Length = input(14, minval=1)
+PercentShift = input(1, minval = 0.01, step = 0.01)
+reverse = input(false, title="Trade reverse")
+xTMA = sma(sma(close, Length), Length)
+xHighBand = xTMA + (xTMA * PercentShift / 100)
+xLowBand = xTMA - (xTMA * PercentShift / 100)
+pos = iff(close > xHighBand, 1,
+       iff(close <xLowBand, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue ) 
+plot(xTMA, color=blue, title="TMA")
+plot(xHighBand, color=red, title="High Band")
+plot(xLowBand, color=red, title="Low Band")
+
+View in Pine Editor・36 lines
+Use on chart
+8
+1
+3
+4 103
+Feb 27, 2018
+As the name suggests, High low bands are two bands surrounding the underlying’s
+price. These bands are generated from the triangular moving averages calculated
+from the underlying’s price. The triangular moving average is, in turn, shifted
+up and down by a fixed percentage. The bands, thus formed, are termed as High
+low bands. The main theme and concept of High low bands is based upon the triangular
+moving average.
+
+You can change long to short in the Input Settings
+WARNING:
+- For purpose educate only
+- This script to change bars colors.
+Feb 28, 2018
+Release Notes
+To fix do not correct to interpret a signal.

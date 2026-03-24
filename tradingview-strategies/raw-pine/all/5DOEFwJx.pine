@@ -1,0 +1,404 @@
+//@version=6
+strategy("EMA + Sessions + RSI Strategy v1.0", overlay=true, pyramiding=3, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ========================================
+// STRATEGY SETTINGS
+// ========================================
+// Trade Direction
+tradeDirection = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group="Strategy Settings")
+useSessionFilter = input.bool(false, "Use Session Filter", group="Strategy Settings")
+allowedSession = input.session("0800-1600", "Allowed Trading Session", group="Strategy Settings")
+
+// Position Sizing
+usePyramiding = input.bool(false, "Enable Pyramiding", group="Strategy Settings")
+maxPyramidPositions = input.int(3, "Max Pyramid Positions", minval=1, maxval=10, group="Strategy Settings")
+
+// ========================================
+// RISK MANAGEMENT
+// ========================================
+useStopLoss = input.bool(true, "Use Stop Loss", group="Risk Management")
+stopLossType = input.string("Fixed %", "Stop Loss Type", options=["Fixed %", "ATR", "Session Low/High", "EMA100 Cross"], group="Risk Management")
+stopLossPercent = input.float(1.0, "Stop Loss %", minval=0.1, maxval=10, step=0.1, group="Risk Management")
+atrMultiplier = input.float(1.5, "ATR Multiplier for SL", minval=0.5, maxval=5, step=0.1, group="Risk Management")
+atrLength = input.int(14, "ATR Length", minval=1, group="Risk Management")
+
+useTakeProfit = input.bool(true, "Use Take Profit", group="Risk Management")
+takeProfitType = input.string("Fixed %", "Take Profit Type", options=["Fixed %", "Risk/Reward"], group="Risk Management")
+takeProfitPercent = input.float(3.0, "Take Profit %", minval=0.1, maxval=20, step=0.1, group="Risk Management")
+riskRewardRatio = input.float(2.0, "Risk/Reward Ratio", minval=0.5, maxval=10, step=0.1, group="Risk Management")
+
+useTrailingStop = input.bool(false, "Use Trailing Stop", group="Risk Management")
+trailingStopType = input.string("ATR", "Trailing Stop Type", options=["Fixed %", "ATR"], group="Risk Management")
+trailingStopPercent = input.float(1.5, "Trailing Stop %", minval=0.1, maxval=10, step=0.1, group="Risk Management")
+trailingAtrMultiplier = input.float(1.0, "Trailing ATR Multiplier", minval=0.1, maxval=5, step=0.1, group="Risk Management")
+
+useBreakeven = input.bool(false, "Move to Breakeven", group="Risk Management")
+breakevenTrigger = input.float(1.0, "Breakeven Trigger (R)", minval=0.5, maxval=5, step=0.1, group="Risk Management")
+breakevenOffset = input.float(0.1, "Breakeven Offset %", minval=0, maxval=1, step=0.05, group="Risk Management")
+
+// ========================================
+// EMA SETTINGS
+// ========================================
+ema1Length = input.int(21, "EMA 1 Length", minval=1, group="EMA Settings")
+ema2Length = input.int(50, "EMA 2 Length", minval=1, group="EMA Settings")
+ema3Length = input.int(100, "EMA 3 Length", minval=1, group="EMA Settings")
+emaFilterLength = input.int(2, "EMA Filter Length", minval=2, group="EMA Settings")
+
+ema1Color = input.color(color.rgb(255, 235, 59, 50), "EMA 1 Color", group="EMA Settings")
+ema2Color = input.color(color.rgb(255, 115, 0, 50), "EMA 2 Color", group="EMA Settings")
+ema3Color = input.color(color.rgb(255, 0, 0, 50), "EMA 3 Color", group="EMA Settings")
+
+showEma1 = input.bool(true, "Show EMA 1", group="EMA Settings")
+showEma2 = input.bool(true, "Show EMA 2", group="EMA Settings")
+showEma3 = input.bool(true, "Show EMA 3", group="EMA Settings")
+
+// Trend Filter EMA
+useTrendFilter = input.bool(true, "Use Trend Filter EMA", group="EMA Settings")
+trendFilterLength = input.int(750, "Trend Filter EMA Length", minval=1, group="EMA Settings")
+trendFilterColor = input.color(color.rgb(128, 0, 128, 50), "Trend Filter Color", group="EMA Settings")
+showTrendFilter = input.bool(true, "Show Trend Filter EMA", group="EMA Settings")
+
+// ========================================
+// RSI SETTINGS
+// ========================================
+rsiLength = input.int(14, "RSI Length", minval=1, group="RSI Settings")
+rsiBullishLow = input.int(55, "Bullish Zone Low", minval=0, maxval=100, group="RSI Settings")
+rsiBullishHigh = input.int(70, "Bullish Zone High", minval=0, maxval=100, group="RSI Settings")
+rsiBearishLow = input.int(30, "Bearish Zone Low", minval=0, maxval=100, group="RSI Settings")
+rsiBearishHigh = input.int(45, "Bearish Zone High", minval=0, maxval=100, group="RSI Settings")
+
+// RSI Filters
+useRsiFilter = input.bool(true, "Use RSI Overbought/Oversold Filter", group="RSI Settings")
+rsiOverbought = input.int(80, "RSI Overbought (avoid longs)", minval=50, maxval=100, group="RSI Settings")
+rsiOversold = input.int(20, "RSI Oversold (avoid shorts)", minval=0, maxval=50, group="RSI Settings")
+
+// ========================================
+// CALCULATE INDICATORS
+// ========================================
+ema1 = ta.ema(close, ema1Length)
+ema2 = ta.ema(close, ema2Length)
+ema3 = ta.ema(close, ema3Length)
+emaFilter = ta.ema(close, emaFilterLength)
+trendFilterEma = ta.ema(close, trendFilterLength)
+rsiValue = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+
+// Plot EMAs
+plot(showEma1 ? ema1 : na, "EMA 21", ema1Color, 2)
+plot(showEma2 ? ema2 : na, "EMA 50", ema2Color, 2)
+plot(showEma3 ? ema3 : na, "EMA 100", ema3Color, 2)
+plot(showTrendFilter ? trendFilterEma : na, "Trend Filter EMA", trendFilterColor, 3)
+
+// ========================================
+// SIGNAL CONDITIONS
+// ========================================
+// EMA alignment
+emasLong = ema1 > ema2 and ema2 > ema3
+emasShort = ema1 < ema2 and ema2 < ema3
+
+// RSI conditions
+candleBullish = rsiValue >= rsiBullishLow and rsiValue < rsiBullishHigh
+candleBearish = rsiValue <= rsiBearishHigh and rsiValue > rsiBearishLow
+
+// Price crossovers
+priceCrossAboveEma1 = ta.crossover(close, ema1)
+priceCrossBelowEma1 = ta.crossunder(close, ema1)
+priceCrossAboveEma3 = ta.crossover(close, ema3)
+priceCrossBelowEma3 = ta.crossunder(close, ema3)
+
+// EMA100 cross exit conditions
+ema100CrossDown = ta.crossunder(close, ema3)
+ema100CrossUp = ta.crossover(close, ema3)
+
+// RSI filters
+rsiNotOverbought = not useRsiFilter or rsiValue < rsiOverbought
+rsiNotOversold = not useRsiFilter or rsiValue > rsiOversold
+
+// Session filter
+inSession = not useSessionFilter or not na(time(timeframe.period, allowedSession))
+
+// Buy/Sell signals - DUAL CONDITIONS
+// Trend filter: Long only above EMA750, Short only below EMA750
+longTrendOk = not useTrendFilter or close > trendFilterEma
+shortTrendOk = not useTrendFilter or close < trendFilterEma
+
+// Condition 1: First bullish candle closing above EMA21 with EMAs aligned
+bullishCandle = close > open
+bearishCandle = close < open
+wasBelow = close[1] < ema1
+wasAbove = close[1] > ema1
+
+buySignal1 = emasLong and close > ema1 and wasBelow and bullishCandle and candleBullish and rsiNotOverbought and inSession and longTrendOk
+sellSignal1 = emasShort and close < ema1 and wasAbove and bearishCandle and candleBearish and rsiNotOversold and inSession and shortTrendOk
+
+// Condition 2: Cross EMA100 + bullish/bearish close (RSI based)
+buySignal2 = priceCrossAboveEma3 and rsiValue > 55 and rsiNotOverbought and inSession and longTrendOk
+sellSignal2 = priceCrossBelowEma3 and rsiValue < 45 and rsiNotOversold and inSession and shortTrendOk
+
+// Combined signals (either condition triggers entry)
+buySignal = buySignal1 or buySignal2
+sellSignal = sellSignal1 or sellSignal2
+
+// ========================================
+// CALCULATE STOP LOSS & TAKE PROFIT
+// ========================================
+var float longStopPrice = na
+var float longTakeProfitPrice = na
+var float shortStopPrice = na
+var float shortTakeProfitPrice = na
+var float entryPrice = na
+var float initialStopDistance = na
+
+calcStopLoss(isLong) =>
+    if stopLossType == "Fixed %"
+        isLong ? close * (1 - stopLossPercent / 100) : close * (1 + stopLossPercent / 100)
+    else if stopLossType == "ATR"
+        isLong ? close - atr * atrMultiplier : close + atr * atrMultiplier
+    else  // Session Low/High
+        // Simplified: use ATR as fallback
+        isLong ? close - atr * atrMultiplier : close + atr * atrMultiplier
+
+calcTakeProfit(isLong, stopPrice) =>
+    stopDistance = math.abs(close - stopPrice)
+    if takeProfitType == "Fixed %"
+        isLong ? close * (1 + takeProfitPercent / 100) : close * (1 - takeProfitPercent / 100)
+    else  // Risk/Reward
+        isLong ? close + stopDistance * riskRewardRatio : close - stopDistance * riskRewardRatio
+
+// ========================================
+// ENTRY CONDITIONS
+// ========================================
+allowLong = tradeDirection == "Long Only" or tradeDirection == "Both"
+allowShort = tradeDirection == "Short Only" or tradeDirection == "Both"
+
+// Entry for Long
+if buySignal and allowLong and strategy.position_size == 0
+    entryPrice := close
+    longStopPrice := useStopLoss ? calcStopLoss(true) : na
+    longTakeProfitPrice := useTakeProfit ? calcTakeProfit(true, longStopPrice) : na
+    initialStopDistance := math.abs(close - longStopPrice)
+    strategy.entry("Long", strategy.long)
+
+// Entry for Short
+if sellSignal and allowShort and strategy.position_size == 0
+    entryPrice := close
+    shortStopPrice := useStopLoss ? calcStopLoss(false) : na
+    shortTakeProfitPrice := useTakeProfit ? calcTakeProfit(false, shortStopPrice) : na
+    initialStopDistance := math.abs(close - shortStopPrice)
+    strategy.entry("Short", strategy.short)
+
+// Pyramiding
+if usePyramiding and strategy.position_size > 0
+    currentPositions = math.abs(strategy.position_size) / (strategy.position_avg_price * strategy.position_size / close)
+    
+    if buySignal and strategy.position_size > 0 and currentPositions < maxPyramidPositions
+        strategy.entry("Long", strategy.long)
+    
+    if sellSignal and strategy.position_size < 0 and currentPositions < maxPyramidPositions
+        strategy.entry("Short", strategy.short)
+
+// ========================================
+// EXIT CONDITIONS
+// ========================================
+// Breakeven logic
+var bool movedToBreakeven = false
+
+if strategy.position_size > 0  // Long position
+    if not movedToBreakeven and useBreakeven
+        profitTicks = (close - strategy.position_avg_price) / syminfo.mintick
+        triggerTicks = initialStopDistance * breakevenTrigger / syminfo.mintick
+        if profitTicks >= triggerTicks
+            longStopPrice := strategy.position_avg_price * (1 + breakevenOffset / 100)
+            movedToBreakeven := true
+
+if strategy.position_size < 0  // Short position
+    if not movedToBreakeven and useBreakeven
+        profitTicks = (strategy.position_avg_price - close) / syminfo.mintick
+        triggerTicks = initialStopDistance * breakevenTrigger / syminfo.mintick
+        if profitTicks >= triggerTicks
+            shortStopPrice := strategy.position_avg_price * (1 - breakevenOffset / 100)
+            movedToBreakeven := true
+
+// Trailing Stop
+if strategy.position_size > 0 and useTrailingStop  // Long position
+    trailStop = trailingStopType == "Fixed %" ? 
+         close * (1 - trailingStopPercent / 100) : 
+         close - atr * trailingAtrMultiplier
+    
+    if na(longStopPrice) or trailStop > longStopPrice
+        longStopPrice := trailStop
+
+if strategy.position_size < 0 and useTrailingStop  // Short position
+    trailStop = trailingStopType == "Fixed %" ? 
+         close * (1 + trailingStopPercent / 100) : 
+         close + atr * trailingAtrMultiplier
+    
+    if na(shortStopPrice) or trailStop < shortStopPrice
+        shortStopPrice := trailStop
+
+// Exit Long
+if strategy.position_size > 0
+    // EMA100 Cross exit (override other exits if selected)
+    if stopLossType == "EMA100 Cross" and ema100CrossDown
+        strategy.close("Long", comment="EMA100 Cross Exit")
+        movedToBreakeven := false
+    
+    if useStopLoss and useTakeProfit and not na(longStopPrice) and not na(longTakeProfitPrice) and stopLossType != "EMA100 Cross"
+        strategy.exit("Exit Long", "Long", stop=longStopPrice, limit=longTakeProfitPrice, comment_profit="Exit TP", comment_loss="Exit SL")
+    else if useStopLoss and not useTakeProfit and not na(longStopPrice) and stopLossType != "EMA100 Cross"
+        strategy.exit("Exit Long", "Long", stop=longStopPrice, comment="Exit SL")
+    else if useTakeProfit and not useStopLoss and not na(longTakeProfitPrice)
+        strategy.exit("Exit Long", "Long", limit=longTakeProfitPrice, comment="Exit TP")
+    else if useTakeProfit and stopLossType == "EMA100 Cross" and not na(longTakeProfitPrice)
+        strategy.exit("Exit Long", "Long", limit=longTakeProfitPrice, comment="Exit TP")
+    
+    // Exit on opposite signal
+    if sellSignal
+        strategy.close("Long", comment="Opposite Signal")
+        movedToBreakeven := false
+
+// Exit Short
+if strategy.position_size < 0
+    // EMA100 Cross exit (override other exits if selected)
+    if stopLossType == "EMA100 Cross" and ema100CrossUp
+        strategy.close("Short", comment="EMA100 Cross Exit")
+        movedToBreakeven := false
+    
+    if useStopLoss and useTakeProfit and not na(shortStopPrice) and not na(shortTakeProfitPrice) and stopLossType != "EMA100 Cross"
+        strategy.exit("Exit Short", "Short", stop=shortStopPrice, limit=shortTakeProfitPrice, comment_profit="Exit TP", comment_loss="Exit SL")
+    else if useStopLoss and not useTakeProfit and not na(shortStopPrice) and stopLossType != "EMA100 Cross"
+        strategy.exit("Exit Short", "Short", stop=shortStopPrice, comment="Exit SL")
+    else if useTakeProfit and not useStopLoss and not na(shortTakeProfitPrice)
+        strategy.exit("Exit Short", "Short", limit=shortTakeProfitPrice, comment="Exit TP")
+    else if useTakeProfit and stopLossType == "EMA100 Cross" and not na(shortTakeProfitPrice)
+        strategy.exit("Exit Short", "Short", limit=shortTakeProfitPrice, comment="Exit TP")
+    
+    // Exit on opposite signal
+    if buySignal
+        strategy.close("Short", comment="Opposite Signal")
+        movedToBreakeven := false
+
+// Reset breakeven flag when no position
+if strategy.position_size == 0
+    movedToBreakeven := false
+
+// ========================================
+// VISUALIZATION
+// ========================================
+// Plot entry signals
+plotshape(buySignal and allowLong, "Buy Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(sellSignal and allowShort, "Sell Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+
+// Plot Stop Loss and Take Profit levels
+plot(strategy.position_size > 0 ? longStopPrice : na, "Long SL", color.red, 2, plot.style_linebr)
+plot(strategy.position_size > 0 ? longTakeProfitPrice : na, "Long TP", color.green, 2, plot.style_linebr)
+plot(strategy.position_size < 0 ? shortStopPrice : na, "Short SL", color.red, 2, plot.style_linebr)
+plot(strategy.position_size < 0 ? shortTakeProfitPrice : na, "Short TP", color.green, 2, plot.style_linebr)
+
+// Plot entry price
+plot(strategy.position_size != 0 ? strategy.position_avg_price : na, "Entry Price", color.yellow, 1, plot.style_linebr)
+
+// Background color for position
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position Background")
+
+// ========================================
+// STATISTICS TABLE
+// ========================================
+var table statsTable = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 20), border_width=2, border_color=color.new(color.gray, 50))
+
+if barstate.islast
+    // Header
+    table.cell(statsTable, 0, 0, "Stats", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(statsTable, 1, 0, "", text_color=color.white, bgcolor=color.new(color.blue, 30))
+    
+    // Win Rate
+    winRate = strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100
+    table.cell(statsTable, 0, 1, "Win Rate", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 1, str.tostring(math.round(winRate, 2)) + "%", text_color=color.white, text_size=size.small)
+    
+    // Total Trades
+    table.cell(statsTable, 0, 2, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 2, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.small)
+    
+    // Win/Loss
+    table.cell(statsTable, 0, 3, "W/L", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 3, str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.losstrades), text_color=color.white, text_size=size.small)
+    
+    // Profit Factor
+    table.cell(statsTable, 0, 4, "PF", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 4, str.tostring(math.round(strategy.grossprofit / strategy.grossloss, 2)), 
+         text_color=strategy.grossprofit > strategy.grossloss ? color.lime : color.red, text_size=size.small)
+    
+    // Risk/Reward Ratio
+    avgWin = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+    avgLoss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 0
+    actualRR = avgLoss > 0 ? avgWin / avgLoss : 0
+    table.cell(statsTable, 0, 5, "R:R", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 5, str.tostring(math.round(actualRR, 2)), 
+         text_color=actualRR >= 1.5 ? color.lime : actualRR >= 1 ? color.yellow : color.red, text_size=size.small)
+    
+    // Net Profit
+    netProfit = strategy.netprofit / strategy.initial_capital * 100
+    table.cell(statsTable, 0, 6, "Profit", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 6, str.tostring(math.round(netProfit, 2)) + "%", 
+         text_color=netProfit > 0 ? color.lime : color.red, text_size=size.small)
+    
+    // Breakeven Status
+    table.cell(statsTable, 0, 7, "BE", text_color=color.white, text_size=size.small)
+    beStatus = useBreakeven ? "ON" : "OFF"
+    beColor = useBreakeven ? color.lime : color.gray
+    table.cell(statsTable, 1, 7, beStatus, text_color=beColor, text_size=size.small)
+    
+    // Trailing Stop Status
+    table.cell(statsTable, 0, 8, "Trail", text_color=color.white, text_size=size.small)
+    tsStatus = useTrailingStop ? "ON" : "OFF"
+    tsColor = useTrailingStop ? color.lime : color.gray
+    table.cell(statsTable, 1, 8, tsStatus, text_color=tsColor, text_size=size.small)
+    
+    // Pyramiding Status
+    table.cell(statsTable, 0, 9, "Pyram", text_color=color.white, text_size=size.small)
+    pyrStatus = usePyramiding ? "x" + str.tostring(maxPyramidPositions) : "OFF"
+    pyrColor = usePyramiding ? color.lime : color.gray
+    table.cell(statsTable, 1, 9, pyrStatus, text_color=pyrColor, text_size=size.small)
+    
+    // Session Filter Status
+    table.cell(statsTable, 0, 10, "Session", text_color=color.white, text_size=size.small)
+    sessionStatus = useSessionFilter ? allowedSession : "OFF"
+    sessionColor = useSessionFilter ? color.lime : color.gray
+    table.cell(statsTable, 1, 10, sessionStatus, text_color=sessionColor, text_size=size.small)
+    
+    // Current Position
+    posSize = strategy.position_size
+    posType = posSize > 0 ? "LONG" : posSize < 0 ? "SHORT" : "NONE"
+    posColor = posSize > 0 ? color.green : posSize < 0 ? color.red : color.gray
+    table.cell(statsTable, 0, 11, "Position", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 11, posType, text_color=posColor, text_size=size.small)
+    
+    // RSI Value
+    table.cell(statsTable, 0, 12, "RSI", text_color=color.white, text_size=size.small)
+    rsiColor = rsiValue >= rsiOverbought ? color.red : rsiValue <= rsiOversold ? color.lime : color.gray
+    table.cell(statsTable, 1, 12, str.tostring(math.round(rsiValue, 2)), text_color=rsiColor, text_size=size.small)
+
+View in Pine Editor・380 lines
+Use on chart
+1
+7
+5
+1
+2 707
+Dec 4, 2025
+A professional trading strategy that combines multiple technical indicators for high-probability entries. This system uses EMA crossovers, RSI zone filtering, and trend confirmation to identify optimal trading opportunities while managing risk with advanced position management tools.
+
+Key Features:
+✅ Dual Entry Signals (EMA21 + EMA100 crossover conditions)
+✅ Trend Filter EMA750 (trade only with the major trend)
+✅ Complete Risk Management (SL 1%, TP 3% default)
+✅ Trailing Stop & Breakeven (maximize profits, protect capital)
+✅ Compact Statistics Table (real-time performance metrics)
+✅ RSI & Session Filters (avoid low-probability setups)
+✅ Optional Pyramiding (scale into winning positions)
+
+Perfect for swing trading and trend-following on any timeframe. Fully customizable to match your trading style.
+Dec 4, 2025
+Release Notes
+-Better entry conditions

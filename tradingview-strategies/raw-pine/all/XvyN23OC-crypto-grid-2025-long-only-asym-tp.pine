@@ -1,0 +1,270 @@
+//@version=6
+strategy("Crypto Grid 2025+ Long Only (Asym TP)", overlay=true, pyramiding=50,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06,
+     calc_on_every_tick = true)
+
+//--------------------------
+// ПАРАМЕТРЫ
+//--------------------------
+rangeLen   = input.int(20, "Диапазон (N баров)", minval=5)
+gridCount  = input.int(10, "Количество уровней", minval=2)
+riskPct    = input.float(1.0, "Риск на сделку, % капитала", step=0.1)
+
+// Глобальный потолок TP (от верха диапазона)
+tpPct      = input.float(1.0, "Глобальный TP % выше диапазона")
+stopPct    = input.float(2.0, "Стоп % ниже диапазона")
+
+// Фильтр объёма
+useVolumeFilter = input.bool(true, "📈 Фильтр объема")
+volumeLength    = input.int(40, "Volume MA период", minval=5)
+volumeMult      = input.float(1.0, "Мин множитель объема", minval=0.5, step=0.1)
+
+// Покупать только снизу
+buyLowerHalfOnly = input.bool(true, "Покупать только в нижней половине диапазона")
+
+// Асимметричный TP
+tpLevels = input.int(3, "TP уровней выше входа", minval=1, maxval=20)
+
+// Дополнительно
+usePartialTP = input.bool(true, "📈 Частичный тейк")
+partialPct   = input.float(40.0, "% на первом уровне", minval=10, maxval=90, step=5)
+
+maxPositions = input.int(20, "Макс открытых позиций", minval=5, maxval=50)
+showInfo     = input.bool(true, "📊 Инфо-панель")
+sizeMode     = input.string("Original", "Размер позиции", 
+               options=["Original", "Conservative", "Aggressive"])
+
+//--------------------------
+// ИНДИКАТОРЫ
+//--------------------------
+volumeMA = ta.sma(volume, volumeLength)
+
+//--------------------------
+// ДИАПАЗОН
+//--------------------------
+highLevel = ta.highest(high, rangeLen)
+lowLevel  = ta.lowest(low,  rangeLen)
+
+canRange = not na(highLevel) and not na(lowLevel) and highLevel > lowLevel
+
+rangeMid = (highLevel + lowLevel) / 2.0
+
+plot(highLevel, "Верх", color=color.new(color.green, 0))
+plot(lowLevel,  "Низ", color=color.new(color.red, 0))
+plot(rangeMid,  "Середина", color=color.new(color.blue, 70))
+
+//--------------------------
+// ГЕНЕРАЦИЯ СЕТКИ
+//--------------------------
+step = canRange ? (highLevel - lowLevel) / gridCount : 0.0
+canTrade = step > 0
+
+var float[] gridLevels = array.new_float()
+array.clear(gridLevels)
+
+if canTrade
+    for i = 0 to gridCount
+        level = lowLevel + step * i
+        array.push(gridLevels, level)
+
+//--------------------------
+// РАЗМЕР ПОЗИЦИИ
+//--------------------------
+equity    = strategy.equity
+riskMoney = equity * (riskPct / 100.0)
+
+float divisor = 2.0
+if sizeMode == "Conservative"
+    divisor := 3.0
+else if sizeMode == "Aggressive"
+    divisor := 1.5
+
+posSize = canTrade and step > 0 ? (riskMoney / (step * divisor)) : 0.0
+
+//--------------------------
+// ФИЛЬТРЫ
+//--------------------------
+bool volumeOk = true
+if useVolumeFilter
+    volumeOk := na(volumeMA) ? true : volume > volumeMA * volumeMult
+
+bool longFiltersOk = volumeOk
+
+//--------------------------
+// КОНТРОЛЬ ПОЗИЦИЙ
+//--------------------------
+var int lossStreak = 0
+
+if strategy.closedtrades > strategy.closedtrades[1]
+    lastProfit = strategy.netprofit - strategy.netprofit[1]
+    if lastProfit < 0
+        lossStreak += 1
+    else
+        lossStreak := 0
+
+openPositions = strategy.opentrades
+canOpenNew    = openPositions < maxPositions and lossStreak < 3
+
+//--------------------------
+// ТОРГОВАЯ ЛОГИКА (ТОЛЬКО ЛОНГИ, АСИММЕТРИЧНЫЙ TP)
+//--------------------------
+if canTrade and canOpenNew
+    levelsCount = array.size(gridLevels)
+    for i = 0 to levelsCount - 1
+        level = array.get(gridLevels, i)
+
+        bool longCross = close[1] > level and close <= level
+        bool levelInBuyZone = not buyLowerHalfOnly or level <= rangeMid
+
+        if longCross and longFiltersOk and levelInBuyZone
+            entryId = "L" + str.tostring(i)
+            strategy.entry(entryId, strategy.long, qty=posSize)
+
+            // ---- расчёт асимметричного TP ----
+            // базовый индекс цели: i + tpLevels
+            targetIndex = i + tpLevels
+            if targetIndex > levelsCount - 1
+                targetIndex := levelsCount - 1
+
+            tpBase = array.get(gridLevels, targetIndex)
+            tpCap  = highLevel * (1 + tpPct / 100.0)
+            tpMain = math.min(tpBase, tpCap)
+
+            if usePartialTP
+                // Первая часть — на ближайшем уровне (если он есть)
+                tp1Index = math.min(i + 1, levelsCount - 1)
+                tp1 = array.get(gridLevels, tp1Index)
+
+                strategy.exit("TP1_" + str.tostring(i),from_entry = entryId,qty_percent = partialPct,limit = tp1)
+
+                // Остаток — на удалённой цели
+                strategy.exit("TP2_" + str.tostring(i),from_entry = entryId,limit = tpMain)
+            else
+                // Без частичного — всё сразу на дальнюю цель
+                strategy.exit("TP_" + str.tostring(i),from_entry = entryId,limit = tpMain)
+
+//--------------------------
+// АВАРИЙНЫЕ ВЫХОДЫ
+//--------------------------
+if canRange and low < lowLevel * (1 - stopPct / 100.0)
+    strategy.close_all("🔴 Stop")
+    lossStreak := 0
+
+if canRange and high > highLevel * (1 + tpPct / 100.0)
+    strategy.close_all("🟢 Global TP")
+    lossStreak := 0
+
+if lossStreak >= 3 and strategy.opentrades > 0
+    strategy.close_all("🛑 3 losses")
+    lossStreak := 0
+
+//--------------------------
+// ИНФО-ПАНЕЛЬ
+//--------------------------
+currentPosValue = math.abs(strategy.position_size * close)
+currentExposure = equity > 0 ? (currentPosValue / equity) * 100 : 0
+
+var table info = table.new(position.top_right, 2, 8, 
+                           border_width=1, 
+                           bgcolor=color.new(color.black, 85))
+
+if showInfo and barstate.islast
+    table.cell(info, 0, 0, "💰 Капитал", text_color=color.white)
+    profitColor = equity >= 10000 ? color.lime : color.red
+    table.cell(info, 1, 0, "$" + str.tostring(equity, "#,###"), text_color=profitColor)
+    
+    table.cell(info, 0, 1, "📊 Позиция", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(currentExposure, "#.#") + "%", text_color=color.aqua)
+    
+    table.cell(info, 0, 2, "📏 Шаг", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(step, "#.####"), text_color=color.white)
+    
+    table.cell(info, 0, 3, "🎯 Открыто", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(openPositions), text_color=color.white)
+    
+    table.cell(info, 0, 4, "💸 Прибыль", text_color=color.white)
+    netProfit = strategy.netprofit
+    npColor = netProfit > 0 ? color.lime : color.red
+    table.cell(info, 1, 4, "$" + str.tostring(netProfit, "#,###"), text_color=npColor)
+
+    table.cell(info, 0, 5, "Vol фильтр", text_color=color.white)
+    volText  = useVolumeFilter ? (volumeOk ? "OK" : "LOW") : "Off"
+    volColor = not useVolumeFilter ? color.gray : (volumeOk ? color.lime : color.red)
+    table.cell(info, 1, 5, volText, text_color=volColor)
+
+    table.cell(info, 0, 6, "TP уровни", text_color=color.white)
+    table.cell(info, 1, 6, str.tostring(tpLevels), text_color=color.white)
+
+    table.cell(info, 0, 7, "Фильтры", text_color=color.white)
+    allOk = longFiltersOk
+    allColor = allOk ? color.lime : color.red
+    table.cell(info, 1, 7, allOk ? "ON" : "OFF", text_color=allColor)
+
+//--------------------------
+// ВИЗУАЛИЗАЦИЯ ВХОДОВ
+//--------------------------
+plotshape(strategy.position_size > strategy.position_size[1] and strategy.position_size > 0, 
+         "🟢", shape.triangleup, location.belowbar, color.lime, size=size.tiny)
+
+View in Pine Editor・207 lines
+Use on chart
+2
+4
+859
+Crypto Grid 2025+ Long Only (Asymmetric Take-Profit) is a long-only mean-reversion grid strategy designed for intraday cryptocurrency trading.
+The core idea is to accumulate long positions as price moves downward within a locally defined price range and to exit positions on upward retracements.
+
+The strategy automatically builds a multi-level grid between the highest and lowest price over a user-defined lookback period (“range length”). Each grid level acts as a potential entry point when price crosses it from above.
+
+Key Features
+
+1. Long-only grid logic
+The strategy opens long positions only, progressively increasing exposure as price moves into lower grid levels.
+
+2. Asymmetric take-profit mechanism
+Instead of taking profit strictly at the next grid level, the strategy allows targeting multiple levels above the entry point. This increases the average profit per winning trade and shifts the reward-to-risk profile toward larger, less frequent wins.
+
+3. Optional partial take-profit
+A portion of each trade can be closed at the nearest grid level, while the remainder is held for a more distant asymmetric target. This balances consistency and profit potential.
+
+4. Volume-based market filter
+Entries can be restricted to periods of healthy market activity by requiring volume to exceed a moving-average baseline.
+
+5. Capital-scaled position sizing
+Position size is determined by risk percentage, grid spacing, and a dynamic sizing mode (original / conservative / aggressive).
+
+6. Built-in risk controls
+
+global stop below the lower boundary of the range,
+
+global take-profit above the upper boundary,
+
+automatic shutdown after a configurable loss-streak.
+
+Market Philosophy
+
+This strategy belongs to the mean-reversion family: it expects short-term overshoots to revert back toward mid-range liquidity zones.
+It is not trend-following.
+It performs best in choppy, range-bound, or slow-grinding markets — especially on liquid crypto pairs.
+
+Recommended Use Cases
+
+Short timeframes (1–15 minutes)
+
+High-liquidity crypto pairs
+
+Sideways or rotational price action
+
+Exchanges with low fees (due to higher order count)
+
+Not Intended For
+
+Strong trending markets without pullbacks
+
+Assets with thin order books
+
+Use with leverage without additional risk controls
+
+Summary
+
+Crypto Grid 2025+ Long Only (Asymmetric TP) is a refined grid-based mean-reversion strategy optimized for modern crypto markets. Its asymmetric take-profit framework is specifically engineered to reduce the classical issue of “small wins and large occasional losses” found in traditional grid systems, giving it a more favorable long-term trade distribution.

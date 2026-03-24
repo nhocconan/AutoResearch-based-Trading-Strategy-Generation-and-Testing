@@ -1,0 +1,219 @@
+//@version=5
+strategy("AI Adaptive Trend Navigator Strategy Echo Edition", "MT-AI Long V1.2", 
+     overlay = true, 
+     initial_capital = 500000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 100,
+     slippage = 2,                                // 2點滑價 (單邊 400 TWD)
+     commission_type = strategy.commission.cash_per_contract, 
+     commission_value = 100,                      // 單邊手續費 100 TWD (總成本對標 500 TWD)
+     margin_long = 0, 
+     process_orders_on_close = true)
+
+// -----------------------------------------------------------------------------
+// 【 策略描述與致敬 】
+// An advanced long-only strategy optimized for index futures. 
+// Inspired by LuxAlgo clustering framework with proprietary enhancements.
+// -----------------------------------------------------------------------------
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ① 參數設定
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+grp_ai = "AI 核心參數"
+length     = input.int(10, 'ATR 週期長度', minval = 1, group = grp_ai)
+minMult    = input.float(1.5, 'AI 乘數最小', minval = 0.5, step = 0.5, group = grp_ai)
+maxMult    = input.float(6.0, 'AI 乘數最大', minval = 1.0, step = 0.5, group = grp_ai)
+step       = input.float(0.5, '遞增步長', minval = 0.1, step = 0.1, group = grp_ai)
+perfMem    = input.float(10, "績效記憶權重", minval = 2, group = grp_ai)
+
+grp_smooth = "抗盤整機制"
+useBuffer    = input.bool(true, "啟用空間緩衝區", group = grp_smooth)
+bufferRatio  = input.float(0.3, "緩衝強度 (推薦 0.3)", step = 0.05, group = grp_smooth)
+cooldownBars = input.int(5, "翻轉冷卻根數", minval = 0, group = grp_smooth)
+tsSmoothLen  = input.int(6, "軌跡平滑長度", minval = 1, group = grp_smooth)
+min_conf     = input.float(2.0, "最小信心門檻", minval = 0, step = 0.5, group = grp_smooth)
+
+grp_hard = "硬性停損停利 (點數版)"
+hardTP = input.int(0, "硬停利點數 (0 = 關閉)", minval = 0, group = grp_hard)
+hardSL = input.int(0, "硬停損點數 (0 = 關閉)", minval = 0, group = grp_hard)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ② AI 運算核心 (含狀態連續性修正)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+type STPack
+    float upper = hl2
+    float lower = hl2
+    float out   = 0.0
+    float perf  = 0.0
+    float factor = 0.0
+    int dir     = 0
+
+type vector
+    array<float> out
+
+var holder  = array.new<STPack>(0)
+var factors = array.new<float>(0)
+
+if barstate.isfirst
+    nSteps = int(math.floor((maxMult - minMult) / step))
+    for i = 0 to nSteps
+        f = minMult + i * step
+        array.push(factors, f)
+        array.push(holder, STPack.new())
+
+atr_val = ta.atr(length)
+
+for k = 0 to array.size(factors) - 1
+    s = array.get(holder, k)
+    f = array.get(factors, k)
+    
+    up = hl2 + atr_val * f
+    dn = hl2 - atr_val * f
+    
+    s.dir := close > s.upper ? 1 : close < s.lower ? 0 : s.dir
+    s.upper := close[1] < s.upper ? math.min(up, s.upper) : up
+    s.lower := close[1] > s.lower ? math.max(dn, s.lower) : dn
+    
+    diff = nz(math.sign(close[1] - s.out))
+    s.perf += 2.0 / (perfMem + 1.0) * (nz(close - close[1]) * diff - s.perf)
+    s.out := s.dir == 1 ? s.lower : s.upper
+    s.factor := f
+
+    array.set(holder, k, s)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ③ K-means 聚類優化邏輯
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+data_arr = array.new<float>(0)
+for element in holder
+    array.push(data_arr, element.perf)
+
+centroids = array.new<float>(0)
+array.push(centroids, array.percentile_linear_interpolation(data_arr, 25))
+array.push(centroids, array.percentile_linear_interpolation(data_arr, 50))
+array.push(centroids, array.percentile_linear_interpolation(data_arr, 75))
+
+var factors_clusters = array.new<vector>(0)
+var perfclusters     = array.new<vector>(0)
+
+for _ = 0 to 50
+    factors_clusters := array.from(vector.new(array.new_float(0)), vector.new(array.new_float(0)), vector.new(array.new_float(0)))
+    perfclusters     := array.from(vector.new(array.new_float(0)), vector.new(array.new_float(0)), vector.new(array.new_float(0)))
+    
+    for idx_p = 0 to array.size(data_arr) - 1
+        val = array.get(data_arr, idx_p)
+        dist = array.new_float(0)
+        for c in centroids
+            array.push(dist, math.abs(val - c))
+        idx = array.indexof(dist, array.min(dist))
+        array.push(array.get(perfclusters, idx).out, val)
+        array.push(array.get(factors_clusters, idx).out, array.get(factors, idx_p))
+
+    new_centroids = array.new<float>(0)
+    for cl in perfclusters
+        array.push(new_centroids, array.avg(cl.out))
+    
+    if nz(array.get(new_centroids, 0)) == nz(array.get(centroids, 0)) and nz(array.get(new_centroids, 1)) == nz(array.get(centroids, 1)) and nz(array.get(new_centroids, 2)) == nz(array.get(centroids, 2))
+        break
+    centroids := new_centroids
+
+var float target_factor = 3.0
+var float perf_idx = 0.0
+den = ta.ema(math.abs(close - close[1]), int(perfMem))
+if array.size(perfclusters) == 3
+    target_factor := nz(array.avg(array.get(factors_clusters, 2).out), 3.0)
+    perf_idx := math.max(nz(array.avg(array.get(perfclusters, 2).out)), 0) / (den == 0 ? 1 : den)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ④ 趨勢判定與交易執行
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float upper_band = hl2
+var float lower_band = hl2
+var int os_state = 0
+var int cooldown = 0
+if cooldown > 0
+    cooldown -= 1
+
+up_raw = hl2 + atr_val * target_factor
+dn_raw = hl2 - atr_val * target_factor
+upper_band := close[1] < upper_band ? math.min(up_raw, upper_band) : up_raw
+lower_band := close[1] > lower_band ? math.max(dn_raw, lower_band) : dn_raw
+
+buf = useBuffer ? atr_val * bufferRatio : 0.0
+
+if cooldown == 0
+    if close > upper_band + buf and (perf_idx * 10 >= min_conf)
+        os_state := 1
+        cooldown := cooldownBars
+    else if close < lower_band - buf and (perf_idx * 10 >= min_conf)
+        os_state := 0
+        cooldown := cooldownBars
+
+ts_final = ta.rma(os_state == 1 ? lower_band : upper_band, tsSmoothLen)
+
+buy_sig  = os_state == 1 and os_state[1] == 0
+exit_sig = os_state == 0 and os_state[1] == 1 
+
+// --- 進場與硬性保護邏輯 ---
+if buy_sig
+    strategy.entry("Long🚀", strategy.long, comment="火箭起飛")
+
+float tp_price = hardTP > 0 ? strategy.position_avg_price + hardTP : na
+float sl_price = hardSL > 0 ? strategy.position_avg_price - hardSL : na
+
+if strategy.position_size > 0
+    strategy.exit("Hard Exit", "Long🚀", limit = tp_price, stop = sl_price, comment_loss = "硬停損⚡", comment_profit = "硬停利🎯")
+
+if exit_sig
+    strategy.close("Long🚀", comment="閃電出場")
+
+// 視覺化
+line_color = os_state == 1 ? color.new(#00ffbb, 0) : color.new(#ff1100, 50)
+plot(ts_final, "系統止損線", color = line_color, linewidth = 2, style = plot.style_linebr)
+plotshape(buy_sig, "火箭", shape.labelup, location.belowbar, color.new(#00ffbb, 0), size=size.small, text="🚀")
+plotshape(exit_sig, "閃電", shape.labeldown, location.abovebar, color.new(#ff1100, 0), size=size.small, text="⚡")
+
+View in Pine Editor・177 lines
+Use on chart
+1
+5
+3
+5
+2 965
+AI Adaptive Trend Navigator Strategy [Echo Edition]
+
+This is a professional long-only automated strategy optimized for Taiwan Index Futures (TX). Based on the LuxAlgo clustering framework, this version features advanced logic iteration for institutional-grade backtesting and execution.
+
+1. Realistic Cost Modeling To ensure backtest reliability, this strategy is pre-configured with:
+
+Slippage: 2 ticks (Approx. 400 TWD per side).
+
+Commission: 100 TWD per side.
+
+Total Cost: 500 TWD per side. This provides a rigorous stress test for real-world trading environments.
+
+2. State Consistency & Logic Continuity Optimized the underlying array handling to ensure "State Persistence." This eliminates the logic gaps common in real-time script execution, ensuring that historical signals are 100% consistent with live alerts.
+
+3. Adaptive AI Clustering Utilizes K-means clustering to dynamically select the optimal ATR factors based on current market volatility, allowing the strategy to "evolve" as market regimes shift.
+
+[Traditional Chinese Translation / 中文說明]
+
+🧠 開發理念：追求實戰一致性的量化策略 本策略旨在為台指期（TX）提供一套具備真實參考價值的自動化系統。
+
+✨ Echo 版核心優化點
+
+數據連續性迭代：修正底層邏輯，確保訊號在即時盤勢中穩定不跳斷。
+
+真實交易成本模擬：預設 2 點滑價 與 單邊 100 TWD 手續費，單邊總成本對標 500 TWD，拒絕虛假神單，挑戰最嚴苛的回測環境。
+
+台指期專屬參數調校：融入針對台灣市場波動特性的預設參數與過濾邏輯。
+
+🛡️ 進階實戰過濾
+
+空間緩衝區 (Buffer Strategy)：價格需有效突破緩衝區才觸發，精準過濾盤整雜訊。
+
+AI 信心評分系統：只有當動能穩定度達標時才會發進場訊號。
+
+冷卻保護機制：有效抑制訊號在洗盤區間過度頻繁跳動。
+
+⚠️ Disclaimer: Backtest results do not guarantee future performance.

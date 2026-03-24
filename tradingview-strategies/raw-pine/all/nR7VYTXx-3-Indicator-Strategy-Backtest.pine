@@ -1,0 +1,30 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+
+dailyClose = security(tickerid, "D", close)
+hourlyClose = security(tickerid, "60", close)
+fiveMinClose = security(tickerid, "5", close)
+
+dailyEMA = security(tickerid, "D", ema(close, 13))
+hourlyEMA = security(tickerid, "60", ema(close, 13))
+fiveMinEMA = security(tickerid, "5", ema(close, 20))
+
+buyCondition1 = dailyClose > dailyEMA
+buyCondition2 = hourlyClose < hourlyEMA
+buyCondition3 = crossover(fiveMinClose, fiveMinEMA)
+
+sellCondition1 = dailyClose < dailyEMA
+sellCondition2 = hourlyClose > hourlyEMA
+sellCondition3 = crossunder(fiveMinClose, fiveMinEMA)
+
+if (buyCondition1 and buyCondition2 and buyCondition3)
+    strategy.entry("3EMA", strategy.long)
+
+strategy.close("3EMA")
+
+View in Pine Editor・23 lines
+Use on chart
+1
+8
+1 301
+Use 5 min, hourly and daily EMAs vs Close prices to decide when to buy

@@ -1,0 +1,228 @@
+//@version=6
+strategy("NY VIX Channel Trend Strategy", overlay=true,
+     initial_capital=100000, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=2.5,
+     calc_on_every_tick=true, process_orders_on_close=true, margin_long=0, margin_short=0,
+     max_lines_count=200, max_labels_count=50, max_boxes_count=0)
+
+//============================= CONFIG =============================
+grp_ny     = "New York Session"
+ny_time    = input.session("0930-1600", "NY session time", group=grp_ny)
+ny_tz      = input.string("America/New_York", "Timezone", group=grp_ny)
+
+grp_vix    = "VIX Channel"
+use_vix9d  = input.bool(true, "Use VIX9D for width else VIX", group=grp_vix)
+use_open   = input.bool(false, "Use daily OPEN instead of CLOSE", group=grp_vix)
+vix_color  = input.color(color.new(color.orange, 0), "Channel color", group=grp_vix)
+fill_alpha = input.int(92, "Fill transparency", minval=0, maxval=100, group=grp_vix)
+
+grp_bias   = "Window Trend"
+window_min = input.int(30, "Window minutes", minval=5, maxval=120, step=5, group=grp_bias)
+bg_long    = input.color(color.new(color.teal, 88), "Long background", group=grp_bias)
+bg_short   = input.color(color.new(color.red, 88),  "Short background", group=grp_bias)
+
+grp_risk   = "Risk and Time Exit"
+vix_factor_sl = input.float(1.0, "VIX factor for SL", step=0.25, minval=0.1, group=grp_risk)
+vix_factor_tp = input.float(1.0, "VIX factor for TP", step=0.25, minval=0.1, group=grp_risk)
+exit_cut_min  = input.int(30, "Exit N minutes before session close", minval=5, maxval=180, group=grp_risk)
+
+//============================= SESSION FLAGS ======================
+in_sess  = not na(time("", ny_time, ny_tz))
+new_sess = in_sess and not in_sess[1]
+
+//============================= DAILY IV ===========================
+sym_vix   = input.symbol("VIX",   "VIX 1M symbol", group=grp_vix)
+sym_vix9d = input.symbol("VIX9D", "VIX 9D symbol", group=grp_vix)
+
+req_src(x) => request.security(x, "D", use_open ? open : close, lookahead=barmerge.lookahead_off)
+vix1m_d    = req_src(sym_vix)
+vix9d_d    = req_src(sym_vix9d)
+base_vix_d = use_vix9d and not na(vix9d_d) ? vix9d_d : vix1m_d
+sigma_d    = (base_vix_d / 100.0) / math.sqrt(252.0)  // daily fraction
+
+//============================= CHANNEL ============================
+var float sess_open_px = na
+var float sess_width   = na
+if new_sess
+    sess_open_px := open
+    sess_width   := sigma_d
+if not in_sess
+    sess_open_px := na
+    sess_width   := na
+
+vix_upper = in_sess and not na(sess_open_px) and not na(sess_width) ? sess_open_px * (1 + sess_width) : na
+vix_lower = in_sess and not na(sess_open_px) and not na(sess_width) ? sess_open_px * (1 - sess_width) : na
+vix_mid   = in_sess and not na(sess_open_px) ? sess_open_px : na
+
+pu = plot(vix_upper, "VIX Upper", vix_color, 1)
+pl = plot(vix_lower, "VIX Lower", vix_color, 1)
+pm = plot(vix_mid,   "VIX Mid",   color.new(vix_color, 60), 1)
+fill(pu, pl, color.new(vix_color, fill_alpha))
+
+//============================= WINDOW TREND =======================
+var int   sess_start_ms      = na
+var float ny_open_for_bias   = na
+var float window_close_px    = na
+var int   bias_trend_state   = 0        // 1 long  -1 short  0 flat
+var int   window_end_bar_idx = na
+var bool  entered_this_sess  = false
+
+if new_sess
+    sess_start_ms      := time
+    ny_open_for_bias   := open
+    window_close_px    := na
+    bias_trend_state   := 0
+    window_end_bar_idx := na
+    entered_this_sess  := false
+if not in_sess
+    sess_start_ms      := na
+    ny_open_for_bias   := na
+    window_close_px    := na
+    bias_trend_state   := 0
+    window_end_bar_idx := na
+    entered_this_sess  := false
+
+win_ms     = window_min * 60 * 1000
+win_done   = in_sess and not na(sess_start_ms) and time >= sess_start_ms + win_ms
+if win_done and na(window_end_bar_idx)
+    window_close_px    := close
+    bias_trend_state   := window_close_px > ny_open_for_bias ? 1 : window_close_px < ny_open_for_bias ? -1 : 0
+    window_end_bar_idx := bar_index
+
+after_window = in_sess and not na(window_end_bar_idx) and bar_index > window_end_bar_idx
+bgcolor(after_window ? (bias_trend_state == 1 ? bg_long : bias_trend_state == -1 ? bg_short : na) : na)
+
+//============================= STRATEGY ===========================
+get_minutes(sess) =>
+    sh = str.tonumber(str.substring(sess, 0, 2))
+    sm = str.tonumber(str.substring(sess, 2, 4))
+    eh = str.tonumber(str.substring(sess, 5, 7))
+    em = str.tonumber(str.substring(sess, 7, 9))
+    (eh * 60 + em) - (sh * 60 + sm)
+
+sess_len_min = get_minutes(ny_time)
+sess_end_ms  = not na(sess_start_ms) ? sess_start_ms + sess_len_min * 60 * 1000 : na
+cut_ms       = not na(sess_end_ms) ? sess_end_ms - exit_cut_min * 60 * 1000 : na
+force_exit   = in_sess and not na(cut_ms) and time >= cut_ms
+
+enter_long  = after_window and bias_trend_state == 1 and not entered_this_sess and strategy.position_size == 0
+enter_short = after_window and bias_trend_state == -1 and not entered_this_sess and strategy.position_size == 0
+
+if enter_long
+    strategy.entry("L", strategy.long)
+    entered_this_sess := true
+if enter_short
+    strategy.entry("S", strategy.short)
+    entered_this_sess := true
+
+risk_tp = sigma_d * vix_factor_tp
+risk_sl = sigma_d * vix_factor_sl
+
+long_stop  = strategy.position_avg_price * (1 - risk_sl)
+long_tp    = strategy.position_avg_price * (1 + risk_tp)
+short_stop = strategy.position_avg_price * (1 + risk_sl)
+short_tp   = strategy.position_avg_price * (1 - risk_tp)
+
+if strategy.position_size > 0
+    strategy.exit("XL", from_entry="L", stop=long_stop, limit=long_tp)
+if strategy.position_size < 0
+    strategy.exit("XS", from_entry="S", stop=short_stop, limit=short_tp)
+
+// Exit on channel breach
+exit_long_ch  = strategy.position_size > 0 and not na(vix_upper) and close >= vix_upper
+exit_short_ch = strategy.position_size < 0 and not na(vix_lower) and close <= vix_lower
+if exit_long_ch
+    strategy.close("L", comment="ChTop")
+if exit_short_ch
+    strategy.close("S", comment="ChBot")
+
+// Forced flat before session close
+if strategy.position_size != 0 and force_exit
+    if strategy.position_size > 0
+        strategy.close("L", comment="TimeExit")
+    else
+        strategy.close("S", comment="TimeExit")
+
+View in Pine Editor・148 lines
+Use on chart
+8
+7
+10
+2 915
+NY VIX Channel Trend Strategy
+
+Summary in one paragraph
+Session anchored intraday strategy for index futures such as ES and NQ on one to fifteen minute charts. It acts only after the first configurable window of New York Regular Trading Hours and uses a VIX derived daily implied move to form a realistic channel from the session open. Originality comes from using a pure implied volatility yardstick as portable support and resistance, then committing in the direction of the first window close relative to the open. Add it to a clean chart and trade the simple visuals. For conservative alerts use on bar close.
+
+Scope and intent
+• Markets. Index futures ES and NQ
+• Timeframes. One to thirty minutes
+• Default demo. ES1 on five minutes
+• Purpose. Provide a portable intraday yardstick for entries and exits without curve fitting
+• Limits. This is a strategy. Orders are simulated on standard candles
+
+Originality and usefulness
+• Unique concept. A VIX only channel anchored at 09:30 New York plus a single window trend test
+• Addresses. False urgency at session open and unrealistic bands from arbitrary multipliers
+• Testability. Every input is visible and the channel is plotted so users can audit behavior
+• Portable yardstick. Daily implied move equals VIX percent divided by square root of two hundred fifty two
+• Protected status. None. Method and use are fully disclosed
+
+Method overview in plain language
+Take the daily VIX or VIX9D value, convert it to a daily fraction by dividing by square root of two hundred fifty two, then anchor a symmetric channel at the New York session open. Observe the first N minutes. If that window closes above the open the bias is long. If it closes below the open the bias is short. One trade per session. Exits occur at the channel boundary or at a bracket based on a user selected VIX factor. Positions are closed a set number of minutes before the session ends.
+
+Base measures
+Return basis. The daily implied move unit equals VIX percent divided by square root of two hundred fifty two and serves as the distance unit for targets and stops.
+
+Components
+• VIX Channel. Top, mid, bottom lines anchored at 09:30 New York. No extra multipliers
+• Window Trend. Close of the first N minutes relative to the session open sets direction
+• Risk Bracket. Take profit and stop loss equal to VIX unit times user factor
+• Session Window. Uses the exchange time of the chart
+
+Fusion rule
+Minimum gates count equals one. The trade only arms after the window has elapsed and a direction exists. One entry per session.
+
+Signal rule
+• Long when the window close is above the session open and the window has completed
+• Short when the window close is below the session open and the window has completed
+• Exit on channel touch. Long exits at the top. Short exits at the bottom
+• Flat thirty minutes before the session close or at the user setting
+
+Inputs with guidance
+Setup
+• Use VIX9D. Width source. Typical true for fast tone or false for baseline
+• Use daily OPEN. Toggle for sensitivity to overnight changes
+Logic
+• Window minutes. Five to one hundred twenty. Larger values delay entries and reduce whipsaw
+• VIX factor for TP. Zero point five to two. Raising it widens the profit target
+• VIX factor for SL. Zero point five to two. Raising it widens the stop
+• Exit minutes before close. Fifteen to ninety. Raising it exits earlier
+
+
+Properties visible in this publication
+• Initial capital one hundred thousand USD
+• Base currency USD
+• request.security uses lookahead off
+• Commission cash per contract two point five $ per each contract. Slippage one tick
+• Default order size method FIXED with value one contract. Pyramiding zero. Process orders on close ON. Bar magnifier OFF. Recalculate after order is filled OFF. Calc on every tick ON
+
+Realism and responsible publication
+No performance claims. Past results never guarantee future outcomes. Fills and slippage vary by venue. Shapes can move while a bar forms and settle on close. Strategy uses standard candles.
+
+Honest limitations and failure modes
+Economic releases and thin liquidity can break the channel. Very quiet regimes can reduce signal contrast. Session windows follow the exchange time of the chart. If both stop and target can be hit within one bar, assume stop first for conservative reading without bar magnifier.
+Works best in liquid hours of New York RTH. Very large gaps and surprise news may exceed the implied channel. Always validate on the symbols you trade.
+
+Entries and exits
+• Entry logic. After the first window, go long if the window close is above the session open, go short if below
+• Exit logic. Long exits at the channel top or at the take profit or stop. Short exits at the channel bottom or at the take profit or stop. Flat before session close by the configured minutes
+• Risk model. Initial stop and target based on the VIX unit times user factors. No trail and no break even. No cooldown
+• Tie handling. Treat as stop first for conservative interpretation
+
+Position sizing
+Fixed size one contract per trade. Target risk per trade should generally remain near one percent of account equity. Risk is based on the daily volatility value, the max loss from the tests for one year duration with 5min chart was 4%, while the avg loss was below <1% of the total capital.
+
+
+If you have any questions please let me know. Thank you for coming by !

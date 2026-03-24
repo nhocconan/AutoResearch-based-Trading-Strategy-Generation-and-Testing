@@ -1,0 +1,143 @@
+//@version=6
+strategy("策略: ST趋势 + OKX信号 + 固定金额版", overlay=true, initial_capital=1000, default_qty_type=strategy.cash, default_qty_value=100, currency=currency.USD)
+
+// ==========================================
+// 1. OKX 信号配置 (核心修复)
+// ==========================================
+// 1. 填 Token
+okxSignalToken = input.string("", "OKX Signal Token (必填)", tooltip="粘贴OKX提供的信号Token")
+// 2. 填币对名称 (例如 SOL-USDT-SWAP)
+okxSymbol = input.string("SOL-USDT-SWAP", "交易币对名称", tooltip="OKX永续合约通常为: 币种-USDT-SWAP")
+
+// 🔥 组装完整的 OKX JSON 指令
+// 包含：动作、Token、币种、投资类型(base=按币个数)、数量(strategy.order.contracts)
+// 注意：我们使用 str.format 进行更安全的字符串拼接
+msg_enter_long  = '{"action": "enter_long", "instrument": "' + okxSymbol + '", "signalToken": "' + okxSignalToken + '", "investmentType": "base", "amount": "{{strategy.order.contracts}}"}'
+msg_exit_long   = '{"action": "exit_long",  "instrument": "' + okxSymbol + '", "signalToken": "' + okxSignalToken + '", "investmentType": "base", "amount": "{{strategy.order.contracts}}"}'
+msg_enter_short = '{"action": "enter_short","instrument": "' + okxSymbol + '", "signalToken": "' + okxSignalToken + '", "investmentType": "base", "amount": "{{strategy.order.contracts}}"}'
+msg_exit_short  = '{"action": "exit_short", "instrument": "' + okxSymbol + '", "signalToken": "' + okxSignalToken + '", "investmentType": "base", "amount": "{{strategy.order.contracts}}"}'
+
+// ==========================================
+// 2. 策略参数设置 (保持不变)
+// ==========================================
+
+fixedUSDAmount = input.float(100, "每次固定下单金额 (USD)", step=10, minval=1)
+filterWeekend = input.bool(false, "启用周末过滤")
+
+stFactor = input.float(3.0, "SuperTrend 乘数")
+stPeriod = input.int(10, "SuperTrend 周期")
+
+rsiLength = input.int(14, "RSI 长度")
+rsiEnterLong = input.int(40, "RSI 进场-多 (<)")
+rsiEnterShort = input.int(60, "RSI 进场-空 (>)")
+rsiExitLong = input.int(70, "RSI 止盈-多 (>)", tooltip="RSI一旦超过这个值，就开始等待阴线")
+rsiExitShort = input.int(30, "RSI 止盈-空 (<)", tooltip="RSI一旦低于这个值，就开始等待阳线")
+
+fixedSLPct = input.float(3.0, "固定止损百分比 (%)", step=0.1) / 100
+useBreakEven = input.bool(false, "启用保本机制")
+beTrigger = input.float(1.5, "利润达多少%触发保本", step=0.1) / 100
+
+// ==========================================
+// 3. 指标计算
+// ==========================================
+
+price = close
+rsiVal = ta.rsi(price, rsiLength)
+[superTrendVal, superTrendDir] = ta.supertrend(stFactor, stPeriod)
+isBullTrend = superTrendDir < 0
+isBearTrend = superTrendDir > 0
+
+currentDay = dayofweek(time, syminfo.timezone)
+isWeekend = (currentDay == dayofweek.saturday) or (currentDay == dayofweek.sunday)
+tradingAllowed = filterWeekend ? not isWeekend : true
+
+// ==========================================
+// 4. 逻辑判断
+// ==========================================
+
+var bool watchingLong = false
+var bool watchingShort = false
+var bool waitingForExitLong = false
+var bool waitingForExitShort = false
+
+if rsiVal < rsiEnterLong and isBullTrend
+    watchingLong := true
+if rsiVal > rsiEnterShort and isBearTrend
+    watchingShort := true
+
+if rsiVal > 50
+    watchingLong := false
+if rsiVal < 50
+    watchingShort := false
+if not isBullTrend
+    watchingLong := false
+if not isBearTrend
+    watchingShort := false
+
+longCondition = watchingLong and close > open and isBullTrend and tradingAllowed
+shortCondition = watchingShort and close < open and isBearTrend and tradingAllowed
+
+// ==========================================
+// 5. 交易执行
+// ==========================================
+
+if strategy.position_size == 0
+    waitingForExitLong := false
+    waitingForExitShort := false
+
+if strategy.position_size == 0
+    float qty_contracts = fixedUSDAmount / close
+
+    if longCondition
+        float slPrice = close * (1 - fixedSLPct)
+        strategy.entry("Long", strategy.long, qty=qty_contracts, comment="做多", alert_message=msg_enter_long)
+        strategy.exit("Exit_L", "Long", stop=slPrice, comment_loss="硬止损", alert_message=msg_exit_long)
+        watchingLong := false 
+
+    if shortCondition
+        float slPrice = close * (1 + fixedSLPct)
+        strategy.entry("Short", strategy.short, qty=qty_contracts, comment="做空", alert_message=msg_enter_short)
+        strategy.exit("Exit_S", "Short", stop=slPrice, comment_loss="硬止损", alert_message=msg_exit_short)
+        watchingShort := false 
+
+// ==========================================
+// 6. 动态管理
+// ==========================================
+
+if strategy.position_size > 0
+    if rsiVal > rsiExitLong
+        waitingForExitLong := true
+    if waitingForExitLong and close < open
+        strategy.close("Long", comment="RSI止盈", alert_message=msg_exit_long)
+        waitingForExitLong := false 
+
+if strategy.position_size < 0
+    if rsiVal < rsiExitShort
+        waitingForExitShort := true
+    if waitingForExitShort and close > open
+        strategy.close("Short", comment="RSI止盈", alert_message=msg_exit_short)
+        waitingForExitShort := false 
+
+if useBreakEven and strategy.position_size != 0
+    float entryPrice = strategy.position_avg_price
+    if strategy.position_size > 0
+        if high > entryPrice * (1 + beTrigger)
+            strategy.exit("Exit_L", "Long", stop=entryPrice, comment_loss="保本撤退", alert_message=msg_exit_long)
+    if strategy.position_size < 0
+        if low < entryPrice * (1 - beTrigger)
+            strategy.exit("Exit_S", "Short", stop=entryPrice, comment_loss="保本撤退", alert_message=msg_exit_short)
+
+// ==========================================
+// 7. 绘图
+// ==========================================
+plot(superTrendVal, "SuperTrend", color = isBullTrend ? color.green : color.red)
+hline(rsiExitLong, "多单激活", color=color.green, linestyle=hline.style_dotted)
+hline(rsiExitShort, "空单激活", color=color.red, linestyle=hline.style_dotted)
+bgcolor(isWeekend and filterWeekend ? color.new(color.gray, 90) : na)
+
+View in Pine Editor・136 lines
+Use on chart
+1
+1
+760
+A simple beginner-level tool suitable for SOL 1-hour trend and range trading

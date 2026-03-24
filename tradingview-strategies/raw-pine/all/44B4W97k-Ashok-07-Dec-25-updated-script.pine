@@ -1,0 +1,88 @@
+//@version=5
+strategy("Nifty Options MACD + EMA Strategy with SL/TP - FIXED", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Inputs
+fastLength = input.int(12, "MACD Fast Length")
+slowLength = input.int(26, "MACD Slow Length") 
+signalLength = input.int(9, "MACD Signal Length")
+stopLossPercent = input.float(10.0, "Stop Loss %", minval=0.1, step=0.1)
+takeProfitPercent = input.float(20.0, "Take Profit %", minval=0.1, step=0.1)
+minDiff = input.float(50.0, "Min EMA Gap (Points)", minval=1.0)  // Nifty scale
+
+// Calculate indicators
+[macdLine, signalLine, histLine] = ta.macd(close, fastLength, slowLength, signalLength)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// EMA sequence condition (strict gaps for Nifty)
+emaSeqCondition = ema20 > ema50 and ema50 > ema100 and ema100 > ema200 and
+                  (ema20 - ema50) > minDiff and (ema50 - ema100) > minDiff and (ema100 - ema200) > minDiff
+
+// Buy signals
+buyCondition1 = ta.crossover(macdLine, 0)
+buyCondition2 = emaSeqCondition and not emaSeqCondition[1]  // Only on NEW sequence
+buySignal = buyCondition1 or buyCondition2
+
+// FIXED: Position-aware sell signal (ONLY when in trade)
+sellSignal = strategy.position_size > 0 and ta.crossunder(macdLine, signalLine)
+
+// Track entry price
+var float entryPrice = na
+
+// Entry - only when no position
+if buySignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryPrice := close  // Capture entry price
+
+// Position management
+if strategy.position_size > 0
+    // Calculate SL/TP from actual entry price
+    slPrice = entryPrice * (1 - stopLossPercent / 100)
+    tpPrice = entryPrice * (1 + takeProfitPercent / 100)
+    
+    // Set SL/TP orders
+    strategy.exit("SL/TP", from_entry="Long", stop=slPrice, limit=tpPrice)
+    
+    // Manual sell signal (overrides SL/TP if triggered)
+    if sellSignal
+        strategy.close("Long", comment="Sell Signal")
+        entryPrice := na  // Reset for next trade
+
+// Reset entry price on position close (handles SL/TP exits)
+if strategy.position_size == 0 and not na(entryPrice)
+    entryPrice := na
+
+// Visual signals - POSITION AWARE
+plotshape(buySignal and strategy.position_size == 0, title="BUY", style=shape.labelup, 
+          location=location.belowbar, color=color.green, size=size.normal, text="BUY")
+
+plotshape(sellSignal, title="SELL", style=shape.labeldown, 
+          location=location.abovebar, color=color.red, size=size.normal, text="SELL")
+
+// Plot EMAs
+plot(ema20, "EMA 20", color=color.yellow, linewidth=2)
+plot(ema50, "EMA 50", color=color.red, linewidth=2)
+plot(ema100, "EMA 100", color=color.purple, linewidth=1)
+plot(ema200, "EMA 200", color=color.green, linewidth=1)
+
+// Background highlight for EMA sequence
+bgcolor(emaSeqCondition ? color.new(color.blue, 90) : na, title="EMA Bull Sequence")
+
+// SL/TP levels visualization
+plot(strategy.position_size > 0 ? entryPrice * (1 - stopLossPercent / 100) : na, 
+     "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size > 0 ? entryPrice * (1 + takeProfitPercent / 100) : na, 
+     "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
+
+// Alerts - position aware
+alertcondition(buySignal and strategy.position_size == 0, "NIFTY BUY", "🚀 NIFTY Options BUY Signal")
+alertcondition(sellSignal, "NIFTY SELL", "❌ NIFTY Options SELL Signal - MACD Crossunder")
+
+View in Pine Editor・81 lines
+Use on chart
+1
+7
+804
+Tried to fix the bugs in previous script. Even now improvements are needed, but for now it looks reasonably profiting.

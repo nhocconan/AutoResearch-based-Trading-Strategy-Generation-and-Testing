@@ -1,0 +1,238 @@
+//@version=6
+strategy('Volume weighted average price band strategy [Kevin-Patrick]', shorttitle = 'VWAP Bands Strategy [Kevin-Patrick]', overlay = true, max_labels_count = 500, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//#region Inputs
+inputGroup = 'General Settings'
+window = input.int(100, minval = 10, title = 'ML Window', group = inputGroup)
+forecast = input.int(1, title = 'Forecast', group = inputGroup, tooltip = 'Shifts the ML output forward by the specified number of bars for predictive analysis.')
+sigma = input.float(0.1, step = 0.01, minval = 0, title = 'Sigma', group = inputGroup, tooltip = 'Adjusts the impact of volatility on the ML smoothing calculation.')
+band_multiplier = input.float(2, title = 'Band 1 Multiplier', minval = 0, group = inputGroup)
+band_multiplier_2 = input.float(3, title = 'Band 2 Multiplier', minval = 0, group = inputGroup)
+source = input.source(close, title = 'Source', group = inputGroup)
+
+//#region Smoothing Options
+smoothingGroup = 'ML Smoothing Settings'
+enable_smoothing = input.bool(true, title = 'Enable ML Line Smoothing', group = smoothingGroup)
+smoothing_type = input.string('EMA', title = 'Smoothing Type', options = ['SMA', 'EMA', 'WMA', 'RMA', 'VWAP'], group = smoothingGroup)
+smoothing_length = input.int(5, minval = 1, title = 'Smoothing Length', group = smoothingGroup, tooltip = 'Higher values = smoother line but more lag (not used for VWAP)')
+//#endregion
+
+//#region Strategy Settings
+strategyGroup = 'Strategy Settings'
+entry_band = input.string('Band 1', title = 'Entry Band', options = ['Band 1', 'Band 2'], group = strategyGroup, tooltip = 'Which band to use for entry signals')
+
+// Take Profit System
+tp1_percent = input.float(2.0, title = 'TP1 Distance %', minval = 0.1, step = 0.1, group = strategyGroup, tooltip = 'First take profit level')
+tp2_percent = input.float(4.0, title = 'TP2 Distance %', minval = 0.1, step = 0.1, group = strategyGroup, tooltip = 'Second take profit level')
+tp3_percent = input.float(6.0, title = 'TP3 Distance %', minval = 0.1, step = 0.1, group = strategyGroup, tooltip = 'Third take profit level')
+
+tp1_qty = input.float(10.0, title = 'TP1 Quantity %', minval = 1, maxval = 100, step = 1, group = strategyGroup, tooltip = 'Percentage of position to close at TP1')
+tp2_qty = input.float(15.0, title = 'TP2 Quantity %', minval = 1, maxval = 100, step = 1, group = strategyGroup, tooltip = 'Percentage of position to close at TP2')
+tp3_qty = input.float(25.0, title = 'TP3 Quantity %', minval = 1, maxval = 100, step = 1, group = strategyGroup, tooltip = 'Percentage of position to close at TP3')
+
+// Stop Loss & Trailing Stop
+initial_stop_loss = input.float(2.0, title = 'Initial Stop Loss %', minval = 0.1, step = 0.1, group = strategyGroup)
+enable_trailing = input.bool(true, title = 'Enable Trailing Stop After TP1', group = strategyGroup)
+trailing_stop_percent = input.float(1.5, title = 'Trailing Stop %', minval = 0.1, step = 0.1, group = strategyGroup, tooltip = 'Trailing stop distance after TP1 is hit')
+//#endregion
+
+//#region Signal Options
+signalGroup = 'Signal Options'
+detection_mode = input.string('Both', title = 'Signal Detection Mode', options = ['Both', 'Band 1', 'Band 2'], group = signalGroup)
+label_size_input = input.string('default', title = 'Label Size', options = ['very small', 'small', 'default', 'large', 'very large'], group = signalGroup)
+shape_size_option = switch label_size_input
+    'very small' => size.tiny
+    'small' => size.small
+    'default' => size.normal
+    'large' => size.large
+    'very large' => size.huge
+//#endregion
+
+//#region Style Settings
+styleGroup = 'Style Settings'
+vwap_color = input.color(color.blue, title = 'VWAP Color', group = styleGroup)
+bearColour = color.new(#f23645, 0)
+bullColour = color.new(#089981, 0)
+//#endregion
+
+//#region Candle Colours
+candleGroup = 'Candle Colours'
+NeutralCandles = input.bool(false, title = 'Neutral', group = candleGroup)
+gray = #dddddd
+white = color.white
+neutralColours = NeutralCandles ? close > open ? white : color.gray : gray
+//#endregion
+
+//#region VWAP Calculation
+vwap = ta.vwap(source)
+//#endregion
+
+//#region ML Prediction with Smoothing
+ml_base = ta.sma(source, window)
+ml_adjusted = ml_base + sigma * (vwap - ml_base)
+ml_raw = ml_adjusted[forecast]
+
+// Apply smoothing to ML output
+ml_output = if enable_smoothing
+    switch smoothing_type
+        'SMA' => ta.sma(ml_raw, smoothing_length)
+        'EMA' => ta.ema(ml_raw, smoothing_length)
+        'WMA' => ta.wma(ml_raw, smoothing_length)
+        'RMA' => ta.rma(ml_raw, smoothing_length)
+        'VWAP' => vwap
+        => ml_raw
+else
+    ml_raw
+//#endregion
+
+//#region Standard Deviation for VWAP Bands
+std_dev = ta.stdev(close, window)
+upper_band = vwap + band_multiplier * std_dev
+lower_band = vwap - band_multiplier * std_dev
+upper_band_2 = vwap + band_multiplier_2 * std_dev
+lower_band_2 = vwap - band_multiplier_2 * std_dev
+//#endregion
+
+//#region Dynamic Zones
+upper_ml_band = ml_output + band_multiplier * std_dev
+lower_ml_band = ml_output - band_multiplier * std_dev
+upper_ml_band_2 = ml_output + band_multiplier_2 * std_dev
+lower_ml_band_2 = ml_output - band_multiplier_2 * std_dev
+//#endregion
+
+//#region Signals
+bullish_signal_band_1 = ta.crossover(source, lower_ml_band)
+bearish_signal_band_1 = ta.crossunder(source, upper_ml_band)
+bullish_signal_band_2 = ta.crossover(source, lower_ml_band_2)
+bearish_signal_band_2 = ta.crossunder(source, upper_ml_band_2)
+
+bullish_signal = detection_mode == 'Both' ? bullish_signal_band_1 or bullish_signal_band_2 : detection_mode == 'Band 1' ? bullish_signal_band_1 : bullish_signal_band_2
+bearish_signal = detection_mode == 'Both' ? bearish_signal_band_1 or bearish_signal_band_2 : detection_mode == 'Band 1' ? bearish_signal_band_1 : bearish_signal_band_2
+//#endregion
+
+//#region Strategy Logic
+// Determine entry signals based on user selection
+long_entry = entry_band == 'Band 1' ? bullish_signal_band_1 : bullish_signal_band_2
+
+// Track entry price and highest price for trailing
+var float entry_price = na
+var float highest_price = na
+var bool tp1_hit = false
+
+// Entry logic
+if long_entry and strategy.position_size == 0
+    entry_price := close
+    highest_price := close
+    tp1_hit := false
+    strategy.entry('Long', strategy.long)
+    
+    // Set initial exits for all take profit levels
+    stop_loss_price = close * (1 - initial_stop_loss / 100)
+    tp1_price = close * (1 + tp1_percent / 100)
+    tp2_price = close * (1 + tp2_percent / 100)
+    tp3_price = close * (1 + tp3_percent / 100)
+    
+    // TP1 exit
+    strategy.exit('TP1', 'Long', qty_percent = tp1_qty, limit = tp1_price, stop = stop_loss_price)
+    // TP2 exit
+    strategy.exit('TP2', 'Long', qty_percent = tp2_qty, limit = tp2_price, stop = stop_loss_price)
+    // TP3 exit  
+    strategy.exit('TP3', 'Long', qty_percent = tp3_qty, limit = tp3_price, stop = stop_loss_price)
+
+// Position management while in trade
+if strategy.position_size > 0 and not na(entry_price)
+    // Update highest price
+    if high > highest_price
+        highest_price := high
+    
+    // Check if TP1 was hit
+    tp1_price = entry_price * (1 + tp1_percent / 100)
+    if not tp1_hit and high >= tp1_price
+        tp1_hit := true
+    
+    // Calculate remaining quantity after TPs
+    remaining_qty = 100 - tp1_qty - tp2_qty - tp3_qty
+    
+    // Apply trailing stop to remaining position after TP1
+    if enable_trailing and tp1_hit and remaining_qty > 0
+        trailing_stop_price = highest_price * (1 - trailing_stop_percent / 100)
+        strategy.exit('Trail', 'Long', qty_percent = remaining_qty, stop = trailing_stop_price)
+    else if remaining_qty > 0
+        // Keep initial stop for remaining position
+        stop_loss_price = entry_price * (1 - initial_stop_loss / 100)
+        strategy.exit('Stop', 'Long', qty_percent = remaining_qty, stop = stop_loss_price)
+
+// Reset variables when position closes
+if strategy.position_size == 0
+    entry_price := na
+    highest_price := na
+    tp1_hit := false
+//#endregion
+
+//#region Plotting
+plot(vwap, color = vwap > ml_output ? bullColour : bearColour, linewidth = 2, title = 'VWAP')
+plot(ml_output, color = vwap > ml_output ? bullColour : bearColour, linewidth = 2, title = 'ML Prediction (Smoothed)')
+plot(upper_ml_band, color = color.new(bearColour, 50), linewidth = 1, title = 'Upper ML Band 1')
+plot(lower_ml_band, color = color.new(bullColour, 50), linewidth = 1, title = 'Lower ML Band 1')
+plot(upper_ml_band_2, color = color.new(bearColour, 30), linewidth = 1, title = 'Upper ML Band 2')
+plot(lower_ml_band_2, color = color.new(bullColour, 30), linewidth = 1, title = 'Lower ML Band 2')
+
+// Plot entry/exit markers
+if long_entry
+    label.new(bar_index, low, '▲ LONG\n' + str.tostring(close, '#.##'), yloc = yloc.belowbar, color = color.new(bullColour, 0), style = label.style_label_up, textcolor = color.white, size = shape_size_option)
+
+// Plot TP levels and stop loss when in position
+if strategy.position_size > 0 and not na(entry_price)
+    tp1_price = entry_price * (1 + tp1_percent / 100)
+    tp2_price = entry_price * (1 + tp2_percent / 100)
+    tp3_price = entry_price * (1 + tp3_percent / 100)
+    stop_price = entry_price * (1 - initial_stop_loss / 100)
+    
+    // Draw TP lines
+    var line tp1_line = na
+    var line tp2_line = na
+    var line tp3_line = na
+    var line stop_line = na
+    
+    line.delete(tp1_line)
+    line.delete(tp2_line)
+    line.delete(tp3_line)
+    line.delete(stop_line)
+    
+    tp1_line := line.new(bar_index, tp1_price, bar_index + 10, tp1_price, color = color.new(color.green, 60), width = 2, style = line.style_dashed, extend = extend.right)
+    tp2_line := line.new(bar_index, tp2_price, bar_index + 10, tp2_price, color = color.new(color.green, 40), width = 2, style = line.style_dashed, extend = extend.right)
+    tp3_line := line.new(bar_index, tp3_price, bar_index + 10, tp3_price, color = color.new(color.green, 20), width = 2, style = line.style_dashed, extend = extend.right)
+    
+    if enable_trailing and tp1_hit
+        trailing_stop = highest_price * (1 - trailing_stop_percent / 100)
+        stop_line := line.new(bar_index, trailing_stop, bar_index + 10, trailing_stop, color = color.new(color.red, 30), width = 2, style = line.style_solid, extend = extend.right)
+    else
+        stop_line := line.new(bar_index, stop_price, bar_index + 10, stop_price, color = color.new(color.red, 30), width = 2, style = line.style_solid, extend = extend.right)
+//#endregion
+
+//#region Candle Colours
+barcolor(NeutralCandles ? neutralColours : na)
+//#endregion
+
+//#region Background Highlight
+bgcolor(source > upper_ml_band ? color.new(bullColour, 90) : source < lower_ml_band ? color.new(bearColour, 90) : na, title = 'Background Zone Highlight')
+//#endregion
+
+View in Pine Editor・219 lines
+Use on chart
+4
+1
+1 330
+VWAP Bands strategy, Credit [cryptosea]
+
+VWAP Machine Learning Bands is an advanced indicator designed to enhance trading analysis by integrating VWAP with a machine learning-inspired adaptive smoothing approach. This tool helps traders identify trend-based support and resistance zones, predict potential price movements, and generate dynamic trade signals.
+
+Key Features
+Adaptive ML VWAP Calculation: Uses a dynamically adjusted SMA-based VWAP model with volatility sensitivity for improved trend analysis.
+Forecasting Mechanism: The 'Forecast' parameter shifts the ML output forward, providing predictive insights into potential price movements.
+Volatility-Based Band Adjustments: The 'Sigma' parameter fine-tunes the impact of volatility on ML smoothing, adapting to market conditions.
+Multi-Tier Standard Deviation Bands: Includes two levels of bands to define potential breakout or mean-reversion zones.
+Dynamic Trend-Based Colouring: The VWAP and ML lines change colour based on their relative positions, visually indicating bullish and bearish conditions.
+Custom Signal Detection Modes: Allows traders to choose between signals from Band 1, Band 2, or both, for more tailored trade setups.
+
++ Strategy setting by Kevin-Patrick

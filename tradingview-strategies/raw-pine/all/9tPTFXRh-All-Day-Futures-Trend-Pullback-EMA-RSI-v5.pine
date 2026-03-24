@@ -1,0 +1,122 @@
+//@version=5
+strategy("All-Day Futures Trend Pullback (EMA + RSI) [v5]",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+//========================
+// Inputs
+//========================
+emaLen      = input.int(100, "EMA Length", minval=1)
+rsiLen      = input.int(14, "RSI Length", minval=1)
+rsiLongMax  = input.float(45.0, "Long: RSI must be <= (pullback)", step=0.5)
+rsiShortMin = input.float(55.0, "Short: RSI must be >= (pullback)", step=0.5)
+
+useSession  = input.bool(false, "Use Session Filter?")
+sessionStr  = input.session("0000-2359", "Session (exchange time)")
+
+// Risk settings (choose ONE mode: ticks or ATR)
+riskMode    = input.string("Ticks", "Stop/Target Mode", options=["Ticks", "ATR"])
+slTicks     = input.int(40, "Stop Loss (ticks)", minval=1)
+tpTicks     = input.int(80, "Take Profit (ticks)", minval=1)
+
+atrLen      = input.int(14, "ATR Length", minval=1)
+slATRmult   = input.float(1.5, "Stop Loss (ATR x)", step=0.1)
+tpATRmult   = input.float(3.0, "Take Profit (ATR x)", step=0.1)
+
+// Optional trailing stop
+useTrail    = input.bool(false, "Use Trailing Stop?")
+trailTicks  = input.int(20, "Trailing Stop (ticks)", minval=1)
+
+// Position sizing
+qty         = input.float(1, "Contracts", minval=0.0)
+
+//========================
+// Filters / Indicators
+//========================
+ema = ta.ema(close, emaLen)
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(atrLen)
+
+inSession = not useSession or not na(time(timeframe.period, sessionStr))
+
+// Trend definition
+trendUp   = close > ema
+trendDown = close < ema
+
+// Entry conditions (pullback in trend)
+longCond  = inSession and trendUp   and rsi <= rsiLongMax
+shortCond = inSession and trendDown and rsi >= rsiShortMin
+
+//========================
+// Helpers for tick math
+//========================
+tick = syminfo.mintick
+
+f_stopTargetPrices(_isLong) =>
+    float stopPrice = na
+    float limitPrice = na
+    
+    if riskMode == "Ticks"
+        if _isLong
+            stopPrice  := strategy.position_avg_price - slTicks * tick
+            limitPrice := strategy.position_avg_price + tpTicks * tick
+        else
+            stopPrice  := strategy.position_avg_price + slTicks * tick
+            limitPrice := strategy.position_avg_price - tpTicks * tick
+    else
+        if _isLong
+            stopPrice  := strategy.position_avg_price - (slATRmult * atr)
+            limitPrice := strategy.position_avg_price + (tpATRmult * atr)
+        else
+            stopPrice  := strategy.position_avg_price + (slATRmult * atr)
+            limitPrice := strategy.position_avg_price - (tpATRmult * atr)
+
+    [stopPrice, limitPrice]
+
+//========================
+// Entries
+//========================
+if longCond and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if shortCond and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=qty)
+
+//========================
+// Exits (brackets + optional trailing)
+//========================
+if strategy.position_size > 0
+    [sl, tp] = f_stopTargetPrices(true)
+    if useTrail
+        strategy.exit("Long Exit", from_entry="Long", stop=sl, limit=tp, trail_points=trailTicks * tick)
+    else
+        strategy.exit("Long Exit", from_entry="Long", stop=sl, limit=tp)
+
+if strategy.position_size < 0
+    [sl, tp] = f_stopTargetPrices(false)
+    if useTrail
+        strategy.exit("Short Exit", from_entry="Short", stop=sl, limit=tp, trail_points=trailTicks * tick)
+    else
+        strategy.exit("Short Exit", from_entry="Short", stop=sl, limit=tp)
+
+//========================
+// Visuals
+//========================
+plot(ema, "EMA", linewidth=2)
+hline(50, "RSI 50", color=color.new(color.gray, 70))
+plotchar(longCond,  "Long Signal",  "▲", location=location.belowbar, color=color.new(color.green, 0), size=size.tiny)
+plotchar(shortCond, "Short Signal", "▼", location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+
+View in Pine Editor・113 lines
+Use on chart
+1
+1
+507
+All-Day Futures Trend Pullback (EMA + RSI) [v5] is a simple trend-following pullback strategy built for futures. It defines trend direction using a configurable EMA (default 100) and looks for pullback entries using RSI thresholds—going long when price is above the EMA and RSI is at/under the long level, and short when price is below the EMA and RSI is at/over the short level.
+
+Risk management is handled with bracket exits using either fixed ticks or ATR-based stop loss/take profit, with an optional trailing stop. A session filter can be enabled to limit trading hours, and position size is adjustable via a contracts input. The script plots the EMA and marks long/short signals on the chart.

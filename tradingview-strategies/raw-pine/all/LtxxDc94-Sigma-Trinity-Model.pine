@@ -1,0 +1,733 @@
+//@version=5
+strategy("Sigma Trinity Model", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.25, slippage=3, pyramiding=3, max_lines_count=500, max_labels_count=500)
+
+// ======================================================================
+//                             MODULE TOGGLES
+// ======================================================================
+groupModules = "Modules"
+rastaEnabled    = input.bool(true,  "Enable Rasta",         group=groupModules)
+pyramidEnabled  = input.bool(true,  "Enable Pyramid Enter", group=groupModules)
+
+// ======================================================================
+//                           TRADE DIRECTION MODE
+// ======================================================================
+groupDir = "Trade Direction"
+tradeMode = input.string("Long & Short", "Mode",
+     options = ["Long Only", "Short Only", "Long & Short"],
+     group = groupDir)
+
+allowLong  = tradeMode != "Short Only"
+allowShort = tradeMode != "Long Only"
+
+// Force close incompatible positions when mode changes
+if tradeMode == "Long Only" and strategy.position_size < 0
+    strategy.close("SHORT")
+
+if tradeMode == "Short Only" and strategy.position_size > 0
+    strategy.close("LONG")
+
+// ======================================================================
+//                        STOPS (LONG + SHORT)
+// ======================================================================
+groupStops = "Stops"
+showStopLines   = input.bool(true,  "Plot Stop Lines", group=groupStops)
+showStopMarkers = input.bool(true,  "Plot Stop Markers on Hit", group=groupStops)
+
+// --- LONG toggles
+groupStopsL = "Stops LONG"
+enableFixedLong = input.bool(true,  "Enable Fixed Stop (LONG)",    group=groupStopsL)
+enableTrailLong = input.bool(true,  "Enable Trailing Stop (LONG)", group=groupStopsL)
+
+fixedLongFirstPct = input.float(3.0, "Fixed % — First LONG",            minval=0.0, step=0.1, group=groupStopsL)
+fixedLongAddPct   = input.float(2.0, "Fixed % — LONG Add (Pyramid)",    minval=0.0, step=0.1, group=groupStopsL)
+
+trailLongDistPct  = input.float(5.0, "Trail Distance % (LONG)",         minval=0.0, step=0.1, group=groupStopsL)
+useAutoTrigLong   = input.bool(true, "Auto Trigger = D − FixedFirst",   group=groupStopsL)
+trailLongTrigPct  = input.float(2.0, "Custom Trigger % (LONG)",         minval=0.0, step=0.1, group=groupStopsL)
+
+// --- SHORT toggles
+groupStopsS = "Stops SHORT"
+enableFixedShort = input.bool(true,  "Enable Fixed Stop (SHORT)",    group=groupStopsS)
+enableTrailShort = input.bool(true,  "Enable Trailing Stop (SHORT)", group=groupStopsS)
+
+fixedShortFirstPct = input.float(3.0, "Fixed % — First SHORT",          minval=0.0, step=0.1, group=groupStopsS)
+fixedShortAddPct   = input.float(2.0, "Fixed % — SHORT Add (Pyramid)",  minval=0.0, step=0.1, group=groupStopsS)
+
+trailShortDistPct  = input.float(5.0, "Trail Distance % (SHORT)",       minval=0.0, step=0.1, group=groupStopsS)
+useAutoTrigShort   = input.bool(true, "Auto Trigger = D − FixedFirst",  group=groupStopsS)
+trailShortTrigPct  = input.float(2.0, "Custom Trigger % (SHORT)",       minval=0.0, step=0.1, group=groupStopsS)
+
+// Shared hit behavior
+groupStopsX = "Stops Hit Logic"
+stopBufferPct  = input.float(0.0, "Touch Buffer % (undershoot/overshoot)", minval=0.0, step=0.05, group=groupStopsX)
+stopHitSourceL = input.string("Low",  "LONG Stop Hit Source",  options=["Low","Close"],  group=groupStopsX)
+stopHitSourceS = input.string("High", "SHORT Stop Hit Source", options=["High","Close"], group=groupStopsX)
+
+// ======================================================================
+//                                   RASTA
+// ======================================================================
+groupInp   = "Rasta / Inputs"
+emaLen     = input.int(5, "Length", minval=1, group=groupInp)
+src        = input.source(close, "Source", group=groupInp)
+offsetBars = input.int(0, "Offset", group=groupInp)
+
+groupSm    = "Rasta / Smoothing"
+smType     = input.string("SMA", "Type", options=["SMA","EMA","RMA","WMA","None"], group=groupSm)
+smLen      = input.int(5, "Length", minval=1, group=groupSm)
+
+groupViz   = "Rasta / Visualization"
+showLabels = input.bool(true,  "Show LONG/SHORT Labels", group=groupViz)
+showFog    = input.bool(true,  "Show Colored Fog Between Lines", group=groupViz)
+fogTransp  = input.int(55,     "Fog Opacity (0=solid, 100=hidden)", minval=0, maxval=100, group=groupViz)
+
+groupRung  = "Rasta / DNA Rungs"
+showRungs  = input.bool(true,  "Show DNA Rungs (EMA ↔ Smoothed)", group=groupRung)
+rungWidth  = input.int(1,      "Rung Width (thin default)", minval=1, maxval=5, group=groupRung)
+maxKeep    = input.int(420,    "Max Rungs to Keep (<= 450)", minval=100, maxval=450, step=10, group=groupRung)
+rungColorMode = input.string("Direction", "Rung Color", options=["Fixed Green","Direction"], group=groupRung)
+rungFixedCol  = input.color(color.lime, "Fixed Rung Color", group=groupRung)
+
+groupFilt        = "Rasta / EMA 8/21 Filter"
+useEmaFilter     = input.bool(true,  "Enable EMA 8/21 Filter", group=groupFilt)
+emaFastLenSw     = input.int(8,      "Fast EMA",  minval=1, group=groupFilt)
+emaSlowLenSw     = input.int(21,     "Slow EMA",  minval=1, group=groupFilt)
+plotFilterEMAs   = input.bool(false, "Plot Filter EMAs", group=groupFilt)
+adaptiveOnFlip   = input.bool(true,  "Adaptive entry when filter flips ON", group=groupFilt)
+
+ema8  = ta.ema(close, emaFastLenSw)
+ema21 = ta.ema(close, emaSlowLenSw)
+upTrend      = ema8 > ema21
+filterFlipOn = ta.crossover(ema8, ema21)
+
+// --- Smoothing function (SAFE: no ternary chaining)
+f_smooth(series float s, string t, int l) =>
+    float out = s
+    if t == "SMA"
+        out := ta.sma(s, l)
+    else if t == "EMA"
+        out := ta.ema(s, l)
+    else if t == "RMA"
+        out := ta.rma(s, l)
+    else if t == "WMA"
+        out := ta.wma(s, l)
+    out
+
+emaLine  = ta.ema(src, emaLen)
+smoothed = f_smooth(emaLine, smType, smLen)
+dirUp    = emaLine > smoothed
+
+// ======================================================================
+//                           STATE (BAR LOCK)
+// ======================================================================
+var bool barLock = false
+if barstate.isnew
+    barLock := false
+
+// ======================================================================
+//                             RASTA SIGNALS
+// ======================================================================
+buyRaw  = ta.crossover(emaLine, smoothed)
+sellRaw = ta.crossunder(emaLine, smoothed)
+
+buyAllowed  = (not useEmaFilter) or upTrend
+adaptiveBuy = rastaEnabled and allowLong and useEmaFilter and adaptiveOnFlip and filterFlipOn and (strategy.position_size <= 0) and not barLock and (emaLine > smoothed)
+
+buyFireBase  = rastaEnabled and allowLong  and buyRaw  and not barLock and (strategy.position_size <= 0)
+sellFireBase = rastaEnabled and allowShort and sellRaw and not barLock and (strategy.position_size >= 0)
+
+buyFire  = (buyFireBase and buyAllowed) or adaptiveBuy
+sellFire = sellFireBase
+
+buyFireClose  = rastaEnabled and allowLong  and barstate.isconfirmed and ta.crossover(emaLine, smoothed)  and (strategy.position_size <= 0) and buyAllowed
+sellFireClose = rastaEnabled and allowShort and barstate.isconfirmed and ta.crossunder(emaLine, smoothed) and (strategy.position_size >= 0)
+
+if buyFire or sellFire
+    barLock := true
+
+// ======================================================================
+//                       STOP STATE (LONG/SHORT)
+// ======================================================================
+var float longEntry       = na
+var float longFixedStop   = na
+var bool  longTrailArmed  = false
+var float longPeak        = na
+var float longTrailStop   = na
+
+var float shortEntry      = na
+var float shortFixedStop  = na
+var bool  shortTrailArmed = false
+var float shortTrough     = na
+var float shortTrailStop  = na
+
+// ======================================================================
+//                        PYRAMID STOP FLAG 
+// ======================================================================
+var bool pyrTightLong  = false
+var bool pyrTightShort = false
+
+// ======================================================================
+//                      POSITION FLIPS (ENTRY/EXIT)
+// ======================================================================
+enteredLong  = (buyFire or buyFireClose)
+enteredShort = (sellFire or sellFireClose)
+
+// LONG entry
+if enteredLong
+    strategy.entry("LONG", strategy.long)
+
+    // reset SHORT stops
+    shortEntry      := na
+    shortFixedStop  := na
+    shortTrailArmed := false
+    shortTrough     := na
+    shortTrailStop  := na
+
+    // init LONG stops
+    longEntry := close
+    longFixedStop := na
+    if enableFixedLong
+        longFixedStop := longEntry * (1.0 - fixedLongFirstPct / 100.0)
+    longTrailArmed := false
+    longPeak := na
+    longTrailStop := na
+
+    // reset pyramid-tight flag for new trade
+    pyrTightLong := false
+
+// SHORT entry
+if enteredShort
+    strategy.entry("SHORT", strategy.short)
+
+    // reset LONG stops
+    longEntry      := na
+    longFixedStop  := na
+    longTrailArmed := false
+    longPeak       := na
+    longTrailStop  := na
+
+    // init SHORT stops
+    shortEntry := close
+    shortFixedStop := na
+    if enableFixedShort
+        shortFixedStop := shortEntry * (1.0 + fixedShortFirstPct / 100.0)
+    shortTrailArmed := false
+    shortTrough := na
+    shortTrailStop := na
+
+    // reset pyramid-tight flag for new trade
+    pyrTightShort := false
+
+// ======================================================================
+//                            RASTA PLOTS (THIN)
+// ======================================================================
+pEMA = plot(rastaEnabled ? emaLine  : na, "Rasta EMA",      color=color.new(color.red,    0), offset=offsetBars, linewidth=1)
+pSM  = plot(rastaEnabled ? smoothed : na, "Rasta Smoothed", color=color.new(color.yellow, 0), offset=offsetBars, linewidth=1)
+
+plot(plotFilterEMAs and rastaEnabled ? ema8  : na, "Rasta EMA 8 (Filter)",  color=color.new(color.teal,  0), linewidth=1)
+plot(plotFilterEMAs and rastaEnabled ? ema21 : na, "Rasta EMA 21 (Filter)", color=color.new(color.orange,0), linewidth=1)
+
+if rastaEnabled and showLabels and enteredLong
+    label.new(bar_index, low,  "LONG",  style=label.style_label_up,   textcolor=color.white, color=color.new(color.teal, 0))
+if rastaEnabled and showLabels and enteredShort
+    label.new(bar_index, high, "SHORT", style=label.style_label_down, textcolor=color.white, color=color.new(color.red,  0))
+
+colFog = (rastaEnabled and showFog) ? (dirUp ? color.new(color.lime, fogTransp) : color.new(color.red, fogTransp)) : na
+fill(pEMA, pSM, color=colFog)
+
+// DNA rungs
+topR = math.max(emaLine, smoothed)
+botR = math.min(emaLine, smoothed)
+rungCol = rungColorMode == "Direction" ? (dirUp ? color.lime : color.red) : rungFixedCol
+
+var line   curRung = na
+var line[] rungBuf = array.new_line()
+
+if rastaEnabled and showRungs
+    if barstate.isnew
+        curRung := line.new(bar_index, botR, bar_index, topR, xloc=xloc.bar_index, extend=extend.none, color=rungCol, width=rungWidth)
+        array.push(rungBuf, curRung)
+        if array.size(rungBuf) > maxKeep
+            line.delete(array.shift(rungBuf))
+    if not na(curRung)
+        line.set_y1(curRung, botR)
+        line.set_y2(curRung, topR)
+        line.set_width(curRung, rungWidth)
+        line.set_color(curRung, rungCol)
+
+// ======================================================================
+//                             PYRAMID ENTER (GATED)
+//      LONG adds when LONG, SHORT adds when SHORT (toggles per side)
+// ======================================================================
+groupPy = "Pyramid / Inputs"
+pyr_emaLen     = input.int(5, "Length", minval=1, group=groupPy)
+pyr_src        = input.source(close, "Source", group=groupPy)
+pyr_offsetBars = input.int(0, "Offset", group=groupPy)
+
+groupPySm = "Pyramid / Smoothing"
+pyr_smType = input.string("SMA", "Type", options=["SMA","EMA","RMA","WMA","None"], group=groupPySm)
+pyr_smLen  = input.int(5, "Length", minval=1, group=groupPySm)
+
+groupPyViz = "Pyramid / Visualization"
+pyr_showLabels = input.bool(true, "Show Labels", group=groupPyViz)
+
+groupPyDir = "Pyramid / Direction"
+pyr_enableLong  = input.bool(true,  "Enable Pyramid LONG Adds",  group=groupPyDir)
+pyr_enableShort = input.bool(false, "Enable Pyramid SHORT Adds", group=groupPyDir)
+
+groupPyFilt        = "Pyramid / EMA 8/21 Filter"
+pyr_useEmaFilter   = input.bool(true,  "Enable Pyramid EMA 8/21 Filter", group=groupPyFilt)
+pyr_emaFastLenSw   = input.int(8,      "Fast EMA",  minval=1, group=groupPyFilt)
+pyr_emaSlowLenSw   = input.int(21,     "Slow EMA",  minval=1, group=groupPyFilt)
+pyr_plotFilterEMAs = input.bool(false, "Plot Filter EMAs", group=groupPyFilt)
+pyr_adaptiveOnFlip = input.bool(true,  "Adaptive entry when filter flips ON", group=groupPyFilt)
+
+pyr_ema8  = ta.ema(close, pyr_emaFastLenSw)
+pyr_ema21 = ta.ema(close, pyr_emaSlowLenSw)
+pyr_upTrend      = pyr_ema8 > pyr_ema21
+pyr_downTrend    = pyr_ema8 < pyr_ema21
+pyr_filterFlipUp = ta.crossover(pyr_ema8, pyr_ema21)
+pyr_filterFlipDn = ta.crossunder(pyr_ema8, pyr_ema21)
+
+pyr_emaLine  = ta.ema(pyr_src, pyr_emaLen)
+pyr_smoothed = f_smooth(pyr_emaLine, pyr_smType, pyr_smLen)
+
+var bool pyr_barLock = false
+if barstate.isnew
+    pyr_barLock := false
+
+pyr_gateLong  = pyramidEnabled and pyr_enableLong  and allowLong  and (strategy.position_size > 0)
+pyr_gateShort = pyramidEnabled and pyr_enableShort and allowShort and (strategy.position_size < 0)
+
+pyr_enterRawL     = ta.crossover(pyr_emaLine, pyr_smoothed)
+pyr_enterAllowedL = (not pyr_useEmaFilter) or pyr_upTrend
+pyr_enterBaseL    = pyr_gateLong and pyr_enterRawL and not pyr_barLock and pyr_enterAllowedL
+pyr_adaptiveL     = pyr_gateLong and pyr_useEmaFilter and pyr_adaptiveOnFlip and pyr_filterFlipUp and not pyr_barLock and (pyr_emaLine > pyr_smoothed)
+pyr_enterFireL    = pyr_enterBaseL or pyr_adaptiveL
+pyr_enterCloseL   = pyr_gateLong and barstate.isconfirmed and ta.crossover(pyr_emaLine, pyr_smoothed) and pyr_enterAllowedL and not pyr_barLock
+pyr_addLong       = pyr_enterFireL or pyr_enterCloseL
+
+pyr_enterRawS     = ta.crossunder(pyr_emaLine, pyr_smoothed)
+pyr_enterAllowedS = (not pyr_useEmaFilter) or pyr_downTrend
+pyr_enterBaseS    = pyr_gateShort and pyr_enterRawS and not pyr_barLock and pyr_enterAllowedS
+pyr_adaptiveS     = pyr_gateShort and pyr_useEmaFilter and pyr_adaptiveOnFlip and pyr_filterFlipDn and not pyr_barLock and (pyr_emaLine < pyr_smoothed)
+pyr_enterFireS    = pyr_enterBaseS or pyr_adaptiveS
+pyr_enterCloseS   = pyr_gateShort and barstate.isconfirmed and ta.crossunder(pyr_emaLine, pyr_smoothed) and pyr_enterAllowedS and not pyr_barLock
+pyr_addShort      = pyr_enterFireS or pyr_enterCloseS
+
+pyr_addEvent = pyr_addLong or pyr_addShort
+
+if pyr_addEvent
+    pyr_barLock := true
+
+if pyr_addLong
+    strategy.entry("LONG", strategy.long)
+
+if pyr_addShort
+    strategy.entry("SHORT", strategy.short)
+
+plot(pyramidEnabled ? pyr_emaLine  : na, "Pyramid EMA",      color=color.white, linewidth=1, offset=pyr_offsetBars)
+plot(pyramidEnabled ? pyr_smoothed : na, "Pyramid Smoothed", color=color.blue,  linewidth=1, offset=pyr_offsetBars)
+
+plot(pyr_plotFilterEMAs and pyramidEnabled ? pyr_ema8  : na, "Pyramid EMA 8 (Filter)",  color=color.new(color.teal,  0), linewidth=1)
+plot(pyr_plotFilterEMAs and pyramidEnabled ? pyr_ema21 : na, "Pyramid EMA 21 (Filter)", color=color.new(color.orange,0), linewidth=1)
+
+if pyramidEnabled and pyr_showLabels and pyr_addLong
+    label.new(bar_index, low, "Pyramid LONG", style=label.style_label_up, textcolor=color.white, color=color.new(color.orange, 0))
+if pyramidEnabled and pyr_showLabels and pyr_addShort
+    label.new(bar_index, high, "Pyramid SHORT", style=label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0))
+
+// ======================================================================
+//                     STOPS ENGINE (INTRABAR)
+// ======================================================================
+var bool stopLongHit  = false
+var bool stopShortHit = false
+stopLongHit  := false
+stopShortHit := false
+
+if strategy.position_size > 0 and not na(longEntry)
+    if pyr_addLong and enableFixedLong
+        float candFixL = close * (1.0 - fixedLongAddPct / 100.0)
+        longFixedStop := na(longFixedStop) ? candFixL : math.max(longFixedStop, candFixL)
+        pyrTightLong := true  // <-- NEW (tracks pyramid-tightened fixed stop)
+
+    if enableTrailLong
+        float TL = useAutoTrigLong ? math.max(trailLongDistPct - fixedLongFirstPct, 0.0) : trailLongTrigPct
+        if not longTrailArmed and high >= longEntry * (1.0 + TL / 100.0)
+            longTrailArmed := true
+            longPeak := high
+            longTrailStop := longPeak * (1.0 - trailLongDistPct / 100.0)
+        if longTrailArmed and high > nz(longPeak, high)
+            longPeak := high
+            float candTrailL = longPeak * (1.0 - trailLongDistPct / 100.0)
+            longTrailStop := na(longTrailStop) ? candTrailL : math.max(longTrailStop, candTrailL)
+
+    float priceCheckL = (stopHitSourceL == "Low") ? low : close
+    float effFixL  = (enableFixedLong and not na(longFixedStop)) ? longFixedStop * (1.0 - stopBufferPct / 100.0) : na
+    float effTrlL  = (enableTrailLong and longTrailArmed and not na(longTrailStop)) ? longTrailStop * (1.0 - stopBufferPct / 100.0) : na
+
+    bool hitFixL = not na(effFixL) and priceCheckL <= effFixL
+    bool hitTrlL = not na(effTrlL) and priceCheckL <= effTrlL
+
+    if hitFixL or hitTrlL
+        stopLongHit := true
+        strategy.close("LONG")
+        barLock := true
+
+        if showStopMarkers
+            string txtL = ""
+            if hitTrlL
+                txtL := "STOP LONG (Trail)"
+            else
+                txtL := pyrTightLong ? "PYRAMID STOP (Fixed)" : "STOP LONG (Fixed)"
+            label.new(bar_index, low, txtL,
+                      style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+
+        longEntry      := na
+        longFixedStop  := na
+        longTrailArmed := false
+        longPeak       := na
+        longTrailStop  := na
+        pyrTightLong   := false   // reset
+
+if strategy.position_size < 0 and not na(shortEntry)
+    if pyr_addShort and enableFixedShort
+        float candFixS = close * (1.0 + fixedShortAddPct / 100.0)
+        shortFixedStop := na(shortFixedStop) ? candFixS : math.min(shortFixedStop, candFixS)
+        pyrTightShort := true  // <-- NEW
+
+    if enableTrailShort
+        float TS = useAutoTrigShort ? math.max(trailShortDistPct - fixedShortFirstPct, 0.0) : trailShortTrigPct
+        if not shortTrailArmed and low <= shortEntry * (1.0 - TS / 100.0)
+            shortTrailArmed := true
+            shortTrough := low
+            shortTrailStop := shortTrough * (1.0 + trailShortDistPct / 100.0)
+        if shortTrailArmed and low < nz(shortTrough, low)
+            shortTrough := low
+            float candTrailS = shortTrough * (1.0 + trailShortDistPct / 100.0)
+            shortTrailStop := na(shortTrailStop) ? candTrailS : math.min(shortTrailStop, candTrailS)
+
+    float priceCheckS = (stopHitSourceS == "High") ? high : close
+    float effFixS = (enableFixedShort and not na(shortFixedStop)) ? shortFixedStop * (1.0 + stopBufferPct / 100.0) : na
+    float effTrlS = (enableTrailShort and shortTrailArmed and not na(shortTrailStop)) ? shortTrailStop * (1.0 + stopBufferPct / 100.0) : na
+
+    bool hitFixS = not na(effFixS) and priceCheckS >= effFixS
+    bool hitTrlS = not na(effTrlS) and priceCheckS >= effTrlS
+
+    if hitFixS or hitTrlS
+        stopShortHit := true
+        strategy.close("SHORT")
+        barLock := true
+
+        if showStopMarkers
+            string txtS = ""
+            if hitTrlS
+                txtS := "STOP SHORT (Trail)"
+            else
+                txtS := pyrTightShort ? "PYRAMID STOP (Fixed)" : "STOP SHORT (Fixed)"
+            label.new(bar_index, high, txtS,
+                      style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white)
+
+        shortEntry      := na
+        shortFixedStop  := na
+        shortTrailArmed := false
+        shortTrough     := na
+        shortTrailStop  := na
+        pyrTightShort   := false  // reset
+
+plot(showStopLines and strategy.position_size > 0 and enableFixedLong  ? longFixedStop  : na, title="Fixed Stop (LONG)",  color=color.new(color.red, 0),    style=plot.style_linebr, linewidth=1)
+plot(showStopLines and strategy.position_size > 0 and enableTrailLong and longTrailArmed ? longTrailStop : na, title="Trail Stop (LONG)",  color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=1)
+
+plot(showStopLines and strategy.position_size < 0 and enableFixedShort ? shortFixedStop : na, title="Fixed Stop (SHORT)", color=color.new(color.red, 0),    style=plot.style_linebr, linewidth=1)
+plot(showStopLines and strategy.position_size < 0 and enableTrailShort and shortTrailArmed ? shortTrailStop : na, title="Trail Stop (SHORT)", color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=1)
+
+View in Pine Editor・441 lines
+Use on chart
+2
+4
+6
+1
+4 292
+Nov 7, 2025
+Abstract
+
+Sigma Trinity Model is an educational framework that studies how three layers of market behavior interact within the same trend: (1) structural momentum (Rasta), (2) internal strength (RSI), and (3) continuation/compounding structure (Pyramid). The model deliberately combines bar-close momentum logic with intrabar, wick-aware strength checks to help users see how reversals form, confirm, and extend. It is not a signal service or automation tool; it is a transparent learning instrument for chart study and backtesting.
+
+Why this is not “just a mashup”
+
+Many scripts merge indicators without explaining the purpose. Sigma Trinity is a coordinated, three-engine study designed for a specific learning goal:
+
+Rasta (structure): defines when momentum actually flips using a dual-line EMA vs smoothed EMA. It gives the entry/exit framework on bar close for clean historical study.
+
+RSI (energy): measures internal strength with wick-aware triggers. It uses RSI of LOW (for bottom touches/reclaims) and RSI of HIGH (for top touches/exhaustion) so users can see intrabar strength/weakness that the close can hide.
+
+Pyramid (progression): demonstrates how continuation behaves once momentum and strength align. It shows the logic of adds (compounding) as a didactic layer, also on bar close to keep historical alignment consistent.
+
+These three roles are complementary, not redundant: structure → strength → progression.
+
+Architecture Overview
+
+Execution model
+
+Rasta & Pyramid: bar close only by default (historically stable, easy to audit).
+
+RSI: per tick (realtime) with bar-close backup by default, using RSI of LOW for entries and RSI of HIGH for exits. This makes the module sensitive to intra-bar wicks while still giving a close-based safety net for backtests.
+
+Stops (optional in strategy builds): wick-accurate: trail arms/ratchets on HIGH; stop hit checks with LOW (or Close if selected) with a small undershoot buffer to avoid micro-noise hits.
+
+Visual model
+
+Dual lines (EMA vs smoothed EMA) for Rasta + color fog to see direction and compression/expansion.
+
+Rungs (small vertical lines) drawn between the two Rasta lines to visualize wave spacing and rhythm.
+
+Clean labels for Entry/Exit/Pyramid Add/RSI events. Everything is state-locked to avoid spamming.
+
+Module 1 — Rasta (Structural Momentum Layer)
+
+Goal: Identify structural momentum reversals and maintain a consistent, replayable backbone for study.
+
+Method:
+
+Compute an EMA of a chosen price source (default Close), and a smoothed version (SMA/EMA/RMA/WMA/None selectable).
+
+Flip points occur when the EMA line crosses the smoothed line.
+
+Optional EMA 8/21 trend filter can gate entries (long-bias when EMA8 > EMA21). A small “adaptive on flip” option lets an entry fire when the filter itself flips to ON and the EMA is already above the smoothed line—useful for trend resumption.
+
+Why bar close only?
+Bar-close Rasta gives a stable, auditable timeline for the structure of the trend. It teaches users to separate “structure” (close-resolved) from “energy” (intrabar, via RSI).
+
+Visuals:
+
+Fog between the lines (green/red) to show regime.
+
+Rungs between lines to show spread (compression vs expansion).
+
+Optional plotting of EMA8/EMA21 so users can see the gating effect.
+
+Module 2 — RSI (Internal Strength / Energy Layer)
+
+Goal: Reveal the intrabar strength/weakness that often precedes or confirms structural flips.
+
+Method:
+
+Standard RSI with adjustable length and signal smoothing for the panel view.
+
+Logic uses wick-aware sources:
+
+Entry trigger: RSI of LOW (same RSI length) touching or below a lower band (default 15). Think of it as intraband reactivation from the bottom, using the candle’s deepest excursion.
+
+Exit trigger: RSI of HIGH touching or above an upper band (default 85). Think of it as exhaustion at the top, using the candle’s highest excursion.
+
+Realtime + Close Backup: fires intrabar on tick, but if the realtime event was missed, the close backup will note it at bar end.
+
+Cooldown control: optional bars-between-signals to avoid rapid re-triggers on choppy sequences.
+
+Why wick-aware RSI?
+A close-only RSI can miss the true micro-extremes that cause reversals. Using LOW/HIGH for triggers captures the behavior that traders actually react to during the bar, while the bar-close backup preserves historical reproducibility.
+
+Module 3 — Pyramid (Continuation / Compounding Layer)
+
+Goal: Teach how continuation behaves once a trend is underway, and how adds can be structured.
+
+Method:
+
+Same dual-line logic as Rasta (EMA vs smoothed EMA), but only fires when already in a position (or after prior entry conditions).
+
+Supports the same EMA 8/21 filter and optional adaptive-on-flip behavior.
+
+Bar close only to maintain historical cohesion.
+
+What it teaches:
+
+Adds tend to cluster when momentum persists.
+
+Students can experiment with add spacing and compare “one-shot entries” vs “laddered adds” during strong regimes.
+
+How the Pieces Work Together
+
+Rasta establishes the structural frame (when the wave flip is real enough to record at close).
+
+RSI validates or challenges that structure by tracking intrabar energy at the extremes (low/high touches).
+
+Pyramid shows what sustained continuation looks like once (1) and (2) align.
+
+This produces a layered view: Structure → Energy → Progression. Users can see when all three line up (strongest phases) and when they diverge (riskier phases or transitions).
+
+How to Use It (Step-by-Step)
+Quick Start
+
+Apply script to any symbol/timeframe.
+
+In Strategy/Indicator Properties:
+
+Enable On every tick (recommended).
+
+If available, enable Using bar magnifier and choose a lower resolution (e.g., 1m) to simulate intrabar fills more realistically.
+
+Keep On bar close unchecked if you want to observe realtime logic in live charts (strategies still place orders on close by platform design).
+
+Default behavior: Rasta & Pyramid = bar close; RSI = per tick with close backup.
+
+Reading the Chart
+
+Watch for Rasta Entry/Exit labels: they define clean structural turns on close.
+
+Watch RSI Entry (LOW touch at/below lower band) and RSI Exit (HIGH touch at/above upper band) to gauge internal energy extremes.
+
+Pyramid Add labels reveal continuation phases once a move is already in progress.
+
+Tuning
+
+Rasta smoothing: choose SMA/EMA/RMA/WMA or None. Higher smoothing → later but cleaner flips; lower smoothing → earlier but choppier.
+
+RSI bands: a common educational setting is 15/85 for strong extremes; 20/80 is a bit looser.
+
+Cooldown: increase if you see too many RSI re-fires in chop.
+
+EMA 8/21 filter: toggle ON to study “trend-gated” entries, OFF to study raw momentum flips.
+
+Backtesting Notes (for Strategy Builds)
+
+Stops (optional): trail is armed when price advances by a trigger (default D–F₀), ratchets only upward from HIGH, and hits from LOW (or Close if chosen) with a tiny undershoot buffer to avoid micro-wicks.
+
+Order sequencing per bar (mirrors the script’s code comments):
+
+Trail ratchet via HIGH
+
+Intrabar stop hit via LOW/CLOSE → immediate close
+
+If still in position at bar close: process exits (Rasta/RSI)
+
+If still in position at bar close: process Pyramid Add
+
+If flat at bar close: process entries (Rasta/RSI)
+
+Platform reality: strategies place orders at bar close in historical testing; the intrabar logic improves realism for stops and event marking but final order timestamps are still close-resolved.
+
+Inputs Reference (common)
+
+Modules: enable/disable RSI and Pyramid learning layers.
+
+Rasta: EMA length, smoothing type/length, EMA8/21 filter & adaptive flip, fog opacity, rungs on/off & limit.
+
+RSI: RSI length, signal MA length (panel), Entry band (LOW), Exit band (HIGH), cooldown bars, labels.
+
+Pyramid: EMA length, smoothing, EMA8/21 filter & adaptive adds.
+
+Execution: toggle Bar Close Only for Rasta/Pyramid; toggle Realtime + Close Backup for RSI.
+
+Stops (strategy): Fixed Stop % (first), Fixed Stop % (add), Trail Distance %, Trigger rule (auto D–F₀ or custom), undershoot buffer %, and hit source (LOW/CLOSE).
+
+What to Study With It
+
+Convergence: how often RSI-LOW entry touches precede the next Rasta flip.
+
+Divergence: cases where RSI screams exhaustion (HIGH >= upper band) but Rasta hasn’t flipped yet—often transition zones.
+
+Continuation: how Pyramid adds cluster in strong moves; how spacing changes with smoothing/filter choices.
+
+Regime changes: use EMA8/21 filter toggles to see what happens at macro turns vs chop.
+
+Limitations & Scope
+
+This is a learning tool, not a trade copier. It does not provide financial advice or automated execution.
+
+Intrabar results depend on data granularity; bar magnifier (when available) can help simulate lower-resolution ticks, but true tick-by-tick fills are a platform-level feature and not guaranteed across all symbols.
+
+Suggested Publication Settings (Strategy)
+
+Initial capital: 100
+
+Order size: 100 USD (cash)
+
+Pyramiding: 10
+
+Commission: 0.25%
+
+Slippage: 3 ticks
+
+Recalculate: ✓ On every tick
+
+Fill orders: ✓ Using bar magnifier (choose 1m or similar); leave On bar close unchecked for live viewing.
+
+Educational License
+
+Released under the Michael Culpepper Gratitude License (2025).
+Use and modify freely for education and research with attribution. No resale. No promises of profitability. Purpose is understanding, not signals.
+Feb 16
+Release Notes
+Sigma Trinity Model
+
+Sigma Trinity Model is an open-source Pine Script strategy designed to study how structural regime logic, continuation entries, and coordinated stop management can operate within a single position model.
+
+The script integrates three components that operate under one shared position state:
+
+1) Structural Regime (Rasta Module)
+
+Market structure is defined using:
+
+A primary EMA of a user-selected source
+
+A secondary smoothing layer (SMA, EMA, RMA, WMA, or None applied to that EMA)
+
+A long condition begins when the primary EMA crosses above its smoothed derivative.
+A short condition begins on the inverse crossover.
+
+This crossover defines regime bias rather than repeated signal firing. Only one directional state can be active at a time. Optional EMA 8/21 filtering can restrict entries to broader trend alignment.
+
+2) Continuation Entries (Pyramid Module)
+
+The Pyramid module is optional and operates only when a structural position is already active.
+
+It uses a separate EMA/smoothing configuration to allow additional entries in the direction of the active regime. It cannot initiate new regime direction independently. This ensures continuation logic remains subordinate to the primary structural condition.
+
+3) Integrated Stop Logic
+
+Risk management is handled internally using:
+
+A configurable fixed stop
+
+An optional trailing stop
+
+Optional trigger thresholds
+
+Wick or close-based stop detection
+
+Optional buffer percentage
+
+The trailing stop activates only after price moves a defined distance from entry and ratchets in the favorable direction without widening. Fixed and trailing logic resolve into a single exit event.
+
+Strategy Defaults
+
+The script uses:
+
+Initial capital: 10,000
+
+Order size: 10% of equity
+
+Commission: 0.25%
+
+Slippage: 3
+
+Pyramiding: up to 3 entries
+
+Users may adjust these properties in the Strategy Settings panel. Backtest results depend on market, timeframe, and configuration.
+
+How to Use
+
+Apply the script to a price chart (overlay).
+
+Users can configure:
+
+EMA lengths and smoothing type
+
+EMA 8/21 filter behavior
+
+Long-only, short-only, or bidirectional mode
+
+Fixed and trailing stop parameters
+
+Pyramid module activation
+
+The script is intended for analytical study of structured entry and exit coordination within Pine Script. It does not provide financial advice.

@@ -1,0 +1,81 @@
+//@version=5
+strategy("Khaled Tamim's Avellaneda-Stoikov Strategy", overlay=true)
+
+// Avellaneda-Stoikov model logic
+avellanedaStoikov(src, gamma, sigma, T, k, M) =>
+    midPrice = (src + src[1]) / 2
+    sqrtTerm = gamma * sigma * sigma * T
+    // Add 0.1% fee to bid and ask quotes
+    fee = 0 // 0.1% fee
+    bidQuote = midPrice - k * sqrtTerm - (midPrice * fee)
+    askQuote = midPrice + k * sqrtTerm + (midPrice * fee)
+    longCondition = src < bidQuote - M
+    shortCondition = src > askQuote + M
+    [bidQuote, askQuote]
+
+// Define strategy parameters
+gamma = input.float(2, title="Gamma")
+sigma = input.float(8, title="Sigma")
+T = input.float(0.0833, title="T")
+k = input.float(5, title="k")
+M = input.float(0.5, title="M")
+
+// Calculate signals
+[bidQuote, askQuote] = avellanedaStoikov(close, gamma, sigma, T, k, M)
+longCondition = close < bidQuote - M
+shortCondition = close > askQuote + M
+
+// Plot signals
+plotshape(series=longCondition ? low : na, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=shortCondition ? high : na, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// Plot bid and ask prices
+plot(bidQuote, title="Bid Price", color=color.blue, linewidth=1)
+plot(askQuote, title="Ask Price", color=color.red, linewidth=1)
+
+// Plot inventory level as bars in a separate graph
+plot(strategy.netprofit, title="Inventory", color=color.new(color.purple, 80), style=plot.style_columns)
+
+
+// Strategy logic
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+8
+5
+6 621
+Description:
+This strategy applies the Avellaneda-Stoikov (A-S) model to generate buy and sell signals for underlying assets based on option pricing theory. The A-S model estimates bid and ask quotes for options contracts considering factors like volatility (sigma), time to expiration (T), and risk aversion (gamma).
+
+Key Concepts:
+Avellaneda-Stoikov Model: A mathematical framework for option pricing that incorporates volatility, time decay, and risk tolerance.
+Bid-Ask Quotes: The theoretical buy and sell prices for an option contract.
+Inventory Management: The strategy tracks its long or short position based on signals.
+
+How it Works:
+A-S Model Calculation: The avellanedaStoikov function calculates bid and ask quotes using the underlying asset's closing price, user-defined parameters (gamma, sigma, T, k, and M), and a small fee (adjustable).
+Signal Generation: The strategy generates long signals when the closing price falls below the adjusted bid quote and short signals when it exceeds the adjusted ask quote.
+Trade Execution: Buy and sell orders are triggered based on the generated signals (long for buy, short for sell).
+Inventory Tracking: The strategy's net profit reflects the current inventory level (long or short position).
+
+Customization:
+Gamma (γ): Controls risk aversion in the A-S model (higher values imply lower risk tolerance).
+Sigma (σ): Represents the underlying asset's expected volatility.
+T: Time to expiration for the hypothetical option (defaults to a short-term option).
+k: A constant factor in the A-S model calculations.
+M: Minimum price buffer for buy/sell signals (prevents excessive churn).
+
+Important Note:
+This strategy simulates option pricing behavior for a theoretical option and does not directly trade options contracts. Backtesting results may not reflect actual market conditions.
+
+Further Considerations:
+The 0.1% fee is a placeholder and may need adjustment based on real-world trading costs.
+Consider using realistic timeframes for T (e.g., expiry for a real option)
+
+Disclaimer: This strategy is for educational purposes only and does not constitute financial advice.

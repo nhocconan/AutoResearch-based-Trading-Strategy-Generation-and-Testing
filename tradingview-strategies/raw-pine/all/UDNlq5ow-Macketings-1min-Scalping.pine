@@ -1,0 +1,245 @@
+//@version=6
+strategy("Macketings 1min Scalping [Smart Exit + Time]", shorttitle="Macketing Time", overlay=true, pyramiding=0, initial_capital=10000, default_qty_value=100, default_qty_type=strategy.percent_of_equity)
+
+// --- 1. INSTÄLLNINGAR ---
+len80 = input.int(80, title="EMA 80 Length")
+len90 = input.int(90, title="EMA 90 Length")
+len340 = input.int(340, title="EMA 340 Length")
+len500 = input.int(500, title="EMA 500 Length")
+lenSafety = input.int(325, title="SMA Safety Filter")
+
+// FILTER (Cooldown & Tid)
+cooldown_bars = input.int(100, title="Cooldown Bars (Vila efter exit)", group="Filter")
+
+// NYTT: TIDSFILTER
+use_time_filter = input.bool(true, title="Aktivera Tidsfilter?", group="Filter")
+// Formatet "0900-2359" betyder att handel är tillåten från 09:00 till 23:59.
+// Resten av tiden (00:00-09:00) tas inga nya positioner.
+trading_session = input.session("0900-2359", title="Tillåten Handelstid", group="Filter")
+
+// RISK (Stop Loss & TP)
+sl_perc = input.float(0.2, title="Initial Stop Loss (%)", step=0.1, group="Risk") / 100 
+be_trigger_perc = input.float(0.3, title="Breakeven Trigger (%)", step=0.1, group="Risk") / 100 
+be_profit_perc = input.float(0.2, title="Secured Profit (%)", step=0.1, group="Risk") / 100 
+tp_perc = input.float(1.5, title="Take Profit (%)", step=0.5, group="Risk") / 100 
+
+// SMART BAND EXIT
+use_smart_exit = input.bool(true, title="Använd Smart Band Exit?", group="Smart Band Exit")
+smart_exit_min_profit = input.float(0.3, title="Min Vinst för att aktivera (%)", step=0.1, group="Smart Band Exit") / 100
+
+// --- 2. INDIKATORER ---
+ema80 = ta.ema(close, len80)
+ema90 = ta.ema(close, len90)
+ema340 = ta.ema(close, len340)
+ema500 = ta.ema(close, len500)
+smaSafety = ta.sma(close, lenSafety)
+
+// --- 3. COOLDOWN & TIDS LOGIK ---
+// A) Cooldown
+var int last_exit_bar = 0
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    last_exit_bar := bar_index
+
+is_cooldown_ok = (bar_index - last_exit_bar) >= cooldown_bars
+
+// B) Tidsfilter
+// time(timeframe.period, session) returnerar "na" om vi är utanför sessionen
+// Om use_time_filter är false, ignorerar vi tiden (alltid true).
+is_time_ok = not use_time_filter or not na(time(timeframe.period, trading_session))
+
+// --- 4. HANDELSVILLKOR ---
+mid_band_low = math.min(ema80, ema90)
+mid_band_high = math.max(ema80, ema90)
+
+// Retest
+retest_in_band = (close >= mid_band_low) and (close <= mid_band_high)
+retest_or_breakout_long = retest_in_band or ta.crossover(close, mid_band_high)
+retest_or_breakout_short = retest_in_band or ta.crossunder(close, mid_band_low)
+
+long_conf = close > close[1]
+short_conf = close < close[1]
+
+// ENTRY RULES (Nu med is_time_ok)
+long_trend_ok = (ema340 > ema500) and (mid_band_low > ema500)
+// Lade till "and is_time_ok"
+long_entry_signal = long_trend_ok and retest_or_breakout_long and long_conf and (close > smaSafety) and is_cooldown_ok and is_time_ok
+
+short_trend_ok = (ema340 < ema500) and (mid_band_high < ema500)
+// Lade till "and is_time_ok"
+short_entry_signal = short_trend_ok and retest_or_breakout_short and short_conf and (close < smaSafety) and is_cooldown_ok
+
+// --- 5. EXEKVERING ---
+if long_entry_signal and strategy.position_size == 0
+    strategy.entry("Long_E", strategy.long, comment="Long | CD/Time OK")
+
+if short_entry_signal and strategy.position_size == 0
+    strategy.entry("Short_E", strategy.short, comment="Short | CD/Time OK")
+
+// --- 6. STOP LOSS & EXIT ---
+var float current_stop_price_long = na
+var float current_stop_price_short = na
+
+is_in_long = strategy.position_size > 0
+is_in_short = strategy.position_size < 0
+
+// --- SMART BAND EXIT LOGIK ---
+band_break_down = ta.crossunder(close, mid_band_low)
+band_break_up = ta.crossover(close, mid_band_high)
+
+exit_long_trend_change = ta.crossunder(ema340, ema500)
+exit_short_trend_change = ta.crossover(ema340, ema500)
+
+// 1. Long Exit
+if is_in_long
+    entry_price = strategy.position_avg_price
+    can_use_band_exit = use_smart_exit and (close >= entry_price * (1 + smart_exit_min_profit))
+    
+    if (band_break_down and can_use_band_exit) or exit_long_trend_change
+        strategy.close("Long_E", comment="Exit Long: Smart/Trend")
+        current_stop_price_long := na 
+
+// 2. Short Exit
+if is_in_short
+    entry_price = strategy.position_avg_price
+    can_use_band_exit = use_smart_exit and (close <= entry_price * (1 - smart_exit_min_profit))
+    
+    if (band_break_up and can_use_band_exit) or exit_short_trend_change
+        strategy.close("Short_E", comment="Exit Short: Smart/Trend")
+        current_stop_price_short := na
+
+// Update SL Logic (Breakeven & Hard SL)
+if is_in_long
+    entry_price = strategy.position_avg_price
+    if na(current_stop_price_long)
+        current_stop_price_long := entry_price * (1 - sl_perc)
+    // Breakeven
+    if close >= entry_price * (1 + be_trigger_perc)
+        new_sl_price = entry_price * (1 + be_profit_perc)
+        if new_sl_price > current_stop_price_long
+            current_stop_price_long := new_sl_price
+
+if is_in_short
+    entry_price = strategy.position_avg_price
+    if na(current_stop_price_short)
+        current_stop_price_short := entry_price * (1 + sl_perc)
+    // Breakeven
+    if close <= entry_price * (1 - be_trigger_perc)
+        new_sl_price = entry_price * (1 - be_profit_perc)
+        if new_sl_price < current_stop_price_short
+            current_stop_price_short := new_sl_price
+
+// Exit 1: Dynamic SL & Hard TP
+if is_in_long
+    long_limit_price = strategy.position_avg_price * (1 + tp_perc)
+    strategy.exit("Exit_Risk", from_entry="Long_E", stop=current_stop_price_long, limit=long_limit_price)
+
+if is_in_short
+    short_limit_price = strategy.position_avg_price * (1 - tp_perc)
+    strategy.exit("Exit_Risk", from_entry="Short_E", stop=current_stop_price_short, limit=short_limit_price)
+
+// Reset
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    current_stop_price_long := na
+    current_stop_price_short := na
+
+// --- 7. VISUALS ---
+trend_color = long_trend_ok ? color.rgb(0, 150, 0) : short_trend_ok ? color.rgb(255, 0, 0) : color.gray
+
+plot(ema80, color=color.new(color.blue, 0), linewidth=2, title="EMA 80")
+plot(ema90, color=color.new(color.blue, 20), linewidth=2, title="EMA 90")
+plot(ema340, color=trend_color, linewidth=2, title="EMA 340")
+plot(ema500, color=trend_color, linewidth=1, style=plot.style_stepline, title="EMA 500")
+plot(smaSafety, color=color.orange, linewidth=3, title="SMA 325 Safety")
+
+// Visa bakgrundsfärg när vi INTE får handla pga tid eller cooldown
+bgcolor((not is_cooldown_ok or not is_time_ok) ? color.new(color.gray, 80) : na, title="No Trade Zone")
+
+View in Pine Editor・155 lines
+Use on chart
+4
+4
+5
+8
+7 926
+Nov 21, 2025
+This is a hyper-reactive scalping strategy designed for the 1-minute chart. It utilizes a strict four-EMA hierarchy (80/90/340/500) to ensure trades are only taken in the strongest aligned market trend. The strategy is built to be extremely tight on risk and focuses on capturing the immediate, high-momentum swing that follows a confirmed EMA retest or breakout.
+
+Key Mechanics (How it Works):
+Strict Trend Alignment: Entry is only permitted when the faster EMA band (80/90) and the price action are correctly aligned with the slow trend (340/500).
+
+Long: EMA 80/90 must be above EMA 340/500, AND EMA 340 must be above EMA 500. (And vice-versa for Short.)
+
+Expanded Retest Entry: The strategy waits for the price to retest or briefly enter the 80/90 band, then immediately enters upon the confirmed momentum breakout from that band.
+
+Dynamic Risk Management (Tight Ride): The strategy is engineered to ride the wave aggressively while protecting capital immediately:
+
+Extremely Tight Initial Stop Loss (0.2% default): Limits initial risk instantly.
+
+Break-Even Security: Once profit hits 0.3%, the Stop Loss is automatically trailed to secure 0.2% profit (a risk-free trade).
+
+Aggressive Exit Logic: Positions are closed not only upon hitting the Take Profit target (2.5%) but also immediately if the 80/90 EMA band crosses the 340 EMA, signaling a critical loss of momentum.
+Disclaimer:
+This strategy requires high-liquidity instruments and is best used on low timeframes (1-minute) due to its dependency on fast momentum shifts and tight stops. Backtesting and forward testing are crucial before deployment.
+Dec 1, 2025
+Release Notes
+This update introduces several major improvements for precision, safety, and overall trade quality.
+
+1. Time-Based Trading Filter (NEW)
+Trading can be restricted to specific hours using a session filter.
+Example: 09:00–23:59
+Outside this window, no new positions are opened.
+Prevents low-liquidity and overnight trap trades.
+
+2. Cooldown System (Improved)
+A strict cooldown after each exit.
+Default: 100 bars
+Reduces overtrading and prevents back-to-back low-quality setups.
+
+3. Safety Filter (NEW SMA325)
+A new safety layer based on SMA325:
+Longs only allowed above SMA325
+Shorts only allowed below SMA325
+Helps avoid chop and dangerous mid-trend reversals.
+
+4. Smart Band Exit System (NEW)
+A new advanced exit logic using the 80/90 band:
+Activates only after a minimum profit threshold
+Longs exit on band breakdown
+Shorts exit on band breakout
+Improves profit retention in sideways markets.
+
+Recommended Adjustment:
+Increase activation threshold from the default 0.3 % → 1.5 %.
+This avoids premature exits and stabilizes profitability in trending markets.
+
+5. Trend-Reversal Exits (Reworked)
+Major trend exits now use the EMA340 vs EMA500 cross.
+Much more stable than fast-band exits and prevents holding against strong reversals.
+
+6. Dynamic Stop Loss Overhaul
+Stop loss now adapts as the trade evolves:
+Initial stop set immediately
+Breakeven triggers after profit confirmation
+Secured profit moves SL into safe profit zone
+Minimizes drawdowns and protects wins.
+
+7. Entry Logic Rewritten from Scratch
+Entries now require:
+Strong trend confirmation (340/500 hierarchy)
+Retest or breakout of the band
+Momentum confirmation
+Safety filter
+Cooldown
+Time filter
+Cleaner, more reliable entries with fewer false signals.
+
+8. No-Trade Background Highlight (NEW)
+A grey background appears when:
+Cooldown is active
+Time filter is closed
+Makes chart behavior easier to read.
+
+9. Recommended Band Optimization: 80/90 → 80/85
+For better retests and more responsive signals:
+Switch EMA80/EMA90 → EMA80/EMA85.
+Reduces lag and improves pullback timing, especially in fast markets.

@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-03-23T04:53:11.433704+00:00",
+  "queue_rank": 2676,
+  "page": 112,
+  "name": "Automated Bitcoin (BTC) Investment Strategy from Wunderbit ",
+  "slug": "wunderbit-btc-investment",
+  "chart_url": "https://www.tradingview.com/script/0mCr8Nfv-Automated-Bitcoin-BTC-Investment-Strategy-from-Wunderbit/",
+  "pine_file": "raw-pine/bulk/0mCr8Nfv-Automated-Bitcoin-BTC-Investment-Strategy-from-Wunderbit.pine",
+  "symbol_name": "BINANCE:BTCUSDT",
+  "repo_timeframe_hint": "4h",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "4h",
+  "reason": "Stateful trailing stop logic and position_avg_price dependent exits require simulation; next-bar execution approximates Pine strategy.exit limits",
+  "adaptations": [
+    "Convert recursive Trail1 logic to Python loop",
+    "Simulate entry price tracking for TP/SL levels",
+    "Map strategy.exit limits to close signals",
+    "Remove plotting and UI inputs",
+    "Normalize signals to target position fractions",
+    "Strip backtest date-window filters"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [
+    "Converted TEMA, LSMA, EMA, SMA trend line calculations to pure numpy/pandas",
+    "Implemented Wilder's ATR smoothing method matching Pine Script behavior",
+    "Stateful trailing stop logic converted to Python loop with proper state tracking",
+    "Entry price tracked for dynamic TP/SL level calculations",
+    "strategy.exit limit orders converted to close signals when price reaches levels",
+    "Removed backtest date window filters for fair-comparison mode",
+    "Signals represent target position fractions (0 or 1 for long-only)",
+    "Next-bar execution semantics preserved - no same-bar fills",
+    "Plotting, alerts, and UI inputs stripped from conversion",
+    "All indicators use only historical OHLCV data available at each bar"
+  ],
+  "python_file": "python-strategies/stage2-local/wunderbit-btc-investment.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "Automated Bitcoin (BTC) Investment Strategy from Wunderbit",
+    "module_timeframe": "4h",
+    "symbol": "BTCUSDT",
+    "bars_checked": 907,
+    "non_zero_signals": 187,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

@@ -1,0 +1,100 @@
+//@version=2
+strategy(title="Slow Stochastic Multi K&D Average Crossover Strategy", overlay=false, pyramiding=0, calc_on_order_fills=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, currency="USD", default_qty_value=100)
+
+
+price = input(close)
+
+///////////////////////////////
+smoothK = input(55) 
+
+SMAsmoothK = input(13)
+k = sma(stoch(price, high, low, smoothK), SMAsmoothK)
+
+
+
+smoothD = input(34)
+d = sma(k, smoothD)
+
+
+///////////////////////////
+
+smoothK1 = input(89) 
+
+SMAsmoothK1 = input(8)
+k1 = sma(stoch(price, high, low, smoothK1), SMAsmoothK1)
+
+smoothD1 = input(55)
+d1 = sma(k1, smoothD1)
+
+//////////////////////////////////////
+
+smoothK2 = input(144) 
+
+SMAsmoothK2 = input(5)
+k2 = sma(stoch(price, high, low, smoothK2), SMAsmoothK2)
+
+smoothD2 = input(89)
+d2 = sma(k2, smoothD2)
+
+/////////////////////////////////////
+
+smoothK3 = input(233) 
+
+SMAsmoothK3 = input(3)
+k3 = sma(stoch(price, high, low, smoothK3), SMAsmoothK3)
+
+smoothD3 = input(144)
+d3 = sma(k3, smoothD3)
+
+////////////////////////////////////////////////
+
+smoothK4 = input(377) 
+
+SMAsmoothK4 = input(2)
+k4 = sma(stoch(price, high, low, smoothK4), SMAsmoothK4)
+
+smoothD4 = input(233)
+d4 = sma(k4, smoothD4)
+
+/////////////////////////////////////////////////
+
+Kavg = avg(k,k1,k2,k3,k4, k4)
+plot(Kavg, color=green)
+
+Davg = avg(d,d1,d2,d3,d4, d4)
+plot(Davg, color=red)
+
+
+///////////////////////////////////////
+hline(50, color=gray)
+
+
+long = crossover(Kavg, Davg)// and d < 50
+short = crossunder(Kavg, Davg)// and d > 50
+
+
+last_long = long ? time : nz(last_long[1])
+last_short = short ? time : nz(last_short[1])
+long_signal = crossover(last_long, last_short) 
+short_signal = crossover(last_short, last_long)
+
+
+
+strategy.entry("Long", strategy.long, when=long_signal)
+strategy.entry("Short", strategy.short, when=short_signal) 
+
+//len1 = input(3)
+
+//closelong = d[1] < k[len1]
+//closeshort = d[1] > k[len1]
+
+//strategy.close("Long", when=closelong)
+//strategy.close("Short", when=closeshort)
+
+View in Pine Editor・92 lines
+Use on chart
+1
+1
+2
+4 949
+Uses average of multiple fib lookback periods in stochastic format.

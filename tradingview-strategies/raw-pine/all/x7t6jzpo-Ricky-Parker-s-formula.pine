@@ -1,0 +1,21 @@
+//@version=1
+strategy("Ricky Parker's formula",overlay=false) 
+a = ema(close , 5)
+b = ema(close , 10)
+long = cross (a, b) and  a > b
+short = cross(a, b) and  a < b
+strategy.entry("long" , strategy.long,when=long)
+strategy.entry("short",strategy.short,when=short)
+plot(long,"long",color=green,linewidth=1)
+plot(short,"short",color=red,linewidth=1)
+
+View in Pine Editor・10 lines
+Use on chart
+2
+6
+1 362
+Jan 26, 2018
+Ricky Parker's formula
+Jan 26, 2018
+Release Notes
+Ricky Parker's formula

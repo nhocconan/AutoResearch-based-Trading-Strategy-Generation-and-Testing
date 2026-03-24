@@ -1,0 +1,293 @@
+//@version=5
+// Risk Metric by Oakley Wood (modified by pommesUNDwurst)
+// DCA Strategy implementation with 3Commas integration
+strategy("BTC DCA Risk Strategy", 
+     overlay=false, 
+     initial_capital=10000, 
+     default_qty_type=strategy.cash, 
+     commission_type=strategy.commission.percent, 
+     commission_value=0.1,
+     pyramiding=1000,
+     calc_on_order_fills=false,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// === EXCHANGE SELECTION ===
+exchange = input.string("KRAKEN", "Exchange", options=["BINANCE", "COINBASE", "KRAKEN", "GEMINI", "BYBIT"])
+quoteSymbol = input.string("USD", "Quote Currency", options=["USD", "USDT", "BUSD"])
+
+// Build tickers
+BTC_TICKER = syminfo.tickerid
+BTC_TRADE_TICKER = "BTC" + quoteSymbol
+
+// === 3COMMAS CREDENTIALS ===
+bot_uuid = input.string("", "3Commas Bot UUID", group="3Commas")
+secret_token = input.string("", "3Commas Secret Token", group="3Commas")
+use_3commas = input.bool(false, "Enable 3Commas Alerts", group="3Commas")
+
+// === BUY THRESHOLDS & AMOUNTS ===
+buyL1_thresh = input.float(0.20, "Buy L1 Threshold", group="Buy Settings", tooltip="Risk metric threshold for first buy tier")
+buyL2_thresh = input.float(0.10, "Buy L2 Threshold", group="Buy Settings")
+buyL3_thresh = input.float(0.00, "Buy L3 Threshold", group="Buy Settings")
+buyL1_amt = input.float(10.0, "Buy L1 $ Amount", group="Buy Settings")
+buyL2_amt = input.float(15.0, "Buy L2 $ Amount", group="Buy Settings")
+buyL3_amt = input.float(20.0, "Buy L3 $ Amount", group="Buy Settings")
+
+// === SELL THRESHOLDS & PERCENTAGES ===
+sellL1_thresh = input.float(1.00, "Sell L1 Threshold", group="Sell Settings")
+sellL2_thresh = input.float(1.50, "Sell L2 Threshold", group="Sell Settings")
+sellL3_thresh = input.float(2.00, "Sell L3 Threshold", group="Sell Settings")
+sellL1_pct = input.float(25.0, "Sell L1 %", group="Sell Settings")
+sellL2_pct = input.float(35.0, "Sell L2 %", group="Sell Settings")
+sellL3_pct = input.float(40.0, "Sell L3 %", group="Sell Settings")
+
+// === RISK METRIC CALCULATION (Oakley Wood) ===
+
+// METRIC 1: (BTC - 4 year SMA) / StdDev, normalized by time
+d1460_sma = request.security(BTC_TICKER, 'D', ta.sma(close, 1460)) 
+stdev1 = request.security(BTC_TICKER, 'D', ta.stdev(close, 1460)) 
+btc = request.security(BTC_TICKER, 'D', close)
+maxRiskOne = -38.12 * math.log(timenow) + 1078.5
+riskOne = ((btc - d1460_sma) / stdev1) / maxRiskOne
+
+// METRIC 2: ln(BTC / 20 week MA), normalized by time
+w20_sma = request.security(BTC_TICKER, "W", ta.sma(close, 20))
+minRiskTwo = -3.719 * math.log(timenow) + 105
+maxRiskTwo = -6 * math.pow(10, -12) * timenow + 10.93
+riskTwo = (math.log(btc / w20_sma) + minRiskTwo) / maxRiskTwo
+
+// METRIC 3: 50D MA / 50W MA, normalized by time
+d50_sma = request.security(BTC_TICKER, 'D', ta.sma(close, 50))
+w50_sma = request.security(BTC_TICKER, 'W', ta.sma(close, 50))
+maxRiskThree = -12.55 * math.log(timenow) + 355.15
+riskThree = (d50_sma / w50_sma) / maxRiskThree
+
+// COMPOUND RISK METRIC (0 = extreme buy, 1 = extreme sell)
+riskMetric = (nz(riskOne,0) + nz(riskTwo,0) + nz(riskThree,0)) / 3
+
+// === STATE VARIABLES ===
+var bool sellL1_done = false
+var bool sellL2_done = false
+var bool sellL3_done = false
+
+// === BUY LOGIC ===
+var float buyAmount = 0.0
+buyTier = "NONE"
+
+if riskMetric <= buyL3_thresh
+    buyAmount := buyL1_amt + buyL2_amt + buyL3_amt
+    buyTier := "L3"
+else if riskMetric <= buyL2_thresh
+    buyAmount := buyL1_amt + buyL2_amt
+    buyTier := "L2"
+else if riskMetric <= buyL1_thresh
+    buyAmount := buyL1_amt
+    buyTier := "L1"
+else
+    buyAmount := 0
+    buyTier := "NONE"
+
+buyTrigger = buyAmount > 0
+
+// === BUY EXECUTION ===
+if buyTrigger
+    strategy.entry("BUY", strategy.long, qty=buyAmount/close, comment="BUY " + buyTier)
+    label.new(bar_index, riskMetric, "BUY " + buyTier + "\n$" + str.tostring(buyAmount), 
+         style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+    
+    sellL1_done := false
+    sellL2_done := false
+    sellL3_done := false
+    
+    if use_3commas
+        buyJson = '{"secret":"' + secret_token + '","max_lag":"300","timestamp":"' + str.tostring(timenow) + '","trigger_price":"' + str.tostring(close) + '","tv_exchange":"' + exchange + '","tv_instrument":"' + BTC_TRADE_TICKER + '","action":"enter_long","bot_uuid":"' + bot_uuid + '","order":{"amount":"' + str.tostring(buyAmount) + '","currency_type":"quote","order_type":"market"}}'
+        alert(buyJson, alert.freq_once_per_bar_close)
+
+// === SELL LOGIC ===
+sell1Cond = strategy.position_size > 0 and riskMetric >= sellL1_thresh and not sellL1_done
+sell2Cond = strategy.position_size > 0 and riskMetric >= sellL2_thresh and sellL1_done and not sellL2_done
+sell3Cond = strategy.position_size > 0 and riskMetric >= sellL3_thresh and sellL2_done and not sellL3_done
+
+if sell1Cond
+    strategy.close("BUY", qty_percent=sellL1_pct, comment="SELL L1")
+    label.new(bar_index, riskMetric, "SELL L1\n" + str.tostring(sellL1_pct) + "%", 
+         style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+    sellL1_done := true
+    
+    if use_3commas
+        sellJson = '{"secret":"' + secret_token + '","max_lag":"300","timestamp":"' + str.tostring(timenow) + '","trigger_price":"' + str.tostring(close) + '","tv_exchange":"' + exchange + '","tv_instrument":"' + BTC_TRADE_TICKER + '","action":"exit_long","bot_uuid":"' + bot_uuid + '","order":{"amount":"' + str.tostring(sellL1_pct) + '","currency_type":"position_percent","order_type":"market"}}'
+        alert(sellJson, alert.freq_once_per_bar_close)
+
+if sell2Cond
+    strategy.close("BUY", qty_percent=sellL2_pct, comment="SELL L2")
+    label.new(bar_index, riskMetric, "SELL L2\n" + str.tostring(sellL2_pct) + "%", 
+         style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    sellL2_done := true
+    
+    if use_3commas
+        sellJson = '{"secret":"' + secret_token + '","max_lag":"300","timestamp":"' + str.tostring(timenow) + '","trigger_price":"' + str.tostring(close) + '","tv_exchange":"' + exchange + '","tv_instrument":"' + BTC_TRADE_TICKER + '","action":"exit_long","bot_uuid":"' + bot_uuid + '","order":{"amount":"' + str.tostring(sellL2_pct) + '","currency_type":"position_percent","order_type":"market"}}'
+        alert(sellJson, alert.freq_once_per_bar_close)
+
+if sell3Cond
+    strategy.close("BUY", qty_percent=sellL3_pct, comment="SELL L3")
+    label.new(bar_index, riskMetric, "SELL L3\n" + str.tostring(sellL3_pct) + "%", 
+         style=label.style_label_down, color=color.maroon, textcolor=color.white, size=size.small)
+    sellL3_done := true
+    
+    if use_3commas
+        sellJson = '{"secret":"' + secret_token + '","max_lag":"300","timestamp":"' + str.tostring(timenow) + '","trigger_price":"' + str.tostring(close) + '","tv_exchange":"' + exchange + '","tv_instrument":"' + BTC_TRADE_TICKER + '","action":"exit_long","bot_uuid":"' + bot_uuid + '","order":{"amount":"' + str.tostring(sellL3_pct) + '","currency_type":"position_percent","order_type":"market"}}'
+        alert(sellJson, alert.freq_once_per_bar_close)
+
+// === COLOR-CODED PLOTTING (matching original) ===
+var colorway = color.white
+
+if (riskMetric >= 0.8) 
+    colorway := color.white
+else if (riskMetric >= 0.65) 
+    colorway := color.red
+else if (riskMetric >= 0.5) 
+    colorway := color.orange
+else if (riskMetric >= 0.35) 
+    colorway := color.yellow
+else if (riskMetric >= 0.2) 
+    colorway := color.rgb(21, 255, 0) 
+else if (riskMetric >= 0.0) 
+    colorway := color.rgb(255, 255, 255)
+
+riskMetricPlot = plot(riskMetric, title="Risk Metric", color=colorway, linewidth=1, display=display.all)
+
+// === HORIZONTAL THRESHOLD PLOTS (hidden by default) ===
+i_plot = plot(0.9, color=color.new(color.white, 100), linewidth=1, display=display.none)
+h_plot = plot(0.8, color=color.new(color.white, 100), linewidth=1, display=display.none)
+g_plot = plot(0.7, color=color.new(color.white, 100), linewidth=1, display=display.none)
+f_plot = plot(0.6, color=color.new(color.white, 100), linewidth=1, display=display.none)
+neutral_plot = plot(0.5, color=color.new(color.yellow, 100), linewidth=1, display=display.none)
+d_plot = plot(0.4, color=color.new(color.white, 100), linewidth=1, display=display.none)
+c_plot = plot(0.3, color=color.new(color.white, 100), linewidth=1, display=display.none)
+b_plot = plot(0.2, color=color.new(color.green, 100), linewidth=1, display=display.none)
+a_plot = plot(0.1, color=color.new(color.white, 100), linewidth=1, display=display.none)
+sell_plot = plot(0.8, color=color.new(color.red, 100), linewidth=1, display=display.none)
+buy_plot = plot(0.2, color=color.new(color.green, 100), linewidth=1, display=display.none)
+
+// === BACKGROUND FILLS (matching original) ===
+allinColor = riskMetric < 0.1 ? color.new(color.green, 0) : na
+bullColor = riskMetric < 0.2 ? color.new(color.green, 60) : na
+yellow = riskMetric > 0.2 ? color.new(color.yellow, 50) : na
+orange = riskMetric < 0.8 ? color.new(color.orange, 50) : na
+bearColor = riskMetric > 0.8 ? color.new(color.red, 60) : na
+alloutColor = riskMetric > 0.9 ? color.new(color.red, 0) : na
+
+fill(riskMetricPlot, a_plot, color=allinColor)
+fill(riskMetricPlot, buy_plot, color=bullColor)
+fill(riskMetricPlot, sell_plot, color=bearColor)
+fill(riskMetricPlot, i_plot, color=alloutColor)
+
+// Custom buy/sell threshold lines (thinnest, dashed, 100% opacity)
+plot(buyL1_thresh, "Buy L1", color=color.new(color.yellow, 0), linewidth=1, style=plot.style_linebr)
+plot(buyL2_thresh, "Buy L2", color=color.new(color.lime, 0), linewidth=1, style=plot.style_linebr)
+plot(buyL3_thresh, "Buy L3", color=color.new(color.green, 0), linewidth=1, style=plot.style_linebr)
+plot(sellL1_thresh, "Sell L1", color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
+plot(sellL2_thresh, "Sell L2", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+plot(sellL3_thresh, "Sell L3", color=color.new(color.maroon, 0), linewidth=1, style=plot.style_linebr)
+
+View in Pine Editor・191 lines
+Use on chart
+5
+0
+1 283
+BTC DCA Risk Strategy - Automated Dollar Cost Averaging with 3Commas Integration
+Overview
+This strategy combines the proven Oakley Wood Risk Metric with an intelligent tiered Dollar Cost Averaging (DCA) system, designed to help traders systematically accumulate Bitcoin during periods of low risk and take profits during high-risk conditions.
+Key Features
+📊 Multi-Component Risk Assessment
+
+4-Year SMA Deviation: Measures Bitcoin's distance from its long-term mean
+20-Week MA Analysis: Tracks medium-term momentum shifts
+50-Day/50-Week MA Ratio: Captures short-to-medium term trend strength
+All metrics are normalized by time to account for Bitcoin's maturing market dynamics
+
+💰 3-Tier DCA Buy System
+
+Level 1 (Low Risk): Conservative entry with base allocation
+Level 2 (Lower Risk): Increased allocation as opportunity improves
+Level 3 (Extreme Low Risk): Maximum allocation during rare buying opportunities
+Buys execute every bar while risk remains below thresholds, enabling true DCA accumulation
+
+📈 Progressive Profit Taking
+
+Sell Level 1: Take initial profits as risk increases
+Sell Level 2: Scale out further positions during elevated risk
+Sell Level 3: Final exit during extreme market conditions
+Sell levels automatically reset when new buy signals occur, allowing flexible re-entry
+
+🤖 3Commas Integration
+
+Fully automated webhook alerts for Custom Signal Bots
+JSON payloads formatted per 3Commas API specifications
+Supports multiple exchanges (Binance, Coinbase, Kraken, Gemini, Bybit)
+Configurable quote currency (USD, USDT, BUSD)
+
+How It Works
+The strategy calculates a composite risk metric (0-1 scale):
+
+0.0-0.2: Extreme buying opportunity (green zone)
+0.2-0.5: Favorable accumulation range (yellow zone)
+0.5-0.8: Neutral to cautious territory (orange zone)
+0.8-1.0+: High risk, profit-taking zone (red zone)
+
+Buy Logic: As risk decreases, position sizes increase automatically. If risk drops from L1 to L3 threshold, the strategy combines all three tier allocations for maximum exposure.
+Sell Logic: Sequential profit-taking ensures you capture gains progressively. The system won't advance to Sell L2 until L1 completes, preventing premature full exits.
+Configuration
+Risk Metric Parameters:
+
+All calculations use Bitcoin price data (any BTC chart works)
+Time-normalized formulas adapt to market maturity
+No manual parameter tuning required
+
+Buy Settings:
+
+Set risk thresholds for each tier (default: 0.20, 0.10, 0.00)
+Define dollar amounts per tier (default: $10, $15, $20)
+Fully customizable to your risk tolerance and capital
+
+Sell Settings:
+
+Configure risk thresholds for profit-taking (default: 1.00, 1.50, 2.00)
+Set percentage of position to sell at each level (default: 25%, 35%, 40%)
+
+3Commas Setup:
+
+Create a Custom Signal Bot in 3Commas
+Copy Bot UUID and Secret Token into strategy inputs
+Enable 3Commas Alerts checkbox
+Create TradingView alert: Condition → "alert() function calls only", Webhook → api.3commas.io/signal_bots/webhooks
+
+
+Backtesting Results
+Strengths:
+
+Systematically buys dips without emotion
+Averages down during extended bear markets
+Captures explosive bull run profits through tiered exits
+Pyramiding (1000 max orders) allows true DCA behavior
+
+Considerations:
+
+Requires sufficient capital for multiple buys during prolonged downtrends
+Backtest on Daily timeframe for most reliable signals
+Past performance does not guarantee future results
+
+Visual Design
+The indicator pane displays:
+
+Color-coded risk metric line: Changes from white→red→orange→yellow→green as risk decreases
+Background zones: Green (buy), yellow (hold), red (sell) areas
+Dashed threshold lines: Clear visual markers for each buy/sell level
+Entry/Exit labels: Green buy labels and orange/red sell labels mark all trades
+
+Credits
+Original Risk Metric: Oakley Wood
+Strategy Development & 3Commas Integration: Claude AI (Anthropic)
+Modifications: pommesUNDwurst
+Disclaimer
+This strategy is for educational and informational purposes only. Cryptocurrency trading carries substantial risk of loss. Always conduct your own research and never invest more than you can afford to lose. The authors are not financial advisors and assume no responsibility for trading decisions made using this tool.

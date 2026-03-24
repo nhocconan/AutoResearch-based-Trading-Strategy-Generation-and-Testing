@@ -1,0 +1,66 @@
+//@version=5
+strategy("Bollinger Bands Mean Reversion by Kevin Davey ",  overlay=true, precision=2, calc_on_every_tick=true, initial_capital=20000, currency=currency.USD, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.05)
+
+// Bollinger Bands Input
+length = input.int(20, title="Bollinger Bands Length")
+src = input(close, title="Source")
+mult = input.float(2.0, title="Multiplier")
+
+// Calculate Bollinger Bands
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upperBand = basis + dev
+lowerBand = basis - dev
+
+// Entry and Exit Conditions
+buyCondition = close < lowerBand
+sellCondition = close > upperBand
+
+// Trade Logic
+if (buyCondition)
+    strategy.entry("Long", strategy.long)
+
+if (sellCondition)
+    strategy.close("Long")
+
+// Plot Bollinger Bands
+plot(upperBand, color=color.red, title="Upper Band")
+plot(basis, color=color.blue, title="Basis")
+plot(lowerBand, color=color.green, title="Lower Band")
+
+View in Pine Editor・32 lines
+Use on chart
+1
+0
+6
+3 721
+Bollinger Bands Mean Reversion Strategy Description
+
+The Bollinger Bands Mean Reversion Strategy is a popular trading approach based on the concept of volatility and market overreaction. The strategy leverages Bollinger Bands, which consist of an upper and lower band plotted around a central moving average, typically using standard deviations to measure volatility. When the price moves beyond these bands, it signals potential overbought or oversold conditions, and the strategy seeks to exploit a reversion back to the mean (the central band).
+
+Strategy Components:
+
+1. Bollinger Bands:
+
+The bands are calculated using a 20-period Simple Moving Average (SMA) and a multiple (usually 2.0) of the standard deviation of the asset’s price over the same period. The upper band represents the SMA plus two standard deviations, while the lower band is the SMA minus two standard deviations. The distance between the bands increases with higher volatility and decreases with lower volatility.
+
+2. Mean Reversion:
+
+Mean reversion theory suggests that, over time, prices tend to move back toward their historical average. In this strategy, a buy signal is triggered when the price falls below the lower Bollinger Band, indicating a potential oversold condition. Conversely, the position is closed when the price rises back above the upper Bollinger Band, signaling an overbought condition.
+
+Entry and Exit Logic:
+
+Buy Condition: The strategy enters a long position when the price closes below the lower Bollinger Band, anticipating a mean reversion to the central band (SMA).
+
+Sell Condition: The long position is exited when the price closes above the upper Bollinger Band, implying that the market is likely overbought and a reversal could occur.
+
+This approach uses mean reversion principles, aiming to capitalize on short-term price extremes and volatility compression, often seen in sideways or non-trending markets. Scientific studies have shown that mean reversion strategies, particularly those based on volatility indicators like Bollinger Bands, can be effective in capturing small but frequent price reversals ￼ .
+
+Scientific Basis for Bollinger Bands:
+
+Bollinger Bands, developed by John Bollinger, are widely regarded in both academic literature and practical trading as an essential tool for volatility analysis and mean reversion strategies. Research has shown that Bollinger Bands effectively identify relative price highs and lows, and can be used to forecast price volatility and detect potential breakouts . Studies in financial markets, such as those by Fernández-Rodríguez et al. (2003), highlight the efficacy of Bollinger Bands in detecting overbought or oversold conditions in various assets .
+
+Who is Kevin Davey?
+
+Kevin Davey is an award-winning algorithmic trader and highly regarded expert in developing and optimizing systematic trading strategies. With over 25 years of experience, Davey gained significant recognition after winning the prestigious World Cup Trading Championships multiple times, where he achieved triple-digit returns with minimal drawdown. His success has made him a key figure in algorithmic trading education, with a focus on disciplined and rule-based trading systems.
+

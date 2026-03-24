@@ -1,0 +1,45 @@
+//@version=3
+strategy("3 MAcross_alert", shorttitle="MAcross_Alert", overlay=true)
+EMA_Fast =input(4, minval=1) // To input period for 1st sma, default period set as 10
+EMA_Medium =input(9, minval=1)
+EMA_Slow =input(18, minval=1)
+s1=ema(close,EMA_Fast) // sma values stored in s1 and s2 variables
+s2=ema(close,EMA_Medium)
+s3=ema(close,EMA_Slow)
+plot(s1, color=red,linewidth=2) // Plots the MA
+plot(s2, color=yellow,linewidth=2)
+plot(s3, color=green,linewidth=2)
+long= crossover(s1,s3) and  s1 > s2// Define our buy/sell conditions, using pine inbuilt functions.
+short= crossunder(s1,s3) and s1 < s2
+exitLong = crossunder(s1,s2) 
+exitShort = crossover(s1,s2)
+strategy.entry("long",strategy.long,when=long) // Buys when buy condition met
+strategy.close("long",when=exitLong)
+strategy.entry("short",strategy.short, when = short ) // Closes position when sell condition met
+strategy.close("short",when=exitShort)
+
+View in Pine Editor・19 lines
+Use on chart
+3
+0
+4
+1
+14 869
+Basically the following rules follow:
+
+
+
+Long when
+
+4 and 9 EMA cross up over the 18 EMA
+
+Exit when 4 day crosses down over the 9 day EMA
+
+Short when 4 and 9 cross down over the 18
+
+Exit when 4 crosses up back across 9
+
+New Entry signal when both the 4 and 9 are on the same side of the 18
+
+
+*****Best used on a 4HR TF

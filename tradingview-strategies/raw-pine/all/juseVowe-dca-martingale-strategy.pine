@@ -1,0 +1,301 @@
+//@version=6
+strategy("DCA", overlay=true,
+     initial_capital=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     pyramiding=10,
+     currency=currency.USD)
+
+// === ФИЛЬТР ДАТ ===
+useDateFilter = input.bool(false, "Ограничить период бэктеста", group="Фильтр дат")
+startDate     = input.time(timestamp("2025-10-11"), "Начало", group="Фильтр дат")
+inDateRange   = not useDateFilter or (time >= startDate and time <= timenow)
+
+if not inDateRange
+    na
+
+// 🔴 ФЛАГ ВХОДА
+var bool entry_confirmed = false
+
+// === ОБЪЁМЫ И ПЛЕЧО ===
+base_cash_total = input.float(100.0, "Общая сумма сетки, USD", minval=1.0, step=0.1, group="Объём")
+leverage        = input.float(10.0, "Плечо на бирже(X)", minval=1.0, step=0.5, group="Риск")
+max_margin      = input.float(50.0, "Маржа на бирже, USD", minval=1.0, step=1.0, group="Риск")
+
+// === ВХОД В СДЕЛКУ ===
+price_change_threshold = input.float(-1.5, "Изменение цены 1H % <", step=0.1, group="Вход")
+use_price_filter       = input.bool(true,  "Включить фильтр 1H",  group="Вход")
+
+// === СЕТКА ===
+overlap_pct     = input.float(10.0, "Перекрытие сетки %", minval=3, step=1, group="Сетка")
+orders_count    = input.int(7, "Количество ордеров", minval=1, maxval=20, group="Сетка")
+martingale_mult = input.float(1.45, "Мартингейл множитель", minval=1.1, step=0.1, group="Сетка")
+
+// === TAKE-PROFIT ===
+take_profit_pct = input.float(5.0, "Тейк-профит %", step=0.1, group="Выход")
+var float tp_price = na
+
+// === ФУНКЦИИ ДЛЯ РАСЧЕТА ИЗМЕНЕНИЯ ЦЕНЫ ЗА 1 ЧАС ===
+
+// Функция для расчета изменения цены за N баров
+getPriceChangePeriod(periodBars) =>
+    if bar_index >= periodBars
+        (close - close[periodBars]) / close[periodBars] * 100
+    else
+        na
+
+// Функция для получения количества баров в 1 часе на текущем таймфрейме
+getBarsInOneHour() =>
+    currentTF = timeframe.multiplier
+    tfUnit = timeframe.period
+    
+    // Определяем количество баров в 1 часу в зависимости от таймфрейма
+    minutesPerBar = switch tfUnit
+        "D" => 24 * 60
+        "W" => 7 * 24 * 60
+        "M" => 30 * 24 * 60
+        "H" => 60
+        "min" => currentTF
+        => currentTF  // по умолчанию считаем, что это минутный таймфрейм
+    
+    int(math.max(1, 60 / minutesPerBar))
+
+// Функция для проверки условия входа
+checkEntryConditions() =>
+    // Определяем количество баров в 1 часе
+    barsInHour = getBarsInOneHour()
+    
+    // Расчет изменения цены за 1 час
+    priceChange1h = getPriceChangePeriod(barsInHour)
+    
+    // Проверка условия по цене
+    not use_price_filter or (not na(priceChange1h) and priceChange1h < price_change_threshold)
+
+// === РАСЧЁТ УСЛОВИЙ ВХОДА ===
+entry_condition = inDateRange and checkEntryConditions()
+
+var float entry_price               = na
+var float grid_step                 = na
+var int   order_num                 = 0
+var float fixed_base_cash_per_order = na
+var float total_invested_cash = 0.0
+
+
+// флаги для меток
+var bool just_entry_open   = false
+var bool just_grid_entered = false
+var bool just_exit_tp      = false
+
+// === СБРОС ПРИ ЗАКРЫТИИ ===
+closed_now = strategy.position_size[1] > 0 and strategy.position_size == 0
+if closed_now
+    order_num                 := 0
+    entry_price               := na
+    grid_step                 := na
+    fixed_base_cash_per_order := na
+    entry_confirmed           := false
+
+// === USD -> количество монет ===
+f_cash_to_qty(cash) =>
+    cash <= 0 ? 0.0 : cash / close
+
+// === ПЕРВЫЙ ВХОД ===
+if entry_condition and strategy.position_size == 0
+    entry_price := close
+    order_num   := 1
+    steps       = orders_count - 1
+    grid_step   := entry_price * (overlap_pct / 100.0) / steps
+    
+    fixed_base_cash_per_order := base_cash_total / orders_count
+    qty_first = f_cash_to_qty(fixed_base_cash_per_order)
+
+    total_invested_cash := fixed_base_cash_per_order
+    strategy.entry("Grid", strategy.long, qty=qty_first,
+               comment="Вход" + " " + str.tostring(fixed_base_cash_per_order / leverage, "#.#") + " USD")
+
+    just_entry_open := true
+    entry_confirmed := false
+
+// 🔴 ПОДТВЕРЖДЕНИЕ ЗАПОЛНЕНИЯ ВХОДА
+if (strategy.position_size > 0 and strategy.position_size[1] == 0)
+    entry_confirmed := true
+
+// === ДОПОЛНИТЕЛЬНЫЕ ОРДЕРА ===
+if strategy.position_size > 0 and order_num < orders_count and inDateRange and not na(grid_step) and entry_confirmed
+    next_level = entry_price - order_num * grid_step
+
+    if close <= next_level
+        order_num += 1
+        cash_this_order = fixed_base_cash_per_order * math.pow(martingale_mult, order_num - 1)
+        total_invested_cash += cash_this_order
+        qty_this_order  = f_cash_to_qty(cash_this_order)
+        if qty_this_order > 0
+            strategy.entry("Grid" + str.tostring(order_num), strategy.long, qty=qty_this_order,
+               comment="#" + str.tostring(order_num) +  
+                    //    str.tostring(cash_this_order / leverage, "|#.#") + " USD|" +
+                       "| Итого: " + str.tostring(total_invested_cash / leverage, "#.#") + " USD")
+            just_grid_entered := true
+
+// === TAKE-PROFIT ===
+if strategy.position_size > 0 and inDateRange and entry_confirmed
+    tp_price := strategy.position_avg_price * (1 + take_profit_pct / 100.0)
+    if high >= tp_price
+        strategy.close_all(comment="TP")
+        just_exit_tp := true
+        total_invested_cash := 0.0
+
+else
+    tp_price := na
+
+// === МЕТКИ ВХОД/СЕТКА/ВЫХОД ===
+plotshape(just_entry_open, title="Вход", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small)
+plotshape(just_grid_entered, title="Сетка", style=shape.circle, location=location.belowbar, color=color.orange, size=size.tiny)
+plotshape(just_exit_tp, title="Выход", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// === СРЕДНЯЯ ЦЕНА НА ГРАФИКЕ ЦЕНЫ ===
+avgPrice_for_plot = strategy.position_size != 0 ? strategy.position_avg_price : na
+plot(avgPrice_for_plot,
+     title="Средняя цена позиции",
+     color=color.yellow,
+     style=plot.style_linebr,
+     linewidth=1)
+
+// === СБРОС ФЛАГОВ НА СЛЕДУЮЩЕМ БАРЕ ===
+if barstate.isconfirmed[1]
+    just_entry_open   := false
+    just_grid_entered := false
+    just_exit_tp      := false
+
+// ------------------------------------------------------------
+// Расчёт маржи для меток Ликвидация
+notional_now = math.abs(strategy.position_size * close)
+margin_now = notional_now / leverage
+margin_exceeded = margin_now > max_margin
+
+// Флаг: первая метка показана
+var bool first_margin_alert_shown = false
+var bool liquidation_happened = false
+
+// === МЕТКА ТОЛЬКО ПЕРВАЯ ===
+if (margin_exceeded and strategy.position_size != 0 and not first_margin_alert_shown)
+    label.new(bar_index, high + (high-low)*0.1, 
+        text="🚨 Ликвидация!\n" + str.tostring(margin_now, "#.#") + " USD", 
+        color=color.new(color.red, 10), 
+        textcolor=color.white, 
+        style=label.style_label_down, 
+        size=size.normal)
+    first_margin_alert_shown := true
+    liquidation_happened := true
+
+// Счётчик (накапливает все случаи)
+var int margin_alerts_count = 0
+if (margin_exceeded)
+    margin_alerts_count += 1
+
+// === СБРОС ФЛАГА ПРИ НОВОЙ ПОЗИЦИИ ===
+if (strategy.position_size[1] == 0 and strategy.position_size != 0)
+    first_margin_alert_shown := false
+
+// ----------------------------------------------------------
+// Таблица
+
+// === ПОЗИЦИЯ ТАБЛИЦЫ ===
+table_position = input.string("bottom_right", "Позиция таблицы", 
+     options=["top_left", "top_center", "top_right", 
+              "middle_left", "middle_center", "middle_right", 
+              "bottom_left", "bottom_center", "bottom_right"], 
+     group="Таблица")
+
+// === ФУНКЦИЯ ДЛЯ ПРЕОБРАЗОВАНИЯ СТРОКИ В ПОЗИЦИЮ ===
+getTablePosition(posString) =>
+    switch posString
+        "top_left"       => position.top_left
+        "top_center"     => position.top_center
+        "top_right"      => position.top_right
+        "middle_left"    => position.middle_left
+        "middle_center"  => position.middle_center
+        "middle_right"   => position.middle_right
+        "bottom_left"    => position.bottom_left
+        "bottom_center"  => position.bottom_center
+        "bottom_right"   => position.bottom_right
+        => position.bottom_left
+
+var table marginTable = table.new(getTablePosition(table_position), 2, 3, frame_width=4, border_width=3)
+
+status_is_liquid = liquidation_happened
+
+table.cell(marginTable, 0, 0, "МАРЖА", text_size=size.huge, text_color=color.white)
+
+table.cell(marginTable, 0, 1,
+     status_is_liquid ? "🚨 ЛИКВИДАЦИЯ!" : "✅ НОРМА",
+     text_size=size.large,
+     text_color=color.white,
+     bgcolor=status_is_liquid ? color.new(color.red, 20) : color.new(color.gray, 60))
+
+table.cell(marginTable, 0, 2, "ЛИМИТ " + str.tostring(max_margin, "#") + "$",
+    text_size=size.normal, text_color=color.silver)
+// ------------------------------------------------------------------------------------
+
+View in Pine Editor・237 lines
+Use on chart
+2
+7
+928
+Jan 28
+DCA + Martingale: smart synergy for volatile markets
+Tame market swings with a powerful hybrid strategy that marries the discipline of Dollar‑Cost Averaging (DCA) with the aggressive recovery logic of the Martingale system. This approach turns price dips into opportunities — systematically building positions while keeping risk in check.
+
+How it works:
+
+1. Entry trigger
+
+The strategy activates when the asset price drops by a predefined percentage on the 1‑hour timeframe. This ensures you only engage when a meaningful pullback occurs, avoiding premature entries.
+
+2. DCA grid for controlled averaging
+
+Once the entry condition is met, a grid of buy orders is deployed:
+
+Each subsequent order is placed at progressively lower price levels (e.g., every 2–5% drop).
+
+Order sizes can be fixed or follow a progressive scale (e.g., 1x, 1.5x, 2x the initial amount).
+
+This dilutes your average entry price, improving the breakeven point as the market corrects.
+
+3. Martingale‑style recovery mechanism
+
+After each unsuccessful trade (i.e., price continues falling), the next position size is increased — not necessarily doubled, but scaled according to your risk tolerance. This accelerates recovery potential when the trend reverses.
+
+4. Take‑profit with a fixed percentage target
+
+A simple, predefined profit target (e.g., +3–7%) is set for the entire averaged position. Once hit, all open trades close, locking in gains. This prevents over‑exposure during uncertain reversals.
+
+Key advantages
+Psychological edge: removes emotional decision‑making by automating entries and exits.
+
+Cost optimization: lowers average entry during downtrends, improving profit potential.
+
+Controlled aggression: Martingale logic helps recoup losses faster without infinite scaling.
+
+Flexibility: parameters (entry %, grid spacing, position sizing, TP) are fully customizable.
+
+Risk management essentials
+Stop‑loss safeguard: a hard stop‑loss (e.g., 10–15% below the lowest grid level) prevents catastrophic drawdowns in prolonged downtrends.
+
+Position sizing: never risk more than 1–3% of capital per grid cycle.
+
+Market context: best suited for assets with mean‑reverting behavior and moderate volatility. Avoid strong, sustained trends.
+
+Capital buffer: ensure sufficient reserves to withstand multiple grid levels without margin calls.
+
+When to use it
+During sideways or range‑bound markets with regular pullbacks.
+
+On assets with historical tendency to recover from short‑term dips.
+
+When you expect a bounce but can’t pinpoint the exact bottom.
+
+Bottom line
+DCA + Martingale isn’t a «set‑and‑forget» miracle — it’s a disciplined framework for turning volatility into opportunity. Combine it with rigorous risk rules, and you’ll navigate downtrends with precision, turning market noise into structured profit potential.
+Feb 2
+Release Notes
+Cosmetic changes.

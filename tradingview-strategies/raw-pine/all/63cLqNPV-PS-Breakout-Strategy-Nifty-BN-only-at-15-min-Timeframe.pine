@@ -1,0 +1,111 @@
+//@version=5
+strategy("Breakout Strategy: Nifty only and only at 15 min Timeframe", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === TIME SETTINGS ===
+startSession     = timestamp("Asia/Kolkata", year, month, dayofmonth, 9, 15)
+first3EndSession = timestamp("Asia/Kolkata", year, month, dayofmonth, 9, 30)
+afterFirst3      = time >= first3EndSession
+
+// === FIRST 3 CANDLE RANGE (9:15 – 9:30) ===
+var float first3High = na
+var float first3Low  = na
+
+inFirst3 = time >= startSession and time < first3EndSession
+
+if time == startSession
+    first3High := na
+    first3Low := na
+
+if inFirst3
+    first3High := na(first3High) ? high : math.max(first3High, high)
+    first3Low := na(first3Low) ? low : math.min(first3Low, low)
+
+targetRange = first3High - first3Low
+
+// === VOLUME FILTER ===
+volMA     = ta.sma(volume, 5)
+volumeOK  = volume> volMA
+
+// === BREAKOUT/BREAKDOWN LOGIC ===
+isBreakout  = afterFirst3 and close > first3High and volumeOK
+isBreakdown = afterFirst3 and close < first3Low and volumeOK
+
+// === ATR TRAILING SL SETTINGS ===
+atrLen     = 20
+atrMult    = 2.0
+atr        = ta.atr(atrLen)
+trailOffset = atr * atrMult
+
+// === TRADE CONTROL ===
+var bool  tradeTaken   = false
+var float trailSL      = na
+var float entryPrice   = na
+var float targetPrice  = na
+
+if time == startSession
+    tradeTaken  := false
+    trailSL     := na
+    entryPrice  := na
+    targetPrice := na
+
+// === ENTRY CONDITIONS ===
+if isBreakout and not tradeTaken and not na(targetRange)
+    strategy.entry("Buy", strategy.long)
+    entryPrice  := close
+    trailSL     := close - trailOffset
+    targetPrice := close + targetRange
+    tradeTaken  := true
+    alert("🔔 BUY triggered!", alert.freq_once_per_bar_close)
+
+if isBreakdown and not tradeTaken and not na(targetRange)
+    strategy.entry("Sell", strategy.short)
+    entryPrice  := close
+    trailSL     := close + trailOffset
+    targetPrice := close - targetRange
+    tradeTaken  := true
+    alert("🔔 SELL triggered!", alert.freq_once_per_bar_close)
+
+// === UPDATE TRAILING SL EACH BAR (ONLY AFTER ENTRY) ===
+if strategy.position_size > 0
+    trailSL := math.max(trailSL, close - trailOffset)
+
+if strategy.position_size < 0
+    trailSL := math.min(trailSL, close + trailOffset)
+
+// === EXIT CONDITIONS ===
+if strategy.position_size > 0 and (close <= trailSL or high >= targetPrice)
+    strategy.close("Buy", comment="Exit: SL or Target")
+    alert("❌ EXIT Buy: SL or Target Hit", alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and (close >= trailSL or low <= targetPrice)
+    strategy.close("Sell", comment="Exit: SL or Target")
+    alert("❌ EXIT Sell: SL or Target Hit", alert.freq_once_per_bar_close)
+
+// === PLOTS ===
+plot(afterFirst3 ? first3High : na, title="Breakout Level", color=color.green, linewidth=1, style = plot.style_linebr)
+plot(afterFirst3 ? first3Low : na, title="Breakdown Level", color=color.red, linewidth=1, style = plot.style_linebr)
+
+plot(strategy.position_size > 0 ? trailSL : na, title="Trailing SL (Long)", color=color.red, linewidth=2, style = plot.style_linebr)
+plot(strategy.position_size < 0 ? trailSL : na, title="Trailing SL (Short)", color=color.lime, linewidth=2, style = plot.style_linebr)
+
+plot(strategy.position_size > 0 ? targetPrice : na, title="Target (Long)", color=color.blue, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? targetPrice : na, title="Target (Short)", color=color.purple, linewidth=1, style=plot.style_linebr)
+
+// === TIME-BASED FINAL EXIT AT 3:15 PM IST ===
+closeTime = timestamp("Asia/Kolkata", year, month, dayofmonth, 15, 00)
+
+if time >= closeTime and strategy.position_size != 0
+    strategy.close_all(comment = "Force Exit at 3:15 PM")
+    alert("⏰ Auto Exit at 3:15 PM", alert.freq_once_per_bar_close)
+
+View in Pine Editor・101 lines
+Use on chart
+1
+1
+3
+2 298
+Aug 4, 2025
+It only works on 15 min timeframe for nifty and Bank nifty.
+Aug 5, 2025
+Release Notes
+Updated with clear break line. Only Use for Nifty and Bank nifty at 15 min time frame only for best result. Please back test give your suggestions in the comments.

@@ -1,0 +1,507 @@
+//@version=6
+strategy("Reversal Trading Bot Strategy [BullByte] Final Version",
+     overlay=true,
+     initial_capital=1000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=30,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     max_lines_count=500,
+     max_labels_count=500)
+
+
+// === USER INPUTS ===
+rsiLength         = input.int(8,    "RSI Length", tooltip="Number of bars used to calculate the Relative Strength Index (RSI).")
+fastRsiLength     = input.int(14,   "Fast RSI Length", tooltip="Number of bars for fast RSI crossover confirmation.")
+slowRsiLength     = input.int(21,   "Slow RSI Length", tooltip="Number of bars for slow RSI crossover confirmation.")
+bbLength          = input.int(20,   "BB Length", tooltip="Number of bars used to calculate Bollinger Bands (BB).")
+adxThreshold      = input.int(20,   "ADX Threshold", tooltip="Minimum ADX value to confirm trend strength.")
+divLookback       = input.int(5,    "Divergence Lookback", tooltip="Number of past bars to analyze for RSI divergence.")
+volumeFilter      = input.bool(false, "Volume ≥ 2× SMA", tooltip="If enabled, requires volume to be at least twice its 20-bar SMA.")
+adxFilter         = input.bool(false, "ADX Strength & Alignment", tooltip="If enabled, requires ADX above threshold and DI+ > DI- for longs, DI- > DI+ for shorts.")
+bbFilter          = input.bool(false, "BB Close Confirmation", tooltip="If enabled, requires close below lower BB for longs, above upper BB for shorts.")
+rsiCrossFilter    = input.bool(false, "RSI Crossover Confirmation", tooltip="If enabled, requires fast RSI to cross over slow RSI for longs, cross under for shorts.")
+stopLossPct       = input.float(1.0, "Stop-Loss %", step=0.1, tooltip="Percentage below/above entry price for stop-loss.") / 100
+takeProfitPct     = input.float(2.0, "Take-Profit %", step=0.1, tooltip="Percentage above/below entry price for take-profit.") / 100
+
+// === INDICATORS ===
+rsi               = ta.rsi(close, rsiLength)[1]
+[diP_raw, diM_raw, adx_raw] = ta.dmi(14, 14)
+diP               = diP_raw[1]
+diM               = diM_raw[1]
+adx               = adx_raw[1]
+[ub, mb, lb]      = ta.bb(close, bbLength, 2)
+upperBB           = ub[1]
+midBB             = mb[1]
+lowerBB           = lb[1]
+volSma            = ta.sma(volume, 20)[1]
+
+// Fast & Slow RSI for crossover confirmation
+efastRSI          = ta.rsi(close, fastRsiLength)[1]
+eslowRSI          = ta.rsi(close, slowRsiLength)[1]
+fastCrossUp       = ta.crossover(efastRSI, eslowRSI)
+fastCrossDown     = ta.crossunder(efastRSI, eslowRSI)
+rsiCrossOKBull    = not rsiCrossFilter or fastCrossUp
+rsiCrossOKBear    = not rsiCrossFilter or fastCrossDown
+
+// === DIVERGENCE DETECTION ===
+prevLow           = ta.lowest(low, divLookback)[1]
+prevLow_1         = ta.lowest(low, divLookback)[2]
+prevRsi           = ta.lowest(rsi, divLookback)[1]
+prevRsi_1         = ta.lowest(rsi, divLookback)[2]
+bullDiv           = prevLow < prevLow_1 and prevRsi > prevRsi_1
+
+prevHigh          = ta.highest(high, divLookback)[1]
+prevHigh_1        = ta.highest(high, divLookback)[2]
+prevRsiH          = ta.highest(rsi, divLookback)[1]
+prevRsiH_1        = ta.highest(rsi, divLookback)[2]
+bearDiv           = prevHigh > prevHigh_1 and prevRsiH < prevRsiH_1
+
+// === SIGNAL FILTERS ===
+volOKBull         = not volumeFilter or volume[1] >= 2 * volSma
+adxOKBull         = not adxFilter or (adx > adxThreshold and diP > diM)
+bbOKBull          = not bbFilter or close[1] <= lowerBB
+
+volOKBear         = not volumeFilter or volume[1] >= 2 * volSma
+adxOKBear         = not adxFilter or (adx > adxThreshold and diM > diP)
+bbOKBear          = not bbFilter or close[1] >= upperBB
+
+// === ENTRY SIGNALS ===
+bullEntry         = bullDiv and volOKBull and adxOKBull and bbOKBull and rsiCrossOKBull
+bearEntry         = bearDiv and volOKBear and adxOKBear and bbOKBear and rsiCrossOKBear
+
+// === TP/SL AND EXECUTION ===
+var line tpLine = na
+var line slLine = na
+var float prevPosSize = 0.0
+var float tpPrice = na
+var float slPrice = na
+
+if barstate.isconfirmed
+    if bullEntry
+        strategy.entry("Long", strategy.long)
+    if bearEntry
+        strategy.entry("Short", strategy.short)
+
+    if strategy.position_size > 0
+        strategy.exit("Long Exit", from_entry="Long",
+                      stop=strategy.position_avg_price * (1 - stopLossPct),
+                      limit=strategy.position_avg_price * (1 + takeProfitPct))
+    if strategy.position_size < 0
+        strategy.exit("Short Exit", from_entry="Short",
+                      stop=strategy.position_avg_price * (1 + stopLossPct),
+                      limit=strategy.position_avg_price * (1 - takeProfitPct))
+
+    if strategy.position_size != prevPosSize and strategy.position_size != 0
+        line.delete(tpLine)
+        line.delete(slLine)
+        entryPrice = strategy.opentrades.entry_price(0)
+        if strategy.position_size > 0
+            tpPrice := entryPrice * (1 + takeProfitPct)
+            slPrice := entryPrice * (1 - stopLossPct)
+        else
+            tpPrice := entryPrice * (1 - takeProfitPct)
+            slPrice := entryPrice * (1 + stopLossPct)
+        tpLine := line.new(bar_index, tpPrice, bar_index + 1, tpPrice, extend=extend.right, style=line.style_dashed, color=color.green)
+        slLine := line.new(bar_index, slPrice, bar_index + 1, slPrice, extend=extend.right, style=line.style_dashed, color=color.red)
+
+    if strategy.position_size == 0 and prevPosSize != 0
+        line.delete(tpLine)
+        line.delete(slLine)
+        tpLine := na
+        slLine := na
+        tpPrice := na
+        slPrice := na
+
+    prevPosSize := strategy.position_size
+
+// === ALERTS ===
+alertcondition(bullEntry, title="BullByte Long Entry", message="Long entry signal detected at {{close}}")
+alertcondition(bearEntry, title="BullByte Short Entry", message="Short entry signal detected at {{close}}")
+
+View in Pine Editor・123 lines
+Use on chart
+9
+7
+4
+37
+23 090
+Apr 5, 2025
+Overview:
+
+The indicator Reversal Trading Bot Strategy[BullByte] is crafted to capture potential market reversal points by combining momentum, volatility, and trend alignment filters. It uses a blend of technical indicators to identify both bullish and bearish reversal setups, ensuring that multiple market conditions are met before entering a trade.
+
+Core Components:
+
+Technical Indicators Used:
+
+RSI (Relative Strength Index):
+
+Purpose: Detects divergence conditions by comparing recent lows/highs in price with the RSI.
+
+Parameter: Length of 8.
+
+Bollinger Bands (BB):
+
+Purpose: Measures volatility and identifies price levels that are statistically extreme.
+
+Parameter: Length of 20 and a 2-standard deviation multiplier.
+
+ADX (Average Directional Index) & DMI (Directional Movement Index):
+
+Purpose: Quantifies the strength of the trend. The ADX threshold is set at 20, and additional filters check for the alignment of the directional indicators (DI+ and DI–).
+
+ATR (Average True Range):
+
+Purpose: Provides a volatility measure used to set stop levels and determine risk through trailing stops.
+
+Volume SMA (Simple Moving Average of Volume):
+
+Purpose: Helps confirm strength by comparing the current volume against a 20-period average, with an optional filter to ensure volume is at least twice the SMA.
+
+User-Defined Toggle Filters:
+
+Volume Filter: Confirms that the volume is above average (or twice the SMA) before taking trades.
+
+ADX Trend Alignment Filter: Checks that the ADX’s directional indicators support the trade direction.
+
+BB Close Confirmation: Optionally refines the entry by requiring price to be beyond the upper or lower Bollinger Band rather than just above or below.
+
+RSI Divergence Exit: Allows the script to close positions if RSI divergence is detected.
+
+BB Mean Reversion Exit: Closes positions if the price reverts to the Bollinger Bands’ middle line.
+
+Risk/Reward Filter: Ensures that the potential reward is at least twice the risk by comparing the distance to the Bollinger Band with the ATR.
+
+Candle Movement Filter: Optional filter to require a minimum percentage move in the candle to confirm momentum.
+
+ADX Trend Exit: Closes positions if the ADX falls below the threshold and the directional indicators reverse.
+
+Entry Conditions:
+
+Bullish Entry:
+
+RSI Divergence: Checks if the current close is lower than a previous low while the RSI is above the previous low, suggesting bullish divergence.
+
+Bollinger Confirmation: Requires that the price is above the lower (or upper if confirmation is toggled) Bollinger Band.
+
+Volume & Trend Filters: Combines volume condition, ADX strength, and an optional candle momentum condition.
+
+Risk/Reward Check: Validates that the trade meets a favorable risk-to-reward ratio.
+
+Bearish Entry:
+
+Uses a mirror logic of the bullish entry by checking for bearish divergence, ensuring the price is below the appropriate Bollinger level, and confirming volume, trend strength, candle pattern, and risk/reward criteria.
+
+Trade Execution and Exit Strategy:
+
+Trade Execution:
+
+Upon meeting the entry conditions, the strategy initiates a long or short position.
+
+Stop Loss & Trailing Stops:
+
+A stop-loss is dynamically set using the ATR value, and trailing stops are implemented as a percentage of the close price.
+
+Exit Conditions:
+
+Additional exit filters can trigger early closures based on RSI divergence, mean reversion (via the middle Bollinger Band), or a weakening trend as signaled by ADX falling below its threshold.
+
+This multi-layered exit strategy is designed to lock in gains or minimize losses if the market begins to reverse unexpectedly.
+
+How the Strategy Works in Different Market Conditions:
+
+Trending Markets:
+
+The ADX filter ensures that trades are only taken when the trend is strong. When the market is trending, the directional movement indicators help confirm the momentum, making the reversal signal more reliable.
+
+Ranging Markets:
+
+In choppy markets, the Bollinger Bands expand and contract, while the RSI divergence can highlight potential turning points. The optional filters can be adjusted to avoid false signals in low-volume or low-volatility conditions.
+
+Volatility Management:
+
+With ATR-based stop-losses and a risk/reward filter, the strategy adapts to current market volatility, ensuring that risk is managed consistently.
+
+Recommendation on using this Strategy with a Trading Bot:
+This strategy is well-suited for high-frequency trading (HFT) due to its ability to quickly identify reversal setups and execute trades dynamically with automated stop-loss and trailing exits. By integrating this script with a TradingView webhook-based bot or an API-driven execution system, traders can automate trade entries and exits in real-time, reducing manual execution delays and capitalizing on fast market movements.
+
+Disclaimer:
+This script is provided for educational and informational purposes only. It is not intended as investment advice. Trading involves significant risk, and you should always conduct your own research and analysis before making any trading decisions. The author is not responsible for any losses incurred while using this script.
+Apr 14, 2025
+Release Notes
+// Initial capital is set to 1000 USD, and order size is set to 30% of account equity.
+// A 0.04% commission and slippage have been added to provide a more realistic performance report.
+Apr 18, 2025
+Release Notes
+Strategy Update: Reversal Trading Bot
+
+📌 Key Updates & Enhancements
+1. ✅ Fixed Bearish (Short) Entry Logic
+- Previously, ADX alignment was too restrictive, blocking valid short signals.
+- Now, both Long & Short entries trigger correctly with proper trend confirmation.
+
+2. 🔥 Optimized Entry/Exit Conditions
+- No More Premature Exits: Removed restrictive exit filters (ADX Trend Exit, BB Mean Reversion Exit, RSI Divergence Exit).
+- Pure Trend-Following with Trailing Stops: Exits now based on ATR-based trailing stops (1% trail).
+
+3. 📊 Tested on BTC/USD (Binance) – 30min Chart
+- Works best in trending markets (bullish & bearish).
+- Uses Volume Filter (2x SMA) for high-probability entries.
+
+4. 💰 Realistic Backtest Settings
+- Initial Capital: $1,000
+- Position Size: 30% of equity per trade
+- Commission: 0.04% (Binance-like fees)
+- Slippage: 1% (accounts for volatility)
+
+
+
+🚀 Why This Strategy Stands Out?
+
+
+🎯 Unique Edge: Smart Divergence + Trend Confirmation
+Most reversal strategies fail because:
+❌ They rely only on RSI divergence (false signals in strong trends).
+❌ They ignore volume & ADX confirmation, leading to weak entries.
+
+This strategy combines:
+✔ True RSI Divergence (Regular & Hidden)
+✔ Bollinger Band Extreme Confirmation (Lower Band for Longs, Upper Band for Shorts)
+✔ Volume Spike Filter (2x SMA volume = institutional interest)
+✔ ADX Trend Strength Check (Avoids ranging markets)
+
+⚡ Entry Conditions (Optimized for High-Probability Trades)
+
+📈 Long Entry (Buy Dips in Uptrend)
+1. Bullish RSI Divergence (Price makes lower low, RSI makes higher low).
+2. Price touches Lower Bollinger Band (Mean-reversion bounce).
+3. Volume Spike (2x SMA volume = strong buying pressure).
+4. ADX > 20 & DI+ > DI- (Confirms uptrend strength).
+
+📉 Short Entry (Sell Rallies in Downtrend)
+1. Bearish RSI Divergence (Price makes higher high, RSI makes lower high).
+2. Price Touches Upper Bollinger Band (Rejection zone).
+3. Volume Spike (2x SMA volume = strong selling pressure).
+4. ADX > 20 & DI- > DI+ (Confirms downtrend strength).
+
+🛑 Exit Logic (Trailing Stop for Maximum Profits)
+- No More Early Exits: Removed restrictive filters that cut winning trades short.
+- ATR-Based Trailing Stop (1%): Locks in profits as the trend extends.
+- No Manual Intervention Needed: Fully systematic.
+
+
+
+⚠️ Disclaimer & Risk Warning
+DO NOT TRADE THIS SCRIPT MANUALLY.
+- This is a tested algorithmic strategy, not financial advice.
+- Use at your own risk. Crypto markets are highly volatile.
+- Backtest first before live trading. Adjust position sizing based on risk tolerance.
+- Margin trading increases risk. Only use leverage you can afford to lose.
+
+
+🔮 My Thoughts
+This strategy is **ideal for swing traders** who want:
+✅ High-probability reversals with trend confirmation
+✅ Reduced false signals via volume & ADX filters
+✅ Hands-free trading with trailing stops
+
+👉 Next Steps:
+1. Backtest on multiple assets (ETH, XRP, etc.).
+2. Optimize parameters for different timeframes.
+3. Start small in live markets & scale gradually.
+
+🔥 Happy Trading! Let the algorithm work for you. 🚀
+Apr 19, 2025
+Release Notes
+No functional changes. Updated metadata and comments for better clarity and compliance.
+Apr 23, 2025
+Release Notes
+Updated core Logic for performance improvements
+Added Alert
+May 5, 2025
+Release Notes
+Changelog: Reversal Trading Bot Strategy v1 → v2
+May 2025 Update | By BullByte
+
+Critical Backtest Reality Check
+_This update focuses on closing the gap between Pine Script’s idealized backtests and live trading. Key issues addressed:_
+- "Pine’s "Hindsight Bias": The backtester cheats by seeing full candles and cherry-picking optimal exits.
+- No Tick Data: Strategy tester lacks real order flow, liquidity, and intra-bar price action.
+- Execution Blindspots: Ignores latency, slippage, and partial fills.
+
+---
+
+New Features & Fixes
+
+1. Backtest Realism Upgrades
+- `calc_on_every_tick=true` + `Bar Magnifier`
+- Simulates intrabar exits (still limited, but closer to live behavior).
+- Mandatory Slippage & Commissions
+- Default: `1 tick slippage` + `0.5% commission` to erode paper profits.
+- Exit Price Buffering (`useExitBuffer`)
+- Adds `ATR-based buffer` to stops, reducing phantom spike exits.
+
+2. Risk Safeguards
+- Daily Loss Circuit Breaker (`maxDailyLoss`)
+- Halts trading after `X%` equity loss in a day.
+- Trade Timeout Protection (`tradeTimeout`)
+- Auto-closes trades open longer than `X hours` (prevents backtest-only holds).
+
+3. Execution Realism Toggles
+- Simulated Broker Latency (`simLatency`)
+- Delays entries to next bar + uses `limit orders` at `minFillDistance`.
+- Paper-Trade Mode
+- Labels charts to warn against blind automation.
+
+4. Transparency Tools
+- Visual Risk Levels
+- Plots `daily max-loss price` and `timeout lines` for open trades.
+- Strategy Description Warnings
+- Explicit steps to validate alerts vs. backtests.
+
+---
+
+Why Live Results WILL Differ
+- _Even with these fixes, Pine Script cannot replicate:_
+- True tick-by-tick fills (backtests "rewrite history").
+- Liquidity gaps (e.g., stop hunts, thin markets).
+- Network/broker delays (real orders execute slower than alerts).
+
+---
+
+Validation Checklist
+_Before going live, users MUST:_
+1. Compare 30+ alert fills to backtest logs.
+2. Paper-trade for 1 month with `Paper-Trade Mode` on.
+3. Test on tick data (e.g., NinjaTrader/QuantConnect).
+
+---
+
+
+This update pushes Pine to its limits—but no backtest is ever "live-ready." Trade small, monitor fills, and assume real performance will be 20-50% worse.
+
+→ Always backtest skepticism.
+→ Never risk capital on unverified systems.
+
+---
+
+Why This Matters
+- Before: Strategy relied on Pine’s flawed perfection.
+- After: Forces users to confront execution gaps while providing tools to mitigate them.
+
+---
+
+This changelog doesn’t hide Pine’s flaws—it weaponizes transparency to build trust. Let me know if you'd like to adjust the tone or emphasize specific elements!
+May 19, 2025
+Release Notes
+Reversal Trading Bot Strategy [BullByte] - Final Version
+
+Overview
+After addressing community feedback and overcoming Pine Script limitations from earlier versions (e.g., v2,v1), this script is optimized for reliability, transparency, and ease of use. It generates long and short entry signals with automated stop-loss and take-profit management, visual aids, and alerts, adhering to TradingView's publication guidelines.
+
+Background and Evolution
+Previous versions faced challenges due to Pine Script’s idealized backtesting, which led to discrepancies in live trading. Community comments highlighted issues like repainting signals and unrealistic performance, which were never my intent. After refining the script to address these concerns, this final version uses confirmed bar data, simplifies the logic, and emphasizes transparency to ensure trustworthiness.
+
+How It Works
+The strategy combines technical indicators with RSI divergence detection to identify reversal points.
+
+Indicators Used
+
+RSI (Relative Strength Index): Measures momentum to detect overbought/oversold conditions. Default length: 8 bars.
+Bollinger Bands (BB): Identifies volatility and price extremes. Default length: 20 bars, 2 standard deviations.
+ADX (Average Directional Index) with DMI: Confirms trend strength and direction. Default ADX threshold: 20.
+Volume SMA: A 20-bar simple moving average of volume for optional filtering.
+
+Divergence Detection
+The strategy’s core is RSI divergence:
+
+Bullish Divergence: Price makes a lower low, but RSI makes a higher low, signaling a potential upward reversal.
+Bearish Divergence: Price makes a higher high, but RSI makes a lower high, indicating a potential downward reversal.
+Divergences are calculated over a 5-bar lookback period using previous bar data [1] to prevent repainting.
+
+Optional Filters
+Configurable filters refine signals:
+
+Volume Filter: Requires volume to be at least twice its 20-bar SMA.
+ADX Filter: Ensures ADX exceeds the threshold and directional indicators align (DI+ > DI- for longs, DI- > DI+ for shorts).
+Bollinger Bands Filter: Requires the close to be below the lower BB for longs or above the upper.
+Take-Profit Line: Green dashed line at the target price.
+Stop-Loss Line: Red dashed line at the stop price.
+Lines appear when a position opens, extend rightward, and clear when the position closes.
+
+Alerts
+
+Long Entry Alert: "BullByte Long Entry" with message "Long entry signal detected at {{close}}".
+Short Entry Alert: "Short Entry Alert:"BullByte Short Entry" with message "Short entry signal detected at {{close}}".
+
+Anti-Repainting Design
+
+calc_on_every_tick=false: Calculates on bar close.
+process_orders_on_close=true: Uses confirmed bar data.
+Indicators use previous bar [1] data to lock in finalized price action.
+
+The setup used for backtesting results
+I use this strategy with the following parameters:
+
+Market: BTC/USD on Binance.
+Timeframe: 5-minute chart.
+Contract Size: 0.5 BTC per trade.
+Initial Capital: $100,000 USD.
+Commission: USD 30 per order (reflecting typical broker fees).
+
+These settings are for basic testing, and the strategy is flexible and can be adapted to other markets, timeframes, or position sizes.
+
+
+Important Point: Why More Trades on Higher Timeframes?
+You might wonder why increasing the timeframe (e.g., from 5-minute to 1-hour) results in more trades. This is due to the strategy’s reliance on RSI divergence and filter conditions:
+
+Divergence Detection: On higher timeframes, each bar represents a longer period, capturing more price action and volatility. This increases the likelihood of detecting significant price swings (lower lows or higher highs) paired with RSI divergences, as the lookback period (default: 5 bars) covers a larger time span.
+
+Reduced Noise: Higher timeframes filter out short-term price noise, producing clearer divergence patterns and fewer false signals, which can lead to more valid trade setups.
+
+Thus, higher timeframes generate more trade opportunities because they amplify the conditions the strategy is designed to detect. However, this may also increase risk per trade due to larger price movements, so adjust position sizing and risk parameters accordingly.
+
+Usage Instructions
+
+Apply to Chart: Add the strategy to your TradingView chart.
+Configure Inputs:
+Adjust RSI length, BB length, ADX threshold, and divergence lookback.
+Enable/disable filters (volume, ADX, BB) as needed.
+Set stop-loss (e.g., 1%) and take-profit (e.g., 2%) percentages.
+
+
+Set Parameters: Input your initial capital ($100,000 in my backtesting case) and commission ($30 per order).
+Choose Timeframe: I use a 5-minute chart, but you can select any timeframe to match your trading style.
+Monitor Signals: Watch for entry signals via chart visuals or alerts.
+Manage Positions: TP/SL lines guide exits; the strategy handles them automatically.
+Test Thoroughly: Backtest on your market and timeframe, then paper trade to validate.
+
+Important Considerations
+
+Backtesting Limitations: Pine Script backtests are idealized, ignoring slippage, latency, and liquidity gaps. Real results will differ from backtests.
+Timeframe Flexibility: While I use a 5-minute chart, you can use any timeframe. Higher timeframes may increase trade frequency but also risk per trade.
+Parameter Tuning: Adjust inputs to suit your market and risk tolerance. My setup (0.5 BTC, $30 commission) is a starting point.
+Risk Management: The 1% stop-loss and 2% take-profit defaults require careful calibration. Always trade within your risk limits.
+Market Variability: Performance varies by market conditions. Test in trending and ranging markets.
+Validation: Compare backtest results with paper trading or live alerts before trading real capital.
+
+Why This Version?
+This final version addresses community feedback and Pine Script limitations:
+
+Transparency: Clear explanations of logic and limitations, with no exaggerated claims.
+Reliability: Fixed repainting by using closed-bar data.
+Simplicity: Streamlined from v2’s complex features (e.g., removed ATR buffers, timeouts) for clarity.
+Community Focus: Built to be trustworthy and useful, not misleading.
+
+Disclaimer
+This strategy is for educational and informational purposes only. It is not financial advice. Trading carries significant risks, and past performance does not guarantee future results. Conduct thorough research, test extensively, and consider your financial situation before trading.
+
+Thank you to the TradingView community for your feedback, which made this final version possible. I hope it enhances your trading experience!
+-BullByte
+
+May 29, 2025
+Release Notes
+Update: Community Feedback Integration. This iteration incorporates valuable community feedback to get in more trade frequency, specifically enhancing the logic by integrating gettrade.
+Enhancements:
+Introduced RSI crossover logic to improve stability and refine trade signals.

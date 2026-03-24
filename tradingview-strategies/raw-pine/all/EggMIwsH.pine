@@ -1,0 +1,39 @@
+//@version=3
+strategy(title="Bollinger Bands", overlay=true)
+
+//sma算出
+pine_sma(x, y) =>
+    sum = 0.0
+    for i = 0 to y - 1
+        sum := sum + x[i] / y
+    sum
+
+dev = stdev(close,20)
+basis = pine_sma(close,20)
+upper_1 = basis + dev
+lower_1 = basis - dev
+upper_2 = basis + dev * 2
+lower_2 = basis - dev * 2
+upper_3 = basis + dev * 3
+lower_3 = basis - dev * 3
+upper_4 = basis + dev * 4
+lower_4 = basis - dev * 4
+
+
+plot(basis, color=red)
+u1 = plot(upper_1, color=blue)
+l1 = plot(lower_1, color=blue)
+u2 = plot(upper_2, color=green)
+l2 = plot(lower_2, color=green)
+u3 = plot(upper_3, color=red)
+l3 = plot(lower_3, color=red)
+u4 = plot(upper_4, color=red)
+l4 = plot(lower_4, color=red)
+fill(u4,l4, color=green)
+
+View in Pine Editor・32 lines
+Use on chart
+8
+3
+2 276
+４σまで表示しています。

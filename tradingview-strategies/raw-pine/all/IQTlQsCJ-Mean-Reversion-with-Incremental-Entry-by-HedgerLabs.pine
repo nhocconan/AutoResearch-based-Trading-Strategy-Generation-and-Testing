@@ -1,0 +1,84 @@
+//@version=5
+strategy("Mean Reversion with Incremental Entry by HedgerLabs", overlay=true, calc_on_every_tick=true)
+
+// Input for adjustable settings
+maLength = input.int(30, title="MA Length", minval=1)
+initialPercent = input.float(5, title="Initial Percent for First Order", minval=0.01, step=0.01)
+percentStep = input.float(1, title="Percent Step for Additional Orders", minval=0.01, step=0.01)
+
+// Calculating Moving Average
+ma = ta.sma(close, maLength)
+
+// Plotting the Moving Average
+plot(ma, "Moving Average", color=color.blue)
+
+var float lastBuyPrice = na
+var float lastSellPrice = na
+
+// Function to calculate absolute price percentage difference
+pricePercentDiff(price1, price2) =>
+    diff = math.abs(price1 - price2) / price2 * 100
+    diff
+
+// Initial Entry Condition Check Function
+initialEntryCondition(price, ma, initialPercent) =>
+    pricePercentDiff(price, ma) >= initialPercent
+
+// Enhanced Entry Logic for Buy and Sell
+if (low < ma)
+    if (na(lastBuyPrice))
+        if (initialEntryCondition(low, ma, initialPercent))
+            strategy.entry("Buy", strategy.long)
+            lastBuyPrice := low
+    else
+        if (low < lastBuyPrice and pricePercentDiff(low, lastBuyPrice) >= percentStep)
+            strategy.entry("Buy", strategy.long)
+            lastBuyPrice := low
+
+if (high > ma)
+    if (na(lastSellPrice))
+        if (initialEntryCondition(high, ma, initialPercent))
+            strategy.entry("Sell", strategy.short)
+            lastSellPrice := high
+    else
+        if (high > lastSellPrice and pricePercentDiff(high, lastSellPrice) >= percentStep)
+            strategy.entry("Sell", strategy.short)
+            lastSellPrice := high
+
+// Exit Conditions - Close position if price touches the MA
+if (close >= ma and strategy.position_size > 0)
+    strategy.close("Buy")
+    lastBuyPrice := na
+
+if (close <= ma and strategy.position_size < 0)
+    strategy.close("Sell")
+    lastSellPrice := na
+
+// Reset last order price when position is closed
+if (strategy.position_size == 0)
+    lastBuyPrice := na
+    lastSellPrice := na
+
+View in Pine Editor・60 lines
+Use on chart
+2
+4
+1
+1
+6 334
+The "Mean Reversion with Incremental Entry" strategy, designed by HedgerLabs, is an advanced TradingView strategy script focusing on the mean reversion technique in financial markets. This strategy is engineered for traders who prefer a systematic approach with an emphasis on incremental entries based on price movements relative to a moving average.
+
+Key Features:
+
+Moving Average Based Strategy: Central to this strategy is the simple moving average (SMA), around which all trade entries and exits revolve. Traders can customize the MA length, making it flexible for various trading styles and timeframes.
+Incremental Entry Mechanism: Unique to this strategy is the incremental entry system. The strategy initiates an initial trade when the price deviates from the MA by a specified percentage. Subsequent entries are made at incremental steps, defined by the trader, as the price moves further away from the MA. This method can potentially capitalize on increasing market volatility.
+Dynamic Position Management: The strategy intelligently manages positions by entering long when the price is below the MA and short when above, allowing for adaptive positioning in different market conditions.
+Automated Exit Logic: Exit points are determined when the price touches the MA, aiming to close positions at potential reversal points for optimized trade outcomes.
+Continuous Market Analysis: With 'calc_on_every_tick' enabled, the strategy constantly evaluates market conditions, ensuring prompt reaction to price movements.
+Usage Scenario:
+
+This strategy is particularly beneficial in markets exhibiting mean-reverting behavior. It is suitable for traders focusing on swing trading or those who prefer to scale into positions during periods of high volatility.
+
+Disclaimer:
+
+Please remember that this strategy is for informational and educational purposes only and is not intended as financial or investment advice. Trading in financial markets carries risks, including the potential loss of capital. We advise doing your own research and consulting with a financial expert before making any investment decisions.

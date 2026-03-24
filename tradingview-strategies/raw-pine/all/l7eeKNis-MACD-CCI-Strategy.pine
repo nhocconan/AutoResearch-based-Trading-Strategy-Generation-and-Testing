@@ -1,0 +1,52 @@
+//@version=3
+//Author: RvZ14
+//Based on Joseph Nemeth MACD+CCI strategy
+//Reference reading: https://sites.google.com/site/forexjosephnemeth/home/macd-cci
+
+strategy(title="MACD+CCI Strategy", shorttitle="macd/cci")
+length = input(14, minval=1)
+fastLength = input(12, minval=1), slowLength=input(26,minval=1)
+signalLength=input(2,minval=1)
+src = input(close, title="CCI Source")
+
+//cci
+ma = sma(src, length)
+cci = (src - ma) / (0.015 * dev(src, length))
+plot(cci, title = "cci", color=#5DADE2,linewidth = 1,transp = 0)
+band1 = hline(100, color=gray, linestyle=dashed,linewidth = 1)
+band0 = hline(-100, color=gray, linestyle=dashed,linewidth = 1)
+fill(band1, band0, color= #F9E79F)
+
+//macd
+source = close
+fastMA = ema(source, fastLength)
+slowMA = ema(source, slowLength)
+macd = fastMA - slowMA
+signal = ema(macd, signalLength)
+hist = macd - signal
+plot(hist, color=#EC7063, style=histogram)
+plot(macd, title = "macd", color=#5DADE2, linewidth = 1,transp = 0)
+plot(signal, title = "signal", color=#F5B041,linewidth = 1,transp = 0)
+
+longCond = cci > 100 and macd > 0 or cci > -100 and macd < 0
+exitLong = cci < 100
+shortCond = cci < -100 and macd < 0 or cci < 100 and macd > 0
+exitShort = cci > -100
+
+strategy.entry("long",strategy.long, when = longCond == true)
+strategy.exit("long", when = exitLong == true)
+strategy.entry("short",strategy.short,when=shortCond == true)
+strategy.exit("short", when = exitShort == true)
+
+View in Pine Editor・39 lines
+Use on chart
+1 K
+11
+34 138
+Aug 29, 2018
+a simple strategy based on Joseph Nemeth MACD+CCI strategy
+
+Reference reading: sites.google.com/site/forexjosephnemeth/home/macd-cci
+Feb 6, 2019
+Release Notes
+added exit condition

@@ -1,0 +1,86 @@
+//@version=4
+strategy("Cross impro test by Canundo", overlay=true)
+
+//Run on 1 min chart for better testing cases where x and y of crossover have the same value.
+EnableStrictCross = input(title="Enable Strict Cross (rounds SMA to pips/ticks), otherwise standard", type=input.bool, defval=true) //Disable to see differences
+BacktestTradeCandleCount = input(title="Backtest Trade Candle Count", type=input.integer, defval=3000) //Avoid error for too many trades
+MinTick = input(title="Change mintick for Cross Check (0 = Standard Tick/Pip, Chose pips like 0.5, 10, 100, 0.002)",
+     type=input.float, defval=0) //Precision of round to pip function
+SpreadBetween = input(title="Add spread between values to be crossed.",
+     type=input.float, defval=0)
+     
+//Calculate Timeframe for Backtest demonstration
+starttime = 0, starttime := starttime[1] != 0 ? starttime[1] : timenow
+timeFrame = (time_close - time_close[1]) * BacktestTradeCandleCount
+f_tWindow() => time >= starttime - timeFrame ? true : false
+
+//Rounding function
+mult = 1 / (MinTick == 0 ? syminfo.mintick : MinTick)
+f_roundToPip(x)=> (x-floor(x*mult)/mult) < (ceil(x*mult)/mult-x) ? floor(x*mult)/mult : ceil(x*mult)/mult
+
+//Very short SMA's to show the effect of crossovers und price values with more decimals than the tick has
+sma1 = sma(close, 2), sma1impr = EnableStrictCross ? f_roundToPip(sma1) : sma1
+sma2 = sma(close, 3), sma2impr = EnableStrictCross ? f_roundToPip(sma2) : sma2
+
+longCondition = crossover(sma1impr - SpreadBetween/2, sma2impr + SpreadBetween/2)
+if (longCondition and f_tWindow())
+    strategy.entry("Long", strategy.long)
+
+shortCondition = crossunder(sma1impr + SpreadBetween/2, sma2impr - SpreadBetween/2)
+if (shortCondition and f_tWindow())
+    strategy.entry("Short", strategy.short)
+
+//Show changed SMA as line, show normal SMA with crosses.
+plot(sma1, title="SMA1", color=color.red, linewidth=2, style=plot.style_cross)
+plot(sma1impr, title="SMA1 Improved", color=color.red, linewidth=2, style=plot.style_cross)
+plot(strategy.position_size < 0 ? sma1impr - SpreadBetween/2 : sma1impr + SpreadBetween/2, title="SMA1 Improved + Spread", color=color.red, linewidth=1)
+plot(sma2, title="SMA2", color=color.green, linewidth=2, style=plot.style_cross)
+plot(sma2impr, title="SMA2 Improved ", color=color.green, linewidth=2, style=plot.style_cross)
+plot(strategy.position_size < 0 ? sma2impr + SpreadBetween : sma2impr - SpreadBetween, title="SMA2 Improved + Spread", color=color.green, linewidth=1)
+plot(sma1*1000, title="sma1*1000 (Show hidden decimal values)", transp=100)
+
+View in Pine Editor・43 lines
+Use on chart
+1
+1
+2
+1
+4 285
+This is a script where I tried to check the following things:
+
+
+Even thought the tick of an asset is, for example 0.5, there are calculated prices, like SMA's that have even more decimals. Leading to crosses happening that for example happen at the same price. Consequently triggering totally useless in side markets. What happens if SMA values are restricted to the tick resolution? (Option works on it's own or with a combination of the others.)
+
+What happens if I set my own tick value, like 0.8 instead of 0.5, what will be the effect for calculated values that are used for crossings? Will tick sizes improve the success rate? (This option will work only when the first option is active.)
+
+Can success rate, especially for sideway markets be improved when adding a spread between MA's, so that it triggers less in sideway markets? (Option works on it's own or with a combination of the others.)
+
+
+
+First of all, I had a hard time to round prices properly when it needs to be dynamic and working for different assets with different amounts of decimal values in the tick. The solution is that abs(floor(syminfo.mintick)) will give you the amount of decimals a tick has. It works for all ticks that are at least lower than 10. I'm not sure how huge ticks are out there. I did not implement this solution at the end since I found another way to test it.
+
+Findings:
+
+The first option, when activated, takes out half the trades and raises the percent profitability by 8% so there is some effect. However, all of the tested options have less advantage than I hoped for but are nevertheless something worthy for sideway markets. The first option just forces the MA's from the example to use the tick resolution.
+
+See these two images. One when the first option is off, the second when it's active.
+
+
+
+
+
+
+
+The lines are the MA's with adjusted values, the crosses are the places of the MA's when left as is.
+
+Here a screenshot of the third option set to the value 2 on the 1 minute XBTUSD chart.
+
+
+
+
+The advantage is that less trades trigger that have a low change in price and so less trading fees will happen.
+The disadvantage is that all options can implement some delay for a crossing since the crossing will trigger once a slightly bigger move into the direction was taken.
+
+This test environment was not meant to be profitable but to test the effects.
+
+Maybe someone finds it interesting or wanted to test the same, so here you can save some work.

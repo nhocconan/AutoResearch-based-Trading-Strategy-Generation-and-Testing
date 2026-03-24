@@ -1,0 +1,1580 @@
+//@version=6
+strategy("APEX V2", 
+         shorttitle="APX [JOAT]", 
+         overlay=true, 
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         pyramiding=3,
+         calc_on_every_tick=false,
+         max_bars_back=1500,
+         max_labels_count=500,
+         max_lines_count=500,
+         max_boxes_count=500)
+
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// CONFIGURATION GROUPS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+g_strategy = "═══ Strategy Settings ═══"
+g_lad = "═══ Flow Absorption Module (FAM) ═══"
+g_pbe = "═══ Directional Bias Engine (DBE) ═══"
+g_spm = "═══ Structure Mapping System (SMS) ═══"
+g_vrc = "═══ Volatility Classification (VCL) ═══"
+g_dcs = "═══ Momentum Divergence Module (MDM) ═══"
+g_mrz = "═══ Statistical Reversion Zones (SRZ) ═══"
+g_ifs = "═══ Order Flow Analysis (OFA) ═══"
+g_vwap = "═══ Anchor Deviation Bands ═══"
+g_mean_rev = "═══ Deviation Reversion System ═══"
+g_zero_lag = "═══ Trend Momentum Signals ═══"
+g_risk = "═══ Risk Management ═══"
+g_visual = "═══ Visualization ═══"
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// STRATEGY SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+enable_long = input.bool(true, "Enable LONG Trades", group=g_strategy)
+enable_short = input.bool(true, "Enable SHORT Trades", group=g_strategy)
+use_confluence = input.bool(true, "Require Multi-Indicator Confluence", group=g_strategy, 
+     tooltip="Requires signals from multiple indicators for higher accuracy")
+min_confluence = input.int(3, "Minimum Confluence Count", minval=1, maxval=7, group=g_strategy,
+     tooltip="Number of indicators that must agree for a trade signal")
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// FAM - FLOW ABSORPTION MODULE SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_lad = input.bool(true, "Enable FAM", group=g_lad)
+lad_vwap_mode = input.string("Session Anchored", "VWAP Mode", options=["Session Anchored", "Continuous"], group=g_lad)
+lad_deviation_method = input.string("Price Volatility", "Deviation Method", 
+     options=["Price Volatility", "Z-Score", "Spread StDev"], group=g_lad)
+lad_vol_lookback = input.int(45, "Volume Lookback", minval=10, group=g_lad)
+lad_vol_multiplier = input.float(2.25, "Volume Surge Multiplier", minval=1.0, step=0.05, group=g_lad)
+lad_rvol_threshold = input.float(0.6, "RVOL Threshold", minval=0.1, step=0.1, group=g_lad)
+lad_threshold_2m = input.float(8.0, "2m Threshold", minval=0, step=0.5, group=g_lad)
+lad_threshold_5m = input.float(8.0, "5m Threshold", minval=0, step=0.5, group=g_lad)
+lad_threshold_15m = input.float(4.0, "15m Threshold", minval=0, step=0.5, group=g_lad)
+lad_show_ribbon = input.bool(true, "Show FAM Gradient Ribbon", group=g_lad)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// DBE - DIRECTIONAL BIAS ENGINE SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_pbe = input.bool(true, "Enable DBE", group=g_pbe)
+pbe_lookback = input.int(100, "Bias Lookback", minval=20, group=g_pbe)
+pbe_threshold = input.float(0.65, "Bias Threshold", minval=0.5, maxval=1.0, step=0.05, group=g_pbe)
+pbe_momentum_weight = input.float(0.4, "Momentum Weight", minval=0.0, maxval=1.0, step=0.1, group=g_pbe)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// SMS - STRUCTURE MAPPING SYSTEM SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_spm = input.bool(true, "Enable SMS", group=g_spm)
+spm_pivot_left = input.int(10, "Pivot Left Bars", minval=1, group=g_spm)
+spm_pivot_right = input.int(10, "Pivot Right Bars", minval=1, group=g_spm)
+spm_structure_lookback = input.int(50, "Structure Lookback", minval=10, group=g_spm)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// VCL - VOLATILITY CLASSIFICATION SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_vrc = input.bool(true, "Enable VCL", group=g_vrc)
+vrc_atr_length = input.int(14, "ATR Length", minval=1, group=g_vrc)
+vrc_regime_lookback = input.int(100, "Regime Lookback", minval=20, group=g_vrc)
+vrc_high_vol_threshold = input.float(70.0, "High Vol Threshold", minval=50, maxval=100, group=g_vrc)
+vrc_low_vol_threshold = input.float(30.0, "Low Vol Threshold", minval=0, maxval=50, group=g_vrc)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// MDM - MOMENTUM DIVERGENCE MODULE SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_dcs = input.bool(true, "Enable MDM", group=g_dcs)
+dcs_rsi_length = input.int(14, "RSI Length", minval=2, group=g_dcs)
+dcs_pivot_lookback = input.int(5, "Pivot Lookback", minval=2, group=g_dcs)
+dcs_min_divergences = input.int(2, "Min Divergences", minval=1, maxval=4, group=g_dcs)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// SRZ - STATISTICAL REVERSION ZONES SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_mrz = input.bool(true, "Enable SRZ", group=g_mrz)
+mrz_bb_length = input.int(20, "Bollinger Length", minval=5, group=g_mrz)
+mrz_bb_mult = input.float(2.0, "Bollinger Multiplier", minval=0.5, step=0.1, group=g_mrz)
+mrz_rsi_length = input.int(14, "RSI Length", minval=2, group=g_mrz)
+mrz_rsi_ob = input.int(70, "RSI Overbought", minval=50, maxval=100, group=g_mrz)
+mrz_rsi_os = input.int(30, "RSI Oversold", minval=0, maxval=50, group=g_mrz)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// OFA - ORDER FLOW ANALYSIS SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_ifs = input.bool(true, "Enable OFA", group=g_ifs)
+ifs_toxicity_lookback = input.int(20, "Toxicity Lookback", minval=10, maxval=50, group=g_ifs)
+ifs_toxicity_threshold = input.float(0.7, "Toxicity Threshold", minval=0.5, maxval=0.9, step=0.05, group=g_ifs)
+ifs_absorption_coef = input.float(0.75, "Min Absorption Coefficient", minval=0.5, maxval=1.0, step=0.05, group=g_ifs)
+ifs_min_confidence = input.int(75, "Minimum Confidence %", minval=60, maxval=95, step=5, group=g_ifs)
+ifs_show_ribbon = input.bool(true, "Show OFA Gradient Ribbon", group=g_ifs)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// ANCHOR DEVIATION BANDS SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_vwap_tension = input.bool(true, "Enable Anchor Deviation", group=g_vwap)
+vwap_calc_mode = input.string("Price Volatility (BB-Style)", "VWAP Dev Mode", 
+     options=["Price Volatility (BB-Style)", "Spread / StDev (Classic)", "Z-Score (Canonical)"], group=g_vwap)
+vwap_thr_2m = input.float(9.0, "2m VWAP Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_thr_5m = input.float(9.0, "5m VWAP Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_thr_15m = input.float(4.0, "15m VWAP Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_gap_thr_2m = input.float(9.0, "2m Osc σ-Gap Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_gap_thr_5m = input.float(9.0, "5m Osc σ-Gap Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_gap_thr_15m = input.float(4.5, "15m Osc σ-Gap Threshold", minval=0.0, step=0.5, group=g_vwap)
+vwap_show_ribbon = input.bool(true, "Show Anchor Deviation Gradient Ribbon", group=g_vwap)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// DEVIATION REVERSION SYSTEM SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_mean_rev_strat = input.bool(true, "Enable Deviation Reversion System", group=g_mean_rev)
+mr_ma_type = input.string("WMA", "MA Type", options=["WMA","SMA","RMA","EMA","HMA"], group=g_mean_rev)
+mr_ma_length = input.int(20, "MA Period", minval=2, group=g_mean_rev)
+mr_deviation1 = input.float(1.3, "Deviation 1 (%)", minval=0.01, maxval=100, step=0.1, group=g_mean_rev) / 100
+mr_deviation2 = input.float(7.5, "Deviation 2 (%)", minval=0.01, maxval=100, step=0.1, group=g_mean_rev) / 100
+mr_deviation3 = input.float(13.3, "Deviation 3 (%)", minval=0.01, maxval=100, step=0.1, group=g_mean_rev) / 100
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// TREND MOMENTUM SIGNALS SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_zero_lag = input.bool(true, "Enable Trend Momentum Signals", group=g_zero_lag)
+zl_length = input.int(50, "Zero Lag Length", minval=1, group=g_zero_lag)
+zl_volatility_mult = input.float(1.5, "Volatility Multiplier", minval=0.1, group=g_zero_lag)
+zl_loop_start = input.int(1, "Loop Start", minval=1, group=g_zero_lag)
+zl_loop_end = input.int(70, "Loop End", minval=1, group=g_zero_lag)
+zl_threshold_up = input.int(5, "Threshold Uptrend", group=g_zero_lag)
+zl_threshold_down = input.int(-5, "Threshold Downtrend", group=g_zero_lag)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// RISK MANAGEMENT SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+use_stop_loss = input.bool(true, "Enable Stop Loss", group=g_risk)
+stop_loss_pct = input.float(2.0, "Stop Loss %", minval=0.1, step=0.1, group=g_risk)
+use_take_profit = input.bool(true, "Enable Take Profit", group=g_risk)
+take_profit_pct = input.float(4.0, "Take Profit %", minval=0.1, step=0.1, group=g_risk)
+use_trailing = input.bool(true, "Enable Trailing Stop", group=g_risk)
+trailing_pct = input.float(1.5, "Trailing Stop %", minval=0.1, step=0.1, group=g_risk)
+risk_per_trade = input.float(2.0, "Risk Per Trade %", minval=0.1, maxval=10, step=0.1, group=g_risk)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+show_signals = input.bool(true, "Show Entry/Exit Signals", group=g_visual)
+show_dashboard = input.bool(true, "Show Dashboard", group=g_visual)
+show_all_ribbons = input.bool(true, "Show All Gradient Ribbons", group=g_visual)
+ribbon_brightness = input.int(0, "Ribbon Brightness Adjust", minval=-30, maxval=30, group=g_visual)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// COLOR SYSTEM - INSTITUTIONAL GRADE PALETTE
+// ─────────────────────────────────────────────────────────────────────────────────
+
+color c_lad_buy = #00ffff              // LAD - Electric cyan
+color c_lad_sell = #ff00ff             // LAD - Electric magenta
+color c_pbe_bull = #00ff00             // PBE - Lime green
+color c_pbe_bear = #ff0000             // PBE - Red
+color c_spm_support = #4169e1          // SPM - Royal blue
+color c_spm_resistance = #dc143c       // SPM - Crimson
+color c_vrc_high = #ff6600             // VRC - Orange
+color c_vrc_low = #00ccff              // VRC - Sky blue
+color c_dcs_bull = #32cd32             // DCS - Lime green
+color c_dcs_bear = #ff1493             // DCS - Deep pink
+color c_mrz_buy = #1e90ff              // MRZ - Dodger blue
+color c_mrz_sell = #ff4500             // MRZ - Orange red
+color c_ifs_inst_buy = #ffd700         // IFS - Gold
+color c_ifs_inst_sell = #4b0082        // IFS - Indigo
+color c_ifs_toxic_buy = #00ff41        // IFS - Matrix green
+color c_ifs_toxic_sell = #ff0066       // IFS - Hot pink
+color c_vwap_teal = #4ecdc4            // VWAP - Teal
+color c_vwap_purple = #dd578d          // VWAP - Purple
+color c_zl_bull = #00ffaa              // Zero Lag - Bright green
+color c_zl_bear = #ff0000              // Zero Lag - Red
+color c_text = #ffffff                 // Dashboard text
+color c_bg = #0a0a0f                   // Dashboard background
+color c_border = #ffd700               // Dashboard border
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// CORE FUNCTIONS - SHARED UTILITIES
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// VWAP Deviation Calculation (used by LAD and VWAP Tension)
+f_calculate_vwap_deviation(float price, float vwap_val, string method) =>
+    float result = 0.0
+    float denominator = 0.0
+    
+    // Pre-calculate stdev values to avoid scope issues
+    float price_stdev = ta.stdev(price, 20)
+    float gap_val = price - vwap_val
+    float gap_stdev = ta.stdev(gap_val, 20)
+    
+    if method == "Price Volatility" or method == "Price Volatility (BB-Style)"
+        denominator := price_stdev * 1.5
+        result := denominator > 0 ? (price - vwap_val) / denominator : 0.0
+    else if method == "Z-Score" or method == "Z-Score (Canonical)"
+        denominator := price_stdev
+        result := denominator > 0 ? (price - vwap_val) / denominator : 0.0
+    else
+        denominator := gap_stdev
+        result := denominator > 0 ? gap_val / denominator : 0.0
+    
+    result
+
+// Z-Score Calculation
+f_calculate_zscore(float source, int period) =>
+    mean = ta.sma(source, period)
+    stdev = ta.stdev(source, period)
+    stdev > 0 ? (source - mean) / stdev : 0.0
+
+// Volume Surge Detection
+f_volume_surge_detected(int lookback, float multiplier) =>
+    float avg_vol = ta.sma(volume, lookback)
+    bool surge = volume > avg_vol * multiplier
+    surge
+
+// Relative Volume
+f_calculate_rvol(int period) =>
+    float v_avg = ta.sma(volume, period)
+    float rvol = v_avg > 0 ? volume / v_avg : 0.0
+    rvol
+
+// Session Detection
+f_is_new_session() =>
+    bool is_new = ta.change(time("D")) != 0
+    is_new
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// FAM - FLOW ABSORPTION MODULE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Current VWAP (ta.vwma is the correct function, not ta.vma)
+float lad_vwap = lad_vwap_mode == "Session Anchored" ? ta.vwap(hlc3) : ta.vwma(hlc3, 20)
+
+// Multi-timeframe deviation analysis
+f_lad_get_tf_data(string tf, float threshold) =>
+    // Request data from the specified timeframe
+    [vwap_val, dev_val, vol_surge, rvol_val] = request.security(syminfo.tickerid, tf, 
+         [ta.vwap(hlc3), 
+          f_calculate_vwap_deviation(close, ta.vwap(hlc3), lad_deviation_method),
+          f_volume_surge_detected(lad_vol_lookback, lad_vol_multiplier),
+          f_calculate_rvol(20)], 
+         lookahead=barmerge.lookahead_off)
+    
+    bool absorption_detected = math.abs(dev_val) >= threshold and vol_surge
+    bool rvol_pass = rvol_val >= lad_rvol_threshold
+    
+    [dev_val, absorption_detected and rvol_pass, vwap_val]
+
+// Get LAD data from all timeframes
+var float lad_dev_2m = 0.0
+var bool lad_signal_2m = false
+var float lad_vwap_2m = na
+var float lad_dev_5m = 0.0
+var bool lad_signal_5m = false
+var float lad_vwap_5m = na
+var float lad_dev_15m = 0.0
+var bool lad_signal_15m = false
+var float lad_vwap_15m = na
+
+if use_lad
+    [d2, s2, v2] = f_lad_get_tf_data("2", lad_threshold_2m)
+    lad_dev_2m := d2
+    lad_signal_2m := s2
+    lad_vwap_2m := v2
+    
+    [d5, s5, v5] = f_lad_get_tf_data("5", lad_threshold_5m)
+    lad_dev_5m := d5
+    lad_signal_5m := s5
+    lad_vwap_5m := v5
+    
+    [d15, s15, v15] = f_lad_get_tf_data("15", lad_threshold_15m)
+    lad_dev_15m := d15
+    lad_signal_15m := s15
+    lad_vwap_15m := v15
+
+// LAD Signal Aggregation
+int lad_buy_signals = (lad_signal_2m and lad_dev_2m < 0 ? 1 : 0) + (lad_signal_5m and lad_dev_5m < 0 ? 1 : 0) + (lad_signal_15m and lad_dev_15m < 0 ? 1 : 0)
+int lad_sell_signals = (lad_signal_2m and lad_dev_2m > 0 ? 1 : 0) + (lad_signal_5m and lad_dev_5m > 0 ? 1 : 0) + (lad_signal_15m and lad_dev_15m > 0 ? 1 : 0)
+
+bool lad_absorption_buy = use_lad and lad_buy_signals >= 2
+bool lad_absorption_sell = use_lad and lad_sell_signals >= 2
+
+// LAD Gradient Ribbon (9-layer)
+float lad_wave_ratio = use_lad and lad_show_ribbon ? math.min(0.65, math.abs(lad_dev_5m) / lad_threshold_5m) : 0.0
+float lad_wave_level = lad_vwap + ((close - lad_vwap) * lad_wave_ratio)
+float lad_dist = lad_wave_level - lad_vwap
+float lad_step = lad_dist / 9.0
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// DBE - DIRECTIONAL BIAS ENGINE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Directional bias calculation
+f_pbe_calculate_bias(int lookback, float momentum_weight) =>
+    int bullish_bars = 0
+    int bearish_bars = 0
+    float momentum_sum = 0.0
+    
+    for i = 0 to lookback - 1
+        if close[i] > open[i]
+            bullish_bars += 1
+        else if close[i] < open[i]
+            bearish_bars += 1
+        
+        momentum_sum += (close[i] - close[i+1]) / close[i+1]
+    
+    float directional_bias = (bullish_bars - bearish_bars) / lookback
+    float momentum_bias = momentum_sum / lookback
+    float combined_bias = (directional_bias * (1 - momentum_weight)) + (momentum_bias * momentum_weight)
+    
+    [combined_bias, directional_bias, momentum_bias]
+
+var float pbe_bias = 0.0
+var float pbe_dir_bias = 0.0
+var float pbe_mom_bias = 0.0
+
+if use_pbe
+    [pb, pdb, pmb] = f_pbe_calculate_bias(pbe_lookback, pbe_momentum_weight)
+    pbe_bias := pb
+    pbe_dir_bias := pdb
+    pbe_mom_bias := pmb
+
+bool pbe_bullish = use_pbe and pbe_bias > pbe_threshold
+bool pbe_bearish = use_pbe and pbe_bias < -pbe_threshold
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// SMS - STRUCTURE MAPPING SYSTEM CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Pivot detection
+float spm_pivot_high = use_spm ? ta.pivothigh(high, spm_pivot_left, spm_pivot_right) : na
+float spm_pivot_low = use_spm ? ta.pivotlow(low, spm_pivot_left, spm_pivot_right) : na
+
+// Track recent pivots
+var array<float> spm_resistance_levels = array.new_float(0)
+var array<float> spm_support_levels = array.new_float(0)
+
+if use_spm and not na(spm_pivot_high)
+    array.unshift(spm_resistance_levels, spm_pivot_high)
+    if array.size(spm_resistance_levels) > 10
+        array.pop(spm_resistance_levels)
+
+if use_spm and not na(spm_pivot_low)
+    array.unshift(spm_support_levels, spm_pivot_low)
+    if array.size(spm_support_levels) > 10
+        array.pop(spm_support_levels)
+
+// Check if price is near support/resistance
+bool spm_near_support = false
+bool spm_near_resistance = false
+
+if use_spm and array.size(spm_support_levels) > 0
+    for i = 0 to math.min(array.size(spm_support_levels) - 1, 4)
+        float support = array.get(spm_support_levels, i)
+        if math.abs(close - support) / close < 0.01
+            spm_near_support := true
+            break
+
+if use_spm and array.size(spm_resistance_levels) > 0
+    for i = 0 to math.min(array.size(spm_resistance_levels) - 1, 4)
+        float resistance = array.get(spm_resistance_levels, i)
+        if math.abs(close - resistance) / close < 0.01
+            spm_near_resistance := true
+            break
+// ─────────────────────────────────────────────────────────────────────────────────
+// VCL - VOLATILITY CLASSIFICATION CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// ATR-based volatility classification
+float vrc_atr = use_vrc ? ta.atr(vrc_atr_length) : 0.0
+float vrc_natr = use_vrc and close > 0 ? (vrc_atr / close) * 100 : 0.0
+float vrc_percentile = use_vrc ? ta.percentrank(vrc_natr, vrc_regime_lookback) : 50.0
+
+bool vrc_high_vol = use_vrc and vrc_percentile >= vrc_high_vol_threshold
+bool vrc_low_vol = use_vrc and vrc_percentile <= vrc_low_vol_threshold
+bool vrc_normal_vol = use_vrc and not vrc_high_vol and not vrc_low_vol
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// MDM - MOMENTUM DIVERGENCE MODULE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// RSI calculation
+float dcs_rsi = use_dcs ? ta.rsi(close, dcs_rsi_length) : 50.0
+
+// Pivot detection for divergences
+float dcs_price_high = use_dcs ? ta.pivothigh(high, dcs_pivot_lookback, dcs_pivot_lookback) : na
+float dcs_price_low = use_dcs ? ta.pivotlow(low, dcs_pivot_lookback, dcs_pivot_lookback) : na
+float dcs_rsi_high = use_dcs ? ta.pivothigh(dcs_rsi, dcs_pivot_lookback, dcs_pivot_lookback) : na
+float dcs_rsi_low = use_dcs ? ta.pivotlow(dcs_rsi, dcs_pivot_lookback, dcs_pivot_lookback) : na
+
+// Track divergences
+var int dcs_bull_div_count = 0
+var int dcs_bear_div_count = 0
+
+if use_dcs and not na(dcs_price_low) and not na(dcs_rsi_low)
+    if dcs_price_low < dcs_price_low[dcs_pivot_lookback] and dcs_rsi_low > dcs_rsi_low[dcs_pivot_lookback]
+        dcs_bull_div_count += 1
+
+if use_dcs and not na(dcs_price_high) and not na(dcs_rsi_high)
+    if dcs_price_high > dcs_price_high[dcs_pivot_lookback] and dcs_rsi_high < dcs_rsi_high[dcs_pivot_lookback]
+        dcs_bear_div_count += 1
+
+// Reset divergence counts periodically
+if bar_index % 50 == 0
+    dcs_bull_div_count := 0
+    dcs_bear_div_count := 0
+
+bool dcs_bullish_divergence = use_dcs and dcs_bull_div_count >= dcs_min_divergences
+bool dcs_bearish_divergence = use_dcs and dcs_bear_div_count >= dcs_min_divergences
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// SRZ - STATISTICAL REVERSION ZONES CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Bollinger Bands
+float mrz_basis = use_mrz ? ta.sma(close, mrz_bb_length) : close
+float mrz_dev = use_mrz ? ta.stdev(close, mrz_bb_length) : 0.0
+float mrz_upper = mrz_basis + (mrz_bb_mult * mrz_dev)
+float mrz_lower = mrz_basis - (mrz_bb_mult * mrz_dev)
+
+// RSI for mean reversion
+float mrz_rsi = use_mrz ? ta.rsi(close, mrz_rsi_length) : 50.0
+
+// Mean reversion signals
+bool mrz_oversold = use_mrz and close < mrz_lower and mrz_rsi < mrz_rsi_os
+bool mrz_overbought = use_mrz and close > mrz_upper and mrz_rsi > mrz_rsi_ob
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// OFA - ORDER FLOW ANALYSIS CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Order Flow Toxicity Index
+f_ifs_toxicity_index(int lookback) =>
+    float aggressive_buy = 0.0
+    float aggressive_sell = 0.0
+    float passive_flow = 0.0
+    
+    for i = 0 to lookback - 1
+        float candle_pos = (high[i] - low[i]) > 0 ? (close[i] - low[i]) / (high[i] - low[i]) : 0.5
+        float vol_weight = volume[i]
+        
+        if close[i] > open[i] and candle_pos > 0.75
+            aggressive_buy += vol_weight
+        else if close[i] < open[i] and candle_pos < 0.25
+            aggressive_sell += vol_weight
+        else
+            passive_flow += vol_weight
+    
+    float total_flow = aggressive_buy + aggressive_sell + passive_flow
+    float toxicity_buy = total_flow > 0 ? aggressive_buy / total_flow : 0.0
+    float toxicity_sell = total_flow > 0 ? aggressive_sell / total_flow : 0.0
+    
+    [toxicity_buy, toxicity_sell]
+
+var float ifs_tox_buy = 0.0
+var float ifs_tox_sell = 0.0
+
+if use_ifs
+    [tb, ts] = f_ifs_toxicity_index(ifs_toxicity_lookback)
+    ifs_tox_buy := tb
+    ifs_tox_sell := ts
+
+bool ifs_toxic_buy_flow = use_ifs and ifs_tox_buy > ifs_toxicity_threshold
+bool ifs_toxic_sell_flow = use_ifs and ifs_tox_sell > ifs_toxicity_threshold
+
+// Absorption Coefficient
+f_ifs_absorption_coefficient() =>
+    float body = math.abs(close - open)
+    float total_range = high - low
+    float body_ratio = total_range > 0 ? body / total_range : 0.0
+    
+    float vol_avg = ta.sma(volume, 20)
+    float vol_ratio = vol_avg > 0 ? volume / vol_avg : 1.0
+    
+    float absorption = vol_ratio * (1.0 - body_ratio)
+    float dir_absorption = close > open ? absorption : -absorption
+    
+    [absorption, dir_absorption]
+
+var float ifs_absorption = 0.0
+var float ifs_dir_absorption = 0.0
+
+if use_ifs
+    [abs_val, dir_abs_val] = f_ifs_absorption_coefficient()
+    ifs_absorption := abs_val
+    ifs_dir_absorption := dir_abs_val
+
+bool ifs_strong_absorption = use_ifs and ifs_absorption > ifs_absorption_coef
+bool ifs_inst_buy = use_ifs and ifs_strong_absorption and ifs_dir_absorption > 0
+bool ifs_inst_sell = use_ifs and ifs_strong_absorption and ifs_dir_absorption < 0
+
+// IFS Confidence Score
+float ifs_confidence = 0.0
+if use_ifs
+    ifs_confidence += ifs_strong_absorption ? 40.0 : 0.0
+    ifs_confidence += (ifs_toxic_buy_flow or ifs_toxic_sell_flow) ? 30.0 : 0.0
+    ifs_confidence += (ifs_tox_buy > 0.5 or ifs_tox_sell > 0.5) ? 30.0 : 0.0
+
+bool ifs_high_confidence = use_ifs and ifs_confidence >= ifs_min_confidence
+
+// IFS Gradient Ribbon (9-layer institutional flow)
+float ifs_vwap = use_ifs ? ta.vwap(hlc3) : close
+float ifs_flow_intensity = use_ifs and ifs_show_ribbon ? math.min(ifs_confidence / 100, 1.0) : 0.0
+float ifs_wave_ratio = math.min(0.65, ifs_flow_intensity)
+float ifs_wave_level = ifs_vwap + ((close - ifs_vwap) * ifs_wave_ratio)
+float ifs_dist = ifs_wave_level - ifs_vwap
+float ifs_step = ifs_dist / 9.0
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// ANCHOR DEVIATION BANDS CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Multi-timeframe VWAP deviation analysis
+f_vwap_get_tf_data(string tf, float threshold, float gap_threshold) =>
+    // Pre-calculate ta.highest and ta.lowest to avoid scope issues
+    float high_14 = ta.highest(high, 14)
+    float low_14 = ta.lowest(low, 14)
+    float range_14 = high_14 - low_14
+    float stoch_val = range_14 != 0 ? ((high_14 - close) / range_14) * -100 + 100 : 50
+    
+    // Request data from the specified timeframe
+    [v_dev_result, gap_result, vwap_result] = request.security(syminfo.tickerid, tf,
+         [f_calculate_vwap_deviation(close, ta.vwap(hlc3), vwap_calc_mode),
+          math.abs(f_calculate_vwap_deviation(close, ta.vwap(hlc3), vwap_calc_mode) - 
+                   f_calculate_zscore(stoch_val, 20)),
+          ta.vwap(hlc3)],
+         lookahead=barmerge.lookahead_off)
+    
+    bool vwap_signal = math.abs(v_dev_result) >= threshold
+    bool gap_signal = gap_result >= gap_threshold
+    
+    [v_dev_result, gap_result, vwap_signal, gap_signal, vwap_result]
+
+// Get VWAP Tension data from all timeframes
+var float vwap_dev_2m = 0.0
+var float vwap_gap_2m = 0.0
+var bool vwap_sig_2m = false
+var bool vwap_gap_sig_2m = false
+var float vwap_val_2m = na
+var float vwap_dev_5m = 0.0
+var float vwap_gap_5m = 0.0
+var bool vwap_sig_5m = false
+var bool vwap_gap_sig_5m = false
+var float vwap_val_5m = na
+var float vwap_dev_15m = 0.0
+var float vwap_gap_15m = 0.0
+var bool vwap_sig_15m = false
+var bool vwap_gap_sig_15m = false
+var float vwap_val_15m = na
+
+if use_vwap_tension
+    [d2, g2, s2, gs2, v2] = f_vwap_get_tf_data("2", vwap_thr_2m, vwap_gap_thr_2m)
+    vwap_dev_2m := d2
+    vwap_gap_2m := g2
+    vwap_sig_2m := s2
+    vwap_gap_sig_2m := gs2
+    vwap_val_2m := v2
+    
+    [d5, g5, s5, gs5, v5] = f_vwap_get_tf_data("5", vwap_thr_5m, vwap_gap_thr_5m)
+    vwap_dev_5m := d5
+    vwap_gap_5m := g5
+    vwap_sig_5m := s5
+    vwap_gap_sig_5m := gs5
+    vwap_val_5m := v5
+    
+    [d15, g15, s15, gs15, v15] = f_vwap_get_tf_data("15", vwap_thr_15m, vwap_gap_thr_15m)
+    vwap_dev_15m := d15
+    vwap_gap_15m := g15
+    vwap_sig_15m := s15
+    vwap_gap_sig_15m := gs15
+    vwap_val_15m := v15
+
+// VWAP Tension signal aggregation
+int vwap_buy_count = (vwap_sig_2m and vwap_dev_2m < 0 ? 1 : 0) + (vwap_sig_5m and vwap_dev_5m < 0 ? 1 : 0) + (vwap_sig_15m and vwap_dev_15m < 0 ? 1 : 0)
+int vwap_sell_count = (vwap_sig_2m and vwap_dev_2m > 0 ? 1 : 0) + (vwap_sig_5m and vwap_dev_5m > 0 ? 1 : 0) + (vwap_sig_15m and vwap_dev_15m > 0 ? 1 : 0)
+int vwap_gap_count = (vwap_gap_sig_2m ? 1 : 0) + (vwap_gap_sig_5m ? 1 : 0) + (vwap_gap_sig_15m ? 1 : 0)
+
+bool vwap_tension_buy = use_vwap_tension and vwap_buy_count >= 2 and vwap_gap_count >= 2
+bool vwap_tension_sell = use_vwap_tension and vwap_sell_count >= 2 and vwap_gap_count >= 2
+
+// VWAP 9-Layer Gradient Ribbon
+float vwap_local = use_vwap_tension ? ta.vwap(hlc3) : close
+float vwap_consensus_ratio = use_vwap_tension and vwap_show_ribbon ? 
+     math.min(0.65, math.max(math.abs(vwap_dev_2m) / vwap_thr_2m, 
+                             math.abs(vwap_dev_5m) / vwap_thr_5m, 
+                             math.abs(vwap_dev_15m) / vwap_thr_15m)) : 0.0
+float vwap_wave_level = vwap_local + ((close - vwap_local) * vwap_consensus_ratio)
+float vwap_dist = vwap_wave_level - vwap_local
+float vwap_step = vwap_dist / 9.0
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// MEAN REVERSION STRATEGY CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Moving Average
+float mr_ma = switch mr_ma_type
+    "EMA" => ta.ema(close, mr_ma_length)
+    "SMA" => ta.sma(close, mr_ma_length)
+    "RMA" => ta.rma(close, mr_ma_length)
+    "WMA" => ta.wma(close, mr_ma_length)
+    "HMA" => ta.hma(close, mr_ma_length)
+    => close
+
+// Mean reversion levels
+float mr_level1_long = mr_ma * (1 - mr_deviation1)
+float mr_level2_long = mr_ma * (1 - mr_deviation2)
+float mr_level3_long = mr_ma * (1 - mr_deviation3)
+
+float mr_level1_short = mr_ma * (1 + mr_deviation1)
+float mr_level2_short = mr_ma * (1 + mr_deviation2)
+float mr_level3_short = mr_ma * (1 + mr_deviation3)
+
+// Mean reversion signals
+bool mr_buy_signal = use_mean_rev_strat and close < mr_level1_long
+bool mr_sell_signal = use_mean_rev_strat and close > mr_level1_short
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// TREND MOMENTUM SIGNALS CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Zero Lag EMA
+int zl_lag = math.floor((zl_length - 1) / 2)
+float zl_basis = use_zero_lag ? ta.ema(close + (close - close[zl_lag]), zl_length) : close
+float zl_volatility = use_zero_lag ? ta.highest(ta.atr(zl_length), zl_length*3) * zl_volatility_mult : 0.0
+
+// For loop analysis
+f_zl_forloop_analysis(float basis_price) =>
+    float sum = 0.0
+    for i = zl_loop_start to zl_loop_end by 1
+        sum += (basis_price > basis_price[i] ? 1 : -1)
+    sum
+
+float zl_score = use_zero_lag ? f_zl_forloop_analysis(zl_basis) : 0.0
+
+// Zero Lag signals
+bool zl_long_signal = use_zero_lag and zl_score > zl_threshold_up and close > zl_basis + zl_volatility
+bool zl_short_signal = use_zero_lag and zl_score < zl_threshold_down and close < zl_basis - zl_volatility
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// SIGNAL AGGREGATION & CONFLUENCE SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Count bullish signals from all indicators
+int bull_signals = 0
+bull_signals += lad_absorption_buy ? 1 : 0
+bull_signals += pbe_bullish ? 1 : 0
+bull_signals += spm_near_support ? 1 : 0
+bull_signals += dcs_bullish_divergence ? 1 : 0
+bull_signals += mrz_oversold ? 1 : 0
+bull_signals += (ifs_inst_buy and ifs_high_confidence) ? 1 : 0
+bull_signals += vwap_tension_buy ? 1 : 0
+bull_signals += mr_buy_signal ? 1 : 0
+bull_signals += zl_long_signal ? 1 : 0
+
+// Count bearish signals from all indicators
+int bear_signals = 0
+bear_signals += lad_absorption_sell ? 1 : 0
+bear_signals += pbe_bearish ? 1 : 0
+bear_signals += spm_near_resistance ? 1 : 0
+bear_signals += dcs_bearish_divergence ? 1 : 0
+bear_signals += mrz_overbought ? 1 : 0
+bear_signals += (ifs_inst_sell and ifs_high_confidence) ? 1 : 0
+bear_signals += vwap_tension_sell ? 1 : 0
+bear_signals += mr_sell_signal ? 1 : 0
+bear_signals += zl_short_signal ? 1 : 0
+
+// Confluence-based entry signals
+bool entry_long = enable_long and (use_confluence ? bull_signals >= min_confluence : bull_signals > 0)
+bool entry_short = enable_short and (use_confluence ? bear_signals >= min_confluence : bear_signals > 0)
+
+// Prevent simultaneous long/short signals
+if entry_long and entry_short
+    if bull_signals > bear_signals
+        entry_short := false
+    else if bear_signals > bull_signals
+        entry_long := false
+    else
+        entry_long := false
+        entry_short := false
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// POSITION SIZING & RISK MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Calculate position size based on risk
+float account_size = strategy.equity
+float risk_amount = account_size * (risk_per_trade / 100)
+float atr_value = ta.atr(14)
+float stop_distance = atr_value * (stop_loss_pct / 100)
+float position_size = stop_distance > 0 ? risk_amount / stop_distance : 0
+
+// Stop loss and take profit levels
+float long_stop = close * (1 - stop_loss_pct / 100)
+float long_target = close * (1 + take_profit_pct / 100)
+float short_stop = close * (1 + stop_loss_pct / 100)
+float short_target = close * (1 - take_profit_pct / 100)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// STRATEGY EXECUTION
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Entry conditions
+if entry_long and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, comment="LONG (" + str.tostring(bull_signals) + " signals)")
+    
+    if use_stop_loss
+        strategy.exit("LONG EXIT", "LONG", 
+                     stop=long_stop, 
+                     limit=use_take_profit ? long_target : na,
+                     trail_price=use_trailing ? long_target : na,
+                     trail_offset=use_trailing ? close * (trailing_pct / 100) : na)
+
+if entry_short and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short, comment="SHORT (" + str.tostring(bear_signals) + " signals)")
+    
+    if use_stop_loss
+        strategy.exit("SHORT EXIT", "SHORT", 
+                     stop=short_stop, 
+                     limit=use_take_profit ? short_target : na,
+                     trail_price=use_trailing ? short_target : na,
+                     trail_offset=use_trailing ? close * (trailing_pct / 100) : na)
+
+// Exit conditions - close position if opposite signal
+if strategy.position_size > 0 and entry_short
+    strategy.close("LONG", comment="Exit LONG (Reversal)")
+
+if strategy.position_size < 0 and entry_long
+    strategy.close("SHORT", comment="Exit SHORT (Reversal)")
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION - GRADIENT RIBBONS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// FAM Gradient Ribbon (5-layer optimized) - Global scope plots
+float lad_l1 = lad_vwap + lad_step * 2
+float lad_l2 = lad_vwap + lad_step * 4
+float lad_l3 = lad_vwap + lad_step * 6
+float lad_l4 = lad_vwap + lad_step * 8
+
+color lad_ribbon_color = lad_dev_5m < 0 ? c_lad_buy : c_lad_sell
+float lad_t_base = 60.0 + ribbon_brightness
+float lad_t_step = (100.0 - lad_t_base) / 5.0
+bool lad_up = lad_wave_level >= lad_vwap
+
+bool lad_show = show_all_ribbons and lad_show_ribbon and use_lad
+
+p_lad_vwap = plot(lad_show ? lad_vwap : na, "FAM VWAP", color=color.new(lad_ribbon_color, 50), linewidth=2)
+p_lad_1 = plot(lad_show ? lad_l1 : na, display=display.none)
+p_lad_2 = plot(lad_show ? lad_l2 : na, display=display.none)
+p_lad_3 = plot(lad_show ? lad_l3 : na, display=display.none)
+p_lad_4 = plot(lad_show ? lad_l4 : na, display=display.none)
+p_lad_wave = plot(lad_show ? lad_wave_level : na, display=display.none)
+
+fill(p_lad_vwap, p_lad_1, lad_show ? color.new(lad_ribbon_color, lad_up ? lad_t_base : lad_t_base + lad_t_step) : na)
+fill(p_lad_1, p_lad_2, lad_show ? color.new(lad_ribbon_color, lad_up ? lad_t_base + lad_t_step : lad_t_base + lad_t_step * 2) : na)
+fill(p_lad_2, p_lad_3, lad_show ? color.new(lad_ribbon_color, lad_up ? lad_t_base + lad_t_step * 2 : lad_t_base + lad_t_step * 3) : na)
+fill(p_lad_3, p_lad_4, lad_show ? color.new(lad_ribbon_color, lad_up ? lad_t_base + lad_t_step * 3 : lad_t_base + lad_t_step * 4) : na)
+fill(p_lad_4, p_lad_wave, lad_show ? color.new(lad_ribbon_color, lad_up ? lad_t_base + lad_t_step * 4 : 100) : na)
+
+// OFA Gradient Ribbon (5-layer optimized) - Global scope plots
+float ifs_l1 = ifs_vwap + ifs_step * 2
+float ifs_l2 = ifs_vwap + ifs_step * 4
+float ifs_l3 = ifs_vwap + ifs_step * 6
+float ifs_l4 = ifs_vwap + ifs_step * 8
+
+color ifs_ribbon_color = ifs_inst_buy ? c_ifs_inst_buy : ifs_inst_sell ? c_ifs_inst_sell : 
+                         ifs_toxic_buy_flow ? c_ifs_toxic_buy : ifs_toxic_sell_flow ? c_ifs_toxic_sell : color.gray
+float ifs_t_base = 90.0
+float ifs_t_step = (100.0 - ifs_t_base) / 5.0
+bool ifs_up = ifs_wave_level >= ifs_vwap
+
+bool ifs_show = show_all_ribbons and ifs_show_ribbon and use_ifs
+
+p_ifs_vwap = plot(ifs_show ? ifs_vwap : na, "OFA VWAP", color=color.new(ifs_ribbon_color, 0), linewidth=3)
+p_ifs_1 = plot(ifs_show ? ifs_l1 : na, display=display.none)
+p_ifs_2 = plot(ifs_show ? ifs_l2 : na, display=display.none)
+p_ifs_3 = plot(ifs_show ? ifs_l3 : na, display=display.none)
+p_ifs_4 = plot(ifs_show ? ifs_l4 : na, display=display.none)
+p_ifs_wave = plot(ifs_show ? ifs_wave_level : na, display=display.none)
+
+fill(p_ifs_vwap, p_ifs_1, ifs_show ? color.new(ifs_ribbon_color, ifs_up ? ifs_t_base : ifs_t_base + ifs_t_step) : na)
+fill(p_ifs_1, p_ifs_2, ifs_show ? color.new(ifs_ribbon_color, ifs_up ? ifs_t_base + ifs_t_step : ifs_t_base + ifs_t_step * 2) : na)
+fill(p_ifs_2, p_ifs_3, ifs_show ? color.new(ifs_ribbon_color, ifs_up ? ifs_t_base + ifs_t_step * 2 : ifs_t_base + ifs_t_step * 3) : na)
+fill(p_ifs_3, p_ifs_4, ifs_show ? color.new(ifs_ribbon_color, ifs_up ? ifs_t_base + ifs_t_step * 3 : ifs_t_base + ifs_t_step * 4) : na)
+fill(p_ifs_4, p_ifs_wave, ifs_show ? color.new(ifs_ribbon_color, ifs_up ? ifs_t_base + ifs_t_step * 4 : 100) : na)
+
+// Anchor Deviation 5-Layer Gradient Ribbon - Global scope plots
+float vwap_l1 = vwap_local + vwap_step * 2
+float vwap_l2 = vwap_local + vwap_step * 4
+float vwap_l3 = vwap_local + vwap_step * 6
+float vwap_l4 = vwap_local + vwap_step * 8
+
+bool vwap_is_pos = (vwap_dev_2m + vwap_dev_5m + vwap_dev_15m) > 0
+color vwap_ribbon_color = vwap_is_pos ? c_vwap_purple : c_vwap_teal
+float vwap_t_base = 60.0 + ribbon_brightness
+float vwap_t_step = (100.0 - vwap_t_base) / 5.0
+bool vwap_up = vwap_wave_level >= vwap_local
+
+bool vwap_show = show_all_ribbons and vwap_show_ribbon and use_vwap_tension
+
+p_vwap_local = plot(vwap_show ? vwap_local : na, "Anchor Deviation", color=color.new(vwap_ribbon_color, 50), linewidth=2)
+p_vwap_1 = plot(vwap_show ? vwap_l1 : na, display=display.none)
+p_vwap_2 = plot(vwap_show ? vwap_l2 : na, display=display.none)
+p_vwap_3 = plot(vwap_show ? vwap_l3 : na, display=display.none)
+p_vwap_4 = plot(vwap_show ? vwap_l4 : na, display=display.none)
+p_vwap_wave = plot(vwap_show ? vwap_wave_level : na, display=display.none)
+
+fill(p_vwap_local, p_vwap_1, vwap_show ? color.new(vwap_ribbon_color, vwap_up ? vwap_t_base : vwap_t_base + vwap_t_step) : na)
+fill(p_vwap_1, p_vwap_2, vwap_show ? color.new(vwap_ribbon_color, vwap_up ? vwap_t_base + vwap_t_step : vwap_t_base + vwap_t_step * 2) : na)
+fill(p_vwap_2, p_vwap_3, vwap_show ? color.new(vwap_ribbon_color, vwap_up ? vwap_t_base + vwap_t_step * 2 : vwap_t_base + vwap_t_step * 3) : na)
+fill(p_vwap_3, p_vwap_4, vwap_show ? color.new(vwap_ribbon_color, vwap_up ? vwap_t_base + vwap_t_step * 3 : vwap_t_base + vwap_t_step * 4) : na)
+fill(p_vwap_4, p_vwap_wave, vwap_show ? color.new(vwap_ribbon_color, vwap_up ? vwap_t_base + vwap_t_step * 4 : 100) : na)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION - ENTRY/EXIT SIGNALS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Entry signals (plotshape must be in global scope, text must be const string)
+plotshape(show_signals and entry_long and strategy.position_size == 0, "LONG Signal", 
+         shape.triangleup, location.belowbar, c_pbe_bull, size=size.normal, 
+         text="LONG")
+
+plotshape(show_signals and entry_short and strategy.position_size == 0, "SHORT Signal", 
+         shape.triangledown, location.abovebar, c_pbe_bear, size=size.normal, 
+         text="SHORT")
+
+// Position markers
+plotshape(show_signals and strategy.position_size > 0, "In LONG", shape.circle, 
+         location.belowbar, color.new(c_pbe_bull, 70), size=size.tiny)
+
+plotshape(show_signals and strategy.position_size < 0, "In SHORT", shape.circle, 
+         location.abovebar, color.new(c_pbe_bear, 70), size=size.tiny)
+
+// Plot stop loss and take profit levels
+plot(strategy.position_size > 0 and use_stop_loss ? long_stop : na, 
+     "Long Stop", color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and use_take_profit ? long_target : na, 
+     "Long Target", color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and use_stop_loss ? short_stop : na, 
+     "Short Stop", color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 and use_take_profit ? short_target : na, 
+     "Short Target", color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+
+// Plot average entry price
+plot(strategy.position_avg_price, "Avg Entry", color.new(color.white, 0), 
+     linewidth=2, style=plot.style_linebr)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// DASHBOARD - COMPREHENSIVE METRICS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+if show_dashboard
+    var table dashboard = table.new(position.top_right, 3, 20, 
+                                     bgcolor=color.new(c_bg, 5), 
+                                     border_width=2, 
+                                     border_color=color.new(c_border, 30))
+    
+    if barstate.islast
+        // Header
+        table.cell(dashboard, 0, 0, "APEX V2 ENHANCED", 
+                  text_color=c_border, text_size=size.large, bgcolor=color.new(c_bg, 0))
+        table.merge_cells(dashboard, 0, 0, 2, 0)
+        
+        // Strategy Status
+        table.cell(dashboard, 0, 1, "Status", text_color=c_text, text_size=size.small)
+        string status_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+        color status_color = strategy.position_size > 0 ? c_pbe_bull : strategy.position_size < 0 ? c_pbe_bear : color.gray
+        table.cell(dashboard, 1, 1, status_text, text_color=status_color, text_size=size.small)
+        table.cell(dashboard, 2, 1, str.tostring(strategy.position_size, "#.####"), 
+                  text_color=c_text, text_size=size.small)
+        
+        // P&L
+        table.cell(dashboard, 0, 2, "P&L", text_color=c_text, text_size=size.small)
+        float pnl = strategy.openprofit
+        color pnl_color = pnl > 0 ? c_pbe_bull : pnl < 0 ? c_pbe_bear : color.gray
+        table.cell(dashboard, 1, 2, str.tostring(pnl, "#.##"), 
+                  text_color=pnl_color, text_size=size.small)
+        float pnl_pct = strategy.position_size != 0 ? (pnl / (strategy.position_avg_price * math.abs(strategy.position_size))) * 100 : 0
+        table.cell(dashboard, 2, 2, str.tostring(pnl_pct, "#.##") + "%", 
+                  text_color=pnl_color, text_size=size.small)
+        
+        // Separator
+        table.cell(dashboard, 0, 3, "─────────────", text_color=color.gray, text_size=size.tiny)
+        table.merge_cells(dashboard, 0, 3, 2, 3)
+        
+        // Signal Confluence
+        table.cell(dashboard, 0, 4, "Bull Signals", text_color=c_text, text_size=size.small)
+        table.cell(dashboard, 1, 4, str.tostring(bull_signals) + "/9", 
+                  text_color=bull_signals >= min_confluence ? c_pbe_bull : color.gray, 
+                  text_size=size.small)
+        table.cell(dashboard, 2, 4, bull_signals >= min_confluence ? "✓" : "✗", 
+                  text_color=bull_signals >= min_confluence ? c_pbe_bull : color.gray, 
+                  text_size=size.small)
+        
+        table.cell(dashboard, 0, 5, "Bear Signals", text_color=c_text, text_size=size.small)
+        table.cell(dashboard, 1, 5, str.tostring(bear_signals) + "/9", 
+                  text_color=bear_signals >= min_confluence ? c_pbe_bear : color.gray, 
+                  text_size=size.small)
+        table.cell(dashboard, 2, 5, bear_signals >= min_confluence ? "✓" : "✗", 
+                  text_color=bear_signals >= min_confluence ? c_pbe_bear : color.gray, 
+                  text_size=size.small)
+        
+        // Separator
+        table.cell(dashboard, 0, 6, "─────────────", text_color=color.gray, text_size=size.tiny)
+        table.merge_cells(dashboard, 0, 6, 2, 6)
+        
+        // Individual Indicator Status
+        table.cell(dashboard, 0, 7, "FAM", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 7, lad_absorption_buy ? "BUY" : lad_absorption_sell ? "SELL" : "─", 
+                  text_color=lad_absorption_buy ? c_lad_buy : lad_absorption_sell ? c_lad_sell : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 7, str.tostring(lad_dev_5m, "#.#") + "σ", 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 8, "DBE", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 8, pbe_bullish ? "BULL" : pbe_bearish ? "BEAR" : "─", 
+                  text_color=pbe_bullish ? c_pbe_bull : pbe_bearish ? c_pbe_bear : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 8, str.tostring(pbe_bias, "#.##"), 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 9, "SMS", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 9, spm_near_support ? "SUP" : spm_near_resistance ? "RES" : "─", 
+                  text_color=spm_near_support ? c_spm_support : spm_near_resistance ? c_spm_resistance : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 9, "─", text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 10, "VCL", text_color=c_text, text_size=size.tiny)
+        string vrc_text = vrc_high_vol ? "HIGH" : vrc_low_vol ? "LOW" : "NORM"
+        color vrc_color = vrc_high_vol ? c_vrc_high : vrc_low_vol ? c_vrc_low : color.gray
+        table.cell(dashboard, 1, 10, vrc_text, text_color=vrc_color, text_size=size.tiny)
+        table.cell(dashboard, 2, 10, str.tostring(vrc_percentile, "#") + "%", 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 11, "MDM", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 11, dcs_bullish_divergence ? "BULL" : dcs_bearish_divergence ? "BEAR" : "─", 
+                  text_color=dcs_bullish_divergence ? c_dcs_bull : dcs_bearish_divergence ? c_dcs_bear : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 11, "RSI:" + str.tostring(dcs_rsi, "#"), 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 12, "SRZ", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 12, mrz_oversold ? "OS" : mrz_overbought ? "OB" : "─", 
+                  text_color=mrz_oversold ? c_mrz_buy : mrz_overbought ? c_mrz_sell : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 12, "RSI:" + str.tostring(mrz_rsi, "#"), 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 13, "OFA", text_color=c_text, text_size=size.tiny)
+        string ifs_text = ifs_inst_buy ? "INST+" : ifs_inst_sell ? "INST-" : 
+                         ifs_toxic_buy_flow ? "TOX+" : ifs_toxic_sell_flow ? "TOX-" : "─"
+        color ifs_color = ifs_inst_buy ? c_ifs_inst_buy : ifs_inst_sell ? c_ifs_inst_sell : 
+                         ifs_toxic_buy_flow ? c_ifs_toxic_buy : ifs_toxic_sell_flow ? c_ifs_toxic_sell : color.gray
+        table.cell(dashboard, 1, 13, ifs_text, text_color=ifs_color, text_size=size.tiny)
+        table.cell(dashboard, 2, 13, str.tostring(ifs_confidence, "#") + "%", 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 14, "ADB", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 14, vwap_tension_buy ? "BUY" : vwap_tension_sell ? "SELL" : "─", 
+                  text_color=vwap_tension_buy ? c_vwap_teal : vwap_tension_sell ? c_vwap_purple : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 14, str.tostring(vwap_dev_5m, "#.#") + "σ", 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 15, "TMS", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 15, zl_long_signal ? "LONG" : zl_short_signal ? "SHORT" : "─", 
+                  text_color=zl_long_signal ? c_zl_bull : zl_short_signal ? c_zl_bear : color.gray, 
+                  text_size=size.tiny)
+        table.cell(dashboard, 2, 15, str.tostring(zl_score, "#"), 
+                  text_color=c_text, text_size=size.tiny)
+        
+        // Separator
+        table.cell(dashboard, 0, 16, "─────────────", text_color=color.gray, text_size=size.tiny)
+        table.merge_cells(dashboard, 0, 16, 2, 16)
+        
+        // Performance Metrics
+        table.cell(dashboard, 0, 17, "Win Rate", text_color=c_text, text_size=size.tiny)
+        float win_rate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+        table.cell(dashboard, 1, 17, str.tostring(win_rate, "#.#") + "%", 
+                  text_color=win_rate >= 50 ? c_pbe_bull : c_pbe_bear, text_size=size.tiny)
+        table.cell(dashboard, 2, 17, str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.closedtrades), 
+                  text_color=c_text, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 18, "Net Profit", text_color=c_text, text_size=size.tiny)
+        float net_profit = strategy.netprofit
+        color profit_color = net_profit > 0 ? c_pbe_bull : net_profit < 0 ? c_pbe_bear : color.gray
+        table.cell(dashboard, 1, 18, str.tostring(net_profit, "#.##"), 
+                  text_color=profit_color, text_size=size.tiny)
+        float profit_pct = (net_profit / strategy.initial_capital) * 100
+        table.cell(dashboard, 2, 18, str.tostring(profit_pct, "#.##") + "%", 
+                  text_color=profit_color, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 19, "Equity", text_color=c_text, text_size=size.tiny)
+        table.cell(dashboard, 1, 19, str.tostring(strategy.equity, "#.##"), 
+                  text_color=c_text, text_size=size.tiny)
+        float equity_pct = ((strategy.equity - strategy.initial_capital) / strategy.initial_capital) * 100
+        color equity_color = equity_pct > 0 ? c_pbe_bull : equity_pct < 0 ? c_pbe_bear : color.gray
+        table.cell(dashboard, 2, 19, str.tostring(equity_pct, "#.##") + "%", 
+                  text_color=equity_color, text_size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────────
+
+alertcondition(entry_long, "APEX V2 LONG", 
+              "APEX V2: LONG Signal - Confluence: {{plot_0}}/9 indicators")
+
+alertcondition(entry_short, "APEX V2 SHORT", 
+              "APEX V2: SHORT Signal - Confluence: {{plot_1}}/9 indicators")
+
+alertcondition(strategy.position_size > 0 and strategy.position_size[1] == 0, "Position Opened LONG", 
+              "APEX V2: LONG position opened")
+
+alertcondition(strategy.position_size < 0 and strategy.position_size[1] == 0, "Position Opened SHORT", 
+              "APEX V2: SHORT position opened")
+
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, "Position Closed", 
+              "APEX V2: Position closed - P&L: {{plot_2}}")
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// END OF APEX V2 ENHANCED STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+View in Pine Editor・1053 lines
+Use on chart
+2
+7
+639
+APEX V2 [JOAT]
+
+Introduction
+
+APEX V2 Enhanced is an advanced open-source algorithmic trading strategy that synthesizes 9 proprietary analytical concepts through a sophisticated confluence system to generate high-probability trade signals. This strategy integrates Flow Absorption Module (FAM), Directional Bias Engine (DBE), Structure Mapping System (SMS), Volatility Classification (VCL), Momentum Divergence Module (MDM), Statistical Reversion Zones (SRZ), Order Flow Analysis (OFA), Anchor Deviation Bands, and Trend Momentum Signals into a unified trading framework with comprehensive risk management.
+
+Unlike single-indicator strategies that produce frequent false signals, APEX V2 requires multi-dimensional confluence before executing trades. This confluence-based approach dramatically reduces false positives while capturing high-conviction institutional moves. The strategy includes adaptive position sizing based on risk percentage, dynamic stop loss and take profit levels, trailing stops, and real-time performance tracking through a comprehensive dashboard.
+
+
+
+
+Why This Strategy Exists
+
+This strategy addresses the fundamental challenge of trading: distinguishing high-probability setups from market noise. Individual analytical methods often produce conflicting signals, leading to whipsaws and losses. APEX V2 solves this by requiring multiple independent confirmation signals before entering trades, ensuring that:
+
+
+Institutional Activity is Confirmed: FAM and OFA detect when large players are positioning
+
+Directional Bias is Established: DBE quantifies market sentiment through probabilistic analysis
+
+Structural Context is Validated: SMS identifies key support/resistance levels
+
+Volatility Regime is Appropriate: VCL ensures trades occur in favorable volatility conditions
+
+Momentum Divergence is Present: MDM confirms smart money positioning through multi-oscillator divergence
+
+Mean Reversion Opportunity Exists: SRZ identifies statistical extremes for reversal trades
+
+Order Flow is Toxic: OFA detects aggressive institutional buying/selling
+
+Anchor Deviation is Extreme: Multi-timeframe VWAP deviation signals absorption zones
+
+Trend Momentum Confirmation: Trend-following signals with minimal lag
+
+
+
+Each analytical module provides a unique perspective on market structure. By requiring confluence across multiple dimensions, APEX V2 captures only the highest-quality setups where institutional activity, technical structure, momentum, volatility, and order flow all align.
+
+Strategy Components Explained
+
+1. Flow Absorption Module (FAM)
+
+FAM analyzes VWAP deviation across 2-minute, 5-minute, and 15-minute timeframes to identify institutional liquidity absorption zones. When price deviates significantly from VWAP (default: 8.0 sigma on 2m/5m, 4.0 sigma on 15m) combined with volume surges (2.25x average) and sufficient relative volume (0.6+), FAM signals institutional absorption.
+
+The strategy requires 2+ timeframe confirmation for FAM signals. Buy signals occur when price is below VWAP with volume surge across multiple timeframes (institutions absorbing at lows). Sell signals occur when price is above VWAP with volume surge (institutions distributing at highs).
+
+FAM contributes 1 point to the confluence score when absorption is detected, indicating institutional players are actively positioning at price extremes.
+
+2. Directional Bias Engine (DBE)
+
+DBE calculates directional bias by analyzing the ratio of bullish vs bearish bars over a lookback period (default: 100 bars) combined with momentum analysis. The engine weights directional bias (60%) and momentum bias (40%) to produce a combined bias score ranging from -1.0 (extreme bearish) to +1.0 (extreme bullish).
+
+When combined bias exceeds the threshold (default: 0.65), DBE signals bullish bias. When below -0.65, it signals bearish bias. This probabilistic approach quantifies market sentiment and filters trades against the prevailing bias.
+
+DBE contributes 1 point to confluence when bias aligns with trade direction, ensuring trades flow with statistical probability rather than against it.
+
+
+
+3. Structure Mapping System (SMS)
+
+SMS detects structural pivot highs and pivot lows using configurable left/right bar parameters (default: 10 bars each). The system maintains arrays of the 10 most recent resistance and support levels, then checks if current price is within 1% of any tracked level.
+
+When price approaches support (within 1% of recent pivot lows), SMS signals potential bounce. When price approaches resistance (within 1% of recent pivot highs), SMS signals potential rejection. These structural levels represent areas where price previously reversed, making them high-probability zones for future reversals.
+
+SMS contributes 1 point to confluence when price is near support (for longs) or resistance (for shorts), providing structural context for entries.
+
+4. Volatility Classification (VCL)
+
+VCL classifies current volatility regime using ATR percentile ranking over a lookback period (default: 100 bars). The system calculates normalized ATR (ATR / price * 100) and determines its percentile rank. High volatility is defined as 70th percentile or above, low volatility as 30th percentile or below.
+
+While VCL doesn't directly contribute to confluence scoring, it provides critical context displayed in the dashboard. High volatility regimes may require wider stops, while low volatility regimes may produce more reliable mean reversion signals.
+
+The strategy adapts to volatility by using ATR-based position sizing and stop loss placement, ensuring risk management scales with market conditions.
+
+5. Momentum Divergence Module (MDM)
+
+MDM detects multi-oscillator divergences by comparing price pivots with RSI pivots. Bullish divergence occurs when price makes lower lows but RSI makes higher lows (indicating weakening selling pressure). Bearish divergence occurs when price makes higher highs but RSI makes lower highs (indicating weakening buying pressure).
+
+The system tracks divergence counts and requires a minimum number of divergences (default: 2) before signaling. This prevents single-divergence false signals and ensures sustained divergence patterns.
+
+MDM contributes 1 point to confluence when divergence aligns with trade direction, confirming that smart money is positioning against the prevailing price trend.
+
+6. Statistical Reversion Zones (SRZ)
+
+SRZ combines Bollinger Bands with RSI to identify statistical extremes for mean reversion trades. The system calculates Bollinger Bands (default: 20-period, 2.0 standard deviations) and RSI (default: 14-period) to detect oversold and overbought conditions.
+
+Oversold signals occur when price is below the lower Bollinger Band AND RSI is below 30. Overbought signals occur when price is above the upper Bollinger Band AND RSI is above 70. These dual conditions ensure both price and momentum are at extremes.
+
+SRZ contributes 1 point to confluence when statistical extremes align with trade direction, identifying high-probability mean reversion opportunities.
+
+7. Order Flow Analysis (OFA)
+
+OFA detects institutional order flow through toxicity analysis and absorption coefficient calculation. The toxicity index measures aggressive vs passive order flow by analyzing candle position and volume. When toxicity exceeds threshold (default: 0.7), it indicates institutions are aggressively taking liquidity.
+
+The absorption coefficient quantifies institutional absorption by measuring volume intensity relative to price movement. High absorption (default: 0.75+) with minimal price movement indicates institutions are positioning without moving price significantly.
+
+OFA calculates a confidence score (0-100%) based on absorption strength and toxicity. When confidence exceeds minimum threshold (default: 75%), OFA signals high-probability institutional activity.
+
+OFA contributes 1 point to confluence when institutional footprints are detected with high confidence, confirming large players are actively positioning.
+
+8. Anchor Deviation Bands
+
+Anchor Deviation analyzes multi-timeframe VWAP deviation (2m, 5m, 15m) combined with oscillator sigma gap confirmation. The system calculates VWAP deviation using configurable methods (Price Volatility, Z-Score, or Spread StDev) and measures the gap between VWAP deviation and oscillator z-scores.
+
+Buy signals occur when 2+ timeframes show negative VWAP deviation (price below VWAP) with 2+ timeframes confirming oscillator gap. Sell signals occur when 2+ timeframes show positive VWAP deviation with gap confirmation.
+
+Anchor Deviation contributes 1 point to confluence when multi-timeframe tension is detected, indicating price is at extreme deviation from institutional reference levels.
+
+9. Trend Momentum Signals
+
+Trend Momentum Signals use a zero-lag EMA combined with volatility bands and trend strength analysis. The system calculates a zero-lag EMA by compensating for lag (EMA of price + (price - price[lag])), then applies volatility bands using ATR multiplier (default: 1.5x).
+
+The trend strength score is calculated by comparing current zero-lag EMA with historical values over a loop range (default: 1-70 bars). Long signals occur when trend score exceeds uptrend threshold (default: 5) AND price is above the upper volatility band. Short signals occur when trend score is below downtrend threshold (default: -5) AND price is below the lower volatility band.
+
+Trend Momentum contributes 1 point to confluence when trend signals align with trade direction, providing trend-following confirmation with minimal lag.
+
+10. Deviation Reversion System Component
+
+The Deviation Reversion System component calculates deviation levels from a moving average (configurable: WMA, SMA, RMA, EMA, HMA). Three deviation levels are defined (default: 1.3%, 7.5%, 13.3%) representing progressively extreme deviations from the mean.
+
+Buy signals occur when price drops below the first deviation level (mean - 1.3%). Sell signals occur when price rises above the first deviation level (mean + 1.3%). This component identifies when price has deviated sufficiently from its mean to warrant mean reversion trades.
+
+Deviation Reversion contributes 1 point to confluence when price is at deviation extremes, complementing the SRZ module with a simpler percentage-based approach.
+
+Confluence System & Signal Aggregation
+
+APEX V2's core innovation is its confluence system. The strategy counts bullish and bearish signals from all 9 analytical modules:
+
+
+FAM: Absorption buy/sell (2+ timeframe confirmation)
+
+DBE: Bullish/bearish bias (>0.65 or <-0.65)
+
+SMS: Near support/resistance (within 1%)
+
+MDM: Bullish/bearish divergence (2+ divergences)
+
+SRZ: Oversold/overbought (BB + RSI extremes)
+
+OFA: Institutional buy/sell (75%+ confidence)
+
+Anchor Deviation: Tension buy/sell (2+ timeframe + gap confirmation)
+
+Deviation Reversion: Buy/sell signal (price at deviation levels)
+
+Trend Momentum: Long/short signal (trend score + volatility bands)
+
+
+
+When confluence mode is enabled (default: ON), the strategy requires a minimum number of modules to agree (default: 3 out of 9) before executing trades. This dramatically reduces false signals by ensuring multiple independent perspectives confirm the setup.
+
+If both long and short signals meet confluence requirements simultaneously, the strategy selects the direction with more confirming modules. If tied, no trade is executed to avoid ambiguous setups.
+
+Risk Management System
+
+APEX V2 includes comprehensive risk management:
+
+Position Sizing: Calculated based on risk per trade percentage (default: 2% of equity). The system calculates stop distance using ATR and sizes positions so that if stopped out, the loss equals exactly 2% of account equity.
+
+Stop Loss: Set at a percentage below entry (default: 2% for longs, 2% above for shorts). Stops are placed immediately upon entry to limit maximum loss per trade.
+
+Take Profit: Set at a percentage above entry (default: 4% for longs, 4% below for shorts). This provides a 2:1 reward-to-risk ratio.
+
+Trailing Stop: Activates when take profit level is reached, then trails price by a percentage (default: 1.5%). This locks in profits while allowing winners to run.
+
+Reversal Exits: If an opposite signal meets confluence requirements while in a position, the strategy immediately closes the current position. This prevents holding losing positions when market structure shifts.
+
+Strategy Properties & Backtesting Parameters
+
+The strategy uses realistic backtesting parameters to avoid misleading results:
+
+
+Initial Capital: $10,000 (realistic for average retail trader)
+
+Position Size: 100% of equity (controlled by risk-based position sizing)
+
+Pyramiding: 3 (allows up to 3 positions in same direction)
+
+Commission: Should be set to realistic levels (0.1% for crypto, 0.05% for forex, $1-5 per trade for stocks)
+
+Slippage: Should be set to realistic levels (5-10 ticks for liquid markets)
+
+Risk Per Trade: 2% (sustainable risk level)
+
+Stop Loss: 2% (prevents catastrophic losses)
+
+Take Profit: 4% (2:1 reward-to-risk ratio)
+
+
+
+These parameters ensure backtesting results reflect realistic trading conditions. The strategy is designed to generate 100+ trades over a sufficient dataset to produce statistically significant results.
+
+Visual Elements
+
+
+FAM Gradient Ribbon: 5-layer cyan/magenta ribbon showing liquidity absorption intensity around VWAP
+
+OFA Gradient Ribbon: 5-layer gold/indigo ribbon showing institutional order flow intensity
+
+Anchor Deviation Ribbon: 5-layer teal/purple ribbon showing multi-timeframe VWAP tension
+
+Entry Signals: Green triangle up for LONG entries, red triangle down for SHORT entries
+
+Position Markers: Small circles below/above bars indicating active positions
+
+Stop Loss Lines: Red lines showing stop loss levels for active positions
+
+Take Profit Lines: Green lines showing take profit targets for active positions
+
+Average Entry Price: White line showing average entry price for active positions
+
+Comprehensive Dashboard: Real-time metrics including position status, P&L, signal confluence, individual module status, and performance metrics
+
+
+
+
+
+
+Dashboard Metrics
+
+The dashboard displays 20+ real-time metrics:
+
+Position Status:
+
+Status: LONG, SHORT, or FLAT
+
+Position Size: Current position quantity
+
+P&L: Open profit/loss in currency and percentage
+
+
+
+Signal Confluence:
+
+Bull Signals: Count of bullish indicators (X/9) with checkmark if confluence met
+
+Bear Signals: Count of bearish indicators (X/9) with checkmark if confluence met
+
+
+
+Individual Indicator Status:
+
+FAM: BUY/SELL with deviation value
+
+DBE: BULL/BEAR with bias score
+
+SMS: SUP/RES (support/resistance proximity)
+
+VCL: HIGH/LOW/NORM with percentile
+
+MDM: BULL/BEAR with RSI value
+
+SRZ: OS/OB (oversold/overbought) with RSI value
+
+OFA: INST+/INST-/TOX+/TOX- with confidence percentage
+
+ADB: BUY/SELL with deviation value
+
+TMS: LONG/SHORT with trend score
+
+
+
+Performance Metrics:
+
+Win Rate: Percentage and win/loss ratio
+
+Net Profit: Currency and percentage return
+
+Equity: Current equity and percentage change from initial capital
+
+
+
+Input Parameters
+
+Strategy Settings:
+
+Enable LONG/SHORT Trades: Toggle trade directions
+
+Require Multi-Module Confluence: Enable/disable confluence requirement
+
+Minimum Confluence Count: Number of modules that must agree (1-7, default: 3)
+
+
+
+FAM Settings:
+
+Enable FAM, VWAP Mode, Deviation Method, Volume Lookback, Volume Surge Multiplier, RVOL Threshold, 2m/5m/15m Thresholds, Show Gradient Ribbon
+
+
+
+DBE Settings:
+
+Enable DBE, Bias Lookback, Bias Threshold, Momentum Weight
+
+
+
+SMS Settings:
+
+Enable SMS, Pivot Left/Right Bars, Structure Lookback
+
+
+
+VCL Settings:
+
+Enable VCL, ATR Length, Regime Lookback, High/Low Vol Thresholds
+
+
+
+MDM Settings:
+
+Enable MDM, RSI Length, Pivot Lookback, Min Divergences
+
+
+
+SRZ Settings:
+
+Enable SRZ, Bollinger Length/Multiplier, RSI Length, RSI Overbought/Oversold
+
+
+
+OFA Settings:
+
+Enable OFA, Toxicity Lookback/Threshold, Min Absorption Coefficient, Minimum Confidence %, Show Gradient Ribbon
+
+
+
+Anchor Deviation Settings:
+
+Enable Anchor Deviation, VWAP Dev Mode, 2m/5m/15m VWAP Thresholds, 2m/5m/15m Osc σ-Gap Thresholds, Show Gradient Ribbon
+
+
+
+Deviation Reversion Settings:
+
+Enable Deviation Reversion System, MA Type, MA Period, Deviation 1/2/3 percentages
+
+
+
+Trend Momentum Settings:
+
+Enable Trend Momentum Signals, Zero Lag Length, Volatility Multiplier, Loop Start/End, Threshold Uptrend/Downtrend
+
+
+
+Risk Management Settings:
+
+Enable Stop Loss, Stop Loss %, Enable Take Profit, Take Profit %, Enable Trailing Stop, Trailing Stop %, Risk Per Trade %
+
+
+
+Visualization Settings:
+
+Show Entry/Exit Signals, Show Dashboard, Show All Gradient Ribbons, Ribbon Brightness Adjust
+
+
+
+How to Use This Strategy
+
+Step 1: Configure Backtesting Parameters
+Set realistic commission and slippage in Strategy Properties. For crypto: 0.1% commission, 10 ticks slippage. For forex: 0.05% commission, 5 ticks slippage. For stocks: $1-5 per trade commission, 5 ticks slippage.
+
+Step 2: Set Risk Parameters
+Configure Risk Per Trade (default: 2%), Stop Loss (default: 2%), and Take Profit (default: 4%). These provide sustainable risk management with 2:1 reward-to-risk ratio.
+
+Step 3: Choose Confluence Level
+Set Minimum Confluence Count based on your risk tolerance. Higher confluence (4-5 indicators) produces fewer but higher-quality signals. Lower confluence (2-3 indicators) produces more signals but with more false positives.
+
+Step 4: Enable/Disable Indicators
+Toggle individual modules based on market conditions and your trading style. For trending markets, emphasize DBE, Trend Momentum, and Anchor Deviation. For ranging markets, emphasize SRZ, MDM, and Deviation Reversion.
+
+Step 5: Monitor Dashboard
+Watch the dashboard for signal confluence. When Bull Signals shows 3+/9 with checkmark, the strategy is ready to enter long. When Bear Signals shows 3+/9 with checkmark, ready to enter short.
+
+Step 6: Review Individual Indicators
+Check which specific modules are signaling. High-quality setups show alignment across multiple module types (institutional + technical + momentum + volatility).
+
+Step 7: Backtest on Sufficient Data
+Run backtests on datasets that generate 100+ trades for statistical significance. Review win rate, net profit, maximum drawdown, and profit factor.
+
+Step 8: Optimize Parameters
+Adjust module parameters for your specific instrument and timeframe. Avoid over-optimization - parameters should work across multiple instruments and time periods.
+
+Step 9: Forward Test
+After backtesting, forward test on paper trading or small live positions to validate strategy performance in real market conditions.
+
+Step 10: Monitor Performance
+Track Win Rate, Net Profit, and Equity metrics in the dashboard. If performance degrades, re-evaluate parameters or market conditions.
+
+Best Practices
+
+
+Use on liquid instruments with sufficient volume for reliable signals
+
+Higher confluence (4-5 modules) is recommended for beginners to reduce false signals
+
+Lower confluence (2-3 modules) can be used by experienced traders who can filter signals manually
+
+Backtest on multiple timeframes (5m, 15m, 1h, 4h) to find optimal timeframe for your instrument
+
+Use realistic commission and slippage - overly optimistic parameters produce misleading results
+
+Risk no more than 2% per trade to ensure account survival during drawdown periods
+
+Monitor VCL (Volatility Classification) - high volatility may require wider stops or reduced position size
+
+Combine with higher timeframe trend analysis - trading with the trend improves win rate
+
+Review individual module signals to understand why confluence was met
+
+Disable modules that consistently produce false signals for your specific instrument
+
+Enable trailing stops to lock in profits on winning trades
+
+Use pyramiding (default: 3) to add to winning positions when additional confluence signals appear
+
+Avoid trading during major news events - volatility spikes can invalidate technical signals
+
+Backtest over multiple market conditions (trending, ranging, high volatility, low volatility)
+
+Forward test for at least 100 trades before committing significant capital
+
+
+
+Strategy Limitations
+
+
+Requires sufficient historical data for all modules - may not work well on newly listed instruments
+
+Multi-timeframe analysis (FAM, Anchor Deviation) requires data availability on 2m, 5m, 15m timeframes
+
+Confluence requirement reduces trade frequency - may produce few signals on some instruments/timeframes
+
+Backtesting results are historical and do not guarantee future performance
+
+Strategy performance degrades during extreme volatility events (flash crashes, circuit breakers)
+
+Commission and slippage significantly impact profitability - must use realistic values
+
+Pyramiding can amplify losses if market reverses after adding to position
+
+Stop loss placement using fixed percentage may be suboptimal during volatility regime changes
+
+Module parameters optimized for one instrument may not work on others
+
+Requires regular monitoring and parameter adjustment as market conditions evolve
+
+Dashboard metrics are real-time snapshots and can change rapidly during volatile periods
+
+Strategy assumes sufficient liquidity to execute at desired prices - may not work on illiquid instruments
+
+Trailing stops can be triggered by normal volatility, closing winning trades prematurely
+
+Reversal exits may close positions too early if opposite signal is temporary
+
+
+
+Technical Implementation
+
+Built with Pine Script v6 using:
+
+9 independent analytical modules with individual enable/disable controls
+
+Multi-timeframe security requests for FAM and Anchor Deviation (2m, 5m, 15m)
+
+Confluence-based signal aggregation with configurable minimum threshold
+
+Risk-based position sizing using ATR and account equity
+
+Dynamic stop loss, take profit, and trailing stop management
+
+Strategy.entry and strategy.exit functions for automated trade execution
+
+Reversal exit logic to close positions when opposite confluence is met
+
+Three 5-layer gradient ribbons (FAM, OFA, Anchor Deviation) with progressive transparency
+
+Comprehensive dashboard with 20+ real-time metrics using table visualization
+
+5 alert conditions for trade signals and position changes
+
+Performance tracking (win rate, net profit, equity) displayed in dashboard
+
+Pyramiding support (up to 3 positions) for scaling into winning trades
+
+
+
+The code is fully open-source and can be modified to suit individual trading styles and risk tolerances.
+
+Originality Statement
+
+This strategy is original in its multi-confluence approach to algorithmic trading. The strategy synthesizes multiple analytical concepts into a unified framework:
+
+
+It synthesizes 9 proprietary analytical concepts into a unified confluence system
+
+The confluence requirement dramatically reduces false signals compared to single-method strategies
+
+Each concept provides a unique perspective: institutional activity (FAM, OFA), directional bias (DBE), structural context (SMS), volatility regime (VCL), momentum divergence (MDM), mean reversion (SRZ), anchor deviation (multi-timeframe), and trend following (Trend Momentum)
+
+Risk management system uses ATR-based position sizing to risk exactly 2% per trade regardless of stop distance
+
+Reversal exit logic closes positions when opposite confluence is met, preventing holding losing positions during structure shifts
+
+Comprehensive dashboard synthesizes 20+ metrics into actionable intelligence
+
+Three gradient ribbons (FAM, OFA, Anchor Deviation) provide visual confirmation of institutional activity and order flow
+
+Strategy is designed with realistic backtesting parameters (commission, slippage, position sizing) to avoid misleading results
+
+Pyramiding support allows scaling into winning positions when additional confluence appears
+
+Individual module enable/disable controls allow customization for different market conditions and trading styles
+
+
+
+The strategy's value lies in its systematic approach to trade selection through multi-dimensional confluence. By requiring agreement across institutional activity, technical structure, momentum, volatility, and order flow, APEX V2 captures only the highest-quality setups where all factors align. This reduces emotional decision-making and provides a repeatable, testable framework for algorithmic trading.
+
+Disclaimer
+
+This strategy is provided for educational and informational purposes only. It is not financial advice. Trading involves substantial risk of loss. Past performance does not guarantee future results. Backtesting results are hypothetical and may not reflect actual trading performance. Always use proper risk management, never risk more than you can afford to lose, and thoroughly test any strategy on paper before committing real capital. Commission, slippage, and market conditions significantly impact profitability. No strategy works in all market conditions. Regular monitoring and parameter adjustment are required.
+
+-Made with passion by officialjackofalltrades
+

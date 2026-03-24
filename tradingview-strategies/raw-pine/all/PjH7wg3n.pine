@@ -1,0 +1,481 @@
+//@version=6
+// -----------------------------------------------------------------------------
+// Volumatic FVG Strategy (BigBeluga derivative)
+// License: CC BY-NC-SA 4.0
+// Inspired by the indicator “Volumatic Fair Value Gaps [BigBeluga]”
+// Original: https://www.tradingview.com/script/OfR2t6z5-Volumatic-Fair-Value-Gaps-BigBeluga/
+//
+// CHANGELOG VS ORIGINAL INDICATOR
+// • Converted to a STRATEGY: entries based on FVG mitigation %
+// • Robust lower-TF volume split (upticks/downticks). Fallback if LTF missing:
+//   distribute previous-bar volume by the prior close’s position in its H–L range
+// • Per-FVG TOTAL volume filter (min/max)
+// • AGE filter (bars since FVG creation)
+// • Bull% / Bear% share filter (the % numbers rendered inside the FVG)
+// • Optional candle confirmation + cooldown
+// • Risk management: fixed Stop Loss % + Trailing Stop with profit trigger
+// • Pine v6 safety: reverse-index deletes, NaN guards, no unsupported args
+//
+// DISCLAIMER: For educational purposes only. Not financial advice.
+// -----------------------------------------------------------------------------
+strategy("Order Block Volumatic FVG Strategy — Mitigation%, Volume & Age + SL/Trailing",
+  overlay=true, max_boxes_count=500, max_bars_back=5000,
+  initial_capital=100, pyramiding=0, calc_on_every_tick=true,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ===================== INPUTS =====================
+string mitigationSrc = input.string("high/low", "Mitigation source", ["close","high/low"])
+bool   bullGaps      = input.bool(true,  "Show Bullish FVG")
+bool   bearGaps      = input.bool(true,  "Show Bearish FVG")
+bool   volumeBars    = input.bool(true,  "Show Volume Bars inside FVG")
+
+// Mitigation thresholds (entry condition)
+float  longThreshold  = input.float(5,  "Long: Mitigation % (≥)",  minval=1, maxval=100, step=0.5)
+float  shortThreshold = input.float(5,  "Short: Mitigation % (≥)", minval=1, maxval=100, step=0.5)
+
+// Per-FVG TOTAL volume filter (uses the number printed on each box)
+bool   useVolFilter   = input.bool(true, "Filter by TOTAL FVG volume")
+float  minVolLong     = input.float(1000, "Long: total volume min (0 = off)", step=1)
+float  maxVolLong     = input.float(0,     "Long: total volume max (0 = off)", step=1)
+float  minVolShort    = input.float(1000, "Short: total volume min (0 = off)", step=1)
+float  maxVolShort    = input.float(0,     "Short: total volume max (0 = off)", step=1)
+
+// Bull/Bear share filter (46% / 53% numbers inside each FVG)
+bool   useShareFilter    = input.bool(true, "Filter by Bull% / Bear% share")
+float  longBullShareMin  = input.float(70,  "Long: Bull% min (≥)", minval=0, maxval=100, step=0.1)
+float  longBearShareMax  = input.float(100, "Long: Bear% max (≤)", minval=0, maxval=100, step=0.1)
+float  shortBearShareMin = input.float(70,  "Short: Bear% min (≥)", minval=0, maxval=100, step=0.1)
+float  shortBullShareMax = input.float(100, "Short: Bull% max (≤)", minval=0, maxval=100, step=0.1)
+
+// Age filter (bars since FVG creation)
+bool   useAgeFilter   = input.bool(true, "Use AGE filter (bars since created)")
+int    minAgeLong     = input.int(40,    "Long: min age (bars)",  minval=0)
+int    minAgeShort    = input.int(40,    "Short: min age (bars)", minval=0)
+
+// Candle confirmation & cooldown
+bool   confirmCandle  = input.bool(false, "Require candle in trade direction")
+int    cooldownBars   = input.int(0, "Cooldown after an entry (bars)", minval=0)
+
+// Risk management
+float  slPercent       = input.float(30, "Stop Loss %", minval=0.1, step=0.1)
+float  trailTriggerPct = input.float(1.5, "Activate trailing at +% profit", minval=0.1, step=0.1)
+float  trailDistPct    = input.float(1.5, "Trailing distance (%)",        minval=0.1, step=0.1)
+
+// Lower-TF aggregation (fixed or auto)
+bool   useAutoLTF      = input.bool(false, "Auto Lower TF (TF/Divisor → 1/3/5m)")
+int    ltfDivisor      = input.int(10, "Divisor for Auto LTF", minval=2, maxval=60)
+string ltfFixed        = input.string("3", "Fixed Lower TF (minutes)", options=["1","3","5","15"])
+
+// Colors
+color  bullColor = input.color(color.rgb(26,194,216,50), "Bullish color")
+color  bearColor = input.color(color.rgb(216,118,26,50), "Bearish color")
+
+// ===================== TYPES =====================
+type VolumaticFVG
+    box   body
+    int   bull
+    int   bear
+    bool  isBull
+    box   bullBar
+    box   bearBar
+    float totalVol
+    int   bornBar
+
+var fvgs = array.new<VolumaticFVG>()
+var dash = table.new(position.top_right, 100, 100, chart.bg_color)
+
+// ===================== ORIGINAL FVG DETECTION (BigBeluga base) =====================
+float diff      = close[1] > open[1] ? (low - high[2]) / low * 100 : (low[2] - high) / high * 100
+float sizeFVG   = diff / ta.percentile_nearest_rank(diff, 1000, 100) * 100
+bool  filterFVG = sizeFVG > 10
+bool  isBull_gap = high[2] < low and high[2] < high[1] and low[2] < low and filterFVG
+bool  isBear_gap = low[2] > high and low[2] > low[1] and high[2] > high and filterFVG
+
+// ===================== ROBUST LOWER-TF VOLUME SPLIT =====================
+f_pick_ltf_str(_useAuto, _div, _tfMinutes) =>
+    string out = ltfFixed
+    if _useAuto
+        float target = math.max(1.0, math.ceil(_tfMinutes / _div))
+        out := target >= 5 ? "5" : target >= 3 ? "3" : "1"
+    out
+
+float tfMin = timeframe.in_seconds("") / 60.0
+string tfLtf = f_pick_ltf_str(useAutoLTF, ltfDivisor, tfMin)
+
+// Upticks/downticks in LTF
+array<float> bullArr = request.security_lower_tf(syminfo.tickerid, tfLtf, close > close[1] ? volume : 0)
+array<float> bearArr = request.security_lower_tf(syminfo.tickerid, tfLtf, close < close[1] ? volume : 0)
+
+// Prefer previous closed HTF bar
+float bullNow  = nz(bullArr.sum(), 0)
+float bearNow  = nz(bearArr.sum(), 0)
+float bullPrev = nz(bullArr.sum()[1], bullNow)
+float bearPrev = nz(bearArr.sum()[1], bearNow)
+float totPrev  = bullPrev + bearPrev
+
+// Fallback: distribute previous-bar volume by prior close position in H–L range
+if totPrev <= 0
+    float tfVol    = nz(volume[1], volume)
+    float hlRange  = math.max(1e-10, high[1] - low[1])
+    float share    = (close[1] - low[1]) / hlRange
+    share := math.max(0.0, math.min(1.0, share))
+    bullPrev := tfVol * share
+    bearPrev := tfVol - bullPrev
+    totPrev  := tfVol
+
+// ===================== UTILS =====================
+f_mitigation_pct(_isBull, _top, _bot) =>
+    float top = math.max(_top, _bot)
+    float bot = math.min(_top, _bot)
+    float height = math.max(1e-10, top - bot)
+    float src = mitigationSrc == "close" ? close : (_isBull ? low : high)
+    float pct = 0.0
+    if _isBull
+        pct := src >= top ? 0 : src <= bot ? 100 : ((top - src) / height) * 100
+    else
+        pct := src <= bot ? 0 : src >= top ? 100 : ((src - bot) / height) * 100
+    pct := math.max(0, math.min(100, pct))
+
+f_bar_intersects_box(_top, _bot) =>
+    float top = math.max(_top, _bot)
+    float bot = math.min(_top, _bot)
+    (high >= bot) and (low <= top)
+
+// ===================== CREATE / MAINTAIN FVGs =====================
+if bar_index > 100
+    // Bullish FVG
+    if isBull_gap and bullGaps
+        box body = box.new(bar_index-1, low, bar_index+5, high[2], bgcolor=color.new(bullColor,70), border_color=na)
+        float mid = math.avg(low, high[2])
+        float bullPct = totPrev > 0 ? (bullPrev / totPrev) * 100 : 50
+        float bearPct = 100 - bullPct
+        box bearBar = box.new(body.get_left(), body.get_top(), body.get_left(), mid, bgcolor=bearColor, border_color=chart.bg_color)
+        box bullBar = box.new(body.get_left(), mid, body.get_left(), body.get_bottom(), bgcolor=bullColor, border_color=chart.bg_color)
+        fvgs.push(VolumaticFVG.new(body, int(math.round(bullPct)), int(math.round(bearPct)), true, bullBar, bearBar, totPrev, bar_index))
+
+    // Bearish FVG
+    if isBear_gap and bearGaps
+        box body = box.new(bar_index-1, low[2], bar_index+5, high, bgcolor=color.new(bearColor,70), border_color=na)
+        float mid = math.avg(low[2], high)
+        float bullPct = totPrev > 0 ? (bullPrev / totPrev) * 100 : 50
+        float bearPct = 100 - bullPct
+        box bearBar = box.new(body.get_left(), body.get_top(), body.get_left(), mid, bgcolor=bearColor, border_color=chart.bg_color)
+        box bullBar = box.new(body.get_left(), mid, body.get_left(), body.get_bottom(), bgcolor=bullColor, border_color=chart.bg_color)
+        fvgs.push(VolumaticFVG.new(body, int(math.round(bullPct)), int(math.round(bearPct)), false, bullBar, bearBar, totPrev, bar_index))
+
+    // Delete crossed, extend right, update text
+    if array.size(fvgs) > 0
+        for k = array.size(fvgs)-1 to 0
+            VolumaticFVG fvg = fvgs.get(k)
+            float src1 = mitigationSrc == "close" ? close : low
+            float src2 = mitigationSrc == "close" ? close : high
+            bool crossed = fvg.isBull ? (src1 < fvg.body.get_bottom()) : (src2 > fvg.body.get_top())
+            if crossed
+                fvg.body.delete(), fvg.bullBar.delete(), fvg.bearBar.delete()
+                fvgs.remove(k)
+            else
+                fvg.body.set_right(bar_index+25)
+                fvg.body.set_text(str.tostring(nz(fvg.totalVol, 0), format.volume))
+                fvg.body.set_text_halign(text.align_right)
+                fvg.body.set_text_color(chart.bg_color)
+                if volumeBars
+                    int leftI = fvg.body.get_left(), rightI = fvg.body.get_right()
+                    int sz = int(rightI - leftI) / 200
+                    fvg.bullBar.set_right(leftI + sz * fvg.bull)
+                    fvg.bearBar.set_right(leftI + sz * fvg.bear)
+                    fvg.bullBar.set_text(str.tostring(int(fvg.bull), format.percent))
+                    fvg.bearBar.set_text(str.tostring(int(fvg.bear), format.percent))
+                    fvg.bullBar.set_text_color(chart.fg_color)
+                    fvg.bearBar.set_text_color(chart.fg_color)
+                    fvg.bullBar.set_text_halign(text.align_right)
+                    fvg.bearBar.set_text_halign(text.align_right)
+                else
+                    fvg.bearBar.set_text(""), fvg.bullBar.set_text("")
+
+    // Remove overlapped (reverse-index safe)
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs)-1 to 0
+            VolumaticFVG fvg = fvgs.get(i)
+            float topi = fvg.body.get_top()
+            float boti = fvg.body.get_bottom()
+            bool removed = false
+            for j = 0 to array.size(fvgs)-1
+                if i == j
+                    continue
+                VolumaticFVG l = fvgs.get(j)
+                float top1 = l.body.get_top()
+                float bot1 = l.body.get_bottom()
+                if top1 < topi and top1 > boti
+                    fvg.body.delete(), fvg.bearBar.delete(), fvg.bullBar.delete()
+                    fvgs.remove(i)
+                    removed := true
+                    break
+            if removed
+                continue
+
+    // Cap list size
+    if array.size(fvgs) > 10
+        VolumaticFVG old = fvgs.shift()
+        old.body.delete(), old.bullBar.delete(), old.bearBar.delete()
+
+    // Dashboard
+    if barstate.islast
+        int bullCount = 0, bearCount = 0
+        float bullVolume = 0.0, bearVolume = 0.0
+        if array.size(fvgs) > 0
+            for fvg in fvgs
+                if fvg.isBull
+                    bullCount += 1, bullVolume += nz(fvg.totalVol, 0)
+                else
+                    bearCount += 1, bearVolume += nz(fvg.totalVol, 0)
+        dash.cell(0,0,"FVG Type",text_color=chart.fg_color)
+        dash.cell(1,0,"On Chart",text_color=chart.fg_color)
+        dash.cell(2,0,"Total Volume",text_color=chart.fg_color)
+        dash.cell(0,1,"Bullish FVG",text_color=color.new(bullColor,0))
+        dash.cell(1,1,str.tostring(bullCount),text_color=chart.fg_color)
+        dash.cell(2,1,str.tostring(bullVolume,format.volume),text_color=chart.fg_color)
+        dash.cell(0,2,"Bearish FVG",text_color=color.new(bearColor,0))
+        dash.cell(1,2,str.tostring(bearCount),text_color=chart.fg_color)
+        dash.cell(2,2,str.tostring(bearVolume,format.volume),text_color=chart.fg_color)
+
+// ===================== SCAN (Mitigation + Volume + Age + Bull/Bear%) =====================
+int   bestBullIdx = na
+int   bestBearIdx = na
+float bestBullLeft = na
+float bestBearLeft = na
+float bullMit = na
+float bearMit = na
+
+if array.size(fvgs) > 0
+    for i = 0 to array.size(fvgs)-1
+        VolumaticFVG f = fvgs.get(i)
+        float top = f.body.get_top()
+        float bot = f.body.get_bottom()
+        if f_bar_intersects_box(top, bot)
+            float m = f_mitigation_pct(f.isBull, top, bot)
+            int ageBars = bar_index - f.bornBar
+
+            if f.isBull
+                bool ok = m >= longThreshold
+                if confirmCandle
+                    ok := ok and close > open
+                if useVolFilter
+                    bool volOK = (f.totalVol >= minVolLong) and (maxVolLong == 0 or f.totalVol <= maxVolLong)
+                    ok := ok and volOK
+                if useAgeFilter
+                    ok := ok and (ageBars >= minAgeLong)
+                if useShareFilter
+                    ok := ok and (f.bull >= longBullShareMin) and (f.bear <= longBearShareMax)
+                if ok
+                    int leftI = f.body.get_left()
+                    if na(bestBullIdx) or leftI > bestBullLeft
+                        bestBullIdx := i, bestBullLeft := leftI, bullMit := m
+            else
+                bool ok = m >= shortThreshold
+                if confirmCandle
+                    ok := ok and close < open
+                if useVolFilter
+                    bool volOK = (f.totalVol >= minVolShort) and (maxVolShort == 0 or f.totalVol <= maxVolShort)
+                    ok := ok and volOK
+                if useAgeFilter
+                    ok := ok and (ageBars >= minAgeShort)
+                if useShareFilter
+                    ok := ok and (f.bear >= shortBearShareMin) and (f.bull <= shortBullShareMax)
+                if ok
+                    int leftI = f.body.get_left()
+                    if na(bestBearIdx) or leftI > bestBearLeft
+                        bestBearIdx := i, bestBearLeft := leftI, bearMit := m
+
+// ===================== ENTRIES =====================
+var int lastBullLeftTraded = na
+var int lastBearLeftTraded = na
+var int lastEntryBar = na
+
+bool canEnter = na(lastEntryBar) or (bar_index - lastEntryBar >= cooldownBars)
+bool flat = strategy.position_size == 0
+
+if not na(bestBullIdx) and flat and canEnter
+    VolumaticFVG fB = fvgs.get(bestBullIdx)
+    int leftB = fB.body.get_left()
+    if (na(lastBullLeftTraded) or leftB != lastBullLeftTraded)
+        strategy.entry("Long", strategy.long)
+        lastBullLeftTraded := leftB
+        lastEntryBar := bar_index
+        label.new(bar_index, low,"Long  mit:" + str.tostring(bullMit, format.percent) +"  V:" + str.tostring(nz(fB.totalVol,0), format.volume) +"  Bull%:" + str.tostring(fB.bull) + " Bear%:" + str.tostring(fB.bear),style=label.style_label_up, color=color.new(color.teal, 0), textcolor=color.black)
+
+if not na(bestBearIdx) and flat and canEnter
+    VolumaticFVG fS = fvgs.get(bestBearIdx)
+    int leftS = fS.body.get_left()
+    if (na(lastBearLeftTraded) or leftS != lastBearLeftTraded)
+        strategy.entry("Short", strategy.short)
+        lastBearLeftTraded := leftS
+        lastEntryBar := bar_index
+        label.new(bar_index, high,"Short mit:" + str.tostring(bearMit, format.percent) +"  V:" + str.tostring(nz(fS.totalVol,0), format.volume) + "  Bull%:" + str.tostring(fS.bull) + " Bear%:" + str.tostring(fS.bear),style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black)
+
+// ===================== EXITS (SL + Trailing with trigger) =====================
+var bool longTrailActive  = false
+var bool shortTrailActive = false
+if strategy.position_size == 0
+    longTrailActive  := false
+    shortTrailActive := false
+
+float avgPrice = strategy.position_avg_price
+
+// LONG position
+if strategy.position_size > 0
+    float longStop     = avgPrice * (1 - slPercent/100)
+    float longTrigger  = avgPrice * (1 + trailTriggerPct/100)
+    if not longTrailActive and high >= longTrigger
+        longTrailActive := true
+    float longTrailPts = longTrailActive ? (avgPrice * (trailDistPct/100)) : na
+    strategy.exit("XL", from_entry="Long", stop=longStop, trail_points=longTrailPts)
+
+// SHORT position
+if strategy.position_size < 0
+    float shortStop     = avgPrice * (1 + slPercent/100)
+    float shortTrigger  = avgPrice * (1 - trailTriggerPct/100)
+    if not shortTrailActive and low <= shortTrigger
+        shortTrailActive := true
+    float shortTrailPts = shortTrailActive ? (avgPrice * (trailDistPct/100)) : na
+    strategy.exit("XS", from_entry="Short", stop=shortStop, trail_points=shortTrailPts)
+
+// Optional diagnostics
+plot(bullMit, "Candidate Bull mitigation (%)", color=color.teal)
+plot(bearMit, "Candidate Bear mitigation (%)", color=color.orange)
+
+View in Pine Editor・344 lines
+Use on chart
+1.2 K
+1
+23 429
+Inspired by: Volumatic Fair Value Gaps [BigBeluga] —
+
+
+License: CC BY-NC-SA 4.0 (Creative Commons Attribution–NonCommercial–ShareAlike).
+This script is a non-commercial derivative work that credits the original author and keeps the same license.
+
+What this strategy does
+
+This turns BigBeluga’s visual FVG concept into an entry/exit strategy. It scans bullish and bearish FVG boxes, measures how deep price has mitigated into a box (as a percentage), and opens a long/short when your mitigation threshold and filters are satisfied. Risk is managed with a fixed Stop Loss % and a Trailing Stop that activates only after a user-defined profit trigger.
+
+Additions vs. the original indicator
+
+✅ Strategy entries based on % mitigation into FVGs (long/short).
+
+✅ Lower-TF volume split using upticks/downticks; fallback if LTF data is missing (distributes prior bar volume by close’s position in its H–L range) to avoid NaN/0.
+
+✅ Per-FVG total volume filter (min/max) so you can skip weak boxes.
+
+✅ Age filter (min bars since the FVG was created) to avoid fresh/immature boxes.
+
+✅ Bull% / Bear% share filter (the 46%/53% numbers you see inside each FVG).
+
+✅ Optional candle confirmation and cooldown between trades.
+
+✅ Risk management: fixed SL % + Trailing Stop with a profit trigger (doesn’t trail until your trigger is reached).
+
+✅ Pine v6 safety: no unsupported args, no indexof/clamp/when, reverse-index deletes, guards against zero/NaN.
+
+How a trade is decided (logic overview)
+
+Detect FVGs (same rules as the original visual logic).
+
+For each FVG currently intersected by the bar, compute:
+
+Mitigation % (how deep price has entered the box).
+
+Bull%/Bear% split (internal volume share).
+
+Total volume (printed on the box) from LTF aggregation or fallback.
+
+Age (bars) since the box was created.
+
+Apply your filters:
+
+Mitigation ≥ Long/Short threshold.
+
+Volume between your min and max (if enabled).
+
+Age ≥ min bars (if enabled).
+
+Bull% / Bear% within your limits (if enabled).
+
+(Optional) the current candle must be in trade direction (confirm).
+
+If multiple FVGs qualify on the same bar, the strategy uses the most recent one.
+
+Enter long/short (no pyramiding).
+
+Exit with:
+
+Fixed Stop Loss %, and
+
+Trailing Stop that only starts after price reaches your profit trigger %.
+
+Input settings (quick guide)
+
+Mitigation source: close or high/low. Use high/low for intrabar touches; close is stricter.
+
+Mitigation % thresholds: minimal mitigation for Long and Short.
+
+TOTAL Volume filter: skip FVGs with too little/too much total volume (per box).
+
+Bull/Bear share filter: require, e.g., Long only if Bull% ≥ 50; avoid Short when Bull% is high (Short Bull% max).
+
+Age filter (bars): e.g., ≥ 20–30 bars to avoid fresh boxes.
+
+Confirm candle: require candle direction to match the trade.
+
+Cooldown (bars): minimum bars between entries.
+
+Risk:
+
+Stop Loss % (fixed from entry price).
+
+Activate trailing at +% profit (the trigger).
+
+Trailing distance % (the trailing gap once active).
+
+Lower-TF aggregation:
+
+Auto: TF/Divisor → picks 1/3/5m automatically.
+
+Fixed: choose 1/3/5/15m explicitly.
+If LTF can’t be fetched, fallback allocates prior bar’s volume by its close position in the bar’s H–L.
+
+Suggested starting presets (you should optimize per market)
+
+Mitigation: 60–80% for both Long/Short.
+
+Bull/Bear share:
+
+Long: Bull% ≥ 50–70, Bear% ≤ 100.
+
+Short: Bull% ≤ 60 (avoid shorting into strong support), Bear% ≥ 0–70 as you prefer.
+
+Age: ≥ 20–30 bars.
+
+Volume: pick a min that filters noise for your symbol/timeframe.
+
+Risk: SL 4–6%, trailing trigger 1–2%, distance 1–2% (crypto example).
+Set slippage/fees in Strategy Properties.
+
+Notes, limitations & best practices
+
+Data differences: The LTF split uses request.security_lower_tf. If the exchange/data feed has sparse LTF data, the fallback kicks in (it’s deliberate to avoid NaNs but is a heuristic).
+
+Real-time vs backtest: The current bar can update until close; results on historical bars use closed data. Use “Bar Replay” to understand intrabar effects.
+
+No pyramiding: Only one position at a time. Modify pyramiding in the header if you need scaling.
+
+Assets: For spot/crypto, TradingView “volume” is exchange volume; in some markets it may be tick volume—interpret filters accordingly.
+
+Risk disclosure: Past performance ≠ future results. Use appropriate position sizing and risk controls; this is not financial advice.
+
+Credits
+
+Visual FVG concept and original implementation: BigBeluga.
+
+This derivative strategy adds entry/exit logic, volume/age/share filters, robust LTF handling, and risk management while preserving the original spirit.
+
+License remains CC BY-NC-SA 4.0 (non-commercial, attribution required, share-alike).

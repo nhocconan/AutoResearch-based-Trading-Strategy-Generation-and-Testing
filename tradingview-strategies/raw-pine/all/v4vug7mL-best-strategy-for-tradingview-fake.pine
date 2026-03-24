@@ -1,0 +1,38 @@
+//@version=4
+strategy("Line break strategy", "LBS", default_qty_type = strategy.percent_of_equity, default_qty_value=100, currency="USD", commission_type=strategy.commission.percent, commission_value=0.07)
+
+lb_t = linebreak(syminfo.tickerid, input(3, 'break', input.integer))
+
+lb_open = security(lb_t, timeframe.period, open, barmerge.gaps_on)
+lb_high = security(lb_t, timeframe.period, high, barmerge.gaps_on)
+lb_low = security(lb_t, timeframe.period, low, barmerge.gaps_on)
+lb_close = security(lb_t, timeframe.period, close, barmerge.gaps_on)
+
+plotcandle(lb_open, lb_high, lb_low, lb_close, color = lb_close >= lb_open ? color.green : color.red)
+
+if lb_close > lb_open
+    strategy.entry("Long", true)
+else
+    strategy.close("Long")
+        
+if lb_close < lb_open
+    strategy.entry("Short", false)
+else
+    strategy.close("Short")
+
+View in Pine Editor・21 lines
+Use on chart
+1
+7
+7
+12
+13 898
+Hello everyone! I want to show you this strategy so you don't fall for the tricks of scammers. On TradingView, you can write an algorithm (probably more than one) that will show any profit you want: from 1% to 100,000% in one year (maybe more)! This can be done, for example, using the built-in linebreak () function and several conditions for opening long and short.
+
+I am sure that sometimes scammers show up on TradingView showing their incredible strategies. Will a smart person sell a profitable quick strategy? When a lot of people start using the quick strategy, it stops working. Therefore, no smart person would sell you a quick strategy. It is acceptable to sell slow strategies: several transactions per month - this does not greatly affect the market.
+
+So, don't fall for the tricks of scammers, write quick strategies yourself.
+
+About this strategy, I can say that the linebreak () function does not work correctly in it. Accordingly, the lines are not drawn correctly on the chart. They are drawn in such a way as to show the maximum profit. I watched this algorithm on a 1m timeframe - no lines are drawn in real time. This is a fake!
+
+

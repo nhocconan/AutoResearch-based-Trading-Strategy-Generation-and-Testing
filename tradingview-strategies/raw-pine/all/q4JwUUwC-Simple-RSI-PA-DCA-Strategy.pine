@@ -1,0 +1,215 @@
+//@version=5
+
+// Study of a Simple RSI based, PA (priceaveraging) and DCA strategy that opens a new position everytime it hits a specified price level below the first entry.
+// The first entry is opened when the specified rsi and moving average conditions are met. 
+// The following DCA levels are calculated exponentially and set, starting with a specified % of price drop. 
+// The disctance between the dca levels can be changed with the exponential scale.
+// Each position closes individually when it reaches a specified take profit.
+// The position can re-open again when it hits the price level again.
+// Each time a position is closed and reopened, the average price drops a little.
+// The position stays open until the first entry closes or when the price reaches the Stop level.
+// When the price reaches the Stop level, all positions will close at once.
+
+// The RSI and MA code for opening the entry is adapted from the Optimized RSI Buy the Dips strategy, by Coinrule.
+// This code is used for study purposes, but any other low/ dip finding indicator can be used.
+// https://www.tradingview.com/script/Pm1WAtyI-Optimized-RSI-Strategy-Buy-The-Dips-by-Coinrule/
+
+// Dynamic DCA layers are inspired by the Backtesting 3commas DCA Bot v2, by rouxam
+// This logic gives more flexibility because you can dyanically change the amount of dca entries.
+// https://www.tradingview.com/script/8d6Auyst-Backtesting-3commas-DCA-Bot-v2/
+
+// The use of for loops to (re)open and close different entries separately is based on the Simple_Pyramiding strategy.
+// https://www.tradingview.com/script/t6cNLqDN-Simple-Pyramiding/
+
+
+strategy('Simple_RSI+PA+DCA', overlay=true, pyramiding=99, initial_capital=500, calc_on_order_fills=true, default_qty_type=strategy.percent_of_equity, commission_type=strategy.commission.percent, commission_value=0.075, close_entries_rule='FIFO')
+
+
+// Backtest Window //
+start_time   = input.time(defval=timestamp("01 April 2021 20:00"), group = "Backtest Window", title="Start Time")
+end_time     = input.time(defval=timestamp("01 Aug 2030 20:00"),   group = "Backtest Window", title="End Time")
+window() => time >= start_time and time <= end_time
+
+
+// Inputs //
+takeProfit      = input.float  (3,           group = 'Risk',           title = 'Take Profit %', step=0.1)
+takeProfitAll   = input.float  (6,           group = "Risk",           title = 'Close All %',   step=0.1)
+linear_mode     = input.bool   (false,       group = 'DCA Settings',   title = 'Switch to linear DCA Layers')
+posCount        = input.int    (8,           group = 'DCA Settings',   title = 'Max Amount of DCA Layers')
+increment       = input.float  (2,           group = 'DCA Settings',   title = 'Base % to calculate DCA layers', step=0.5, minval=1.1)
+bar_lookback    = input.int    (4999,        group = 'DCA Settings',   title = 'Lines Bar Lookback', maxval = 4999)
+plotMA          = input.bool   (false,       group = 'Moving Average', title = 'Plot Moving Average')
+moving_average  = input.int    (100,         group = 'Moving Average', title = 'MA Length' )
+rsiLengthInput  = input.int    (14,          group = 'RSI Settings',   title = "RSI Length", minval=1)
+rsiSourceInput  = input.source (close,       group = 'RSI Settings',   title = 'Source')
+overSold        = input.int    (29,          group = 'RSI Settings',   title = 'Oversold, Trigger to Enter First Position')
+
+// variables //
+var open_position    = true   // true when there are open positions
+var entry_price      = 0.0    // the entry price of the first entry
+var dca_price        = 0.0    // the price of the different dca layers
+var int count        = 0      // bar counter since first open position
+var int max_bar      = 0      // max bar buffer variable for DCA lines, stop lines, average price
+var line dca_line    = na     // lines variable for creating dca lines
+
+
+// arrays //
+linesArray = array.new_float(posCount,na)  // array to store different dca price levels for creating the dca lines
+
+
+// Create max bar buffer for DCA lines, Stop and average price lines ///
+max_bar := count >= bar_lookback ? bar_lookback : count
+
+
+// Order size based on first entry and amount of DCA layers
+q = (strategy.equity  / posCount + 1) / open
+
+
+// Calculate Moving Averages
+movingaverage_signal = ta.sma(close ,moving_average)
+plot (plotMA ? movingaverage_signal : na, color = color.new(#f5ff35, 0))
+
+
+// RSI calculations //
+up   = ta.rma(math.max(ta.change(rsiSourceInput), 0), rsiLengthInput)
+down = ta.rma(-math.min(ta.change(rsiSourceInput), 0), rsiLengthInput)
+rsi  = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+
+// Buy Signal (co)
+co = ta.crossover(rsi, overSold) and close < movingaverage_signal
+
+
+// Create a white line for average price, since the last opened position //
+average_price = line.new(x1 = bar_index - max_bar, y1 = strategy.position_avg_price, x2 = bar_index, y2 = strategy.position_avg_price, color = color.white)
+    
+
+// Stop //
+// Create a red Stop level line based on a specified % above the average price //
+stop_level = strategy.position_avg_price + (strategy.position_avg_price / 100 * takeProfitAll)
+stop_line  = line.new(x1 = bar_index - max_bar, y1 = stop_level, x2 = bar_index, y2 = stop_level, color = color.red)
+    
+
+// Take profit definition per open position //
+take_profit_price = close * takeProfit / 100 / syminfo.mintick
+
+
+// Make sure the Stop level and average price level don't excied the bar buffer to avoid errors //
+if count <= bar_lookback
+    line.set_x1(stop_line,     strategy.opentrades.entry_bar_index(strategy.opentrades - 1))
+    line.set_x1(average_price, strategy.opentrades.entry_bar_index(strategy.opentrades - 1))
+
+
+// Exponential DCA Layer Calculation fucntion --> New caclulation, the base number is calculated based the range between the entry_price and 0 and the amount of DCA layers //
+dca_exponent_level(index) =>
+    base_number = math.pow(entry_price, (1 / posCount))
+    dca_level_calc = (entry_price - (math.pow(base_number,index))) * (1 - ((math.pow(1 + (increment / 100),index)) - 1))
+
+
+// Linear DCA Layer Calculation // Added option to switch
+dca_linear_level(index) =>   
+   entry_price - ((entry_price / posCount) * index)
+
+
+// Set  Entries //
+// Open the first entry and set the entry price //
+if co and strategy.position_size == 0 and window() 
+    open_position := true
+    entry_price   := close
+    strategy.entry(id = 'FE1', direction = strategy.long, qty = q)  
+    
+first_entry_line = line.new(x1 = bar_index - max_bar, y1 = entry_price, x2 = bar_index, y2 = entry_price, color = color.blue)
+
+
+// Start bar counting since the position is open //
+if open_position == true
+    count := count + 1
+
+
+// Set the DCA entries //
+// Prices below 1 are not set to avoid negative prices //
+if strategy.position_size > 0 and window()
+    for i = 0 to strategy.opentrades
+        dca_level_mode = linear_mode ? dca_linear_level(i) : dca_exponent_level(i)
+        if strategy.opentrades == i and i < posCount
+            dca_price := dca_level_mode
+            entry_id = 'DCA' + str.tostring(i + 1) 
+            strategy.entry(id = entry_id, direction = strategy.long, limit = dca_price, qty = q)  
+
+
+// Store the values of the different dca price levels in an array and create the dca lines // 
+// Prices below 1 are not stored//
+if open_position==true and window() 
+    for i = 1 to posCount -1
+        dca_level_mode = linear_mode ? dca_linear_level(i) : dca_exponent_level(i)
+        array.push(linesArray, dca_level_mode) 
+    
+    for i = 1 to array.size(linesArray) - 1
+        dca_line := line.new(x1 = bar_index - max_bar, y1 = array.get(linesArray, i), x2 = bar_index, y2 = array.get(linesArray, i),color = color.blue)
+
+
+// Create thick line to show the last Entry price //
+last_entry_price = line.new(x1 = bar_index[5], y1 = strategy.opentrades.entry_price(strategy.opentrades - 1), x2 = bar_index, y2 = strategy.opentrades.entry_price(strategy.opentrades - 1),color = color.rgb(255, 0, 204), width = 5)
+
+
+// Exit the first entry when the take profit triggered //   
+if strategy.opentrades > 0 and window() 
+    strategy.exit(id = 'Exit FE', from_entry = 'FE1', profit = take_profit_price)
+
+
+// Exit DCA entries when take profit is triggered //
+if strategy.opentrades > 0 and window() 
+    for i = 1 to strategy.opentrades 
+        exit_from = 'DCA' + str.tostring(i + 1)
+        exit_id = 'Exit_' + str.tostring(i + 1)
+        strategy.exit(id = exit_id, from_entry = exit_from, profit = take_profit_price)
+
+
+// Close all positions at once when Stop is crossed //
+if strategy.opentrades > 0 and ta.crossover(close,stop_level) and window() 
+    strategy.close_all()
+
+
+// Make sure nothing is open after alle positions are closed and set the condiftion back to be open for new entries //
+if strategy.position_size[1] > 0 and strategy.position_size == 0
+    strategy.cancel_all()
+    strategy.close_all()
+    line.delete(average_price)
+    line.delete(stop_line)
+    line.delete(dca_line)
+    open_position := false   // All position are closed, so back to false
+    count := 0               // Reset bar counter
+
+View in Pine Editor・183 lines
+Use on chart
+4
+7
+3
+18
+10 402
+Mar 7, 2023
+This strategy is a result of a study to understand better the workings of functions, for loops and the use of lines to visualize price levels. The strategy is a complete rewrite of the older RSI+PA+DCA Strategy with the goal to make it dynamic and to simplify the strategy settings to the bare minimum.
+
+In case you are not familiar with the older RSI+PA+DCA Strategy, here is a short explanation of the idea behind the strategy:
+
+The idea behind the strategy based on an RSI strategy of buying low. A position is entered when the RSI and moving average conditions are met. The position is closed when it reaches a specified take profit percentage. As soon as the first the position is opened multiple PA (price average) layers are setup based on a specified percentage of price drop. When the price hits the layer another position with the same position size is is opened. This causes the average cost price (the white line) to decrease. If the price drops more, another position is opened with another price average decrease as result. When the price starts rising again the different positions are separately closed when each reaches the specified take profit. The positions can be re-opened when the price drops again. And so on. When the price rises more and crosses over the average price and reached the specified Stop level (the red line) on top of it, it closes all the positions at once and cancels all orders. From that moment on it waits for another price dip before it opens a new position.
+
+This is the old RSI+PA+DCA Strategy:
+
+
+
+The reason to completely rewrite the code for this strategy is to create a more automated, adaptable and dynamic system. The old version is static and because of the linear use of code the amount of DCA levels were fixed to max 6 layers. If you want to add more DCA layers you manually need to change the script and add extra code. The big difference in the new version is that you can specify the amount of DCA layers in the strategy settings. The use of 'for loops' in the code gives the possibility to make this very dynamic and adaptable.
+
+The RSI code is adapted, just like the old version, from the RSI Strategy - Buy The Dips by Coinrule and is used for study purpose. Any other low/dip finding indicator can be used as well
+
+The distance between the DCA layers are calculated exponentially in a function. In the settings you can define the exponential scale to create the distance between the layers. The bigger the scale the bigger the distance. This calculation is not working perfectly yet and needs way more experimentation. Feel free to leave a comment if you have a better idea about this.
+The idea behind generating DCA layers with a 'for loop' is inspired by the Backtesting 3commas DCA Bot v2 by rouxam.
+
+The ideas for creating a dynamic position count and for opening and closing different positions separately based on a specified take profit are taken from the Simple_Pyramiding strategy I wrote previously.
+
+This code is a result of a study and not intended for use as a full functioning strategy. To make the code understandable for users that are not so much introduced into pine script (like myself), every step in the code is commented to explain what it does. Hopefully it helps.
+Enjoy!
+Mar 24, 2023
+Release Notes
+It was a bit of a headache, but I think I found a more elegant way to calculate the exponential DCA layers. The base number is calculated based on the max amount of DCA layers and the range between the entry price and 0. With this method the DCA layers never will be negative. The more layers you set the more the exponential layers get squeezed between the range limit of the entry price and 0.
+I also added the option to switch to a linear calculation of the DCA layers. Enjoy!

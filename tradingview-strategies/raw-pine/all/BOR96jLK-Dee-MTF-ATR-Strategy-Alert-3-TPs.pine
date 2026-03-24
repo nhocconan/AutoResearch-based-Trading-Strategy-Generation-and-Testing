@@ -1,0 +1,266 @@
+//@version=5
+strategy("NAS-Style MTF ATR Strategy (3 TPs)",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     process_orders_on_close = true)
+
+// ==== Inputs ====
+tfHTF        = input.timeframe("60", "Higher Timeframe")
+stAtrLen     = input.int(10, "Supertrend ATR Length", 1)
+stMult       = input.float(3.0, "Supertrend Multiplier", 0.1, 10.0)
+
+smaFastLen   = input.int(8, "Fast SMA")
+smaSlowLen   = input.int(9, "Slow SMA")
+
+atrLen       = input.int(10, "ATR Length (TP/SL)")
+atrRiskMult  = input.float(1.5, "ATR Stop Multiplier", 0.1, 10.0)
+tp1MultR     = input.float(1.0, "TP1 (R multiples)", 0.5, 5.0)
+tp2MultR     = input.float(2.0, "TP2 (R multiples)", 0.5, 5.0)
+tp3MultR     = input.float(3.0, "TP3 (R multiples)", 0.5, 5.0)
+
+// Risk per trade (optional, fixed quantity here)
+useRiskSizing   = input.bool(false, "Use $ Risk Sizing")
+riskUsdPerTrade = input.float(100.0, "Risk $ per Trade", 10.0)
+fixedQty        = input.float(1.0, "Fixed Quantity (if risk sizing off)", 0.1)
+
+// ==== Supertrend helper (single timeframe) ====
+f_supertrend(price_src, atr_len, mult) =>
+    atr   = ta.atr(atr_len)
+    upper = price_src + mult * atr
+    lower = price_src - mult * atr
+    var float dir  = 1.0
+    var float line = na
+
+    if price_src > nz(line, lower)
+        dir  := 1.0
+        line := math.max(lower, nz(line, lower))
+    else
+        dir  := -1.0
+        line := math.min(upper, nz(line, upper))
+    [dir, line]
+
+// ==== LTF Supertrend (chart timeframe) ====
+[ltfDir, ltfLine] = f_supertrend(close, stAtrLen, stMult)
+
+// ==== HTF Supertrend via security ====
+[htfDir_raw, htfLine_raw] = request.security(syminfo.tickerid, tfHTF, f_supertrend(close, stAtrLen, stMult))
+htfDir  = htfDir_raw
+htfLine = htfLine_raw
+
+// ==== SMAs on LTF ====
+smaFast = ta.sma(close, smaFastLen)
+smaSlow = ta.sma(close, smaSlowLen)
+
+// ==== Trend & entry conditions ====
+// LTF trend must agree with HTF trend
+bullLTF = (ltfDir == 1.0)  and (close > ltfLine)
+bearLTF = (ltfDir == -1.0) and (close < ltfLine)
+
+bullHTF = (htfDir == 1.0)
+bearHTF = (htfDir == -1.0)
+
+bull = bullLTF and bullHTF
+bear = bearLTF and bearHTF
+
+strongBuy  = bull and smaFast >= smaSlow
+strongSell = bear and smaFast <= smaSlow
+
+// Entry triggers on bar close
+longEntry  = strongBuy
+shortEntry = strongSell
+
+// ==== ATR and risk calculations ====
+atr = ta.atr(atrLen)
+
+// Long stop and R per unit
+longSL  = close - atrRiskMult * atr
+longR   = close - longSL
+
+// Short stop and R per unit
+shortSL = close + atrRiskMult * atr
+shortR  = shortSL - close
+
+// ==== Position size (no ternary, avoids syntax issues) ====
+float longQty  = na
+float shortQty = na
+
+if useRiskSizing and (longR > 0)
+    longQty := math.floor(riskUsdPerTrade / longR)
+else
+    longQty := fixedQty
+
+if useRiskSizing and (shortR > 0)
+    shortQty := math.floor(riskUsdPerTrade / shortR)
+else
+    shortQty := fixedQty
+
+// ==== Take-profit level variables ====
+float longTP1 = na
+float longTP2 = na
+float longTP3 = na
+
+float shortTP1 = na
+float shortTP2 = na
+float shortTP3 = na
+
+if longEntry and (longR > 0)
+    longTP1 := close + tp1MultR * longR
+    longTP2 := close + tp2MultR * longR
+    longTP3 := close + tp3MultR * longR
+
+if shortEntry and (shortR > 0)
+    shortTP1 := close - tp1MultR * shortR
+    shortTP2 := close - tp2MultR * shortR
+    shortTP3 := close - tp3MultR * shortR
+
+// ==== Entry orders ====
+// Only enter when flat
+isFlat = strategy.position_size == 0
+
+if longEntry and isFlat and (longQty > 0)
+    strategy.entry("Long", strategy.long, qty = longQty)
+
+if shortEntry and isFlat and (shortQty > 0)
+    strategy.entry("Short", strategy.short, qty = shortQty)
+
+// ==== Exit orders: SL + 3 TPs (scaled exits) ====
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    r   = atrRiskMult * atr
+
+    float longSL_now  = avg - atrRiskMult * atr
+    float longTP1_now = avg + tp1MultR * r
+    float longTP2_now = avg + tp2MultR * r
+    float longTP3_now = avg + tp3MultR * r
+
+    strategy.exit("L-TP1", from_entry = "Long",
+                  limit = longTP1_now, qty_percent = 33, comment = "TP1")
+    strategy.exit("L-TP2", from_entry = "Long",
+                  limit = longTP2_now, qty_percent = 33, comment = "TP2")
+    strategy.exit("L-TP3", from_entry = "Long",
+                  limit = longTP3_now, qty_percent = 34, comment = "TP3")
+    strategy.exit("L-SL", from_entry = "Long",
+                  stop = longSL_now, qty_percent = 100, comment = "SL")
+
+if strategy.position_size < 0
+    avg = strategy.position_avg_price
+    r   = atrRiskMult * atr
+
+    float shortSL_now  = avg + atrRiskMult * atr
+    float shortTP1_now = avg - tp1MultR * r
+    float shortTP2_now = avg - tp2MultR * r
+    float shortTP3_now = avg - tp3MultR * r
+
+    strategy.exit("S-TP1", from_entry = "Short",
+                  limit = shortTP1_now, qty_percent = 33, comment = "TP1")
+    strategy.exit("S-TP2", from_entry = "Short",
+                  limit = shortTP2_now, qty_percent = 33, comment = "TP2")
+    strategy.exit("S-TP3", from_entry = "Short",
+                  limit = shortTP3_now, qty_percent = 34, comment = "TP3")
+    strategy.exit("S-SL", from_entry = "Short",
+                  stop = shortSL_now, qty_percent = 100, comment = "SL")
+
+// ==== Plotting ====
+plot(ltfLine, "LTF Supertrend", color = ltfDir == 1.0 ? color.new(color.green, 0) : color.new(color.red, 0), linewidth = 2)
+plot(htfLine, "HTF Supertrend", color = color.new(color.blue, 60), linewidth = 2, style = plot.style_linebr)
+
+plotshape(longEntry,  title = "Strong Buy",  style = shape.triangleup,   location = location.belowbar, color = color.lime, text = "SB", size = size.tiny)
+plotshape(shortEntry, title = "Strong Sell", style = shape.triangledown, location = location.abovebar, color = color.red,  text = "SS", size = size.tiny)
+
+View in Pine Editor・171 lines
+Use on chart
+6
+254
+Dee MTF ATR Strategy follows these 7 clear, mechanical rules for entries, exits, and risk.
+
+Entry Rules
+Long Entry (Strong Buy)
+
+Condition 1: LTF Supertrend is bullish (price above LTF Supertrend line).
+
+Condition 2: HTF Supertrend is bullish (higher timeframe Supertrend direction = +1).
+
+Condition 3: Fast SMA(8) ≥ Slow SMA(9) (momentum alignment).
+
+Execution: Enter long at next bar’s open after all 3 conditions align.
+
+Short Entry (Strong Sell)
+
+Condition 1: LTF Supertrend is bearish (price below LTF Supertrend line).
+
+Condition 2: HTF Supertrend is bearish (higher timeframe Supertrend direction = -1).
+
+Condition 3: Fast SMA(8) ≤ Slow SMA(9) (momentum alignment).
+
+Execution: Enter short at next bar’s open after all 3 conditions align.
+
+Position rules: Only 1 position at a time (no pyramiding). No entry if already in a trade.
+
+Exit Rules
+For Long Trades
+
+SL: Entry price - (ATR × 1.5) → dynamic trailing stop.
+
+TP1: Entry price + (1.0 × Risk Distance) → exit 33% of position.
+
+TP2: Entry price + (2.0 × Risk Distance) → exit 33% of position.
+
+TP3: Entry price + (3.0 × Risk Distance) → exit 34% of position.
+
+For Short Trades
+
+SL: Entry price + (ATR × 1.5) → dynamic trailing stop.
+
+TP1: Entry price - (1.0 × Risk Distance) → exit 33% of position.
+
+TP2: Entry price - (2.0 × Risk Distance) → exit 33% of position.
+
+TP3: Entry price - (3.0 × Risk Distance) → exit 34% of position.
+
+Risk Distance = |Entry - SL| (so TP1 = 1R, TP2 = 2R, TP3 = 3R).
+
+Risk Management Rules
+Position Size:
+
+Fixed: fixedQty contracts (default 1.0).
+
+OR Risk‑based: Size so that SL hit = riskUsdPerTrade (default $100).
+
+Commission: 0.01% per side (adjustable).
+
+Order fill: On bar close (avoids intrabar repainting).
+
+Visual Confirmation Checklist
+When you see a SB (Strong Buy) triangle:
+
+Blue HTF Supertrend line should be flat/up (not down).
+
+Green LTF Supertrend line should be below price.
+
+SMA(8) line above or touching SMA(9) line.
+
+When you see a SS (Strong Sell) triangle:
+
+Blue HTF Supertrend line should be flat/down (not up).
+
+Red LTF Supertrend line should be above price.
+
+SMA(8) line below or touching SMA(9) line.
+
+Example Trade Plan (5m NAS100)
+
+Strong Buy signal appears at 1.7500:
+Entry: 1.7500
+ATR(10): 0.0020
+SL: 1.7500 - (1.5 × 0.0020) = 1.7470 (Risk = 30 points)
+TP1: 1.7500 + (1 × 30) = 1.7530 (33% out)
+TP2: 1.7500 + (2 × 30) = 1.7560 (33% out)
+TP3: 1.7500 + (3 × 30) = 1.7590 (34% out)
+
+Strategy Logic Summary
+Core idea: Trade only when LTF momentum aligns with HTF trend, using ATR for objective risk/reward scaling.
+
+Edge assumption: HTF trend filter reduces whipsaws, LTF momentum catches pullbacks into trend, 3R scaling captures trend continuation.

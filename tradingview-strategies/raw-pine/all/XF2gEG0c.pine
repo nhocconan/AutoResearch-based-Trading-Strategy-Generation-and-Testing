@@ -1,0 +1,58 @@
+//@version=6
+strategy("EMD Trend + Supertrend Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ==== INPUTS ====
+length = input.int(50, "EMA Length")
+devLen = input.int(20, "Deviation Length")
+mult = input.float(1.5, "Deviation Multiplier")
+
+atrPeriod = input.int(8, "Supertrend ATR Period")
+atrMult = input.float(0.7, "Supertrend Multiplier")
+
+// ==== BASE EMA ====
+emaBase = ta.ema(close, length)
+
+// ==== EMD DEVIATION ====
+dev = ta.ema(math.abs(close - emaBase), devLen)
+
+upper = emaBase + dev * mult
+lower = emaBase - dev * mult
+
+// ==== SUPERTREND ====
+[st, direction] = ta.supertrend(atrMult, atrPeriod)
+
+// ==== TREND FILTER ====
+trendLong = close > upper
+trendShort = close < lower
+
+// ==== ENTRY CONDITIONS ====
+longCondition = trendLong and direction == 1
+shortCondition = trendShort and direction == -1
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+// ==== EXIT CONDITIONS ====
+if strategy.position_size > 0 and direction == -1
+    strategy.close("Long")
+
+if strategy.position_size < 0 and direction == 1
+    strategy.close("Short")
+
+// ==== PLOTS ====
+plot(emaBase, color=color.orange, title="EMA Base")
+plot(upper, color=color.green, title="Upper Band")
+plot(lower, color=color.red, title="Lower Band")
+
+plot(st, color = direction == 1 ? color.green : color.red, title="Supertrend")
+
+View in Pine Editor・50 lines
+Use on chart
+1
+7
+9
+2 382
+I added the Supertrend Strategy to the EMD Trend indicator as a filter and optimized it as much as possible for very short-term scalping. The optimizations targeted BIST 30 companies.

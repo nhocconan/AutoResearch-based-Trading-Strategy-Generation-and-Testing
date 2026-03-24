@@ -1,0 +1,74 @@
+//@version=3
+//This is a simple strategy based on Doji star candlestick
+//It places two orders: buy stop at doji star high or previous candle high and sell stop at doji star low or previous candle low.
+//This strategy works very well with high time frames like Weekly TF because it eliminates the noise in doji formation.
+//
+
+strategy("Doji strategy W", overlay=true, calc_on_every_tick=true, pyramiding=0,default_qty_type=strategy.percent_of_equity,default_qty_value=100,currency=currency.USD)
+
+//INPUTS
+//MinDistance=input(100,'Minimum distance in ticks')
+Use_SL_TP=input(true,'Use stop loss and take profit?')
+TP=input(200,'Take Profit in ticks')
+SL=input(200,'Stop Loss in tiks')
+Doji = input(0.05, minval=0.01, title="Doji size", step=0.01)
+LongCandleRatio = input (0.7,'Long candle ratio', step=0.1, maxval=1)
+UseVolumeFilter = input(false,'Use Volume as filter (reccomended on lower TFs)')
+VolumeMA=input(24,'Moving Average of Volume e.g. TF 1h - MA suggested is 24',step=1)
+
+//VARIABILI
+body=close-open
+range=high-low
+abody=abs(body)
+ratio=abody/range
+longcandle= (ratio>LongCandleRatio)
+
+//Doji
+data=(abs(open - close) <= (high - low) * Doji)
+plotchar(data, title="Doji", text='Doji', color=black)
+longDist= longcandle[1] and range[1]>range? high: max(high,high[1])
+shortDist= longcandle[1] and range[1]>range? low: min(low,low[1])
+dojilow=data==1?low:na
+dojihigh=data==1?high:na
+
+goStar=data==1? UseVolumeFilter==false? true: volume>ema(volume,VolumeMA)?true:false:false
+//////////////////////////////////////////////////////////////////
+
+//STRATEGY
+
+strategy.order("buy stop",true,stop=longDist, oca_type=strategy.oca.cancel, oca_name="Dojy Entry",when=goStar)
+strategy.order("sell stop",false,stop=shortDist, oca_type=strategy.oca.cancel, oca_name="Dojy Entry",when=goStar)
+
+strategy.exit("exit buy","buy stop",loss=SL, profit=TP, when=Use_SL_TP)
+strategy.exit("exit sell","sell stop",loss=SL,profit=TP, when=Use_SL_TP)
+
+strategy.close("buy stop",when=not Use_SL_TP and close<dojilow)
+strategy.exit("exit buy","buy stop",profit=TP, when=not Use_SL_TP)
+strategy.close("sell stop",when=not Use_SL_TP and close>dojihigh)
+strategy.exit("exit sell","sell stop",profit=TP, when=not Use_SL_TP)
+
+View in Pine Editor・48 lines
+Use on chart
+8
+3
+2
+8
+22 762
+Oct 26, 2018
+This is a simple strategy based on Doji star candlestick.
+It places two orders: buy stop at doji star high or previous candle high and sell stop at doji star low or previous candle low.
+Exit rules are with take profit and fixed stop loss or take profit and stop loss at doji min or max.
+This strategy works very well with high time frames like Daily and Weekly because those are without noise in doji formation.
+
+Each currency pair has its own optimal setting for TP and SL: it's up to user find the best ones.
+I could implement SL based on ATR, maybe in next revision.
+
+Please use comment section for any feedback.
+Next improvement (only to whom is interested to this script and follows me): study with alerts on multiple tickers all at one. Leave a comment if you want to have access to study.
+Oct 27, 2018
+Release Notes
+Two updates:
+- Long candle before doji star: now the ratio between candle and its body can be customized.
+- Use Volume filter: this is helpful on higher timefarmes like 1h or 4h because avoid startegy to take trades when a doji is formed with low volume (example after NY close)
+
+So the performances (profit factor and profitable percentage) are improved.

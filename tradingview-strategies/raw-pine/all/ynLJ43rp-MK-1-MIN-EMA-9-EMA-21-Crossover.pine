@@ -1,0 +1,124 @@
+//@version=6
+strategy(
+     title = "EMA 9 / EMA 21 Crossover Strategy (v6)",
+     overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10
+)
+
+// ───── INPUTS ─────
+emaFastLen = input.int(9,  "EMA 9 Length")
+emaSlowLen = input.int(21, "EMA 21 Length")
+
+// ───── EMA CALCULATION ─────
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// ───── CROSS CONDITIONS ─────
+buySignal  = ta.crossover(emaFast, emaSlow)
+sellSignal = ta.crossunder(emaFast, emaSlow)
+
+// ───── STORE LAST SIGNAL (FIX) ─────
+var int lastSignal = 0   // 1 = BUY, -1 = SELL
+
+if buySignal
+    lastSignal := 1
+
+if sellSignal
+    lastSignal := -1
+
+// ───── STRATEGY ENTRIES ─────
+if buySignal
+    strategy.entry("BUY", strategy.long)
+
+if sellSignal
+    strategy.entry("SELL", strategy.short)
+
+// ───── EMA COLOR HIGHLIGHT ─────
+emaFastColor =
+     lastSignal == 1 ? color.lime :
+     lastSignal == -1 ? color.red :
+     color.green
+
+emaSlowColor = color.red
+
+// ───── PLOTS ─────
+plot(emaFast, title="EMA 9",  color=emaFastColor, linewidth=3)
+plot(emaSlow, title="EMA 21", color=emaSlowColor, linewidth=2)
+
+// ───── BUY / SELL LABELS ─────
+plotshape(buySignal,  text="BUY",  style=shape.labelup,   location=location.belowbar,
+          color=color.green, textcolor=color.white, size=size.small)
+
+plotshape(sellSignal, text="SELL", style=shape.labeldown, location=location.abovebar,
+          color=color.red, textcolor=color.white, size=size.small)
+
+// ───── LEGEND (TOP RIGHT — FIXED) ─────
+var table legend = table.new(position.top_right, 1, 4, border_width = 1)
+
+// Dynamic legend colors (persistent)
+buyLegendColor  = lastSignal == 1 ? color.green : color.gray
+sellLegendColor = lastSignal == -1 ? color.red : color.gray
+
+table.cell(legend, 0, 0, "EMA 9 / EMA 21", text_color=color.white, bgcolor=color.black)
+table.cell(legend, 0, 1, "BUY  → EMA 9 ABOVE EMA 21", text_color=color.white, bgcolor=buyLegendColor)
+table.cell(legend, 0, 2, "SELL → EMA 9 BELOW EMA 21", text_color=color.white, bgcolor=sellLegendColor)
+table.cell(legend, 0, 3, "Last Signal Active", text_color=color.white, bgcolor=color.new(color.black, 20))
+
+View in Pine Editor・67 lines
+Use on chart
+1
+7
+924
+EMA 9 / EMA 21 Crossover Strategy (1-Minute Scalping)
+
+This strategy is a clean, fast, and reliable EMA crossover system designed specifically for 1-minute intraday scalping.
+
+It uses only EMA 9 and EMA 21, keeping the chart uncluttered while delivering clear BUY and SELL signals based on momentum shifts.
+
+🔹 How It Works
+
+BUY Signal:
+When EMA 9 crosses above EMA 21, indicating bullish momentum.
+
+SELL Signal:
+When EMA 9 crosses below EMA 21, indicating bearish momentum.
+
+Signals are confirmed visually using:
+
+On-chart BUY / SELL text labels
+
+Dynamic EMA color highlighting
+
+Smart legend (top-right) that remembers the last active signal
+
+🎨 Visual Features
+
+EMA 9 plotted in green (turns bright on bullish trend)
+
+EMA 21 plotted in red
+
+BUY and SELL labels displayed directly on crossover candles
+
+Dynamic legend:
+
+BUY row stays green after bullish cross
+
+SELL row stays red after bearish cross
+
+Makes trend direction instantly clear, even on fast charts
+
+⏱ Best Use
+
+Timeframe: 1-minute
+
+Suitable for:
+
+Index scalping
+
+Options scalping
+
+High-liquidity stocks & ETFs
+
+Works best during high-volume market hours

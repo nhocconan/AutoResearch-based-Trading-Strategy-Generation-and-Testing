@@ -1,0 +1,695 @@
+//@version=5
+strategy("ORB + Key Session Levels (Backtest v1.2)",
+     overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     slippage=0,
+     calc_on_order_fills=true,
+     calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS  (same as your indicator)
+// ══════════════════════════════════════════════════════════════════════════════
+grpORB = "Opening Range"
+showORB = input.bool(true, "Show ORB", group=grpORB)
+orbStartTime = input.string("0930", "Start Time (HHMM ET)", tooltip="Enter time in 24hr format. Examples: 0800, 0930, 1400", group=grpORB, display=display.none)
+orbDuration = input.string("15 Min", "Duration", options=["5 Min", "15 Min", "30 Min", "1 Hour", "Custom"], group=grpORB, display=display.none)
+orbCustomEnd = input.string("0945", "Custom End (HHMM ET)", tooltip="Only used when Duration is 'Custom'", group=grpORB, display=display.none)
+showMidline = input.bool(true, "Show Midline", group=grpORB, display=display.none)
+orbHistory = input.int(1, "Days to Show", minval=1, maxval=20, group=grpORB, display=display.none)
+orbLineWidth = input.int(3, "Line Thickness", minval=1, maxval=5, group=grpORB, display=display.none)
+orbHighColor = input.color(color.new(#00d4ff, 0), "High Color", group=grpORB, display=display.none)
+orbLowColor = input.color(color.new(#00d4ff, 0), "Low Color", group=grpORB, display=display.none)
+orbMidColor = input.color(color.new(#00d4ff, 50), "Midline Color", group=grpORB, display=display.none)
+i_alertORB = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks ORB High/Low/Mid. Uncheck to see levels without alerts.", group=grpORB, display=display.none)
+
+// ── ORB TRADE SIGNALS ──
+grpSignals = "ORB Trade Signals"
+i_enableSignals  = input.bool(true, "Enable Trade Signals", tooltip="Backtest trades on ORB break.", group=grpSignals)
+i_orbEntryMode   = input.string("Breakout", "Entry Mode", options=["Breakout", "Retest Zone", "Retest Midpoint"], tooltip="Breakout: enter on candle close through level.\nRetest Zone: wait for candle to wick back to the broken level and close outside.\nRetest Midpoint: wait for candle to wick back to ORB midpoint and close outside.", group=grpSignals)
+i_orbRetestTimeout = input.int(20, "Retest Timeout (bars)", minval=3, maxval=100, tooltip="Max bars to wait for retest after breakout. Resets if no retest. Only used in Retest modes.", group=grpSignals, display=display.none)
+i_orbSLMethod    = input.string("Midpoint", "Stop Loss", options=["Midpoint", "Opposite Side", "Fixed Points"], tooltip="Midpoint: SL at middle of ORB range.\nOpposite Side: SL at ORB low (long) / ORB high (short).\nFixed Points: user-defined distance from entry.", group=grpSignals)
+i_orbSLPoints   = input.float(20.0, "SL Fixed Points", minval=0.25, step=0.25, tooltip="Only used when SL = Fixed Points.", group=grpSignals, display=display.none)
+i_orbContracts  = input.int(1, "Contracts", minval=1, maxval=100, tooltip="Total number of contracts/lots for the entry order.", group=grpSignals)
+i_orbTP1RR      = input.float(1.0, "TP1 R:R", minval=0.1, step=0.1, group=grpSignals, inline="tp1")
+i_orbTP1Qty     = input.int(1, "Close Qty", minval=1, maxval=100, tooltip="Contracts to close at TP1.", group=grpSignals, inline="tp1")
+i_orbTP2RR      = input.float(2.0, "TP2 R:R", minval=0.1, step=0.1, group=grpSignals, inline="tp2")
+i_orbTP2Qty     = input.int(0, "Close Qty", minval=0, maxval=100, tooltip="Contracts to close at TP2. Set 0 to skip.", group=grpSignals, inline="tp2")
+i_orbTP3RR      = input.float(3.0, "TP3 R:R", minval=0.1, step=0.1, group=grpSignals, inline="tp3")
+i_orbTP3Qty     = input.int(0, "Close Qty", minval=0, maxval=100, tooltip="Contracts to close at TP3. Set 0 to close all remaining.", group=grpSignals, inline="tp3")
+i_orbShowSLTP   = input.bool(true, "Show SL/TP Lines", group=grpSignals)
+i_orbShowEntry  = input.bool(true, "Show Entry Arrows", group=grpSignals)
+
+grpSessions = "Session Mode"
+sessionMode = input.string("Full Sessions", "Mode", options=["Kill Zones", "Full Sessions"], tooltip="Kill Zones: Non-overlapping high-activity windows\nFull Sessions: Traditional full session times", group=grpSessions, display=display.none)
+
+grpPD = "Previous Day"
+showPDHL = input.bool(true, "Show PDH/PDL", group=grpPD)
+pdSource = input.string("RTH Only", "PDH/PDL Source", options=["RTH Only", "Full Session (Futures)"], tooltip="RTH Only: 9:30 AM - 4:00 PM ET (cash market hours)\nFull Session: 6:00 PM - 5:00 PM ET (futures 23hr session)", group=grpPD, display=display.none)
+rthStart = input.string("0930", "RTH Start (HHMM ET)", tooltip="Regular Trading Hours start - used when Source = RTH Only", group=grpPD, display=display.none)
+rthEnd = input.string("1600", "RTH End (HHMM ET)", tooltip="Regular Trading Hours end - used when Source = RTH Only", group=grpPD, display=display.none)
+fullSessionStart = input.string("1800", "Full Session Start (HHMM ET)", tooltip="Futures session start (previous day 6pm) - used when Source = Full Session", group=grpPD, display=display.none)
+fullSessionEnd = input.string("1700", "Full Session End (HHMM ET)", tooltip="Futures session end (5pm) - used when Source = Full Session", group=grpPD, display=display.none)
+pdHistory = input.int(1, "Days to Show", minval=0, maxval=10, group=grpPD, display=display.none)
+pdLineWidth = input.int(1, "Line Thickness", minval=1, maxval=5, group=grpPD, display=display.none)
+pdhColor = input.color(color.new(color.yellow, 0), "Color", group=grpPD, display=display.none)
+i_alertPD = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks PDH/PDL. Uncheck to see levels without alerts.", group=grpPD, display=display.none)
+
+grpAsian = "Asian Session"
+showAsian = input.bool(true, "Show Asian H/L", group=grpAsian, display=display.none)
+showAsianBox = input.bool(false, "Show Session Box", tooltip="Draw a box around the Asian session range", group=grpAsian, display=display.none)
+showAsianMid = input.bool(false, "Show Midline", group=grpAsian, display=display.none)
+extendAsianLines = input.bool(true, "Extend Lines", tooltip="Extend Asian H/L lines beyond session end", group=grpAsian, display=display.none)
+asianExtendUntil = input.string("1130", "Extend Until (HHMM ET)", tooltip="Time to extend lines until when 'Extend Lines' is enabled", group=grpAsian, display=display.none)
+asianStartKZ = input.string("2000", "Kill Zone Start (HHMM ET)", group=grpAsian, display=display.none)
+asianEndKZ = input.string("0000", "Kill Zone End (HHMM ET)", group=grpAsian, display=display.none)
+asianStartFull = input.string("1800", "Full Session Start (HHMM ET)", group=grpAsian, display=display.none)
+asianEndFull = input.string("0300", "Full Session End (HHMM ET)", group=grpAsian, display=display.none)
+asianHistory = input.int(1, "Days to Show", minval=0, maxval=10, group=grpAsian, display=display.none)
+asianLineWidth = input.int(1, "Line Thickness", minval=1, maxval=5, group=grpAsian, display=display.none)
+asianColor = input.color(color.new(color.purple, 0), "Color", group=grpAsian, display=display.none)
+asianBoxColor = input.color(color.new(color.purple, 90), "Box Fill Color", group=grpAsian, display=display.none)
+i_alertAsian = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks Asian H/L. Uncheck to see levels without alerts.", group=grpAsian, display=display.none)
+
+grpLondon = "London Session"
+showLondon = input.bool(true, "Show London H/L", group=grpLondon, display=display.none)
+showLondonBox = input.bool(false, "Show Session Box", tooltip="Draw a box around the London session range", group=grpLondon, display=display.none)
+showLondonMid = input.bool(false, "Show Midline", group=grpLondon, display=display.none)
+extendLondonLines = input.bool(true, "Extend Lines", tooltip="Extend London H/L lines beyond session end", group=grpLondon, display=display.none)
+londonExtendUntil = input.string("1130", "Extend Until (HHMM ET)", tooltip="Time to extend lines until when 'Extend Lines' is enabled", group=grpLondon, display=display.none)
+londonStartKZ = input.string("0200", "Kill Zone Start (HHMM ET)", group=grpLondon, display=display.none)
+londonEndKZ = input.string("0500", "Kill Zone End (HHMM ET)", group=grpLondon, display=display.none)
+londonStartFull = input.string("0300", "Full Session Start (HHMM ET)", group=grpLondon, display=display.none)
+londonEndFull = input.string("0930", "Full Session End (HHMM ET)", tooltip="Ends when NY opens to avoid overlap", group=grpLondon, display=display.none)
+londonHistory = input.int(1, "Days to Show", minval=0, maxval=10, group=grpLondon, display=display.none)
+londonLineWidth = input.int(1, "Line Thickness", minval=1, maxval=5, group=grpLondon, display=display.none)
+londonColor = input.color(color.new(color.orange, 0), "Color", group=grpLondon, display=display.none)
+londonBoxColor = input.color(color.new(color.orange, 90), "Box Fill Color", group=grpLondon, display=display.none)
+i_alertLondon = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks London H/L. Uncheck to see levels without alerts.", group=grpLondon, display=display.none)
+
+grpNYAM = "NY AM Session"
+showNYAM = input.bool(false, "Show NY AM H/L", group=grpNYAM, display=display.none)
+showNYAMBox = input.bool(false, "Show Session Box", group=grpNYAM, display=display.none)
+showNYAMMid = input.bool(false, "Show Midline", group=grpNYAM, display=display.none)
+nyamStartKZ = input.string("0830", "Kill Zone Start (HHMM ET)", group=grpNYAM, display=display.none)
+nyamEndKZ = input.string("1100", "Kill Zone End (HHMM ET)", group=grpNYAM, display=display.none)
+nyamStartFull = input.string("0930", "Full Session Start (HHMM ET)", group=grpNYAM, display=display.none)
+nyamEndFull = input.string("1200", "Full Session End (HHMM ET)", group=grpNYAM, display=display.none)
+nyamHistory = input.int(1, "Days to Show", minval=0, maxval=10, group=grpNYAM, display=display.none)
+nyamLineWidth = input.int(1, "Line Thickness", minval=1, maxval=5, group=grpNYAM, display=display.none)
+nyamColor = input.color(color.new(color.blue, 0), "Color", group=grpNYAM, display=display.none)
+nyamBoxColor = input.color(color.new(color.blue, 90), "Box Fill Color", group=grpNYAM, display=display.none)
+i_alertNYAM = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks NY AM H/L. Uncheck to see levels without alerts.", group=grpNYAM, display=display.none)
+
+grpNYPM = "NY PM Session"
+showNYPM = input.bool(false, "Show NY PM H/L", group=grpNYPM, display=display.none)
+showNYPMBox = input.bool(false, "Show Session Box", group=grpNYPM, display=display.none)
+showNYPMMid = input.bool(false, "Show Midline", group=grpNYPM, display=display.none)
+nypmStartKZ = input.string("1330", "Kill Zone Start (HHMM ET)", group=grpNYPM, display=display.none)
+nypmEndKZ = input.string("1600", "Kill Zone End (HHMM ET)", group=grpNYPM, display=display.none)
+nypmStartFull = input.string("1200", "Full Session Start (HHMM ET)", group=grpNYPM, display=display.none)
+nypmEndFull = input.string("1600", "Full Session End (HHMM ET)", group=grpNYPM, display=display.none)
+nypmHistory = input.int(1, "Days to Show", minval=0, maxval=10, group=grpNYPM, display=display.none)
+nypmLineWidth = input.int(1, "Line Thickness", minval=1, maxval=5, group=grpNYPM, display=display.none)
+nypmColor = input.color(color.new(color.teal, 0), "Color", group=grpNYPM, display=display.none)
+nypmBoxColor = input.color(color.new(color.teal, 90), "Box Fill Color", group=grpNYPM, display=display.none)
+i_alertNYPM = input.bool(false, "Alert on Break", tooltip="Fire alertcondition when price breaks NY PM H/L. Uncheck to see levels without alerts.", group=grpNYPM, display=display.none)
+
+grpFVG = "Fair Value Gaps"
+showFVG = input.bool(true, "Show FVGs", group=grpFVG, display=display.none)
+fvgThreshold = input.float(0, "Threshold %", minval=0, maxval=5, step=0.1, group=grpFVG, display=display.none)
+autoThreshold = input.bool(true, "Auto Threshold", group=grpFVG, display=display.none)
+fvgExtend = input.int(50, "Extend Bars", minval=10, maxval=200, group=grpFVG, display=display.none)
+fvgMitigation = input.bool(true, "Remove When Mitigated", group=grpFVG, display=display.none)
+bullFVGColor = input.color(color.new(#089981, 70), "Bullish FVG", group=grpFVG, display=display.none)
+bearFVGColor = input.color(color.new(#f23645, 70), "Bearish FVG", group=grpFVG, display=display.none)
+i_alertFVG = input.bool(false, "Alert on FVG", tooltip="Fire alertcondition when FVGs form or get mitigated. Uncheck to see FVGs without alerts.", group=grpFVG, display=display.none)
+
+grpHTF = "Higher Timeframe Bias"
+showDashboard = input.bool(true, "Show Dashboard", group=grpHTF, display=display.none)
+htf1 = input.timeframe("240", "Timeframe 1", group=grpHTF, display=display.none)
+htf2 = input.timeframe("60", "Timeframe 2", group=grpHTF, display=display.none)
+swingLookback = input.int(10, "Swing Lookback", minval=3, maxval=50, group=grpHTF, display=display.none)
+dashPosition = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpHTF, display=display.none)
+dashSize = input.string("Tiny", "Dashboard Size", options=["Tiny", "Small", "Normal"], group=grpHTF, display=display.none)
+i_alertHTF = input.bool(false, "Alert on Bias Change", tooltip="Fire alertcondition when HTF bias changes. Uncheck to see dashboard without alerts.", group=grpHTF, display=display.none)
+
+grpDashColors = "Dashboard Colors"
+dashBgColor = input.color(color.new(#0d1117, 10), "Background", group=grpDashColors, display=display.none)
+dashBorderColor = input.color(color.new(color.gray, 70), "Border", group=grpDashColors, display=display.none)
+dashHeaderBg = input.color(color.new(#2962ff, 70), "Header Background", group=grpDashColors, display=display.none)
+dashHeaderText = input.color(color.white, "Header Text", group=grpDashColors, display=display.none)
+dashLabelColor = input.color(color.gray, "Labels", group=grpDashColors, display=display.none)
+dashBullColor = input.color(color.green, "Bullish", group=grpDashColors, display=display.none)
+dashBearColor = input.color(color.red, "Bearish", group=grpDashColors, display=display.none)
+dashNeutralColor = input.color(color.gray, "Neutral", group=grpDashColors, display=display.none)
+
+grpStyle = "Style"
+lineStyle = input.string("Solid", "Line Style", options=["Solid", "Dashed", "Dotted"], group=grpStyle, display=display.none)
+showLabels = input.bool(true, "Show Labels", group=grpStyle, display=display.none)
+labelSize = input.string("Tiny", "Label Size", options=["Tiny", "Small", "Normal"], group=grpStyle, display=display.none)
+
+// ---------- Backtest helpers ----------
+f_clampQty(_q) =>
+    math.max(0, int(math.floor(_q)))
+
+f_buildTp3Qty(_contracts, _tp1, _tp2, _tp3) =>
+    _tp3 == 0 ? math.max(0, _contracts - _tp1 - _tp2) : _tp3
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION TIME CALCULATION
+// ══════════════════════════════════════════════════════════════════════════════
+calcEndTime(simple string startTime, simple string duration) =>
+    startHour = math.floor(str.tonumber(str.substring(startTime, 0, 2)))
+    startMin = math.floor(str.tonumber(str.substring(startTime, 2, 4)))
+
+    addMins = switch duration
+        "5 Min" => 5
+        "15 Min" => 15
+        "30 Min" => 30
+        "1 Hour" => 60
+        => 0
+
+    totalMins = startMin + addMins
+    endHour = startHour + math.floor(totalMins / 60)
+    endMin = totalMins % 60
+
+    endHourStr = endHour < 10 ? "0" + str.tostring(endHour) : str.tostring(endHour)
+    endMinStr = endMin < 10 ? "0" + str.tostring(endMin) : str.tostring(endMin)
+
+    endHourStr + endMinStr
+
+orbEndTime = orbDuration == "Custom" ? orbCustomEnd : calcEndTime(orbStartTime, orbDuration)
+orbSession = orbStartTime + "-" + orbEndTime
+
+pdSession = pdSource == "RTH Only" ? rthStart + "-" + rthEnd : fullSessionStart + "-" + fullSessionEnd
+
+asianSession = sessionMode == "Kill Zones" ? asianStartKZ + "-" + asianEndKZ : asianStartFull + "-" + asianEndFull
+londonSession = sessionMode == "Kill Zones" ? londonStartKZ + "-" + londonEndKZ : londonStartFull + "-" + londonEndFull
+nyamSession = sessionMode == "Kill Zones" ? nyamStartKZ + "-" + nyamEndKZ : nyamStartFull + "-" + nyamEndFull
+nypmSession = sessionMode == "Kill Zones" ? nypmStartKZ + "-" + nypmEndKZ : nypmStartFull + "-" + nypmEndFull
+
+asianEnd = sessionMode == "Kill Zones" ? asianEndKZ : asianEndFull
+londonEnd = sessionMode == "Kill Zones" ? londonEndKZ : londonEndFull
+asianExtendSession = asianEnd + "-" + asianExtendUntil
+londonExtendSession = londonEnd + "-" + londonExtendUntil
+
+orbDisplayTime = orbDuration == "Custom" ? orbStartTime + "-" + orbCustomEnd : orbStartTime + " " + orbDuration
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+getLineStyle() =>
+    switch lineStyle
+        "Solid" => line.style_solid
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+
+getLabelSize() =>
+    switch labelSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+
+getDashSize() =>
+    switch dashSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+
+formatTF(simple string tf) =>
+    switch tf
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "15" => "15m"
+        "30" => "30m"
+        "45" => "45m"
+        "60" => "1H"
+        "120" => "2H"
+        "180" => "3H"
+        "240" => "4H"
+        "D" => "1D"
+        "W" => "1W"
+        => tf
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TYPES
+// ══════════════════════════════════════════════════════════════════════════════
+type orbData
+    float hi
+    float lo
+    float mid
+    int startBar
+    int hiBar
+    int loBar
+    line hiLine
+    line loLine
+    line midLine
+    label hiLabel
+    label loLabel
+    label midLabel
+
+type levelData
+    float hi
+    float lo
+    float mid
+    int startBar
+    int hiBar
+    int loBar
+    line hiLine
+    line loLine
+    line midLine
+    label hiLabel
+    label loLabel
+    label midLabel
+    box sessionBox
+
+type fvgData
+    float top
+    float bottom
+    bool isBull
+    int barIdx
+    box area
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VARIABLES
+// ══════════════════════════════════════════════════════════════════════════════
+var orbData[] orbArray = array.new<orbData>(0)
+var levelData[] pdArray = array.new<levelData>(0)
+var levelData[] asianArray = array.new<levelData>(0)
+var levelData[] londonArray = array.new<levelData>(0)
+var levelData[] nyamArray = array.new<levelData>(0)
+var levelData[] nypmArray = array.new<levelData>(0)
+var fvgData[] fvgArray = array.new<fvgData>(0)
+
+var float currentORBHigh = na
+var float currentORBLow = na
+var float currentORBMid = na
+var int orbStartBar = na
+var int orbHighBar = na
+var int orbLowBar = na
+var bool orbBuilding = false
+var bool orbComplete = false
+
+var bool  orbSignalFired     = false
+var bool  orbBreakoutPending = false
+var int   orbBreakoutDir     = 0
+var int   orbBreakoutBar     = 0
+var float orbSignalEntry     = na
+var float orbSignalSL    = na
+var float orbSignalTP1   = na
+var float orbSignalTP2   = na
+var float orbSignalTP3   = na
+var int   orbSignalDir   = 0
+var bool  orbTP1Hit      = false
+var bool  orbTP2Hit      = false
+var bool  orbTP3Hit      = false
+var bool  orbSLHit       = false
+var line  orbSLLine      = na
+var line  orbTP1Line     = na
+var line  orbTP2Line     = na
+var line  orbTP3Line     = na
+var label orbSLLabel     = na
+var label orbTP1Label    = na
+var label orbTP2Label    = na
+var label orbTP3Label    = na
+
+var float pdTrackHigh = na
+var float pdTrackLow = na
+var float currentPDH = na
+var float currentPDL = na
+
+var float asianHigh = na
+var float asianLow = na
+var int asianHighBar = na
+var int asianLowBar = na
+var int asianStartBar = na
+var bool asianBuilding = false
+var float currentAsianHigh = na
+var float currentAsianLow = na
+var float currentAsianMid = na
+var box currentAsianBox = na
+
+var float londonHigh = na
+var float londonLow = na
+var int londonHighBar = na
+var int londonLowBar = na
+var int londonStartBar = na
+var bool londonBuilding = false
+var float currentLondonHigh = na
+var float currentLondonLow = na
+var float currentLondonMid = na
+var box currentLondonBox = na
+
+var float nyamHigh = na
+var float nyamLow = na
+var int nyamHighBar = na
+var int nyamLowBar = na
+var int nyamStartBar = na
+var bool nyamBuilding = false
+var float currentNYAMHigh = na
+var float currentNYAMLow = na
+var float currentNYAMMid = na
+var box currentNYAMBox = na
+
+var float nypmHigh = na
+var float nypmLow = na
+var int nypmHighBar = na
+var int nypmLowBar = na
+var int nypmStartBar = na
+var bool nypmBuilding = false
+var float currentNYPMHigh = na
+var float currentNYPMLow = na
+var float currentNYPMMid = na
+var box currentNYPMBox = na
+
+var string htf1PrevBias = ""
+var string htf2PrevBias = ""
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TIME HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+newDay = dayofweek != dayofweek[1]
+inORBSession = not na(time(timeframe.period, orbSession, "America/New_York"))
+inPDSession = not na(time(timeframe.period, pdSession, "America/New_York"))
+inAsianSession = not na(time(timeframe.period, asianSession, "America/New_York"))
+inLondonSession = not na(time(timeframe.period, londonSession, "America/New_York"))
+inNYAMSession = not na(time(timeframe.period, nyamSession, "America/New_York"))
+inNYPMSession = not na(time(timeframe.period, nypmSession, "America/New_York"))
+
+inAsianExtend = extendAsianLines and not na(time(timeframe.period, asianExtendSession, "America/New_York"))
+inLondonExtend = extendLondonLines and not na(time(timeframe.period, londonExtendSession, "America/New_York"))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HTF BIAS
+// ══════════════════════════════════════════════════════════════════════════════
+[htf1High, htf1Low] = request.security(syminfo.tickerid, htf1, [high, low])
+htf1SwingHigh = ta.pivothigh(htf1High, swingLookback, swingLookback)
+htf1SwingLow = ta.pivotlow(htf1Low, swingLookback, swingLookback)
+
+var float htf1LastHigh = na
+var float htf1PrevHigh = na
+var float htf1LastLow = na
+var float htf1PrevLow = na
+
+if not na(htf1SwingHigh)
+    htf1PrevHigh := htf1LastHigh
+    htf1LastHigh := htf1SwingHigh
+
+if not na(htf1SwingLow)
+    htf1PrevLow := htf1LastLow
+    htf1LastLow := htf1SwingLow
+
+htf1HigherHigh = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh > htf1PrevHigh
+htf1LowerHigh = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh < htf1PrevHigh
+htf1HigherLow = not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow > htf1PrevLow
+htf1LowerLow = not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow < htf1PrevLow
+
+htf1Bullish = htf1HigherHigh and htf1HigherLow
+htf1Bearish = htf1LowerHigh and htf1LowerLow
+
+htf1BiasText = htf1Bullish ? "BULLISH" : htf1Bearish ? "BEARISH" : "NEUTRAL"
+htf1BiasColor = htf1Bullish ? dashBullColor : htf1Bearish ? dashBearColor : dashNeutralColor
+htf1StructureText = (htf1HigherHigh ? "HH" : htf1LowerHigh ? "LH" : "-") + " / " + (htf1HigherLow ? "HL" : htf1LowerLow ? "LL" : "-")
+
+htf1BiasChanged = htf1BiasText != htf1PrevBias and htf1PrevBias != ""
+htf1PrevBias := htf1BiasText
+
+[htf2High, htf2Low] = request.security(syminfo.tickerid, htf2, [high, low])
+htf2SwingHigh = ta.pivothigh(htf2High, swingLookback, swingLookback)
+htf2SwingLow = ta.pivotlow(htf2Low, swingLookback, swingLookback)
+
+var float htf2LastHigh = na
+var float htf2PrevHigh = na
+var float htf2LastLow = na
+var float htf2PrevLow = na
+
+if not na(htf2SwingHigh)
+    htf2PrevHigh := htf2LastHigh
+    htf2LastHigh := htf2SwingHigh
+
+if not na(htf2SwingLow)
+    htf2PrevLow := htf2LastLow
+    htf2LastLow := htf2SwingLow
+
+htf2HigherHigh = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh > htf2PrevHigh
+htf2LowerHigh = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh < htf2PrevHigh
+htf2HigherLow = not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow > htf2PrevLow
+htf2LowerLow = not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow < htf2PrevLow
+
+htf2Bullish = htf2HigherHigh and htf2HigherLow
+htf2Bearish = htf2LowerHigh and htf2LowerLow
+
+htf2BiasText = htf2Bullish ? "BULLISH" : htf2Bearish ? "BEARISH" : "NEUTRAL"
+htf2BiasColor = htf2Bullish ? dashBullColor : htf2Bearish ? dashBearColor : dashNeutralColor
+htf2StructureText = (htf2HigherHigh ? "HH" : htf2LowerHigh ? "LH" : "-") + " / " + (htf2HigherLow ? "HL" : htf2LowerLow ? "LL" : "-")
+
+htf2BiasChanged = htf2BiasText != htf2PrevBias and htf2PrevBias != ""
+htf2PrevBias := htf2BiasText
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORB TRACKING
+// ══════════════════════════════════════════════════════════════════════════════
+if newDay
+    currentORBHigh := na
+    currentORBLow := na
+    currentORBMid := na
+    orbBuilding := false
+    orbComplete := false
+    orbStartBar := na
+    orbHighBar := na
+    orbLowBar := na
+    orbSignalFired     := false
+    orbBreakoutPending := false
+    orbBreakoutDir     := 0
+    orbBreakoutBar     := 0
+    orbSignalDir       := 0
+    orbTP1Hit          := false
+    orbTP2Hit      := false
+    orbTP3Hit      := false
+    orbSLHit       := false
+    orbSignalEntry := na
+    orbSignalSL   := na
+    orbSignalTP1  := na
+    orbSignalTP2  := na
+    orbSignalTP3  := na
+    line.delete(orbSLLine)
+    line.delete(orbTP1Line)
+    line.delete(orbTP2Line)
+    line.delete(orbTP3Line)
+    label.delete(orbSLLabel)
+    label.delete(orbTP1Label)
+    label.delete(orbTP2Label)
+    label.delete(orbTP3Label)
+
+if inORBSession and not orbComplete
+    if not orbBuilding
+        orbStartBar := bar_index
+        orbBuilding := true
+    if na(currentORBHigh) or high > currentORBHigh
+        currentORBHigh := high
+        orbHighBar := bar_index
+    if na(currentORBLow) or low < currentORBLow
+        currentORBLow := low
+        orbLowBar := bar_index
+
+if not inORBSession and orbBuilding and not orbComplete and not na(currentORBHigh)
+    orbComplete := true
+    currentORBMid := (currentORBHigh + currentORBLow) / 2
+
+    if showORB
+        hiLine = line.new(orbHighBar, currentORBHigh, bar_index + 100, currentORBHigh, color=orbHighColor, style=getLineStyle(), width=orbLineWidth)
+        loLine = line.new(orbLowBar, currentORBLow, bar_index + 100, currentORBLow, color=orbLowColor, style=getLineStyle(), width=orbLineWidth)
+        midLine = showMidline ? line.new(orbStartBar, currentORBMid, bar_index + 100, currentORBMid, color=orbMidColor, style=line.style_dotted, width=math.max(1, orbLineWidth - 1)) : na
+
+        hiLabel = showLabels ? label.new(bar_index + 102, currentORBHigh, "ORB H", style=label.style_none, textcolor=orbHighColor, size=getLabelSize()) : na
+        loLabel = showLabels ? label.new(bar_index + 102, currentORBLow, "ORB L", style=label.style_none, textcolor=orbLowColor, size=getLabelSize()) : na
+        midLabel = showLabels and showMidline ? label.new(bar_index + 102, currentORBMid, "ORB M", style=label.style_none, textcolor=orbMidColor, size=getLabelSize()) : na
+
+        newOrb = orbData.new(currentORBHigh, currentORBLow, currentORBMid, orbStartBar, orbHighBar, orbLowBar, hiLine, loLine, midLine, hiLabel, loLabel, midLabel)
+        array.unshift(orbArray, newOrb)
+
+        if array.size(orbArray) > orbHistory
+            old = array.pop(orbArray)
+            line.delete(old.hiLine)
+            line.delete(old.loLine)
+            line.delete(old.midLine)
+            label.delete(old.hiLabel)
+            label.delete(old.loLabel)
+            label.delete(old.midLabel)
+
+if orbComplete and array.size(orbArray) > 0
+    current = array.get(orbArray, 0)
+    line.set_x2(current.hiLine, bar_index + 20)
+    line.set_x2(current.loLine, bar_index + 20)
+    if showMidline and not na(current.midLine)
+        line.set_x2(current.midLine, bar_index + 20)
+    if showLabels
+        label.set_x(current.hiLabel, bar_index + 22)
+        label.set_x(current.loLabel, bar_index + 22)
+        if showMidline and not na(current.midLabel)
+            label.set_x(current.midLabel, bar_index + 22)
+
+orbHighBreak = orbComplete and ta.crossover(close, currentORBHigh)
+orbLowBreak = orbComplete and ta.crossunder(close, currentORBLow)
+orbMidCrossUp = orbComplete and showMidline and ta.crossover(close, currentORBMid)
+orbMidCrossDown = orbComplete and showMidline and ta.crossunder(close, currentORBMid)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORB TRADE SIGNALS — Breakout / Retest Zone / Retest Midpoint
+// ══════════════════════════════════════════════════════════════════════════════
+bool orbLongSignal  = false
+bool orbShortSignal = false
+
+if i_enableSignals and orbBreakoutPending and bar_index > orbBreakoutBar and not orbSignalFired
+    _retestLvl = i_orbEntryMode == "Retest Midpoint" ? currentORBMid : (orbBreakoutDir == 1 ? currentORBHigh : currentORBLow)
+    if orbBreakoutDir == 1
+        if low <= _retestLvl and close > currentORBHigh
+            orbLongSignal      := true
+            orbBreakoutPending := false
+        else if close <= currentORBHigh
+            orbBreakoutPending := false
+    else if orbBreakoutDir == -1
+        if high >= _retestLvl and close < currentORBLow
+            orbShortSignal     := true
+            orbBreakoutPending := false
+        else if close >= currentORBLow
+            orbBreakoutPending := false
+    if orbBreakoutPending and bar_index - orbBreakoutBar >= i_orbRetestTimeout
+        orbBreakoutPending := false
+
+if i_enableSignals and orbComplete and not orbSignalFired
+    if i_orbEntryMode == "Breakout"
+        if barstate.isconfirmed and orbHighBreak
+            orbLongSignal := true
+        else if barstate.isconfirmed and orbLowBreak
+            orbShortSignal := true
+    else
+        if orbHighBreak and not orbBreakoutPending
+            orbBreakoutPending := true
+            orbBreakoutDir     := 1
+            orbBreakoutBar     := bar_index
+        else if orbLowBreak and not orbBreakoutPending
+            orbBreakoutPending := true
+            orbBreakoutDir     := -1
+            orbBreakoutBar     := bar_index
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STRATEGY ORDERS (Backtest)
+// ══════════════════════════════════════════════════════════════════════════════
+if orbLongSignal
+    orbSignalFired := true
+    orbSignalEntry := close
+    orbSignalDir   := 1
+
+    if i_orbSLMethod == "Midpoint"
+        orbSignalSL := currentORBMid
+    else if i_orbSLMethod == "Opposite Side"
+        orbSignalSL := currentORBLow
+    else
+        orbSignalSL := close - i_orbSLPoints
+
+    _risk = math.abs(orbSignalEntry - orbSignalSL)
+    if _risk > 0
+        orbSignalTP1 := orbSignalEntry + _risk * i_orbTP1RR
+        orbSignalTP2 := orbSignalEntry + _risk * i_orbTP2RR
+        orbSignalTP3 := orbSignalEntry + _risk * i_orbTP3RR
+
+    _contracts = f_clampQty(i_orbContracts)
+    _tp1Qty = f_clampQty(i_orbTP1Qty)
+    _tp2Qty = f_clampQty(i_orbTP2Qty)
+    _tp3Qty = f_clampQty(f_buildTp3Qty(_contracts, _tp1Qty, _tp2Qty, i_orbTP3Qty))
+
+    if _contracts > 0
+        strategy.entry("ORB Long", strategy.long, qty=_contracts)
+
+        if _tp1Qty > 0
+            strategy.exit("L-TP1", from_entry="ORB Long", qty=_tp1Qty, stop=orbSignalSL, limit=orbSignalTP1)
+        if _tp2Qty > 0
+            strategy.exit("L-TP2", from_entry="ORB Long", qty=_tp2Qty, stop=orbSignalSL, limit=orbSignalTP2)
+        if _tp3Qty > 0
+            strategy.exit("L-TP3", from_entry="ORB Long", qty=_tp3Qty, stop=orbSignalSL, limit=orbSignalTP3)
+
+if orbShortSignal
+    orbSignalFired := true
+    orbSignalEntry := close
+    orbSignalDir   := -1
+
+    if i_orbSLMethod == "Midpoint"
+        orbSignalSL := currentORBMid
+    else if i_orbSLMethod == "Opposite Side"
+        orbSignalSL := currentORBHigh
+    else
+        orbSignalSL := close + i_orbSLPoints
+
+    _risk = math.abs(orbSignalSL - orbSignalEntry)
+    if _risk > 0
+        orbSignalTP1 := orbSignalEntry - _risk * i_orbTP1RR
+        orbSignalTP2 := orbSignalEntry - _risk * i_orbTP2RR
+        orbSignalTP3 := orbSignalEntry - _risk * i_orbTP3RR
+
+    _contracts = f_clampQty(i_orbContracts)
+    _tp1Qty = f_clampQty(i_orbTP1Qty)
+    _tp2Qty = f_clampQty(i_orbTP2Qty)
+    _tp3Qty = f_clampQty(f_buildTp3Qty(_contracts, _tp1Qty, _tp2Qty, i_orbTP3Qty))
+
+    if _contracts > 0
+        strategy.entry("ORB Short", strategy.short, qty=_contracts)
+
+        if _tp1Qty > 0
+            strategy.exit("S-TP1", from_entry="ORB Short", qty=_tp1Qty, stop=orbSignalSL, limit=orbSignalTP1)
+        if _tp2Qty > 0
+            strategy.exit("S-TP2", from_entry="ORB Short", qty=_tp2Qty, stop=orbSignalSL, limit=orbSignalTP2)
+        if _tp3Qty > 0
+            strategy.exit("S-TP3", from_entry="ORB Short", qty=_tp3Qty, stop=orbSignalSL, limit=orbSignalTP3)
+
+// Extend SL/TP lines forward each bar (visuals)
+if orbSignalDir != 0 and i_orbShowSLTP
+    if not na(orbSLLine)
+        line.set_x2(orbSLLine, bar_index + 20)
+        line.set_x2(orbTP1Line, bar_index + 20)
+        line.set_x2(orbTP2Line, bar_index + 20)
+        line.set_x2(orbTP3Line, bar_index + 20)
+    if showLabels and not na(orbSLLabel)
+        label.set_x(orbSLLabel, bar_index + 22)
+        label.set_x(orbTP1Label, bar_index + 22)
+        label.set_x(orbTP2Label, bar_index + 22)
+        label.set_x(orbTP3Label, bar_index + 22)
+
+// Entry arrows
+plotshape(i_orbShowEntry and orbLongSignal,  title="ORB Long",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, text="ORB LONG")
+plotshape(i_orbShowEntry and orbShortSignal, title="ORB Short", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, text="ORB SHORT")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NOTE:
+// Your original script continues with PDH/PDL, Sessions, FVG, Dashboard, Alerts.
+// Paste the REST of your original code BELOW this line unchanged.
+// (Everything after your ORB section can remain identical.)
+// ══════════════════════════════════════════════════════════════════════════════
+
+View in Pine Editor・672 lines
+Use on chart
+3
+2
+667
+Mar 3
+This is an Opening Range Breakout (ORB) strategy with optional retest entries, plus a bunch of context levels (previous day high/low, Asian/London/NY session highs/lows, and Fair Value Gaps) drawn on the chart to help you see where price is relative to key liquidity/structure zones.
+Mar 3
+Release Notes
+This is an Opening Range Breakout (ORB) strategy with optional retest entries, plus a bunch of context levels (previous day high/low, Asian/London/NY session highs/lows, and Fair Value Gaps) drawn on the chart to help you see where price is relative to key liquidity/structure zones.
+
+What it trades
+
+Once per day (reset at a new day), it builds an Opening Range from a user-defined start time (default 9:30 ET) for a set duration (default 15 minutes). From that range it defines:
+
+ORB High
+
+ORB Low
+
+ORB Midpoint (average of high and low)
+
+After the opening range is finished (“ORB complete”), the script watches for price to break out of that range and takes trades based on your selected entry mode.

@@ -1,0 +1,53 @@
+//@version=5
+strategy("Diaper Sniper v16 — LOW VOL V CATCHER", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+
+// SETTINGS
+lookback     = input.int(30, "Lookback bars")
+minDropPct   = input.float(-6.0, "Min % drop from high")
+
+// DROP FROM HIGH (previous bars)
+highPrev = ta.highest(high[1], lookback)
+drop     = (close - highPrev) / highPrev * 100
+isDown   = drop <= minDropPct
+
+// VOLUME — REMOVED ENTIRELY (catches dead-quiet reversals)
+volOk    = true
+
+// GREEN CANDLE
+green    = close > open
+
+// TRIGGER
+diaper   = isDown and green
+
+if (diaper)
+    strategy.entry("Diaper", strategy.long)
+
+strategy.exit("DiaperExit", "Diaper", profit=20, loss=8)
+
+// TINY ARROWS
+plotshape(diaper, location=location.belowbar, color=#39ff14, style=shape.triangleup, size=size.tiny, text="D")
+
+alertcondition(diaper, title="Diaper Sniper", message="{\"content\":\"🚀 DIAPER V {{ticker}} @ {{close}} | {{interval}}\"}")
+
+View in Pine Editor・31 lines
+Use on chart
+5
+600
+Diaper Sniper v16 — Low-Vol Reversal Hunter
+
+Catches dead-cat bounces and V-shaped reversals on the day’s biggest losers.
+Designed for pennies and trash stocks that drop 6 %+ from recent high and snap back on any volume + green candle.
+
+Features:
+• Tiny green “D” = reversal signal
+• Works on 1m → daily
+• Fully adjustable filters
+
+
+Best on low-float runners that bleed hard and bounce harder.
+Use tiny size — it fires a lot.
+
+Public version — code visible. No invite-only on Essential plan.
+do not alter settings with out first recording defaults.. defaults are quite effective
+2025 build. Test at your own risk.

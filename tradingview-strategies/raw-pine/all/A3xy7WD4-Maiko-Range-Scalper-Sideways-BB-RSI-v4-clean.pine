@@ -1,0 +1,217 @@
+//@version=5
+strategy("Maiko Range Scalper (Sideways BB + RSI) – v4 clean",
+     overlay=true,
+     initial_capital=5000,
+     commission_type=strategy.commission.percent, commission_value=0.06)
+
+// ===== Inputs =====
+tfHTF     = input.timeframe("60", "HTF voor range (15 of 60)")
+lenRange  = input.int(96, "HTF lookback voor range (bars)", minval=10)
+bbLen     = input.int(20, "Bollinger lengte", minval=5)
+bbMult    = input.float(2.0, "Bollinger std dev", step=0.1)
+rsiLen    = input.int(14, "RSI lengte", minval=5)
+rsiLong   = input.int(30, "RSI drempel Long ≤", minval=5, maxval=50)
+rsiShort  = input.int(70, "RSI drempel Short ≥", minval=50, maxval=95)
+useVWAP   = input.bool(false, "Extra filter: prijs nabij VWAP (±X%)")
+vwapBand  = input.float(0.25, "VWAP tolerantie %", step=0.05)
+tpMode    = input.string("Mid band", "Take-Profit doel", options=["Mid band","Tegenoverliggende band/Range"])
+slBufferP = input.float(0.15, "SL buffer buiten range (%)", step=0.05, minval=0.05)
+maxPosPct = input.float(20, "Max positie t.o.v. account (%)", step=1)
+
+// ===== HTF Range (MTF) =====
+htfHigh = request.security(syminfo.tickerid, tfHTF, ta.highest(high, lenRange))
+htfLow  = request.security(syminfo.tickerid, tfHTF, ta.lowest(low,  lenRange))
+rangeMid = (htfHigh + htfLow) / 2.0
+
+// ===== LTF Indicatoren =====
+basis  = ta.sma(close, bbLen)
+dev    = ta.stdev(close, bbLen) * bbMult
+bbU    = basis + dev
+bbL    = basis - dev
+rsi    = ta.rsi(close, rsiLen)
+vwapV  = ta.vwap
+
+// ===== Filters =====
+inRange = (close <= htfHigh) and (close >= htfLow)
+vwapOK  = not useVWAP or (math.abs(close - vwapV) / vwapV * 100 <= vwapBand)
+
+// ===== Signalen =====
+longCond  = inRange and vwapOK and (close <= bbL) and (rsi <= rsiLong)
+shortCond = inRange and vwapOK and (close >= bbU) and (rsi >= rsiShort)
+
+// ===== Position sizing =====
+equity      = strategy.equity
+maxQtyValue = equity * (maxPosPct / 100.0)
+qty         = maxQtyValue / close
+
+// ===== Stops & Targets =====
+longSL  = htfLow  * (1.0 - slBufferP / 100.0)
+shortSL = htfHigh * (1.0 + slBufferP / 100.0)
+
+longTP  = tpMode == "Mid band" ? basis : math.max(basis, htfHigh)
+shortTP = tpMode == "Mid band" ? basis : math.min(basis, htfLow)
+
+// ===== Huidige positie =====
+isFlat  = strategy.position_size == 0
+isLong  = strategy.position_size > 0
+isShort = strategy.position_size < 0
+
+// ===== Orders =====
+if (longCond and (isFlat or isShort))
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("L-Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+if (shortCond and (isFlat or isLong))
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// ===== Plots =====
+plot(htfHigh, "HTF Resistance", color=color.new(color.red, 0),   linewidth=2)
+plot(htfLow,  "HTF Support",    color=color.new(color.green, 0), linewidth=2)
+plot(basis, "BB Basis", color=color.new(color.blue, 0))
+plot(bbU,   "BB Upper", color=color.new(color.blue, 0))
+plot(bbL,   "BB Lower", color=color.new(color.blue, 0))
+plot(vwapV, title="VWAP", color=color.new(color.purple, 0), display=useVWAP ? display.all : display.none)
+
+// ===== Midline als dashed line object =====
+var line midLine = na
+if barstate.islast
+    if na(midLine)
+        midLine := line.new(bar_index-500, rangeMid, bar_index, rangeMid, xloc=xloc.bar_index, extend=extend.right, color=color.gray, style=line.style_dashed, width=1)
+    else
+        line.set_xy1(midLine, bar_index-500, rangeMid)
+        line.set_xy2(midLine, bar_index, rangeMid)
+        line.set_color(midLine, color.gray)
+        line.set_style(midLine, line.style_dashed)
+        line.set_width(midLine, 1)
+
+// ===== Signal markeringen =====
+plotshape(longCond,  title="Long signal",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+plotshape(shortCond, title="Short signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red,   0))
+
+// ===== Alerts =====
+alertcondition(longCond,  title="Long Setup",  message="Long setup: BB bounce + RSI in HTF-range")
+alertcondition(shortCond, title="Short Setup", message="Short setup: BB bounce + RSI in HTF-range")
+
+View in Pine Editor・94 lines
+Use on chart
+1
+8
+1 549
+Purpose
+
+It’s a range scalping strategy for crypto. It tries to take small, repeatable trades inside a sideways market: buy near the bottom of the range, sell near the middle/top (and the reverse for shorts).
+
+Core idea (two timeframes)
+
+Define the trading range on a higher timeframe (HTF)
+
+You choose the HTF (e.g., 15m or 1h).
+
+The script finds the highest high and lowest low over a lookback window (e.g., last 96 HTF candles) → these become HTF Resistance and HTF Support.
+
+It also calculates the midline (average of support/resistance).
+
+Trade signals on your lower timeframe (LTF)
+
+You run the strategy on a fast chart (e.g., 1m or 5m).
+
+Entries are only allowed inside the HTF range.
+
+Entry logic (mean reversion)
+
+Indicators on the LTF:
+
+Bollinger Bands (length & std dev configurable).
+
+RSI (length & thresholds configurable).
+
+Optional VWAP proximity filter (price must be within X% of VWAP).
+
+Long setup:
+Price touches/under-cuts the lower Bollinger band AND RSI ≤ threshold (default 30) AND price is inside the HTF range (and passes VWAP filter if enabled).
+
+Short setup:
+Price touches/exceeds the upper Bollinger band AND RSI ≥ threshold (default 70) AND price is inside the HTF range (and passes VWAP filter if enabled).
+
+Exits and risk
+
+Stop-loss: placed just outside the HTF range with a configurable buffer %:
+
+Long SL = HTF Support × (1 − buffer).
+
+Short SL = HTF Resistance × (1 + buffer).
+
+Take-profit (selectable):
+
+Mid band (the Bollinger basis) → conservative, faster exits.
+
+Opposite band / HTF boundary → more aggressive, higher RR but more give-backs.
+
+Position sizing
+
+A simple cap: maximum position size = percent of account equity (e.g., 20%).
+The script calculates quantity from that cap and current price.
+
+Plots you’ll see on the chart
+
+HTF Resistance (red) and HTF Support (green) via plot().
+
+HTF Midline (gray dashed) drawn with a line.new() object (because plot() cannot do dashed).
+
+Bollinger basis/upper/lower on the LTF.
+
+Optional VWAP line (only shown if you enable the filter).
+
+Signal markers (green triangle up for Long setups, red triangle down for Short setups).
+
+Alerts
+
+Two alertconditions:
+
+“Long Setup” – when a long entry condition appears.
+
+“Short Setup” – when a short entry condition appears.
+Create alerts from these to get notified in real time.
+
+How to use it (quick start)
+
+Add to a 1m or 5m chart of a liquid coin (BTC, ETH, SOL).
+
+Set HTF timeframe (start with 1h) and lookback (e.g., 96 = ~4 days on 1h).
+
+Keep default Bollinger/RSI first; tune later.
+
+Choose TP mode:
+
+“Mid band” for quick scalps.
+
+“Opposite band/Range” if the range is very clean and you want bigger targets.
+
+Set SL buffer (0.15–0.30% is common; adjust for volatility).
+
+Set Max position % to control size (e.g., 20%).
+
+(Optional) Enable VWAP filter to skip stretched moves.
+
+When it works best
+
+Clearly sideways markets with visible support/resistance on the HTF.
+
+High-liquidity pairs where spreads/fees are small relative to your scalp target.
+
+Limitations & safety notes
+
+True breakouts will invalidate mean-reversion logic—your SL outside the range is there to cut losses fast.
+
+Fees can eat into small scalps—prefer limit orders, rebates, and liquid pairs.
+
+Backtest results vary by exchange data; always forward-test on small size.
+
+If you want, I can:
+
+Add an ATR-based stop/target option.
+
+Provide a study-only version (signals/alerts, no trading engine).
+
+Pre-set risk to your €5,000 plan (e.g., ~0.5% max loss/trade) with calculated qty.

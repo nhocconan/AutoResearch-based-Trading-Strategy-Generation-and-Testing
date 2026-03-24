@@ -1,0 +1,302 @@
+//@version=6
+
+strategy('MA Strategy: Dual Entry Filter', shorttitle = 'MA Strategy', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 40)
+
+
+
+// ==================== MAIN SETTINGS ====================
+
+ma_type = input.string('EMA', 'Moving Average Type', options = ['SMA', 'EMA', 'WMA', 'HMA', 'VWMA', 'RMA'], group = 'MA Settings')
+
+ma_length = input.int(40, 'MA Length', minval = 1, group = 'MA Settings')
+
+
+
+// ==================== TREND FILTER SETTINGS ====================
+
+use_trend_filter = input.bool(false, 'Use Trend Filter MA', group = 'Trend Filter')
+
+trend_ma_type = input.string('EMA', 'Trend MA Type', options = ['SMA', 'EMA', 'WMA', 'HMA', 'VWMA', 'RMA'], group = 'Trend Filter')
+
+trend_ma_length = input.int(70, 'Trend MA Length', minval = 1, group = 'Trend Filter')
+
+
+
+// ==================== ENTRY SETTINGS ====================
+
+entry_mode = input.string('Crossover', 'Entry Mode', options = ['Crossover', 'Full Candle Confirmation'], group = 'Entry Settings')
+
+enable_long = input.bool(true, 'Enable Long Trades', group = 'Entry Settings')
+
+enable_short = input.bool(true, 'Enable Short Trades', group = 'Entry Settings')
+
+
+
+// ==================== MA CALCULATION FUNCTION ====================
+
+get_ma(source, length, ma_type) =>
+
+    switch ma_type
+
+        'SMA' => ta.sma(source, length)
+
+        'EMA' => ta.ema(source, length)
+
+        'WMA' => ta.wma(source, length)
+
+        'HMA' => ta.hma(source, length)
+
+        'VWMA' => ta.vwma(source, length)
+
+        'RMA' => ta.rma(source, length)
+
+        => ta.sma(source, length)
+
+
+
+// ==================== CALCULATE MA ====================
+
+ma_value = get_ma(close, ma_length, ma_type)
+
+
+
+// Calculate Trend Filter MA
+
+trend_ma_value = use_trend_filter ? get_ma(close, trend_ma_length, trend_ma_type) : na
+
+
+
+// Trend direction based on MA relationship
+
+trend_is_bullish = use_trend_filter ? ma_value > trend_ma_value : true
+
+trend_is_bearish = use_trend_filter ? ma_value < trend_ma_value : true
+
+
+
+// ==================== CROSSOVER SIGNALS ====================
+
+bullish_cross = ta.crossover(close, ma_value)
+
+bearish_cross = ta.crossunder(close, ma_value)
+
+
+
+// Price position relative to MA
+
+price_above_ma = close > ma_value
+
+price_below_ma = close < ma_value
+
+
+
+// ==================== FULL CANDLE CONFIRMATION ====================
+
+// Full candle above MA: open, high, low, close all above MA
+
+full_candle_above = open > ma_value and high > ma_value and low > ma_value and close > ma_value
+
+
+
+// Full candle below MA: open, high, low, close all below MA
+
+full_candle_below = open < ma_value and high < ma_value and low < ma_value and close < ma_value
+
+
+
+// Track if we had a crossover recently and haven't entered yet
+
+var bool waiting_for_long = false
+
+var bool waiting_for_short = false
+
+
+
+// Reset waiting flags if price crosses back OR if trend filter changes
+
+if bearish_cross
+
+    waiting_for_long := false
+
+    waiting_for_long
+
+if bullish_cross
+
+    waiting_for_short := false
+
+    waiting_for_short
+
+
+
+// Also reset waiting flags if trend filter condition is no longer valid
+
+if use_trend_filter
+
+    if not trend_is_bullish
+
+        waiting_for_long := false
+
+        waiting_for_long
+
+    if not trend_is_bearish
+
+        waiting_for_short := false
+
+        waiting_for_short
+
+
+
+// Entry conditions based on mode
+
+bool long_condition = false
+
+bool short_condition = false
+
+
+
+if entry_mode == 'Crossover'
+
+    long_condition := bullish_cross and enable_long and trend_is_bullish
+
+    short_condition := bearish_cross and enable_short and trend_is_bearish
+
+    short_condition
+
+else if entry_mode == 'Full Candle Confirmation'
+
+    // Mark that we're waiting for confirmation after crossover (only if trend allows)
+
+    if bullish_cross and trend_is_bullish
+
+        waiting_for_long := true
+
+        waiting_for_long
+
+    if bearish_cross and trend_is_bearish
+
+        waiting_for_short := true
+
+        waiting_for_short
+
+
+
+    // Enter when we get a full candle above/below after crossover (and trend still valid)
+
+    long_condition := waiting_for_long and full_candle_above and enable_long and trend_is_bullish
+
+    short_condition := waiting_for_short and full_candle_below and enable_short and trend_is_bearish
+
+
+
+    // Reset flags after entry
+
+    if long_condition
+
+        waiting_for_long := false
+
+        waiting_for_long
+
+    if short_condition
+
+        waiting_for_short := false
+
+        waiting_for_short
+
+
+
+// ==================== DYNAMIC COLOR ====================
+
+// Green when price above MA, Red when price below MA
+
+ma_color = price_above_ma ? color.new(#04b304, 25) : color.new(#d60303, 19)
+
+
+
+// Trend MA color - blue
+
+trend_ma_color = color.new(#0066ff, 0)
+
+
+
+// ==================== PLOT MA ====================
+
+plot(ma_value, 'Moving Average', color = ma_color, linewidth = 1)
+
+plot(use_trend_filter ? trend_ma_value : na, 'Trend Filter MA', color = trend_ma_color, linewidth = 1)
+
+
+
+// ==================== STRATEGY EXECUTION ====================
+
+// Entry logic
+
+if long_condition
+
+    strategy.close('Short')
+
+    strategy.entry('Long', strategy.long)
+
+
+
+if short_condition
+
+    strategy.close('Long')
+
+    strategy.entry('Short', strategy.short)
+
+
+
+// Exit logic - close on opposite crossover
+
+if bearish_cross and strategy.position_size > 0
+
+    strategy.close('Long', comment = 'Exit on Crossunder')
+
+
+
+if bullish_cross and strategy.position_size < 0
+
+    strategy.close('Short', comment = 'Exit on Crossover')
+
+View in Pine Editor・265 lines
+Use on chart
+3
+8
+822
+Configurable MA Dual-Filter Strategy
+This strategy is an enhanced and highly configurable Moving Average (MA) Crossover system designed to mitigate false signals and align trades with the prevailing market trend. It is built to offer traders granular control over entry criteria, elevating it beyond basic, built-in MA crossover indicators.
+
+Originality & Key Features
+The script's originality and utility lie in the combination of its two primary, optional filtering mechanics:
+
+Dual Entry Mode (Key Filter): Users can choose between two distinct methods for trade entry:
+
+Crossover (Classic): Immediate entry when the price crosses the main MA.
+
+Full Candle Confirmation (Unique Feature): This mode requires the entire candle body (open, high, low, and close) to be completely above or below the main MA after a crossover event to confirm the signal before entry. This strict confirmation helps to filter out weak crossovers, reducing whipsaws in choppy markets.
+
+Optional Trend Filter: A second, slower MA (Trend Filter MA) can be activated. Trades are only permitted when the faster main MA is aligned with the slower Trend MA (i.e., long only if main MA > Trend MA), ensuring trades are executed with the established higher-timeframe direction.
+
+How to Use the Strategy
+The strategy logic is built on simple MA principles but utilizes Pine Script's switch function to allow users to select from six different MA types for both the main signal and the trend filter: SMA, EMA, WMA, HMA, VWMA, and RMA.
+
+Core Logic:
+
+Signal: A cross of the price over the Main MA (filtered by the chosen Entry Mode).
+
+Directional Filter: The Trend Filter must confirm the direction (if enabled).
+
+Exit: Trades are exited on the opposite price crossover of the Main MA.
+
+Customizable Settings Include:
+
+Main MA Type & Length (Default: 40 EMA): The primary signal generator.
+
+Trend Filter MA Type & Length (Default: 70 EMA): The optional, slower trend bias.
+
+Entry Mode: Switch between Crossover or Full Candle Confirmation.
+
+Strategy Results and High-Risk Disclaimer
+The default setting for trade size is set to 40% of equity for backtesting demonstration purposes only. This high value is used to generate a large and diverse sample size of trades for historical review on the chart.
+
+This 40% value is NOT a recommended setting for live trading. Per TradingView guidelines, traders are strongly advised to change this input to a sustainable risk level, typically 5% to 10% of equity per trade. Past performance is not a guarantee of future results.

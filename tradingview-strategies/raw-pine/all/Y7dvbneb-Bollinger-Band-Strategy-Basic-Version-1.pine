@@ -1,0 +1,78 @@
+//@version=3
+strategy(title="BB Strategy (Basic)",overlay=true, initial_capital=25000, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=3.02)
+len = input(20, minval=1, title="Length")
+src = input(close, title="Source")
+mult = input(2.0, "Deviation", minval=0.001, maxval=50)
+//price_drop = input(.003, "When price drops (In Ticks) Enter Long", step=.001)
+//price_climb = input(.003, "When price climbs (In Ticks) Enter Short", step=.001)
+trail = input(true, "Trailing Stop(checked), Market stop(unchecked)")
+stop = input(10000, "Stop (in ticks)", step=5)
+limit = input(20000, "Limit Out", step=5)
+//size = input(1, "Limit Position Size (pyramiding)", minval=1)
+revt = input(true, "Reversal Entry(checked, Trend Entry(unchecked)")
+timec = input(false, "Limit Time of Day (Buying Side)")
+
+//calculations and plots
+revti = if revt==false
+    true
+basis = wma(src, len)
+dev = mult * stdev(src, len)
+upper = basis + dev
+lower = basis - dev
+plot(basis, color=red)
+p1 = plot(upper, color=teal)
+p2 = plot(lower, color=teal)
+fill(p1, p2)
+u = crossover(high, upper) 
+d = crossunder(low, lower)
+//Time Session
+sess = input("1600-0500", "Start/Stop trades (Est time)", type=session)
+t = time(period, sess)
+
+//Orders
+if(timec)
+    strategy.entry("Enterlong", long=revt, when=d and t>1)
+else
+    strategy.entry("Enterlong", long=revt, when=d)
+if(trail)
+    strategy.exit("Exit","Enterlong", profit=limit, trail_points = 0, trail_offset = stop )
+else
+    strategy.exit("Exit","Enterlong", profit=limit, loss = stop )
+    
+if(timec)
+    strategy.entry("Entershort", long=revti, when=u and t>1)
+else
+    strategy.entry("Entershort", long=revti, when=u)
+if(trail)
+    strategy.exit("Exit","Entershort", profit=limit, trail_points = 0, trail_offset = stop )
+else
+    strategy.exit("Exit","Entershort", profit=limit, loss = stop )
+
+View in Pine Editor・49 lines
+Use on chart
+1
+6
+4
+6 875
+This strategy is for learning purposes only. Pay special attention to these strategies on longer aggregation periods (like 1 hr chart or more). Don't expect accurate results when you set a limit to 10 cents above your entry to be accurate. For example if you set the chart to 1 day, the price may move down and hit a stop 10 times then tag your limit. If this doesn't make sense, just don't use strategies here. Learn more first. That being said, I don't have specific recommendations for each aggregation period, backtesting isn't always perfect.
+
+Now then, this strategy can be used as the traditional BB method by setting the "Stop" and "Limit Out" to like 10000, check "Reversal Entry" and uncheck "Limit Time of Day" This will keep the strategy running just reverse your position when price crosses outside each band.
+
+INPUTS:
+Length - length of WMA that I used for mean of Bollinger Band (this may suppose to be SMA, too bad)
+Source - O-H-L-C basis for WMA
+Deviation - normal Standard deviation that would be set when using Bollinger Band
+
+Trailing stop check box - your stop value will be either a hard stop or trailing stop for an exit
+Stop - the stop value - remember you can set this really high and it won't stop out
+Limit Out - the limit value for exit
+
+Reversal Entry check box - This changes each entry from a reversal (traditional idea of BB) to enter a trend trade - hopefully version 2 will have choice to trend one direction and reversal in the other.
+
+Limit Time of Day - Especially when trading futures, you may want to only trade a specific time of day, when this box is checked, you can set the entry times below, exit will still only occur based on limit/stop or a flip entry order (the opposite entry condition is met)
+
+Tips:
+
+when I don't know a thing about a price range, like gold. I can set the limit out to 10000 and play with a trailing stop to get a better idea of what is even possible before tuning further.
+
+

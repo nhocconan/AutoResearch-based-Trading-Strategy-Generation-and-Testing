@@ -1,0 +1,214 @@
+//@version=5
+strategy("Turtle Momentum Strategy",
+     overlay                 = true,
+     initial_capital         = 100000,
+     pyramiding              = 3,                    // we manage pyramiding manually up to 4 units
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.1,                  // 0.1% commission
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     process_orders_on_close = true)
+
+//──────────────────────────────────────────────────────────────────────
+// 1. Inputs
+//──────────────────────────────────────────────────────────────────────
+
+// Choose which Turtle system to trade
+systemMode = input.string(     "System 2 (Long-Term)",     "System to Trade",     options = ["System 1 (Short-Term)", "System 2 (Long-Term)"])
+
+// Direction filter (handy for testing long-only on indexes/crypto)
+direction = input.string(     "Both",     "Trade direction",     options = ["Both", "Long Only", "Short Only"])
+longEnabled  = direction == "Both" or direction == "Long Only"
+shortEnabled = direction == "Both" or direction == "Short Only"
+
+// Trading window inputs
+startDate = input.time(     defval = timestamp("2017-12-31T00:00:00"),     title  = "Start trading from")
+
+endDate = input.time(     defval = timestamp("2099-12-31T00:00:00"),     title  = "End trading at")
+
+inTradeWindow = time >= startDate and time <= endDate
+
+isSystem1 = systemMode == "System 1 (Short-Term)"
+
+riskPct  = input.float(2.0, "Risk per Trade (% of equity)", minval = 0.1, maxval = 5.0)
+atrLen   = input.int(20, "ATR length (N)", minval = 1)
+stopN    = input.float(2.0, "Stop distance in N (2N in article)")
+addStepN = input.float(0.5, "Add unit every N move (0.5N in article)")
+maxUnits = input.int(4, "Max units (including initial)", minval = 1, maxval = 10)
+
+// Donchian parameters from the article
+dc1EntryLen = input.int(20, "System 1 entry Donchian (20)", minval = 1)
+dc1ExitLen  = input.int(10, "System 1 exit Donchian (10)",  minval = 1)
+dc2EntryLen = input.int(55, "System 2 entry Donchian (55)", minval = 1)
+dc2ExitLen  = input.int(20, "System 2 exit Donchian (20)",  minval = 1)
+
+//──────────────────────────────────────────────────────────────────────
+// 2. Core Turtle metrics: N (ATR), Donchian Channels
+//──────────────────────────────────────────────────────────────────────
+N = ta.atr(atrLen)
+
+// System 1 Donchian
+s1High = ta.highest(high, dc1EntryLen)
+s1Low  = ta.lowest(low,  dc1EntryLen)
+
+// For exits, we use the previous bar's Donchian channel (very important)
+// so exits can actually trigger.
+s1ExitLow  = ta.lowest(low,  dc1ExitLen)[1]
+s1ExitHigh = ta.highest(high, dc1ExitLen)[1]
+
+// System 2 Donchian (55/20 mixed lookback)
+s2High = ta.highest(high, dc2EntryLen)
+s2Low  = ta.lowest(low,  dc2EntryLen)
+s2ExitLow  = ta.lowest(low,  dc2ExitLen)[1]
+s2ExitHigh = ta.highest(high, dc2ExitLen)[1]
+
+// Use [1] for breakout to avoid “same-bar” lookback (entries)
+longBreakout  = isSystem1 ? close > s1High[1] : close > s2High[1]
+shortBreakout = isSystem1 ? close < s1Low[1]  : close < s2Low[1]
+
+// Donchian exits by system (now reachable thanks to [1] on exit channels)
+longDonchExit  = isSystem1 ? close < s1ExitLow  : close < s2ExitLow
+shortDonchExit = isSystem1 ? close > s1ExitHigh : close > s2ExitHigh
+
+//──────────────────────────────────────────────────────────────────────
+// 3. State variables: entry price, units, System 1 skip rule
+//──────────────────────────────────────────────────────────────────────
+var float baseEntryPrice = na
+var int   unitCount      = 0
+
+// System 1 rule: “If last breakout was a winner, skip the next breakout”
+var bool skipNextLongBreakout  = false
+var bool skipNextShortBreakout = false
+
+// For detecting trade closes (previous bar’s position)
+posSizePrev    = strategy.position_size[1]
+posDirPrev     = posSizePrev > 0 ? 1 : posSizePrev < 0 ? -1 : 0
+tradeClosedLong  = posDirPrev == 1  and strategy.position_size == 0
+tradeClosedShort = posDirPrev == -1 and strategy.position_size == 0
+
+// When a trade closes, evaluate PnL and set skip flags for System 1
+if (tradeClosedLong or tradeClosedShort) and not na(baseEntryPrice)
+    dir = posDirPrev
+    qty = math.abs(posSizePrev)
+
+    // Approximate exit at current close
+    profit = (close - baseEntryPrice) * dir * qty * syminfo.pointvalue
+
+    if isSystem1
+        if dir == 1 and profit > 0
+            skipNextLongBreakout := true
+        if dir == -1 and profit > 0
+            skipNextShortBreakout := true
+
+    // reset per-trade variables
+    baseEntryPrice := na
+    unitCount      := 0
+
+//──────────────────────────────────────────────────────────────────────
+// 4. Position sizing: risk a fixed % of equity with 2N stop
+//──────────────────────────────────────────────────────────────────────
+f_calcQty(_N, _riskPct, _stopN) =>
+    _N > 0 ? math.max(1, math.floor((strategy.equity * (_riskPct / 100)) / (_stopN * _N * syminfo.pointvalue))) : 0
+
+//──────────────────────────────────────────────────────────────────────
+// 5. Entry logic (with System 1 skip-after-win filter)
+//──────────────────────────────────────────────────────────────────────
+flat = strategy.position_size == 0
+
+// LONG entry
+doLongEntry = longBreakout and flat and longEnabled
+
+if inTradeWindow and doLongEntry
+    if isSystem1 and skipNextLongBreakout
+        // consume the “skip next” and do nothing
+        skipNextLongBreakout := false
+    else
+        qty = f_calcQty(N, riskPct, stopN)
+        if qty > 0
+            strategy.entry("Long", strategy.long, qty = qty)
+            baseEntryPrice := close
+            unitCount      := 1
+
+// SHORT entry
+doShortEntry = shortBreakout and flat and shortEnabled
+
+if inTradeWindow and doShortEntry
+    if isSystem1 and skipNextShortBreakout
+        skipNextShortBreakout := false
+    else
+        qty = f_calcQty(N, riskPct, stopN)
+        if qty > 0
+            strategy.entry("Short", strategy.short, qty = qty)
+            baseEntryPrice := close
+            unitCount      := 1
+
+//──────────────────────────────────────────────────────────────────────
+// 6. Pyramiding: add 1 unit every 0.5N in your favor, up to maxUnits
+//──────────────────────────────────────────────────────────────────────
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// Long pyramiding
+if inLong and unitCount > 0 and unitCount < maxUnits and not na(baseEntryPrice)
+    // each add is 0.5N above last filled unit → base + 0.5N * current unitCount
+    nextAddPrice = baseEntryPrice + addStepN * N * unitCount
+    if close >= nextAddPrice
+        qty = f_calcQty(N, riskPct, stopN)
+        if qty > 0
+            strategy.entry("Long", strategy.long, qty = qty)
+            unitCount += 1
+
+// Short pyramiding
+if inShort and unitCount > 0 and unitCount < maxUnits and not na(baseEntryPrice)
+    nextAddPrice = baseEntryPrice - addStepN * N * unitCount
+    if close <= nextAddPrice
+        qty = f_calcQty(N, riskPct, stopN)
+        if qty > 0
+            strategy.entry("Short", strategy.short, qty = qty)
+            unitCount += 1
+
+//──────────────────────────────────────────────────────────────────────
+// 7. Exits: 2N ATR stop + Donchian exit
+//──────────────────────────────────────────────────────────────────────
+longStopPrice  = not na(baseEntryPrice) ? baseEntryPrice - stopN * N : na
+shortStopPrice = not na(baseEntryPrice) ? baseEntryPrice + stopN * N : na
+
+if inLong and not na(longStopPrice)
+    strategy.exit("Long Stop", "Long", stop = longStopPrice)
+
+if inShort and not na(shortStopPrice)
+    strategy.exit("Short Stop", "Short", stop = shortStopPrice)
+
+// Donchian exits for open trades
+if inLong and longDonchExit
+    strategy.close("Long", comment = "Donchian Exit")
+
+if inShort and shortDonchExit
+    strategy.close("Short", comment = "Donchian Exit")
+
+//──────────────────────────────────────────────────────────────────────
+// 8. Visuals – Donchian bands & ATR stop
+//──────────────────────────────────────────────────────────────────────
+entryHighPlot = isSystem1 ? s1High : s2High
+entryLowPlot  = isSystem1 ? s1Low  : s2Low
+exitLowPlot   = isSystem1 ? s1ExitLow : s2ExitLow
+exitHighPlot  = isSystem1 ? s1ExitHigh : s2ExitHigh
+
+plot(entryHighPlot, "Entry High (Donchian)", style = plot.style_line)
+plot(entryLowPlot,  "Entry Low (Donchian)",  style = plot.style_line)
+plot(exitLowPlot,   "Exit Low (Donchian)",   style = plot.style_line)
+plot(exitHighPlot,  "Exit High (Donchian)",  style = plot.style_line)
+
+plot(inLong  and not na(longStopPrice)  ? longStopPrice  : na,
+     "ATR Stop Long",
+     style = plot.style_line)
+
+plot(inShort and not na(shortStopPrice) ? shortStopPrice : na,
+     "ATR Stop Short",
+     style = plot.style_line)
+View in Pine Editor・208 lines
+Use on chart
+2
+3
+801
+Turtle momentum strategy as per Momentum Trading Strategy article on Substack (Nov 26, 2025)

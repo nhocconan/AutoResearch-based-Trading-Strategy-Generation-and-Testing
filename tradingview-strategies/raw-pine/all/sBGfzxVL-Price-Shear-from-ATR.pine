@@ -1,0 +1,34 @@
+//@version=3
+//future strategy
+//strategy(title = "stub", default_qty_type = strategy.fixed, default_qty_value = 1,  overlay = true, commission_type=strategy.commission.cash_per_contract,commission_value=2.05)
+//stock strategy
+strategy(title = "stub", default_qty_type = strategy.percent_of_equity, default_qty_value = 100,  overlay = true, commission_type=strategy.commission.cash_per_contract,commission_value=.000)
+//forex strategy
+//strategy(title = "stub", default_qty_type = strategy.percent_of_equity, default_qty_value = 100,  overlay = true)
+//crypto strategy
+//strategy(title = "stub", default_qty_type = strategy.percent_of_equity, default_qty_value = 100,  overlay = true, commission_type=strategy.commission.percent,commission_value=.0,default_qty_value=10000)
+
+
+atr_notification_multiplier = input(title="atr multiplier that must be hit for alert to fire", type=integer, defval=1)
+
+ema20 = ema(close,20)
+atr20 = atr(20)*atr_notification_multiplier
+
+bear_shear = abs(close - ema20) > atr20 and close < ema20
+bull_shear = abs(close - ema20) > atr20 and close > ema20 
+
+atr_multiplier = abs(close - ema20) / atr20
+
+plotshape(bull_shear, location=location.abovebar, text="bull shear",color=green)
+alertcondition(bull_shear, title='Bull Shear', message='Bull Shear')
+
+plotshape(bear_shear, location=location.belowbar, text="bear shear",color=red)
+alertcondition(bear_shear, title='Bear Shear', message='Bear Shear')
+
+View in Pine Editor・26 lines
+Use on chart
+1
+2
+1 472
+Price Shear from ATR for TCG
+

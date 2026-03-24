@@ -1,0 +1,75 @@
+//@version=4
+strategy(title="EMA+RSI Pump & Drop Swing Sniper (With Alerts & SL+TP) - Strategy", shorttitle="EMA+RSI Swing Strategy", overlay=true)
+emaLength = input(title="EMA Length", type=input.integer, defval=50, minval=0)
+emarsiSource = input(close, title="EMA+RSI Source")
+condSource = input(high, title="Long+Short Condition Source")
+emaVal = ema(emarsiSource, emaLength)
+rsiLength = input(title="RSI Length", type=input.integer, defval=25, minval=0)
+rsiVal = rsi(emarsiSource, rsiLength)
+
+//Safety 
+emaLength2 = input(title="Safety EMA Length", type=input.integer, defval=70, minval=0)
+emaSource2 = input(close, title="Safety EMA Source")
+ema = ema(emaSource2, emaLength2)
+emaColorSource2 = close
+emaBSource2 = close
+
+// Backtest+Dates
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear = input(defval = 2019, title = "From Year", minval = 2017)
+ToMonth = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear = input(defval = 9999, title = "To Year", minval = 2017)
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)        // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest end window
+window()  => time >= start and time <= finish ? true : false       // create function - add window() to entry/exit/close
+
+// Conditions
+exit_long = crossover(emaVal, condSource)
+longCond = crossunder(emaVal, condSource) and close > ema
+
+//Stoploss + TakeProfit
+sl = input(0.051, step=0.001, title="Stop Loss")
+tp = input(0.096, step=0.001, title="Take Profit")
+
+// Plots Colors
+colors = emarsiSource > emaVal and rsiVal > 14 ? color.green : color.red
+emaColorSource = input(close, title="Line Color Source")
+emaBSource = input(close, title="Line Color B Source")
+
+// Plots
+plot(ema, color=emaColorSource2[1] > ema and emaBSource2 > ema ? color.green : color.red, linewidth=1)
+plot(emaVal, color=emaColorSource[1] > emaVal and emaBSource > emaVal ? color.green : color.red, linewidth=3)
+plotcandle(open, high, low, close, color=colors)
+
+
+//Strategy Entry+Exits
+strategy.entry("long",1,when=window() and longCond)
+strategy.close("long",when=window() and exit_long)
+strategy.exit("long tp/sl", "long", profit = close * tp / syminfo.mintick, loss = close * sl / syminfo.mintick)
+
+View in Pine Editor・54 lines
+Use on chart
+5
+4
+6
+27 034
+This is the strategy version of the 'EMA-RSI-Pump-Drop-Swing-Sniper-With-Alerts':
+
+
+Some additions with this strategy:
+
+~Added Stop loss & Take profit control. In Settings > Inputs if the Stop Loss is at .051 that means it's 5.1% and the Take Profit at .096 is 9.6%. If you wish to remove the TP and SL just change the value to 1.00 and it would be the same as it being 100% TP and SL which is likely to never be hit.
+
+~Added Backtesting by changing the month/date/year in Settings > Inputs
+
+~Added a 2nd EMA line to assist with the long entry signals. I only use this for long entry & exits, though you could use the long exits as Short entries too. I just personally don't do short trading on Bitcoin.
+
+This is using an EMA and RSI with slightly modified settings to give good entry and exit points while looking at Bitcoin. I use this on a 1-hour and 4-hour chart and with other indicators to find good positions to enter a trade or exit if things are turning red.
+It's important to know this strategy was made as a request by another user that was using the indicator version. I don't use this as a trading strategy by itself, I use the visuals it gives as a confirmation with other indicators to find the best possible entry and exit positions.
+
+If you click on the EMA line it will color the bars of the chart based on if they are above or below the EMA - This is just visually helpful for me to see the active trend.
+
+Make sure you hover over or click on the EMA line to see the colors of the candles change - it's not visible by default or without doing this.

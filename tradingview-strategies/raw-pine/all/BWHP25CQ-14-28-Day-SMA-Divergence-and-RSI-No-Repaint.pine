@@ -1,0 +1,61 @@
+//@version=3
+strategy(title = "14/28 SMA and RSI", shorttitle = "14/28 SMA and RSI", overlay = false, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, currency = currency.USD)
+src = close, len = input(14, minval=1, title="Length")
+take_Profit=input(8, title="Take Profit", type=integer)
+quantityPercentage=input(50, title="Percent of Quantity to Sell", type=integer)
+closeOverbought=input(true, title="Close Overbought and Take Profit")
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+longCondition = 0
+sellCondition = 0
+takeProfit = 0
+quantityRemainder = 100
+smaSignal = input(14, title="SMA Signal Period", type=integer)
+smaLong = input(28, title="SMA Longer Period", type=integer)
+if ((sma(close, smaSignal) >= sma(close, smaLong) and rsi<= 30) or (rsi<=13)) and strategy.position_size==0
+    longCondition:=1
+
+if longCondition==1
+    strategy.entry("Buy", strategy.long)
+    
+profit = ((close-strategy.position_avg_price)/strategy.position_avg_price) * 100
+
+if sma(close, smaSignal) <= sma(close, smaLong) and strategy.position_size>1
+    sellCondition := 1
+
+if strategy.position_size>=1
+    if closeOverbought == true
+        if profit>=take_Profit and takeProfit == 0
+            strategy.exit("Take Profit", profit=take_Profit, qty_percent=quantityPercentage)
+            takeProfit:=1
+            quantityRemainder:=100-quantityPercentage
+    if sellCondition == 1 and quantityRemainder<100
+        strategy.close("Buy")
+
+    if closeOverbought == false and rsi>70
+        strategy.close("Take Profit")
+        
+plot(longCondition, "Buy Condition", green)
+plot(takeProfit, "Partial Sell Condition", orange)
+plot(sellCondition, "Sell Condition", red)
+
+View in Pine Editor・41 lines
+Use on chart
+9
+3
+5
+18
+33 518
+If you are interested in purchasing my algorithmic trading bot that receives Tradingview indicator alerts via email and then executes them in Bittrex, please visit my product page here: ilikestocks.com/products/tradingview-algorithmic-trading-bot/.
+ Additionally, I would love to create video/blog guides on creating Tradingview scripts or strategies. If you are a knowledgeable in finance or other related fields and would like to be featured on my page, please contact me at tanner@ilikestocks.com.
+
+No crossovers were used in this script, and this is likely the reason for the no repaint(Correct me if wrong).
+
+This strategy script uses a 14-day SMA signal line, a 28-day SMA and RSI. The strategy works by determining whether the (14-day SMA is above the 28-day SMA and the RSI levels are overbought(below 30)) or RSI is very overbought(below 13 or so). Once either of these conditions have been met, a long position is opened.
+
+The initial long position must be partially closed by the take profit first and then the final close is executed if the 14-day signal SMA is below the 28-day SMA; you may also exclusively use take profit to close positions.
+
+The green plotted spikes are the initial long position conditions. The orange plotted spikes are take profit signals once a long position is opened. The red plotted spikes are plotted when the SMA 14-day is below the 28-day SMA.
+
+Please do leave constructive criticism or comments below because it helps me better create scripts!

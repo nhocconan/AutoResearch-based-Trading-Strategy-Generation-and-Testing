@@ -1,0 +1,186 @@
+//@version=6
+//indicator("CNN Fear and Greed Index", overlay=false)
+strategy("CNN Fear and Greed Strategy", overlay=false)
+
+// Equal weights as in the original CNN Index
+momentum_weight = 1.0
+strength_weight = 1.0
+breadth_weight = 1.0
+put_call_weight = 1.0
+vix_weight = 1.0
+safe_haven_weight = 1.0
+junk_bond_weight = 1.0
+
+SCALING_FACTOR = 16.7
+LENGTH = 100
+
+// Momentum: S&P 500 vs 125-SMA
+sp500 = request.security("SP:SPX", "D", close)
+momentum = (sp500 / ta.sma(sp500, 125) - 1) * 100
+momentum_std = ta.stdev(momentum, LENGTH)
+momentum_normalized_score_raw = 50 + (momentum / momentum_std) * SCALING_FACTOR
+momentum_score = math.min(100, math.max(0, momentum_normalized_score_raw))
+
+// Strength: 52-week highs vs lows (Number of stocks with highs vs lows)
+highs_count = request.security("INDEX:HIGN", "D", close)
+lows_count = request.security("INDEX:LOWN", "D", close)
+strength = (highs_count / (highs_count + lows_count + 1e-9))*100 // Avoid division by 0
+strength_std = ta.stdev(strength, LENGTH)
+strength_avg = ta.sma(strength, LENGTH)
+strength_normalized_score_raw = 50 + ((strength - strength_avg) / strength_std) * SCALING_FACTOR
+strength_score = math.min(100, math.max(0, strength_normalized_score_raw))
+
+// Breadth: McClellan Volume Summation Index
+volume_up = request.security("USI:UVOL", "D", close)
+volume_down = request.security("USI:DVOL", "D", close)
+net_volume = volume_up - volume_down
+mclellan_oscillator = ta.ema(net_volume, 19) - ta.ema(net_volume, 39)
+//mclellan_summation = ta.cum(mclellan_oscillator)
+mco_std = ta.stdev(mclellan_oscillator, LENGTH)
+mco_avg = ta.sma(mclellan_oscillator, LENGTH)
+mclellan_normalized_score_raw = 50 + ((mclellan_oscillator-mco_avg) / mco_std) * SCALING_FACTOR
+breadth_score = math.min(100, math.max(0, mclellan_normalized_score_raw))
+
+
+// Put/Call Ratio (5-day average)
+put_call_ratio = ta.sma(request.security("INDEX:CPCI", "D", close), 5)
+pcr_std = ta.stdev(put_call_ratio, LENGTH)
+pcr_avg = ta.sma(put_call_ratio, LENGTH)
+pcr_normalized_score_raw = 50 + ((pcr_avg-put_call_ratio) / pcr_std) * SCALING_FACTOR
+pcr_score = math.min(100, math.max(0, pcr_normalized_score_raw))
+
+// VIX with historical comparison
+vix = request.security("CBOE:VIX", "D", close)
+vix_ma = ta.sma(vix, 50)
+vix_diff = (vix / vix_ma -1)*100
+vix_diff_std = ta.stdev(vix_diff, LENGTH)
+vix_normalized_score_raw = 50 + (-vix_diff / vix_diff_std) * SCALING_FACTOR
+volatility_score = math.min(100, math.max(0, vix_normalized_score_raw))
+
+// Safe Haven Demand (Stocks vs. Bonds)
+stock_returns = ta.roc(sp500, 20)
+bond_price = request.security("BND", "D", close)
+bond_returns = ta.roc(bond_price, 20)
+safe_haven_demand = stock_returns - bond_returns
+demand_std = ta.stdev(safe_haven_demand, LENGTH)
+demand_avg = ta.sma(safe_haven_demand, LENGTH)
+demand_normalized_score_raw = 50 + ((safe_haven_demand - demand_avg)/ demand_std) * SCALING_FACTOR
+demand_score = math.min(100, math.max(0, demand_normalized_score_raw))
+
+// Junk Bond Demand (High-yield vs. Treasury spread)
+junk_yield = request.security("FRED:BAMLH0A0HYM2EY", "D", close)
+treasury_yield = request.security("FRED:DGS10", "D", close)
+junk_bond_demand = junk_yield - treasury_yield
+JB_std = ta.stdev(junk_bond_demand, LENGTH)
+JB_avg = ta.sma(junk_bond_demand, LENGTH)
+JB_normalized_score_raw = 50 + ((JB_avg-junk_bond_demand) / JB_std) * SCALING_FACTOR
+JB_score = math.min(100, math.max(0, JB_normalized_score_raw))
+
+// Total index
+fear_greed = (momentum_score * momentum_weight + strength_score * strength_weight + breadth_score * breadth_weight + pcr_score * put_call_weight + volatility_score * vix_weight + demand_score * safe_haven_weight + JB_score * junk_bond_weight) / (momentum_weight + strength_weight + breadth_weight + put_call_weight + vix_weight + safe_haven_weight + junk_bond_weight)
+
+// Color gradient
+color_gradient = color.from_gradient(fear_greed, 0, 100, color.red, color.green)
+
+plot(fear_greed, title="Fear & Greed", color=color_gradient, linewidth=2)
+hline(25, "Extreme Fear", color=color.rgb(255, 0, 0, 0), linestyle=hline.style_dashed)
+hline(50, "Neutral", color=color.blue, linestyle=hline.style_dashed)
+hline(75, "Extreme Greed", color=color.green, linestyle=hline.style_dashed)
+
+// Background colors for each zone
+bgcolor(fear_greed <= 25 ? color.new(color.red, 90) : na, title="Extreme Fear Zone")
+bgcolor(fear_greed >= 75 ? color.new(color.green, 90) : na, title="Extreme Greed Zone")
+
+
+// Define Strategy Parameters
+FEAR_LEVEL = input.int(25, "Buy Fear Level (FEAR_LEVEL)", minval=0, maxval=50)
+EXIT_BARS = input.int(252, "Exit Period (K Bars)", minval=1)
+MA_LENGTH = input.int(5, "Crossover MA Period", minval=2)
+
+// Tracking Variables
+var float entry_bar_index = na
+var bool in_long_position = false
+
+// --- Strategy Calculation ---
+
+// 1. Calculate the N-day MA of the F&G Index
+fear_greed_sma = ta.sma(fear_greed, MA_LENGTH)
+
+// 2. Define Entry Condition
+long_entry_condition = fear_greed < FEAR_LEVEL and ta.crossover(fear_greed, fear_greed_sma)
+
+// --- Execute Trade Commands ---
+
+// 1. Entry
+if long_entry_condition and not in_long_position // Ensure no duplicate entry
+    strategy.entry("Long_Entry", strategy.long)
+    entry_bar_index := bar_index
+    in_long_position := true
+
+// 2. Exit
+time_exit_condition = in_long_position and (bar_index >= entry_bar_index + EXIT_BARS)
+
+if time_exit_condition
+    strategy.close("Long_Entry", comment="Time_Exit")
+    in_long_position := false // Reset position status
+
+View in Pine Editor・128 lines
+Use on chart
+2
+8
+1 221
+Adaptation of the CNN Fear and Greed Index Indicator (Original by EdgeTools)
+
+
+
+The following changes have been implemented:
+
+Put/Call Ratio Data Source: The data source for the Put/Call Ratio has been updated.
+
+Bond Data Source: The data sources for the bond components (Safe Haven Demand and Junk Bond Demand) have been updated.
+
+Normalization Adjustment: The normalization method has been adjusted to allow the CNN Fear and Greed Index to display over a longer historical period, optimizing it for backtesting purposes.
+
+Style Modification: The display style has been modified for a simpler and cleaner appearance.
+
+Strategy Logic Addition: Added a new strategy entry condition: index >= 25 AND index crosses over its 5-period Simple Moving Average (SMA), and a corresponding exit condition of holding the position for 252 bars (days).
+
+
+
+CNN Fear & Greed Backtest Strategy (Adapted)
+This script is an adaptation of the popular CNN Fear & Greed Index, originally created by EdgeTools, with significant modifications to optimize it for long-term backtesting on the TradingView platform.
+
+The core function of the Fear & Greed Index is to measure the current emotional state of the stock market, ranging from 0 (Extreme Fear) to 100 (Extreme Greed). It operates on the principle that excessive fear drives prices too low (a potential buying opportunity), and excessive greed drives them too high (a potential selling opportunity).
+
+Key Components of the Index (7 Factors)
+The composite index is calculated as a weighted average of seven market indicators, each normalized to a score between 0 and 100:
+
+Market Momentum: S&P 500's current level vs. its 125-day Moving Average.
+
+Stock Price Strength: Stocks hitting 52-week highs vs. those hitting 52-week lows.
+
+Stock Price Breadth: Measured by the McClellan Volume Summation Index (or similar volume/breadth metric).
+
+Put/Call Ratio: The relationship between volume of put options (bearish bets) and call options (bullish bets).
+
+Market Volatility: The CBOE VIX Index relative to its 50-day Moving Average.
+
+Safe Haven Demand: The relative performance of stocks (S&P 500) vs. bonds.
+
+Junk Bond Demand: The spread between high-yield (junk) bonds and U.S. Treasury yields.
+
+Critical Adaptations for Backtesting
+To improve the index's utility for quantitative analysis, the following changes were made:
+
+Long-Term Normalization: The original normalization method (ta.stdev over a short LENGTH) has been replaced or adjusted to use longer historical data. This change ensures the index generates consistent and comparable sentiment scores across decades of market history, which is crucial for reliable backtesting results.
+
+Updated Data Sources: Specific ticker requests for the Put/Call Ratio and Bond components (Safe Haven and Junk Bond Demand) have been updated to use the most reliable and long-running data available on TradingView, reducing data gaps and improving chart continuity.
+
+Simplified Visuals: The chart display is streamlined, focusing only on the final Fear & Greed Index line and key threshold levels (25, 50, 75) for quick visual assessment.
+
+Integrated Trading Strategy
+This script also includes a simple, rules-based strategy designed to test the counter-trend philosophy of the index:
+
+Entry Logic (Long Position): A long position is initiated when the market shows increasing fear, specifically when the index score is less than or equal to the configurable FEAR_LEVEL (default 25) and the index crosses above its own short-term 5-period Simple Moving Average (SMA). This crossover acts as a confirmation that sentiment may be starting to turn around from peak fear.
+
+Exit Logic (Time-Based): All positions are subject to a time-based exit after holding for 252 trading days (approximately one year). This fixed holding period aims to capture the typical duration of a cyclical market recovery following a major panic event.

@@ -1,0 +1,46 @@
+//@version=5
+strategy("Failed Reversal – Opposite Candle Only (No Doji/Hammer/Hanging Man)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Previous candle
+prevBull = close[1] > open[1]
+prevBear = close[1] < open[1]
+prevHigh = high[1]
+prevLow  = low[1]
+prevVolume = volume[1]
+
+// Current candle
+currBull = close > open
+currBear = close < open
+currHigh = high
+currLow  = low
+currBody = math.abs(close - open)
+currRange = currHigh - currLow
+currVolume = volume
+
+// Volume confirmation
+volumeHigher = currVolume > prevVolume
+
+// Candle type filters
+isDoji  = currBody <= currRange * 0.10
+isHammerOrHangingMan = currBody <= currRange * 0.30 and ((close - low) >= currBody * 2 or (high - close) >= currBody * 2)
+
+// Cancel signals if any forbidden candle type
+candleValid = not isDoji and not isHammerOrHangingMan
+
+// Strict failed reversal conditions (opposite candles only)
+longSignal  = prevBull and currBear and volumeHigher and currLow >= prevLow and candleValid
+shortSignal = prevBear and currBull and volumeHigher and currHigh <= prevHigh and candleValid
+
+// Entries (long/short only)
+if longSignal
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・39 lines
+Use on chart
+9
+704
+“Failed Reversal – Opposite Candle Only (No Doji/Hammer/Hanging Man)”:
+This strategy captures failed reversal attempts where the current candle is opposite to the previous candle and volume is higher. It enters long if a bearish candle fails to break a previous bullish candle’s low, and short if a bullish candle fails to break a previous bearish candle’s high. Signals are canceled for Doji, Hammer, or Hanging Man candles. Entries only, fully backtestable.

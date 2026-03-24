@@ -1,0 +1,674 @@
+//@version=5
+strategy("Pivot Squeeze Strategy", shorttitle="Pivot Squeeze", overlay=false,
+         initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Input parameters
+lookback = input.int(20, "Pivot Lookback Period", minval=5, maxval=100)
+leftBars = input.int(5, "Left Bars for Pivot", minval=1, maxval=25)
+rightBars = input.int(5, "Right Bars for Pivot", minval=1, maxval=25)
+
+// Strategy settings
+tradeMode = input.string("Long Only", "Trade Mode", options=["Both", "Long Only", "Short Only"], group="Strategy Settings")
+
+// Strategy Logic Selection
+strategyLogic = input.string("MA Cross MA", "Strategy Logic", 
+                           options=["Pivot Distance Breakout", "MA Cross Zero", "MA Cross MA"], 
+                           tooltip="Choose between original pivot distance breakout logic, MA vs zero crossover, or dual MA crossover", 
+                           group="Strategy Settings")
+
+//MA Settings
+maLength = input.int(14, "MA Length", minval=2, maxval=50, group="Moving Average Settings")
+maType = input.string("EMA", "MA Type", options=["SMA", "EMA", "WMA", "RMA"], group="Moving Average Settings")
+// Slow MA settings for dual MA crossover
+slowMALength = input.int(50, "Slow MA Length", minval=10, maxval=200, group="Moving Average Settings")
+slowMAType = input.string("SMA", "Slow MA Type", options=["SMA", "EMA", "WMA", "RMA"], group="Moving Average Settings")
+
+// Dynamic Threshold Settings
+thresholdMode = input.string("ATR-Based", "Threshold Mode", options=["Fixed %", "ATR-Based", "Bollinger Bands", "Keltner Channels"], group="Threshold Settings")
+fixedSqueezeThreshold = input.float(5.0, "Fixed Squeeze Threshold %", minval=1.0, maxval=20.0, step=0.5, group="Threshold Settings")
+fixedBreakoutThreshold = input.float(10.0, "Fixed Breakout Threshold %", minval=5.0, maxval=30.0, step=0.5, group="Threshold Settings")
+
+// ATR-based thresholds
+atrThresholdLength = input.int(14, "ATR Length for Thresholds", minval=5, maxval=50, group="Threshold Settings")
+atrSqueezeMultiplier = input.float(1.0, "ATR Squeeze Multiplier", minval=0.1, maxval=5.0, step=0.1, group="Threshold Settings")
+atrBreakoutMultiplier = input.float(2.0, "ATR Breakout Multiplier", minval=0.5, maxval=10.0, step=0.1, group="Threshold Settings")
+
+// Bollinger Bands thresholds
+bbLength = input.int(20, "BB Length", minval=5, maxval=50, group="Threshold Settings")
+bbMultiplier = input.float(2.0, "BB Multiplier", minval=0.5, maxval=4.0, step=0.1, group="Threshold Settings")
+bbSqueezeRatio = input.float(0.3, "BB Squeeze Ratio", minval=0.1, maxval=0.8, step=0.05, group="Threshold Settings")
+bbBreakoutRatio = input.float(0.7, "BB Breakout Ratio", minval=0.3, maxval=1.5, step=0.05, group="Threshold Settings")
+
+// Keltner Channels thresholds
+kcLength = input.int(20, "KC Length", minval=5, maxval=50, group="Threshold Settings")
+kcMultiplier = input.float(1.5, "KC Multiplier", minval=0.5, maxval=4.0, step=0.1, group="Threshold Settings")
+kcUseTrueRange = input.bool(true, "KC Use True Range", group="Threshold Settings")
+kcSqueezeRatio = input.float(0.3, "KC Squeeze Ratio", minval=0.1, maxval=0.8, step=0.05, group="Threshold Settings")
+kcBreakoutRatio = input.float(0.7, "KC Breakout Ratio", minval=0.3, maxval=1.5, step=0.05, group="Threshold Settings")
+
+// ATR-based Risk Management
+useStopLoss = input.bool(false, "Use Stop Loss", group="Risk Management")
+atrLength = input.int(14, "ATR Length", minval=1, maxval=50, group="Risk Management")
+stopLossATRMultiplier = input.float(2.0, "Stop Loss ATR Multiplier", minval=0.5, maxval=10.0, step=0.1, group="Risk Management")
+useTakeProfit = input.bool(false, "Use Take Profit", group="Risk Management")
+takeProfitATRMultiplier = input.float(3.0, "Take Profit ATR Multiplier", minval=1.0, maxval=20.0, step=0.5, group="Risk Management")
+
+// Trailing Stop Loss
+useTrailingStop = input.bool(false, "Use Trailing Stop", group="Risk Management")
+trailingStopATRMultiplier = input.float(2.5, "Trailing Stop ATR Multiplier", minval=0.5, maxval=10.0, step=0.1, group="Risk Management")
+trailingStopActivation = input.float(1.0, "Trailing Stop Activation (ATR)", minval=0.1, maxval=5.0, step=0.1, group="Risk Management")
+
+// Exit Option - Exit on Breakout Cross Under
+useBreakoutCrossExit = input.bool(false, "Exit on Breakout Cross Under", 
+ tooltip="Only applies to Pivot Distance Breakout logic", group="Risk Management")
+
+// Stop Loss Cooldown
+useCooldown = input.bool(true, "Use Stop Loss Cooldown", group="Risk Management")
+cooldownBars = input.int(10, "Cooldown Bars", minval=1, maxval=100, group="Risk Management")
+
+// === ENHANCED: Multi-Timeframe Settings ===
+useMTF = input.bool(true, "Enable Multi-Timeframe Analysis", group="Multi-Timeframe Settings")
+higherTF = input.timeframe("120","Higher Timeframe", group="Multi-Timeframe Settings")
+
+// NEW: HTF Method Selection
+htfMethod = input.string("Pivot Distance Breakout", "HTF Analysis Method", 
+ options=["Pivot Distance Breakout", "MA Cross Zero", "MA Cross MA"], 
+ tooltip="Select method for higher timeframe analysis", 
+ group="Multi-Timeframe Settings")
+
+// HTF Threshold Settings (for Pivot Distance Breakout method)
+htfThresholdMode = input.string("ATR-Based", "HTF Threshold Mode", 
+                               options=["Fixed %", "ATR-Based"], 
+                               group="Multi-Timeframe Settings")
+htfFixedSqueezeThreshold = input.float(5.0, "HTF Fixed Squeeze Threshold %", minval=1.0, maxval=20.0, step=0.5, group="Multi-Timeframe Settings")
+htfFixedBreakoutThreshold = input.float(10.0, "HTF Fixed Breakout Threshold %", minval=5.0, maxval=30.0, step=0.5, group="Multi-Timeframe Settings")
+htfATRSqueezeMultiplier = input.float(1.0, "HTF ATR Squeeze Multiplier", minval=0.1, maxval=5.0, step=0.1, group="Multi-Timeframe Settings")
+htfATRBreakoutMultiplier = input.float(2.0, "HTF ATR Breakout Multiplier", minval=0.5, maxval=10.0, step=0.1, group="Multi-Timeframe Settings")
+
+// HTF MA Settings
+htfMALength = input.int(14, "HTF MA Length", minval=2, maxval=50, group="Multi-Timeframe Settings")
+htfMAType = input.string("EMA", "HTF MA Type", options=["SMA", "EMA", "WMA", "RMA"], group="Multi-Timeframe Settings")
+htfSlowMALength = input.int(50, "HTF Slow MA Length", minval=10, maxval=200, group="Multi-Timeframe Settings")
+htfSlowMAType = input.string("EMA", "HTF Slow MA Type", options=["SMA", "EMA", "WMA", "RMA"], group="Multi-Timeframe Settings")
+
+// Visual settings
+showMA = input.bool(true, "Show Moving Average", group="Visual")
+showSlowMA = input.bool(true, "Show Slow MA", group="Visual")
+showDynamicLevels = input.bool(true, "Show Dynamic Threshold Levels", group="Visual")
+
+// Colors
+positiveColor = input.color(color.green, "Positive Distance Color")
+negativeColor = input.color(color.red, "Negative Distance Color")
+squeezeColor = input.color(color.orange, "Squeeze Color")
+maColor = input.color(color.blue, "MA Color")
+breakoutUpColor = input.color(color.lime, "Breakout Up Color")
+breakoutDownColor = input.color(color.fuchsia, "Breakout Down Color")
+
+// Date range for backtesting
+startDate = input.time(timestamp("2020-01-01"), "Start Date", group="Backtest Period")
+endDate = input.time(timestamp("2025-12-31"), "End Date", group="Backtest Period")
+
+// Check if we're within the date range
+inDateRange = time >= startDate and time <= endDate
+
+// Calculate ATR
+atr = ta.atr(atrLength)
+atrForThresholds = ta.atr(atrThresholdLength)
+
+// Cooldown tracking variables
+var int lastLongStopBar = na
+var int lastShortStopBar = na
+var int lastLongBreakoutExitBar = na
+var int lastShortBreakoutExitBar = na
+var int lastLongTrailingStopBar = na
+var int lastShortTrailingStopBar = na
+var bool longCooldownActive = false
+var bool shortCooldownActive = false
+
+// Trailing stop variables
+var float longTrailingStop = na
+var float shortTrailingStop = na
+
+// === CURRENT TIMEFRAME CALCULATIONS ===
+
+// Find pivot highs and lows
+pivotHigh = ta.pivothigh(high, leftBars, rightBars)
+pivotLow = ta.pivotlow(low, leftBars, rightBars)
+
+// Variables to store the last pivot values
+var float lastPivotHigh = na
+var float lastPivotLow = na
+
+// Update pivot values when new pivots are found
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+// Calculate percentages
+highPivotPercent = na(lastPivotHigh) ? na : (close / lastPivotHigh) * 100
+lowPivotPercent = na(lastPivotLow) ? na : (lastPivotLow / close) * 100
+
+// Calculate distance between high and low pivot percentages
+pivotDistance = highPivotPercent - lowPivotPercent
+
+// Calculate moving average function
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "WMA" => ta.wma(source, length)
+        "RMA" => ta.rma(source, length)
+
+distanceMA = ma(pivotDistance, maLength, maType)
+slowDistanceMA = ma(pivotDistance, slowMALength, slowMAType)
+
+// === ENHANCED: MULTI-TIMEFRAME CALCULATIONS ===
+
+// Get HTF data directly using request.security
+htfHigh = useMTF ? request.security(syminfo.tickerid, higherTF, high, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+htfLow = useMTF ? request.security(syminfo.tickerid, higherTF, low, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+htfClose = useMTF ? request.security(syminfo.tickerid, higherTF, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+htfPivotHighRaw = useMTF ? request.security(syminfo.tickerid, higherTF, ta.pivothigh(high, leftBars, rightBars), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+htfPivotLowRaw = useMTF ? request.security(syminfo.tickerid, higherTF, ta.pivotlow(low, leftBars, rightBars), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+
+// HTF pivot values storage
+var float htfLastPivotHigh = na
+var float htfLastPivotLow = na
+
+if useMTF
+    if not na(htfPivotHighRaw)
+        htfLastPivotHigh := htfPivotHighRaw
+    if not na(htfPivotLowRaw)
+        htfLastPivotLow := htfPivotLowRaw
+
+// Calculate HTF pivot distance
+htfHighPivotPercent = useMTF and not na(htfLastPivotHigh) ? (htfClose / htfLastPivotHigh) * 100 : na
+htfLowPivotPercent = useMTF and not na(htfLastPivotLow) ? (htfLastPivotLow / htfClose) * 100 : na
+htfPivotDistance = useMTF ? htfHighPivotPercent - htfLowPivotPercent : na
+
+// HTF Moving Averages
+htfDistanceMA = useMTF ? request.security(syminfo.tickerid, higherTF, ma(pivotDistance, htfMALength, htfMAType), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+htfSlowDistanceMA = useMTF ? request.security(syminfo.tickerid, higherTF, ma(pivotDistance, htfSlowMALength, htfSlowMAType), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+
+// HTF ATR for dynamic thresholds
+htfATR = useMTF ? request.security(syminfo.tickerid, higherTF, ta.atr(atrThresholdLength), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off) : na
+
+// === NEW: HTF CONDITION CALCULATION BASED ON SELECTED METHOD ===
+
+var string htfCondition = "Squeeze"  // Default state
+var color htfConditionColor = squeezeColor
+
+if useMTF and not na(htfPivotDistance)
+    if htfMethod == "Pivot Distance Breakout"
+        // Calculate HTF dynamic thresholds
+        var float htfDynamicSqueezeThreshold = na
+        var float htfDynamicBreakoutThreshold = na
+        
+        if htfThresholdMode == "Fixed %"
+            htfDynamicSqueezeThreshold := htfFixedSqueezeThreshold
+            htfDynamicBreakoutThreshold := htfFixedBreakoutThreshold
+        else  // ATR-Based
+            htfATRPercent = (htfATR / htfClose) * 100
+            htfDynamicSqueezeThreshold := htfATRPercent * htfATRSqueezeMultiplier
+            htfDynamicBreakoutThreshold := htfATRPercent * htfATRBreakoutMultiplier
+        
+        // Determine HTF condition based on pivot distance breakout logic
+        if math.abs(htfPivotDistance) <= htfDynamicSqueezeThreshold
+            htfCondition := "Squeeze"
+            htfConditionColor := squeezeColor
+        else if htfPivotDistance > htfDynamicBreakoutThreshold
+            htfCondition := "Long"
+            htfConditionColor := positiveColor
+        else if htfPivotDistance < -htfDynamicBreakoutThreshold
+            htfCondition := "Short"
+            htfConditionColor := negativeColor
+        else
+            htfCondition := "Squeeze"
+            htfConditionColor := squeezeColor
+            
+    else if htfMethod == "MA Cross Zero"
+        // HTF condition based on MA vs zero
+        if not na(htfDistanceMA)
+            if htfDistanceMA > 0
+                htfCondition := "Long"
+                htfConditionColor := positiveColor
+            else if htfDistanceMA < 0
+                htfCondition := "Short"
+                htfConditionColor := negativeColor
+            else
+                htfCondition := "Squeeze"
+                htfConditionColor := squeezeColor
+                
+    else  // MA Cross MA
+        // HTF condition based on dual MA crossover
+        if not na(htfDistanceMA) and not na(htfSlowDistanceMA)
+            if htfDistanceMA > htfSlowDistanceMA
+                htfCondition := "Long"
+                htfConditionColor := positiveColor
+            else if htfDistanceMA < htfSlowDistanceMA
+                htfCondition := "Short"
+                htfConditionColor := negativeColor
+            else
+                htfCondition := "Squeeze"
+                htfConditionColor := squeezeColor
+
+// === NEW: MTF FILTERING BASED ON HTF CONDITION ===
+// Logic from user's table:
+// HTF Condition | Enter Long? | Enter Short? | Exit Long? | Exit Short?
+// Long          | Yes         | No           | Yes        | Yes
+// Short         | No          | Yes          | Yes        | Yes  
+// Squeeze       | No          | No           | Yes        | Yes
+
+var bool htfAllowLongEntry = true
+var bool htfAllowShortEntry = true
+var bool htfForceExitLong = false
+var bool htfForceExitShort = false
+
+if useMTF
+    switch htfCondition
+        "Long" =>
+            htfAllowLongEntry := true
+            htfAllowShortEntry := false
+            htfForceExitLong := false  // Allow to stay in long
+            htfForceExitShort := true  // Force exit short
+        "Short" =>
+            htfAllowLongEntry := false
+            htfAllowShortEntry := true
+            htfForceExitLong := true   // Force exit long
+            htfForceExitShort := false // Allow to stay in short
+        "Squeeze" =>
+            htfAllowLongEntry := false
+            htfAllowShortEntry := false
+            htfForceExitLong := true   // Force exit long
+            htfForceExitShort := true  // Force exit short
+
+// === CURRENT TF DYNAMIC THRESHOLDS ===
+var float dynamicSqueezeThreshold = na
+var float dynamicBreakoutThreshold = na
+
+switch thresholdMode
+    "Fixed %" =>
+        dynamicSqueezeThreshold := fixedSqueezeThreshold
+        dynamicBreakoutThreshold := fixedBreakoutThreshold
+    "ATR-Based" =>
+        atrPercent = (atrForThresholds / close) * 100
+        dynamicSqueezeThreshold := atrPercent * atrSqueezeMultiplier
+        dynamicBreakoutThreshold := atrPercent * atrBreakoutMultiplier
+    "Bollinger Bands" =>
+        bbBasis = ta.sma(pivotDistance, bbLength)
+        bbDev = ta.stdev(pivotDistance, bbLength)
+        bbUpper = bbBasis + (bbDev * bbMultiplier)
+        bbLower = bbBasis - (bbDev * bbMultiplier)
+        bbWidth = bbUpper - bbLower
+        dynamicSqueezeThreshold := bbWidth * bbSqueezeRatio
+        dynamicBreakoutThreshold := bbWidth * bbBreakoutRatio
+    "Keltner Channels" =>
+        kcMA = ta.sma(pivotDistance, kcLength)
+        kcRange = kcUseTrueRange ? ta.atr(kcLength) : ta.sma(ta.stdev(pivotDistance, kcLength), kcLength)
+        kcUpper = kcMA + (kcRange * kcMultiplier)
+        kcLower = kcMA - (kcRange * kcMultiplier)
+        kcWidth = kcUpper - kcLower
+        dynamicSqueezeThreshold := kcWidth * kcSqueezeRatio
+        dynamicBreakoutThreshold := kcWidth * kcBreakoutRatio
+
+// Determine squeeze and breakout conditions with dynamic thresholds
+isInSqueeze = math.abs(pivotDistance) <= dynamicSqueezeThreshold
+wasInSqueeze = math.abs(pivotDistance[1]) <= dynamicSqueezeThreshold
+breakoutUp = wasInSqueeze and pivotDistance > dynamicBreakoutThreshold
+breakoutDown = wasInSqueeze and pivotDistance < -dynamicBreakoutThreshold
+
+// MA Crossover conditions
+maCrossAboveZero = distanceMA > 0 and distanceMA[1] <= 0
+maCrossBelowZero = distanceMA < 0 and distanceMA[1] >= 0
+
+// Dual MA Crossover conditions
+fastMAAboveSlowMA = distanceMA > slowDistanceMA and distanceMA[1] <= slowDistanceMA[1]
+fastMABelowSlowMA = distanceMA < slowDistanceMA and distanceMA[1] >= slowDistanceMA[1]
+
+// Update cooldown status
+longCooldownActive := useCooldown and ((not na(lastLongStopBar) and (bar_index - lastLongStopBar) < cooldownBars) or 
+                      (useBreakoutCrossExit and strategyLogic == "Pivot Distance Breakout" and not na(lastLongBreakoutExitBar) and (bar_index - lastLongBreakoutExitBar) < cooldownBars) or
+                      (useTrailingStop and not na(lastLongTrailingStopBar) and (bar_index - lastLongTrailingStopBar) < cooldownBars))
+shortCooldownActive := useCooldown and ((not na(lastShortStopBar) and (bar_index - lastShortStopBar) < cooldownBars) or 
+                       (useBreakoutCrossExit and strategyLogic == "Pivot Distance Breakout" and not na(lastShortBreakoutExitBar) and (bar_index - lastShortBreakoutExitBar) < cooldownBars) or
+                       (useTrailingStop and not na(lastShortTrailingStopBar) and (bar_index - lastShortTrailingStopBar) < cooldownBars))
+
+// Exit conditions
+longBreakoutCrossExit = useBreakoutCrossExit and strategyLogic == "Pivot Distance Breakout" and (pivotDistance < dynamicBreakoutThreshold and pivotDistance[1] >= dynamicBreakoutThreshold)
+shortBreakoutCrossExit = useBreakoutCrossExit and strategyLogic == "Pivot Distance Breakout" and (pivotDistance > -dynamicBreakoutThreshold and pivotDistance[1] <= -dynamicBreakoutThreshold)
+
+// Color logic for the histogram (enhanced with MTF info)
+histColor = strategyLogic == "Pivot Distance Breakout" ? 
+ (isInSqueeze ? squeezeColor : 
+ breakoutUp ? breakoutUpColor :
+ breakoutDown ? breakoutDownColor :
+ pivotDistance >= 0 ? positiveColor : negativeColor) :
+ strategyLogic == "MA Cross Zero" ?
+ (maCrossAboveZero ? breakoutUpColor :
+ maCrossBelowZero ? breakoutDownColor :
+ pivotDistance >= 0 ? positiveColor : negativeColor) :
+ (fastMAAboveSlowMA ? breakoutUpColor :
+ fastMABelowSlowMA ? breakoutDownColor :
+ distanceMA > slowDistanceMA ? positiveColor : negativeColor)
+
+// Plot the distance as histogram
+plot(pivotDistance, "Pivot Distance", style=plot.style_histogram, color=histColor, linewidth=2)
+
+// Plot moving averages
+plot(showMA ? distanceMA : na, "Distance MA", color=maColor, linewidth=2)
+plot(showSlowMA and strategyLogic == "MA Cross MA" ? slowDistanceMA : na, "Slow Distance MA", color=color.purple, linewidth=2)
+
+// Plot reference lines
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_solid)
+
+// Dynamic threshold lines
+plot(showDynamicLevels and strategyLogic == "Pivot Distance Breakout" ? dynamicSqueezeThreshold : na, "Upper Squeeze", color=squeezeColor)
+plot(showDynamicLevels and strategyLogic == "Pivot Distance Breakout" ? -dynamicSqueezeThreshold : na, "Lower Squeeze", color=squeezeColor)
+plot(showDynamicLevels and strategyLogic == "Pivot Distance Breakout" ? dynamicBreakoutThreshold : na, "Bullish Breakout", color=breakoutUpColor)
+plot(showDynamicLevels and strategyLogic == "Pivot Distance Breakout" ? -dynamicBreakoutThreshold : na, "Bearish Breakout", color=breakoutDownColor)
+
+// Plot squeeze dots on zero line
+plotshape(strategyLogic == "Pivot Distance Breakout" and isInSqueeze ? 0 : na, "Squeeze Dot", shape.circle, location.absolute, squeezeColor, size=size.tiny)
+
+// === ENHANCED STRATEGY CONDITIONS WITH NEW MTF LOGIC ===
+
+// Strategy conditions based on trade mode
+canGoLong = tradeMode == "Both" or tradeMode == "Long Only"
+canGoShort = tradeMode == "Both" or tradeMode == "Short Only"
+
+// Entry conditions with HTF filtering
+var bool longCondition = false
+var bool shortCondition = false
+
+if strategyLogic == "Pivot Distance Breakout"
+    longCondition := pivotDistance > dynamicSqueezeThreshold and canGoLong and not longCooldownActive and htfAllowLongEntry
+    shortCondition := pivotDistance < -dynamicSqueezeThreshold and canGoShort and not shortCooldownActive and htfAllowShortEntry
+else if strategyLogic == "MA Cross Zero"
+    longCondition := maCrossAboveZero and canGoLong and not longCooldownActive and htfAllowLongEntry
+    shortCondition := maCrossBelowZero and canGoShort and not shortCooldownActive and htfAllowShortEntry
+else
+    longCondition := fastMAAboveSlowMA and canGoLong and not longCooldownActive and htfAllowLongEntry
+    shortCondition := fastMABelowSlowMA and canGoShort and not shortCooldownActive and htfAllowShortEntry
+
+// Exit conditions for opposite position
+exitLongCondition = shortCondition and tradeMode == "Both"
+exitShortCondition = longCondition and tradeMode == "Both"
+
+// NEW: HTF forced exits
+htfForcedLongExit = useMTF and htfForceExitLong and strategy.position_size > 0
+htfForcedShortExit = useMTF and htfForceExitShort and strategy.position_size < 0
+
+// Exit conditions for single direction modes
+var bool exitLongForLongOnly = false
+var bool exitShortForShortOnly = false
+
+if strategyLogic == "Pivot Distance Breakout"
+    exitLongForLongOnly := pivotDistance < 0 and tradeMode == "Long Only"
+    exitShortForShortOnly := pivotDistance > 0 and tradeMode == "Short Only"
+else if strategyLogic == "MA Cross Zero"
+    exitLongForLongOnly := maCrossBelowZero and tradeMode == "Long Only"
+    exitShortForShortOnly := maCrossAboveZero and tradeMode == "Short Only"
+else
+    exitLongForLongOnly := fastMABelowSlowMA and tradeMode == "Long Only"
+    exitShortForShortOnly := fastMAAboveSlowMA and tradeMode == "Short Only"
+
+// === STRATEGY EXECUTION ===
+if inDateRange
+    // HTF forced exits (highest priority)
+    if htfForcedLongExit
+        strategy.close("Long", comment="Exit Long - HTF " + htfCondition)
+        longTrailingStop := na
+    
+    if htfForcedShortExit
+        strategy.close("Short", comment="Exit Short - HTF " + htfCondition)
+        shortTrailingStop := na
+    
+    // Long trades
+    if longCondition and not htfForcedLongExit
+        if strategy.position_size < 0 and tradeMode == "Both"
+            strategy.close("Short", comment="Exit Short - Flip")
+        strategy.entry("Long", strategy.long)
+        if useTrailingStop
+            longTrailingStop := na
+    
+    // Short trades
+    if shortCondition and not htfForcedShortExit
+        if strategy.position_size > 0 and tradeMode == "Both"
+            strategy.close("Long", comment="Exit Long - Flip")
+        strategy.entry("Short", strategy.short)
+        if useTrailingStop
+            shortTrailingStop := na
+    
+    // Update trailing stops for existing positions
+    if strategy.position_size > 0 and useTrailingStop and not htfForcedLongExit
+        entryPrice = strategy.position_avg_price
+        currentProfit = close - entryPrice
+        activationThreshold = atr * trailingStopActivation
+        
+        if currentProfit >= activationThreshold
+            newTrailingStop = close - (atr * trailingStopATRMultiplier)
+            longTrailingStop := na(longTrailingStop) ? newTrailingStop : math.max(longTrailingStop, newTrailingStop)
+        
+        if not na(longTrailingStop) and close <= longTrailingStop
+            strategy.close("Long", comment="Exit Long - Trailing Stop")
+            lastLongTrailingStopBar := bar_index
+            longTrailingStop := na
+    
+    if strategy.position_size < 0 and useTrailingStop and not htfForcedShortExit
+        entryPrice = strategy.position_avg_price
+        currentProfit = entryPrice - close
+        activationThreshold = atr * trailingStopActivation
+        
+        if currentProfit >= activationThreshold
+            newTrailingStop = close + (atr * trailingStopATRMultiplier)
+            shortTrailingStop := na(shortTrailingStop) ? newTrailingStop : math.min(shortTrailingStop, newTrailingStop)
+        
+        if not na(shortTrailingStop) and close >= shortTrailingStop
+            strategy.close("Short", comment="Exit Short - Trailing Stop")
+            lastShortTrailingStopBar := bar_index
+            shortTrailingStop := na
+    
+    // Exit conditions for single direction modes
+    if (exitLongForLongOnly or htfForcedLongExit) and strategy.position_size > 0
+        exitComment = htfForcedLongExit ? "Exit Long - HTF " + htfCondition :
+                     strategyLogic == "Pivot Distance Breakout" ? "Exit Long - Below Zero" : 
+                     strategyLogic == "MA Cross Zero" ? "Exit Long - MA Below Zero" : 
+                     "Exit Long - Fast MA Below Slow MA"
+        strategy.close("Long", comment=exitComment)
+        longTrailingStop := na
+    
+    if (exitShortForShortOnly or htfForcedShortExit) and strategy.position_size < 0
+        exitComment = htfForcedShortExit ? "Exit Short - HTF " + htfCondition :
+                     strategyLogic == "Pivot Distance Breakout" ? "Exit Short - Above Zero" : 
+                     strategyLogic == "MA Cross Zero" ? "Exit Short - MA Above Zero" : 
+                     "Exit Short - Fast MA Above Slow MA"
+        strategy.close("Short", comment=exitComment)
+        shortTrailingStop := na
+    
+    // Breakout Cross Under exits
+    if longBreakoutCrossExit and strategy.position_size > 0 and not htfForcedLongExit
+        strategy.close("Long", comment="Exit Long - Breakout Cross Under")
+        lastLongBreakoutExitBar := bar_index
+        longTrailingStop := na
+    
+    if shortBreakoutCrossExit and strategy.position_size < 0 and not htfForcedShortExit
+        strategy.close("Short", comment="Exit Short - Breakout Cross Under")
+        lastShortBreakoutExitBar := bar_index
+        shortTrailingStop := na
+    
+    // ATR-based Stop Loss and Take Profit
+    if strategy.position_size > 0 and (not useTrailingStop or na(longTrailingStop)) and not htfForcedLongExit
+        stopPrice = useStopLoss ? strategy.position_avg_price - (atr * stopLossATRMultiplier) : na
+        limitPrice = useTakeProfit ? strategy.position_avg_price + (atr * takeProfitATRMultiplier) : na
+        strategy.exit("Long Exit", "Long", stop=stopPrice, limit=limitPrice)
+    
+    if strategy.position_size < 0 and (not useTrailingStop or na(shortTrailingStop)) and not htfForcedShortExit
+        stopPrice = useStopLoss ? strategy.position_avg_price + (atr * stopLossATRMultiplier) : na
+        limitPrice = useTakeProfit ? strategy.position_avg_price - (atr * takeProfitATRMultiplier) : na
+        strategy.exit("Short Exit", "Short", stop=stopPrice, limit=limitPrice)
+
+// Track stop loss exits for cooldown
+if strategy.position_size[1] > 0 and strategy.position_size == 0 and strategy.closedtrades > 0
+    if strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Long Exit" and useStopLoss
+        exitPrice = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+        avgPrice = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+        expectedStopPrice = avgPrice - (atr * stopLossATRMultiplier)
+        if math.abs(exitPrice - expectedStopPrice) < (atr * 0.1)
+            lastLongStopBar := bar_index
+
+if strategy.position_size[1] < 0 and strategy.position_size == 0 and strategy.closedtrades > 0
+    if strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Short Exit" and useStopLoss
+        exitPrice = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+        avgPrice = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+        expectedStopPrice = avgPrice + (atr * stopLossATRMultiplier)
+        if math.abs(exitPrice - expectedStopPrice) < (atr * 0.1)
+            lastShortStopBar := bar_index
+
+// === ENHANCED VISUAL ELEMENTS ===
+
+// Plot trailing stop levels
+plot(useTrailingStop and strategy.position_size > 0 and not na(longTrailingStop) ? longTrailingStop : na, 
+     "Long Trailing Stop", color=color.red, linewidth=1, style=plot.style_stepline)
+plot(useTrailingStop and strategy.position_size < 0 and not na(shortTrailingStop) ? shortTrailingStop : na, 
+     "Short Trailing Stop", color=color.red, linewidth=1, style=plot.style_stepline)
+
+// Plot entry/exit markers
+plotshape(longCondition and strategy.position_size[1] <= 0 ? pivotDistance : na, "Long Entry", 
+          shape.triangleup, location.absolute, color.green, size=size.small)
+plotshape(shortCondition and strategy.position_size[1] >= 0 ? pivotDistance : na, "Short Entry", 
+          shape.triangledown, location.absolute, color.red, size=size.small)
+
+// Plot HTF filter rejection markers
+plotshape(useMTF and not htfAllowLongEntry and longCondition ? pivotDistance : na, "HTF Long Blocked", 
+          shape.xcross, location.absolute, color.orange, size=size.small)
+plotshape(useMTF and not htfAllowShortEntry and shortCondition ? pivotDistance : na, "HTF Short Blocked", 
+          shape.xcross, location.absolute, color.yellow, size=size.small)
+
+// Plot HTF forced exit markers
+plotshape(htfForcedLongExit ? pivotDistance : na, "HTF Long Exit", 
+          shape.diamond, location.absolute, color.orange, size=size.small)
+plotshape(htfForcedShortExit ? pivotDistance : na, "HTF Short Exit", 
+          shape.diamond, location.absolute, color.yellow, size=size.small)
+
+// Plot cooldown indicators
+plotshape(longCooldownActive and longCondition ? pivotDistance : na, "Long Blocked", 
+          shape.xcross, location.absolute, color.yellow, size=size.small)
+plotshape(shortCooldownActive and shortCondition ? pivotDistance : na, "Short Blocked", 
+          shape.xcross, location.absolute, color.purple, size=size.small)
+
+// === NEW: HTF CONDITION DISPLAY ===
+// Display HTF condition in top-left corner
+if useMTF and showDynamicLevels
+    var table htfTable = table.new(position.top_left, 2, 2, bgcolor=color.white, border_width=1)
+    
+    if barstate.islast
+        table.clear(htfTable, 0, 0, 1, 1)
+        table.cell(htfTable, 0, 0, "HTF (" + higherTF + "):", text_color=color.black, text_size=size.small)
+        table.cell(htfTable, 1, 0, htfCondition, text_color=htfConditionColor, text_size=size.small)
+        table.cell(htfTable, 0, 1, "Method:", text_color=color.black, text_size=size.small)
+        table.cell(htfTable, 1, 1, htfMethod, text_color=color.blue, text_size=size.small)
+
+// === ENHANCED ALERTS ===
+alertcondition(longCondition, "Long Signal", "Long entry signal triggered")
+alertcondition(shortCondition, "Short Signal", "Short entry signal triggered")
+alertcondition(useMTF and not htfAllowLongEntry and longCondition, "HTF Long Blocked", "Long signal blocked")
+alertcondition(useMTF and not htfAllowShortEntry and shortCondition, "HTF Short Blocked", "Short signal blocked")
+alertcondition(htfForcedLongExit, "HTF Forced Long Exit", "Long position force closed")
+alertcondition(htfForcedShortExit, "HTF Forced Short Exit", "Short position force closed")
+
+// HTF condition change alerts
+htfConditionChanged = useMTF and htfCondition != htfCondition[1]
+alertcondition(htfConditionChanged and htfCondition == "Long", "HTF Turned Long", "Higher timeframe condition changed to LONG")
+alertcondition(htfConditionChanged and htfCondition == "Short", "HTF Turned Short", "Higher timeframe condition changed to SHORT")
+alertcondition(htfConditionChanged and htfCondition == "Squeeze", "HTF Turned Squeeze", "Higher timeframe condition changed to SQUEEZE")
+
+// Standard alerts remain the same
+alertcondition(strategyLogic == "Pivot Distance Breakout" and isInSqueeze and not isInSqueeze[1], "Entering Squeeze", "Market entering squeeze condition")
+alertcondition(strategyLogic == "Pivot Distance Breakout" and not isInSqueeze and isInSqueeze[1], "Exiting Squeeze", "Market exiting squeeze condition")
+alertcondition(strategyLogic == "Pivot Distance Breakout" and breakoutUp, "Bullish Breakout", "Bullish breakout from squeeze")
+alertcondition(strategyLogic == "Pivot Distance Breakout" and breakoutDown, "Bearish Breakout", "Bearish breakout from squeeze")
+
+View in Pine Editor・591 lines
+Use on chart
+4
+2
+1 322
+# Multi-Timeframe Pivot Distance Strategy
+
+## Core Innovation & Originality
+
+This strategy revolutionizes moving average crossover trading by applying MA logic to **pivot distance relationships** instead of raw price data. Unlike traditional MA crossovers that react to price changes, this system reacts to **structural momentum changes** in how current price relates to recent significant pivot levels, creating earlier signals with fewer false positives.
+
+## Methodology & Mathematical Foundation
+
+### Pivot Distance Oscillator
+The strategy calculates:
+- **High Pivot Percentage**: (Current Close / Last Pivot High) × 100
+- **Low Pivot Percentage**: (Last Pivot Low / Current Close) × 100
+- **Pivot Distance**: High Pivot Percentage - Low Pivot Percentage
+
+This creates a standardized oscillator measuring market structure compression/expansion regardless of asset price or volatility.
+
+### Multi-Timeframe Filter
+Higher timeframe analysis provides directional bias:
+- **HTF Long** → Allow long entries, force short exits
+- **HTF Short** → Allow short entries, force long exits
+- **HTF Squeeze** → Block all entries, force all exits
+
+## Signal Generation Methods
+
+### Method 1: Dual MA Crossover (Primary/Default)
+**Fast MA (14 EMA)** and **Slow MA (50 SMA)** applied to pivot distance values:
+- **Long Signal**: Fast MA crosses above Slow MA (accelerating bullish pivot momentum)
+- **Short Signal**: Fast MA crosses below Slow MA (accelerating bearish pivot momentum)
+
+**Key Advantage**:
+- Traditional: Fast MA(price) crosses Slow MA(price) - reacts to price changes
+- This Strategy: Fast MA(pivot distance) crosses Slow MA(pivot distance) - reacts to structural changes
+- Result: Earlier signals, better trend identification, fewer ranging market whipsaws
+
+### Method 2: MA Cross Zero
+- **Long**: Pivot Distance MA crosses above zero
+- **Short**: Pivot Distance MA crosses below zero
+
+### Method 3: Pivot Distance Breakout (Squeeze-Based)
+Uses dynamic threshold envelopes to detect compression/expansion cycles:
+- **Long**: Distance breaks above dynamic breakout threshold after squeeze
+- **Short**: Distance breaks below negative breakout threshold after squeeze
+
+**Note**: Only the Breakout method uses threshold envelopes; MA Cross modes operate without them for cleaner signals.
+
+## Risk Management Integration
+
+- **ATR-Based Stops**: Entry ± (ATR × Multiplier) for stops/targets
+- **Trailing Stops**: Dynamic adjustment based on profit thresholds
+- **Cooldown System**: Prevents overtrading after stop-loss exits
+
+## How to Use
+
+### Setup (Default: MA Cross MA)
+1. **Strategy Logic**: "MA Cross MA" for structural momentum signals
+2. **MA Settings**: 14 EMA (fast) / 50 SMA (slow) - both adjustable
+3. **Multi-Timeframe**: Enable HTF for trend alignment
+4. **Risk Management**: ATR stop loss, ATR take profit
+
+### Signal Interpretation
+- **Blue/Purple lines**: Fast/Slow MAs of pivot distance
+- **Green/Red histogram**: Positive/negative pivot distance
+- **Triangle markers**: MA crossover entry signals
+- **HTF display**: Shows higher timeframe bias (top-left)
+
+### Trade Management
+- **Entry**: Clean MA crossover with HTF alignment
+- **Exit**: Opposite crossover, HTF change, or risk management triggers
+
+## Unique Advantages
+
+1. **Structural vs Price Momentum**: Captures market structure changes rather than just price movement, naturally filtering noise
+2. **Multi-Modal Flexibility**: Three signal methods for different market conditions or strategies
+3. **Timeframe Alignment**: HTF filtering improves win rates by preventing counter-trend trades
+
+
+

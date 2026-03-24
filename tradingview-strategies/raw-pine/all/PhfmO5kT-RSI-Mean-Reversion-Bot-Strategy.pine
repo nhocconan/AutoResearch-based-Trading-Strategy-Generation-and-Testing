@@ -1,0 +1,5 @@
+//@version=4
+_col1=##input(defval=#00E676,type='INPUT_COLOR',##id='in_7')
+_col2=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_8')
+##root(root_metainfo,barcolor_0_0,_col2,input__color)
+##root(root_metainfo,barcolor_0_1,_col1,input__color)

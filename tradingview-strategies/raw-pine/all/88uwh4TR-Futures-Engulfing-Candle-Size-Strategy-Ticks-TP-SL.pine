@@ -1,0 +1,233 @@
+//@version=5
+strategy("Futures Candle Size Strategy (With Historical Testing Range)", overlay=true, calc_on_every_tick=true)
+
+// Backtesting range
+testStartYear = input(2016, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+
+testStopYear = input(2030, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear, testStopMonth, testStopDay, 23, 59)
+
+// Inputs
+candleSizeThresholdTicks = input.float(25, title="Candle Size Threshold (Ticks)", minval=1)
+takeProfitTicks = input.float(50, title="Take Profit (Ticks)", minval=1)
+stopLossTicks = input.float(40, title="Stop Loss (Ticks)", minval=1)
+
+// Time filter (7:00 AM to 9:15 AM CST)
+startHour = input.int(7, title="Start Hour (CST)", minval=0, maxval=23)
+startMinute = input.int(0, title="Start Minute (CST)", minval=0, maxval=59)
+endHour = input.int(9, title="End Hour (CST)", minval=0, maxval=23)
+endMinute = input.int(15, title="End Minute (CST)", minval=0, maxval=59)
+inTimeRange = time("0700-0915", "GMT-6")
+
+// Tick conversion
+tickSize = syminfo.mintick
+candleSizeThreshold = candleSizeThresholdTicks * tickSize
+takeProfit = takeProfitTicks * tickSize
+stopLoss = stopLossTicks * tickSize
+
+// Candle size
+candleSize = math.abs(high - low)
+
+// Trade tracking
+var hasTradedToday = false
+isNewDay = dayofmonth != dayofmonth[1]
+if isNewDay
+    hasTradedToday := false
+
+// Trigger condition
+triggerCondition = inTimeRange and candleSize >= candleSizeThreshold and not hasTradedToday and time >= testPeriodStart and time <= testPeriodStop
+
+// Entry logic
+if triggerCondition
+    hasTradedToday := true
+    if close > open
+        strategy.entry("Buy", strategy.long)
+    if close < open
+        strategy.entry("Sell", strategy.short)
+
+// Exit logic
+strategy.exit("Exit Long", from_entry="Buy", limit=strategy.position_avg_price + takeProfit, stop=strategy.position_avg_price - stopLoss)
+strategy.exit("Exit Short", from_entry="Sell", limit=strategy.position_avg_price - takeProfit, stop=strategy.position_avg_price + stopLoss)
+
+// Visuals
+plot(strategy.position_size > 0 ? strategy.position_avg_price + takeProfit : na, color=color.green, title="Take Profit Level")
+plot(strategy.position_size > 0 ? strategy.position_avg_price - stopLoss : na, color=color.red, title="Stop Loss Level")
+bgcolor(time >= testPeriodStart and time <= testPeriodStop ? color.new(color.green, 90) : na, title="Backtest Range Highlight")
+
+// Alerts
+if triggerCondition
+    alert("Candle size is " + str.tostring(candleSizeThresholdTicks) + " ticks or greater. Trade initiated.", alert.freq_once_per_bar)
+
+View in Pine Editor・67 lines
+Use on chart
+4
+4
+2 728
+Jan 22, 2025
+The Futures Candle Size Strategy is designed to identify and trade significant price movements in the futures market based on candle size. It is optimized for futures instruments like ES, NQ, or CL, where precise tick-level calculations are essential. The strategy includes a customizable take profit and stop loss in ticks and operates only within a specified time window (e.g., 7:00 AM to 9:15 AM CST).
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds the defined threshold in ticks.
+Time Filter: Limits trades to the most active market hours, specifically between 7:00 AM and 9:15 AM CST.
+Take Profit and Stop Loss: Customizable exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends alerts whenever a trade is triggered, helping you stay informed in real-time.
+How It Works:
+
+The strategy calculates the size of each candle in ticks and compares it to the user-defined threshold.
+If the candle size meets or exceeds the threshold within the specified time range, it triggers a long or short trade.
+The trade automatically exits when the price hits the take profit or stop loss levels.
+Jan 22, 2025
+Release Notes
+The Futures Candle Size Strategy is designed to identify and trade significant price movements in the futures market based on candle size. It is optimized for futures instruments like ES, NQ, or CL, where precise tick-level calculations are essential. The strategy includes a customizable take profit and stop loss in ticks and operates only within a specified time window (e.g., 7:00 AM to 9:15 AM CST).
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds the defined threshold in ticks.
+Time Filter: Limits trades to the most active market hours, specifically between 7:00 AM and 9:15 AM CST.
+Take Profit and Stop Loss: Customizable exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends alerts whenever a trade is triggered, helping you stay informed in real-time.
+How It Works:
+
+The strategy calculates the size of each candle in ticks and compares it to the user-defined threshold.
+If the candle size meets or exceeds the threshold within the specified time range, it triggers a long or short trade.
+The trade automatically exits when the price hits the take profit or stop loss levels.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during high-volume market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust the take profit, stop loss, and candle size threshold to match your risk tolerance and trading style.
+Jan 22, 2025
+Release Notes
+The Futures Candle Size Strategy is designed to identify and trade significant price movements in the futures market based on candle size, with added controls for time-based trading and trade frequency. It is optimized for futures instruments like ES, NQ, or CL, where tick-level precision is essential. This version ensures that only one trade per day is executed, regardless of additional signals, providing better control over trade frequency.
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds the defined threshold in ticks (default: 25 ticks).
+One Trade Per Day: Limits the strategy to a single trade per day, resetting eligibility at the start of a new trading day.
+Time Filter: Limits trades to specific trading hours (e.g., 7:00 AM to 9:15 AM CST), ensuring trades occur only during active market hours.
+Take Profit and Stop Loss: Customizable exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends alerts when a trade is initiated, helping you stay informed in real time.
+Backtesting Compatibility: Includes features for accurate historical testing, such as daily reset of trade limits and time-based execution.
+How It Works:
+
+The strategy calculates the size of each candle in ticks and compares it to the user-defined threshold.
+If the candle size meets or exceeds the threshold within the specified time range, a long or short trade is triggered.
+Once a trade is executed, no additional trades are allowed for the rest of the day, even if subsequent signals occur.
+The trade automatically exits when the price hits the take profit or stop loss levels.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during high-volume market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust the take profit, stop loss, candle size threshold, and time range to match your risk tolerance and trading style.
+
+Jan 22, 2025
+Release Notes
+The Futures Candle Size Strategy is designed to identify and trade significant price movements in the futures market based on candle size, with added controls for time-based trading and trade frequency. It is optimized for futures instruments like ES, NQ, or CL, where tick-level precision is essential. This version ensures that only one trade per day is executed, regardless of additional signals, providing better control over trade frequency.
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds the defined threshold in ticks (default: 25 ticks).
+One Trade Per Day: Limits the strategy to a single trade per day, resetting eligibility at the start of a new trading day.
+Time Filter: Limits trades to specific trading hours (e.g., 7:00 AM to 9:15 AM CST), ensuring trades occur only during active market hours.
+Take Profit and Stop Loss: Customizable exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends alerts when a trade is initiated, helping you stay informed in real time.
+Backtesting Compatibility: Includes features for accurate historical testing, such as daily reset of trade limits and time-based execution.
+How It Works:
+
+The strategy calculates the size of each candle in ticks and compares it to the user-defined threshold.
+If the candle size meets or exceeds the threshold within the specified time range, a long or short trade is triggered.
+Once a trade is executed, no additional trades are allowed for the rest of the day, even if subsequent signals occur.
+The trade automatically exits when the price hits the take profit or stop loss levels.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during high-volume market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust the take profit, stop loss, candle size threshold, and time range to match your risk tolerance and trading style.
+Jan 22, 2025
+Release Notes
+The Futures Candle Size Strategy is a comprehensive tool designed for futures trading, offering precise control over trading conditions and enhanced visualization features. It identifies and trades significant price movements based on candle size, with added features to limit trade frequency, specify trading hours, and highlight alert candles. This strategy is tailored for futures instruments like ES, NQ, or CL, where tick-level precision is crucial.
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds a customizable threshold in ticks (default: 25 ticks).
+Alert Candle Highlighting: Candles that trigger a trade are visually highlighted in white, providing instant recognition of trade signals on the chart.
+One Trade Per Day: Limits the strategy to a single trade per day, resetting eligibility at the start of a new trading day.
+Time Filter: Trades are restricted to specific trading hours (default: 7:00 AM to 9:15 AM CST) to focus on high-volume periods.
+Start Date Filter: The strategy starts generating trade signals only from January 1, 2025, ensuring alignment with your desired historical or live trading range.
+Take Profit and Stop Loss: Predefined exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends real-time alerts when a trade is initiated, keeping you informed of strategy triggers.
+Backtesting Compatibility: Includes features for accurate historical testing, such as daily trade limits, date filters, and time-based execution.
+How It Works:
+
+The strategy evaluates the size of each candle in ticks. If the size meets or exceeds the user-defined threshold, and the current time and date fall within the specified range, a trade is triggered.
+Once a trade is executed, no additional trades are allowed for the rest of the day, regardless of subsequent signals.
+The candle triggering a trade is automatically highlighted in white for easy visualization.
+Take profit and stop loss levels are applied to manage trades automatically.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during active market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust inputs such as take profit, stop loss, candle size threshold, and time range to align with your trading objectives.
+Jan 23, 2025
+Release Notes
+The Futures Candle Size Strategy is a comprehensive tool designed for futures trading, offering precise control over trading conditions and enhanced visualization features. It identifies and trades significant price movements based on candle size, with added features to limit trade frequency, specify trading hours, and highlight alert candles. This strategy is tailored for futures instruments like ES, NQ, or CL, where tick-level precision is crucial.
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds a customizable threshold in ticks (default: 25 ticks).
+Alert Candle Highlighting: Candles that trigger a trade are visually highlighted in white, providing instant recognition of trade signals on the chart.
+One Trade Per Day: Limits the strategy to a single trade per day, resetting eligibility at the start of a new trading day.
+Time Filter: Trades are restricted to specific trading hours (default: 7:00 AM to 9:15 AM CST) to focus on high-volume periods.
+Start Date Filter: The strategy starts generating trade signals only from January 1, 2025, ensuring alignment with your desired historical or live trading range.
+Take Profit and Stop Loss: Predefined exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends real-time alerts when a trade is initiated, keeping you informed of strategy triggers.
+Backtesting Compatibility: Includes features for accurate historical testing, such as daily trade limits, date filters, and time-based execution.
+How It Works:
+
+The strategy evaluates the size of each candle in ticks. If the size meets or exceeds the user-defined threshold, and the current time and date fall within the specified range, a trade is triggered.
+Once a trade is executed, no additional trades are allowed for the rest of the day, regardless of subsequent signals.
+The candle triggering a trade is automatically highlighted in white for easy visualization.
+Take profit and stop loss levels are applied to manage trades automatically.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during active market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust inputs such as take profit, stop loss, candle size threshold, and time range to align with your trading objectives.
+Jan 23, 2025
+Release Notes
+The Futures Candle Size Strategy is a comprehensive tool designed for futures trading, offering precise control over trading conditions and enhanced visualization features. It identifies and trades significant price movements based on candle size, with added features to limit trade frequency, specify trading hours, and highlight alert candles. This strategy is tailored for futures instruments like ES, NQ, or CL, where tick-level precision is crucial.
+
+Key Features:
+
+Candle Size Threshold: Trades are triggered when the candle's high-to-low range exceeds a customizable threshold in ticks (default: 25 ticks).
+Alert Candle Highlighting: Candles that trigger a trade are visually highlighted in white, providing instant recognition of trade signals on the chart.
+One Trade Per Day: Limits the strategy to a single trade per day, resetting eligibility at the start of a new trading day.
+Time Filter: Trades are restricted to specific trading hours (default: 7:00 AM to 9:15 AM CST) to focus on high-volume periods.
+Start Date Filter: The strategy starts generating trade signals only from January 1, 2025, ensuring alignment with your desired historical or live trading range.
+Take Profit and Stop Loss: Predefined exit levels in ticks to manage risk and lock in profits.
+Long and Short Trades: Automatically places buy or sell orders based on the candle's direction (bullish or bearish).
+Alerts: Sends real-time alerts when a trade is initiated, keeping you informed of strategy triggers.
+Backtesting Compatibility: Includes features for accurate historical testing, such as daily trade limits, date filters, and time-based execution.
+How It Works:
+
+The strategy evaluates the size of each candle in ticks. If the size meets or exceeds the user-defined threshold, and the current time and date fall within the specified range, a trade is triggered.
+Once a trade is executed, no additional trades are allowed for the rest of the day, regardless of subsequent signals.
+The candle triggering a trade is automatically highlighted in white for easy visualization.
+Take profit and stop loss levels are applied to manage trades automatically.
+Recommended Usage:
+
+Use this strategy for intraday futures trading during active market hours.
+Ensure the tick size of your chosen futures instrument is correctly set in TradingView.
+Adjust inputs such as take profit, stop loss, candle size threshold, and time range to align with your trading objectives.

@@ -1,0 +1,90 @@
+//@version=2
+strategy(title = "Chikou Cloud Crossover", initial_capital = 200000, overlay = false)
+
+takelong   = input(title = "Take Long Positions",  type = bool, defval = true)
+takeshort  = input(title = "Take Short Positions", type = bool, defval = true)
+waitcandle = input(title = "Enter on opposite candle", type = bool, defval = false)
+usehtf     = input(title = "Check Higher Timeframe Kumo", type = bool, defval = false)
+useFF      = input(title = "Use Fixed Fractional Size", defval = false, type = bool)
+riskEQ     = input(title = "Equity Risk%", defval = 0.5, minval = 0, maxval = 100, type = float)
+startyear  = input(title = "Start Year",  defval = 2000, minval = 1970, type = float)
+startmonth = input(title = "Start Month", defval = 1,    minval = 1, maxval = 12, type = float)
+startday   = input(title = "Start Day",   defval = 1,    minval = 1, maxval = 30, type = float)
+
+
+// Plot equity curve
+PLCurve = (strategy.initial_capital + strategy.netprofit) / strategy.initial_capital * 100
+plot(PLCurve > 100 ? na : PLCurve, title = "-Equity Curve", style = areabr, linewidth = 2, color = #EA9999)
+plot(PLCurve < 100 ? na : PLCurve, title = "+Equity Curve", style = areabr, linewidth = 2, color = lime)
+hline(100, linestyle = dashed, linewidth = 1, color = silver)
+
+
+// Ichimoku Components
+conversionPeriods   = 9
+basePeriods         = 26
+kumoSpan2Periods    = 52
+displacement        = 26
+
+donchian(len) => avg(lowest(len), highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine       = donchian(basePeriods)
+spanA          = offset(avg(conversionLine, baseLine), displacement)
+spanB          = offset(donchian(kumoSpan2Periods), displacement)
+lagLine(A, B) =>
+    threshold = 2
+    upper = offset(max(A, B), displacement)
+    lower = offset(min(A, B), displacement)
+    sum(close < lower, threshold) == threshold ? -1
+   : sum(upper < close, threshold) == threshold ? 1
+   : 0
+
+htfconversionLine = donchian(conversionPeriods * 4)
+htfbaseLine       = donchian(basePeriods * 4)
+htfspanA          = offset(avg(htfconversionLine, htfbaseLine), displacement * 4)
+htfspanB          = offset(donchian(kumoSpan2Periods * 4), displacement * 4)
+
+
+// Trade entry/exit signals
+upperSpan = max(spanA, spanB)
+lowerSpan = min(spanA, spanB)
+longStop  = min(baseLine, lowest(low, displacement * 4))
+shortStop = max(baseLine, highest(high, displacement * 4))
+bullish =  1
+bearish = -1
+trade_signal() =>
+    (lagLine(spanA, spanB) == bullish and lagLine(conversionLine, baseLine) == bullish and conversionLine > baseLine and low > upperSpan and (usehtf ? close > htfspanB : true)) ? bullish
+   : (lagLine(spanA, spanB) == bearish and lagLine(conversionLine, baseLine) == bearish and conversionLine < baseLine and high < lowerSpan and (usehtf ? close < htfspanB : true)) ? bearish
+   : 0
+open_signal(sig) => trade_signal() == sig
+close_signal(sig) =>
+    (sig == bullish and lagLine(spanA, spanB) == bearish) ? true
+  : (sig == bearish and lagLine(spanA, spanB) == bullish)
+
+
+// Trade execution
+compute_position(risk, entry, stop) =>
+    pricestop = max(entry, stop) - min(entry, stop)
+    pos_size = risk / (pricestop * 1.5)
+    nz(pos_size)
+bar_filter() =>
+    startingpoint = year > startyear or (year == startyear and (month > startmonth or (month == startmonth and dayofmonth >= startday)))
+
+if (close_signal(bullish) and (takeshort ? not open_signal(bearish) : true))
+    strategy.cancel("IchiLE")
+    strategy.close("IchiLE")
+if (close_signal(bearish) and (takelong ? not open_signal(bullish) : true))
+    strategy.cancel("IchiSE")
+    strategy.close("IchiSE")
+
+riskamount = riskEQ  / 100 * (strategy.initial_capital + (useFF ? strategy.netprofit : 0))
+strategy.entry("IchiLE", strategy.long,  compute_position(riskamount, highest(9), longStop), when = takelong and bar_filter() and open_signal(bullish))
+strategy.entry("IchiSE", strategy.short, compute_position(riskamount, lowest(9), shortStop), when = takeshort and bar_filter() and open_signal(bearish))
+
+View in Pine Editor・81 lines
+Use on chart
+3
+4
+4
+9
+13 210
+Strategy Test using Ichimoku Cloud and lag line.

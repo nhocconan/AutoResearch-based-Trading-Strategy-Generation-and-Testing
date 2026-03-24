@@ -1,0 +1,233 @@
+//@version=5
+strategy("Monthly Performance Strategy based on Seasonality", overlay = true, calc_on_order_fills=true)//, max_boxes_count = 500)
+
+startYearInput = input.int(2000)
+//#region ———————————————————— Constants, inputs, and global variables
+is_newday(sess) =>
+    d = time("W", sess)
+    ta.change(d) != 0 ? true : na
+    
+is_newbar(res) =>
+    t = time(res)
+    ta.change(t) != 0 ? true : na
+
+
+// User inputs for selecting the month(s) to test
+january   = input.bool(false, title="Test January")
+february  = input.bool(false, title="Test February")
+march     = input.bool(false, title="Test March")
+april     = input.bool(false, title="Test April")
+may       = input.bool(false, title="Test May")
+june      = input.bool(false, title="Test June")
+july      = input.bool(false, title="Test July")
+august    = input.bool(false, title="Test August")
+september = input.bool(false, title="Test September")
+october   = input.bool(false, title="Test October")
+november  = input.bool(false, title="Test November")
+december  = input.bool(false, title="Test December")
+
+// Function to check if the current month is selected
+isMonthSelected() =>
+    (january and month == 1) or    (february and month == 2) or    (march and month == 3) or    (april and month == 4) or    (may and month == 5) or    (june and month == 6) or    (july and month == 7) or    (august and month == 8) or    (september and month == 9) or   (october and month == 10) or    (november and month == 11) or    (december and month == 12)
+
+// Entry: Enter the trade on the first day of the selected month
+// firstDayOfMonth = isMonthSelected()
+
+// Function to check if it's the first day of the next month
+isNextMonthSelected() =>
+    (january and month == 2) or    (february and month == 3) or    (march and month == 4) or    (april and month == 5) or    (may and month == 6) or    (june and month == 7) or    (july and month == 8) or    (august and month == 9) or    (september and month == 10) or    (october and month == 11) or    (november and month == 12) or    (december and month == 1)
+
+apply_risk_management=input.bool(false)
+timeframer = input.timeframe("W")
+length = input(1)
+numATRs = input.float(2, step=0.5)
+atrs = request.security(syminfo.tickerid, timeframer, ta.atr(14)*numATRs)
+// if (not na(close[length]))
+//     strategy.entry("VltClsLE", strategy.long, stop=close+atrs, comment = "VltClsLE")
+//     strategy.entry("VltClsSE", strategy.short, stop=close-atrs, comment = "VltClsSE")
+
+// Function to check if it's the first day of a specific month
+isFirstDay(monthNum) =>
+    month == monthNum  and year>=startYearInput
+
+// Function to check if it's the first day of the next month
+isFirstDayNextMonth(currentMonth) =>
+    month == (currentMonth % 12) + 1
+    // is_newbar("W") and month == currentMonth
+var int cont_jan = na
+var  int cont_feb= na
+var  int cont_mar= na
+var  int cont_apr= na
+var  int cont_may= na
+var  int cont_jun= na
+var  int cont_jul= na
+var  int cont_aug= na
+var  int cont_sept= na
+var  int cont_oct= na
+var  int cont_nov= na
+var  int cont_dec= na
+// January
+if (january and isFirstDay(1) )//jan==0)
+    strategy.entry("Entry January", strategy.long)
+    cont_jan:=1
+
+if (january and isFirstDayNextMonth(1))
+    cont_jan:=0
+    strategy.close("Entry January")
+
+// February
+if (february and isFirstDay(2) )//feb==0)
+    strategy.entry("Entry February", strategy.long)
+    cont_feb:=1
+
+if (february and isFirstDayNextMonth(2))
+    cont_feb:=0
+    strategy.close("Entry February")
+
+// March
+if (march and isFirstDay(3) )//mar==0)
+    strategy.entry("Entry March", strategy.long)
+    cont_mar:=1
+if (march and isFirstDayNextMonth(3))
+    cont_mar:=0
+    strategy.close("Entry March")
+
+// April
+if (april and isFirstDay(4) )//apr==0)
+    strategy.entry("Entry April", strategy.long)
+    cont_apr :=1
+if (april and isFirstDayNextMonth(4))
+    cont_apr:=0
+    strategy.close("Entry April")
+
+// May
+if (may and isFirstDay(5) )//may==0)
+    strategy.entry("Entry May", strategy.long)
+    cont_may:=1
+
+if (may and isFirstDayNextMonth(5))
+    cont_may:=0
+    strategy.close("Entry May")
+
+// June
+if (june and isFirstDay(6) )//jun ==0)
+    strategy.entry("Entry June", strategy.long)
+    cont_jun :=1
+if (june and isFirstDayNextMonth(6))
+    cont_jun :=0
+    strategy.close("Entry June")
+
+// July
+if (july and isFirstDay(7) )//jul==0)
+    strategy.entry("Entry July", strategy.long)
+    cont_jul :=1
+
+if (july and isFirstDayNextMonth(7))
+    cont_jul:=0
+    strategy.close("Entry July")
+
+// August
+if (august and isFirstDay(8) )//aug ==0)
+    strategy.entry("Entry August", strategy.long)
+    cont_aug :=1
+if (august and isFirstDayNextMonth(8))
+    cont_aug:=0
+    strategy.close("Entry August")
+
+// September
+if (september and isFirstDay(9) )//sept==0)
+    strategy.entry("Entry September", strategy.long)
+    cont_sept:=1
+
+if (september and isFirstDayNextMonth(9))
+    cont_sept:=0
+    strategy.close("Entry September")
+
+// October
+if (october and isFirstDay(10) )//oct==0)
+    strategy.entry("Entry October", strategy.long)
+    cont_oct :=1
+if (october and isFirstDayNextMonth(10))
+    cont_oct:=0
+    strategy.close("Entry October")
+
+// November
+if (november and isFirstDay(11) )//nov==0)
+    strategy.entry("Entry November", strategy.long)
+    cont_nov:=1
+if (november and isFirstDayNextMonth(11))
+    strategy.close("Entry November")
+    cont_nov:=0
+// December
+if (december and isFirstDay(12) )//dec==0)
+    strategy.entry("Entry December", strategy.long)
+    cont_dec :=1
+if (december and isFirstDayNextMonth(12))
+    strategy.close("Entry December")
+    cont_dec :=0
+
+if apply_risk_management==true
+    strategy.exit("SL_TP_jan", "Entry January", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_feb", "Entry February", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_mar", "Entry March", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_apr", "Entry April", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_may", "Entry May", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_jun", "Entry June", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_jul", "Entry July", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_aug", "Entry August", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_sep", "Entry September", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_oct", "Entry October", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_nov", "Entry November", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+    strategy.exit("SL_TP_dec", "Entry December", stop=strategy.position_avg_price-atrs, limit=strategy.position_avg_price+atrs)
+
+View in Pine Editor・181 lines
+Use on chart
+1
+7
+7
+2
+5 182
+The Monthly Performance Strategy leverages the power of seasonality—those cyclical patterns that emerge in financial markets at specific times of the year. From tax deadlines to industry-specific events and global holidays, historical data shows that certain months can offer strong opportunities for trading. This strategy was designed to help traders capture those opportunities and take advantage of recurring market patterns through an automated and highly customizable approach.
+
+The Inspiration Behind the Strategy:
+This strategy began with the idea that market performance is often influenced by seasonal factors. Historically, certain months outperform others due to a variety of reasons, like earnings reports, holiday shopping, or fiscal year-end events. By identifying these periods, traders can better time their market entries and exits, giving them an advantage over those who solely rely on technical indicators or news events.
+
+The Monthly Performance Strategy was built to take this concept and automate it. Instead of manually analyzing market data for each month, this strategy enables you to select which months you want to focus on and then executes trades based on predefined rules, saving you time and optimizing the performance of your trades.
+
+Key Features:
+Customizable Month Selection: The strategy allows traders to choose specific months to test or trade on. You can select any combination of months—for example, January, July, and December—to focus on based on historical trends. Whether you’re targeting the historically strong months like December (often driven by the 'Santa Rally') or analyzing quieter months for low volatility trades, this strategy gives you full control.
+
+Automated Monthly Entries and Exits: The strategy automatically enters a long position on the first day of your selected month(s) and exits the trade at the beginning of the next month. This makes it perfect for traders who want to benefit from seasonal patterns without manually monitoring the market. It ensures precision in entering and exiting trades based on pre-set timeframes.
+
+Re-entry on Stop Loss or Take Profit: One of the standout features of this strategy is its ability to re-enter a trade if a position hits the stop loss (SL) or take profit (TP) level during the selected month. If your trade reaches either a SL or TP before the month ends, the strategy will automatically re-enter a new trade the next trading day. This feature ensures that you capture multiple trading opportunities within the same month, instead of exiting entirely after a successful or unsuccessful trade. Essentially, it keeps your capital working for you throughout the entire month, not just when conditions align perfectly at the beginning.
+
+Built-in Risk Management: Risk management is a vital part of this strategy. It incorporates an Average True Range (ATR)-based stop loss and take profit system. The ATR helps set dynamic levels based on the market’s volatility, ensuring that your stops and targets adjust to changing market conditions. This not only helps limit potential losses but also maximizes profit potential by adapting to market behavior.
+
+Historical Performance Testing: You can backtest this strategy on any period by setting the start year. This allows traders to analyze past market data and optimize their strategy based on historical performance. You can fine-tune which months to trade based on years of data, helping you identify trends and patterns that provide the best trading results.
+
+Versatility Across Asset Classes: While this strategy can be particularly effective for stock market indices and sector rotation, it’s versatile enough to apply to other asset classes like forex, commodities, and even cryptocurrencies. Each asset class may exhibit different seasonal behaviors, allowing you to explore opportunities across various markets with this strategy.
+
+How It Works:
+The trader selects which months to test or trade, for example, January, April, and October.
+The strategy will automatically open a long position on the first trading day of each selected month.
+If the trade hits either the take profit or stop loss within the month, the strategy will close the current position and re-enter a new trade on the next trading day, provided the month has not yet ended. This ensures that the strategy continues to capture any potential gains throughout the month, rather than stopping after one successful trade.
+At the start of the next month, the position is closed, and if the next month is also selected, a new trade is initiated following the same process.
+
+Risk Management and Dynamic Adjustments:
+Incorporating risk management with this strategy is as easy as turning on the ATR-based system. The strategy will automatically calculate stop loss and take profit levels based on the market’s current volatility, adjusting dynamically to the conditions. This ensures that the risk is controlled while allowing for flexibility in capturing profits during both high and low volatility periods.
+
+Maximizing the Seasonal Edge:
+By automating entries and exits based on specific months and combining that with dynamic risk management, the Ultimate Monthly Performance Strategy takes advantage of seasonal patterns without requiring constant monitoring. The added re-entry feature after hitting a stop loss or take profit ensures that you are always in the game, maximizing your chances to capture profitable trades during favorable seasonal periods.
+
+Who Can Benefit from This Strategy?
+This strategy is perfect for traders who:
+
+Want to exploit the predictable, recurring patterns that occur during specific months of the year.
+Prefer a hands-off, automated trading approach that allows them to focus on other aspects of their portfolio or life.
+Seek to manage risk effectively with ATR-based stop losses and take profits that adjust to market conditions.
+Appreciate the ability to re-enter trades when a take profit or stop loss is hit within the month, ensuring that they don't miss out on multiple opportunities during a favorable period.
+
+In summary, the Ultimate Monthly Performance Strategy provides traders with a comprehensive tool to capitalize on seasonal trends, optimize their trading opportunities throughout the year, and manage risk effectively. The built-in re-entry system ensures you continue to benefit from the market even after hitting targets within the same month, making it a robust strategy for traders looking to maximize their edge in any market.
+
+Risk Disclaimer:
+Trading financial markets involves significant risk and may not be suitable for all investors. The Monthly Performance Strategy is designed to help traders identify seasonal trends, but past performance does not guarantee future results. It is important to carefully consider your risk tolerance, financial situation, and trading goals before using any strategy. Always use appropriate risk management and consult with a professional financial advisor if necessary. The use of this strategy does not eliminate the risk of losses, and traders should be prepared for the possibility of losing their entire investment. Be sure to test the strategy on a demo account before applying it in live markets.

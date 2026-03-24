@@ -1,0 +1,498 @@
+//@version=5
+strategy("Ultra Reversion DCA Strategy with Manual Leverage - V.1", shorttitle="Ultra Reversion DCA Strategy - V.1", overlay=true, pyramiding=100)
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 포지션 사이징 방식 설정
+// --------------------------------------------------------------------------------------------------------------------{
+position_sizing_mode = input.string("Martingale", "Position Sizing Mode", options=["Martingale", "Equal Split"], group="Position Sizing")
+initial_position_size = input.float(1.0, "Initial Position Size", minval=0.01, step=0.01, group="Position Sizing")
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 수동 레버리지 설정
+// --------------------------------------------------------------------------------------------------------------------{
+manual_leverage = input.float(1.0, "Leverage", minval=1.0, maxval=125.0, step=0.1, group="Leverage Settings")
+
+// 현재 사용 레버리지
+current_leverage = manual_leverage
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 강제 청산 가격 계산 (자동)
+// --------------------------------------------------------------------------------------------------------------------{
+var float long_liquidation_price = na
+var float short_liquidation_price = na
+
+// 강제 청산 가격 계산 함수 (레버리지에 따른 자동 계산)
+// 일반적으로 선물거래소에서는 레버리지 대비 약 95-98% 지점에서 강제청산
+calc_liquidation_price(entry_price, leverage, is_long) =>
+    liquidation_threshold = 0.95 // 95% 지점에서 강제청산 (5% 마진)
+    if is_long
+        entry_price * (1 - liquidation_threshold / leverage)
+    else
+        entry_price * (1 + liquidation_threshold / leverage)
+
+// --------------------------------------------------------------------------------------------------------------------}
+// Donchian Channels 설정
+// --------------------------------------------------------------------------------------------------------------------{
+dc_length = input.int(240, minval=1, title="Donchian Length")
+dc_offset = input.int(14, title="Donchian Offset")
+
+// Donchian 채널 계산
+dc_lower_raw = ta.lowest(dc_length)
+dc_upper_raw = ta.highest(dc_length)
+
+// 오프셋 적용
+dc_lower = ta.valuewhen(bar_index, dc_lower_raw, dc_offset)
+dc_upper = ta.valuewhen(bar_index, dc_upper_raw, dc_offset)
+dc_basis = math.avg(dc_upper, dc_lower)
+
+// Donchian 플롯
+plot(dc_basis, "Basis", color=color.rgb(255, 255, 255))
+dc_u = plot(dc_upper, "Upper", color=#f1ff29e5)
+dc_l = plot(dc_lower, "Lower", color=#f1ff29e5)
+fill(dc_u, dc_l, color=#f3f0210d, title="Background")
+
+dc_is_below_lower = open < dc_lower
+dc_is_above_upper = open > dc_upper
+// 캔들 색상 설정
+barcolor(dc_is_below_lower ? color.green : dc_is_above_upper ? color.red : na)
+
+// --------------------------------------------------------------------------------------------------------------------}
+// Parabolic RSI 설정
+// --------------------------------------------------------------------------------------------------------------------{
+rsi_len = input.int(14, "RSI Length", group="RSI")
+rsi_upper = input.int(75, "Overbought Threshold", inline="Threshold", group="RSI")
+rsi_lower = input.int(25, "Oversold Threshold", inline="Threshold", group="RSI")
+
+display_sar = input.bool(true, "SAR", group="SAR")
+sar_start = input.float(0.02, "Start", step=0.01, inline="sar", group="SAR")
+sar_inc = input.float(0.022, "Increment", step=0.01, inline="sar", group="SAR")
+sar_max = input.float(0.2, "Maximum", step=0.01, inline="sar", group="SAR")
+color_up = input.color(#EEA47F, "", inline="c", group="SAR")
+color_dn = input.color(#00539C, "", inline="c", group="SAR")
+
+// RSI 계산
+rsi = ta.rsi(close, rsi_len)
+
+// Parabolic SAR 함수
+pine_sar(src, start, inc, max) =>
+    src_high = src + 1
+    src_low = src - 1
+    var float result = na
+    var float maxMin = na
+    var float acceleration = na
+    var bool isBelow = false
+    bool isFirstTrendBar = false
+    
+    if bar_index <= rsi_len + 2
+        if src > src[1]
+            isBelow := true
+            maxMin := src_high
+            result := src_low[1]
+        else
+            isBelow := false
+            maxMin := src_low
+            result := src_high[1]
+        isFirstTrendBar := true
+        acceleration := start
+    
+    result := nz(result[1], result) + acceleration * (maxMin - nz(result[1], result))
+    
+    if isBelow
+        if result > src_low
+            isFirstTrendBar := true
+            isBelow := false
+            result := math.max(src_high, maxMin)
+            maxMin := src_low
+            acceleration := start
+    else
+        if result < src_high
+            isFirstTrendBar := true
+            isBelow := true
+            result := math.min(src_low, maxMin)
+            maxMin := src_high
+            acceleration := start
+    
+    if not isFirstTrendBar
+        if isBelow
+            if src_high > maxMin
+                maxMin := src_high
+                acceleration := math.min(acceleration + inc, max)
+        else
+            if src_low < maxMin
+                maxMin := src_low
+                acceleration := math.min(acceleration + inc, max)
+    
+    if isBelow
+        result := math.min(result, src_low[1])
+        if bar_index > 1
+            result := math.min(result, src_low[2])
+    else
+        result := math.max(result, src_high[1])
+        if bar_index > 1
+            result := math.max(result, src_high[2])
+    
+    [result, isBelow]
+
+// Parabolic RSI 계산
+[sar_rsi, isBelow] = pine_sar(rsi, sar_start, sar_inc, sar_max)
+
+// 신호 계산
+sig_up = isBelow != isBelow[1] and isBelow and barstate.isconfirmed
+sig_dn = isBelow != isBelow[1] and not isBelow and barstate.isconfirmed
+s_sig_up = sig_up and sar_rsi <= rsi_lower
+s_sig_dn = sig_dn and sar_rsi >= rsi_upper
+
+// SAR 시각화
+var sar = float(na)
+if display_sar
+    sar := isBelow != isBelow[1] ? na : sar_rsi
+sar_col = isBelow ? color_up : color_dn
+
+// RSI 시각화
+plotshape(s_sig_up, "Chart Strong RSI Up", shape.diamond, location.belowbar, size=size.small, color=sar_col, force_overlay=true)
+plotshape(s_sig_dn, "Chart Strong RSI Down", shape.diamond, location.abovebar, size=size.small, color=sar_col, force_overlay=true)
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 양방향 분할 매수/공매도 전략 (레버리지 & 강제청산 적용)
+// --------------------------------------------------------------------------------------------------------------------{
+// 피라미딩 제한 설정
+MAX_PYRAMID = input.int(7, "Max Pyramid Entries", minval=1, maxval=100, title="Pyramiding Limit", group="Strategy Settings")
+
+var float long_total_qty = 0
+var float long_total_cost = 0
+var float short_total_qty = 0
+var float short_total_cost = 0
+var int long_entry_count = 0
+var int short_entry_count = 0
+var string last_long_id = ""
+var string last_short_id = ""
+var bool long_active = false
+var bool short_active = false
+
+// 수익률 추적 변수
+var float total_profit_pct = 0
+var int total_trades = 0
+var float avg_profit_pct = 0
+
+// 청산 버퍼 설정
+exit_buffer = input.float(0.1, "Exit Buffer (%)", minval=0.0, step=0.1, title="Take Profit Buffer", group="Strategy Settings")
+
+// 평균 진입 가격 계산
+float long_avg_price = long_total_qty > 0 ? long_total_cost / long_total_qty : na
+float short_avg_price = short_total_qty > 0 ? short_total_cost / short_total_qty : na
+
+// 강제 청산 가격 업데이트
+if long_avg_price and not na(long_avg_price)
+    long_liquidation_price := calc_liquidation_price(long_avg_price, current_leverage, true)
+if short_avg_price and not na(short_avg_price)
+    short_liquidation_price := calc_liquidation_price(short_avg_price, current_leverage, false)
+
+// 포지션 사이즈 계산 함수
+calculate_position_size(entry_count, total_qty, is_long) =>
+    float qty = 0
+    if position_sizing_mode == "Martingale"
+        // 마틴게일 방식: 현재 포지션만큼 추가 (1:1:2:4:8:16:32...)
+        qty := entry_count == 0 ? initial_position_size : total_qty
+    else  // Equal Split
+        // 동일 분할 방식: 전체 자금을 피라미딩 횟수로 나누어 진입
+        qty := initial_position_size
+    qty
+
+// 매수/매도 조건
+buy_condition = s_sig_up and dc_is_below_lower
+sell_condition = s_sig_dn and dc_is_above_upper
+
+// 청산 조건
+close_long_condition = s_sig_dn and close >= (long_avg_price * (100 + exit_buffer) / 100)
+close_short_condition = s_sig_up and close <= (short_avg_price * (100 - exit_buffer) / 100)
+
+// 강제 청산 조건
+liquidation_long = long_active and close <= long_liquidation_price
+liquidation_short = short_active and close >= short_liquidation_price
+
+// 매수 신호 처리
+if buy_condition and not short_active and long_entry_count < MAX_PYRAMID
+    qty = calculate_position_size(long_entry_count, long_total_qty, true)
+    string entry_id = "LongEntry" + str.tostring(bar_index)
+    string mode_str = position_sizing_mode == "Martingale" ? "M" : "E"
+    strategy.entry(entry_id, strategy.long, qty=qty, comment="Long x" + str.tostring(qty) + " (" + mode_str + ":" + str.tostring(current_leverage) + ")")
+    
+    long_total_qty := long_total_qty + qty
+    long_total_cost := long_total_cost + qty * close
+    long_entry_count := long_entry_count + 1
+    last_long_id := entry_id
+    long_active := true
+    
+    label.new(bar_index, low, "Long Entry x" + str.tostring(qty) + "\n" + position_sizing_mode + "\nLev:" + str.tostring(current_leverage) + "x (" + str.tostring(long_entry_count) + "/" + str.tostring(MAX_PYRAMID) + ")", 
+              color=color.green, style=label.style_label_up, textcolor=color.black, size=size.small)
+
+// 공매도 신호 처리
+if sell_condition and not long_active and short_entry_count < MAX_PYRAMID
+    qty = calculate_position_size(short_entry_count, short_total_qty, false)
+    string entry_id = "ShortEntry" + str.tostring(bar_index)
+    string mode_str = position_sizing_mode == "Martingale" ? "M" : "E"
+    strategy.entry(entry_id, strategy.short, qty=qty, comment="Short x" + str.tostring(qty) + " (" + mode_str + ":" + str.tostring(current_leverage) + ")")
+    
+    short_total_qty := short_total_qty + qty
+    short_total_cost := short_total_cost + qty * close
+    short_entry_count := short_entry_count + 1
+    last_short_id := entry_id
+    short_active := true
+    
+    label.new(bar_index, high, "Short Entry x" + str.tostring(qty) + "\n" + position_sizing_mode + "\nLev:" + str.tostring(current_leverage) + "x (" + str.tostring(short_entry_count) + "/" + str.tostring(MAX_PYRAMID) + ")", 
+              color=color.red, style=label.style_label_down, textcolor=color.black, size=size.small)
+
+// 강제 청산 처리 (롱)
+if liquidation_long and strategy.position_size > 0
+    float loss_pct = ((close - long_avg_price) / long_avg_price) * 100
+    
+    strategy.close_all(comment="LIQUIDATION - Long")
+    log.info("LIQUIDATION - Long Position: Loss={0}%", loss_pct)
+    
+    total_profit_pct := total_profit_pct + loss_pct
+    total_trades := total_trades + 1
+    avg_profit_pct := total_profit_pct / total_trades
+    
+    // 강제 청산 알림
+    label.new(bar_index, high, "🚨 LIQUIDATION 🚨\nLong Loss: " + str.tostring(loss_pct, "#.##") + "%", 
+              color=color.maroon, style=label.style_label_down, textcolor=color.white, size=size.large)
+    
+    long_total_qty := 0
+    long_total_cost := 0
+    long_entry_count := 0
+    last_long_id := ""
+    long_active := false
+    long_liquidation_price := na
+
+// 강제 청산 처리 (숏)
+if liquidation_short and strategy.position_size < 0
+    float loss_pct = ((short_avg_price - close) / short_avg_price) * 100
+    
+    strategy.close_all(comment="LIQUIDATION - Short")
+    log.info("LIQUIDATION - Short Position: Loss={0}%", loss_pct)
+    
+    total_profit_pct := total_profit_pct + loss_pct
+    total_trades := total_trades + 1
+    avg_profit_pct := total_profit_pct / total_trades
+    
+    // 강제 청산 알림
+    label.new(bar_index, low, "🚨 LIQUIDATION 🚨\nShort Loss: " + str.tostring(loss_pct, "#.##") + "%", 
+              color=color.maroon, style=label.style_label_up, textcolor=color.white, size=size.large)
+    
+    short_total_qty := 0
+    short_total_cost := 0
+    short_entry_count := 0
+    last_short_id := ""
+    short_active := false
+    short_liquidation_price := na
+
+// 일반 청산 처리 (롱) - 강제청산이 아닌 경우에만
+if close_long_condition and strategy.position_size > 0 and not liquidation_long
+    float profit_pct = ((close - long_avg_price) / long_avg_price) * 100
+    
+    strategy.close_all(comment="Close Long (Profit)")
+    log.info("Closing Long Position: Profit={0}%", profit_pct)
+    
+    total_profit_pct := total_profit_pct + profit_pct
+    total_trades := total_trades + 1
+    avg_profit_pct := total_profit_pct / total_trades
+    
+    label.new(bar_index, high, "Close Long\nProfit: " + str.tostring(profit_pct, "#.##") + "%", 
+              color=color.orange, style=label.style_label_down, textcolor=color.black)
+    
+    long_total_qty := 0
+    long_total_cost := 0
+    long_entry_count := 0
+    last_long_id := ""
+    long_active := false
+    long_liquidation_price := na
+
+// 일반 청산 처리 (숏) - 강제청산이 아닌 경우에만
+if close_short_condition and strategy.position_size < 0 and not liquidation_short
+    float profit_pct = ((short_avg_price - close) / short_avg_price) * 100
+    
+    strategy.close_all(comment="Close Short (Profit)")
+    log.info("Closing Short Position: Profit={0}%", profit_pct)
+    
+    total_profit_pct := total_profit_pct + profit_pct
+    total_trades := total_trades + 1
+    avg_profit_pct := total_profit_pct / total_trades
+    
+    label.new(bar_index, low, "Close Short\nProfit: " + str.tostring(profit_pct, "#.##") + "%", 
+              color=color.orange, style=label.style_label_up, textcolor=color.black)
+    
+    short_total_qty := 0
+    short_total_cost := 0
+    short_entry_count := 0
+    last_short_id := ""
+    short_active := false
+    short_liquidation_price := na
+
+// 강제 청산 가격 시각화
+plot(long_liquidation_price, "Long Liquidation", color=color.red, style=plot.style_circles, linewidth=2)
+plot(short_liquidation_price, "Short Liquidation", color=color.red, style=plot.style_circles, linewidth=2)
+
+// 평단가 시각화
+plot(long_total_qty > 0 ? long_avg_price : na, "Long Avg Price", color=color.green, style=plot.style_circles, linewidth=2)
+plot(short_total_qty > 0 ? short_avg_price : na, "Short Avg Price", color=color.red, style=plot.style_circles, linewidth=2)
+
+// 메인 정보 테이블 (깔끔한 디자인)
+if barstate.islast
+    var table main_table = table.new(position.top_left, 2, 4, 
+                                   bgcolor=color.new(color.white, 10), 
+                                   border_width=1, 
+                                   border_color=color.new(color.gray, 30))
+    
+    // 헤더
+    table.cell(main_table, 0, 0, "📊 Strategy Info", 
+              text_color=color.white, 
+              bgcolor=color.new(color.blue, 0), 
+              text_size=size.normal)
+    table.cell(main_table, 1, 0, "Values", 
+              text_color=color.white, 
+              bgcolor=color.new(color.blue, 0), 
+              text_size=size.normal)
+    
+    // 포지션 사이징 모드
+    table.cell(main_table, 0, 1, "Sizing Mode", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    table.cell(main_table, 1, 1, position_sizing_mode, 
+              text_color=position_sizing_mode == "Martingale" ? color.orange : color.blue,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    
+    // 레버리지
+    table.cell(main_table, 0, 2, "Leverage", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    table.cell(main_table, 1, 2, str.tostring(current_leverage, "#.#") + "x", 
+              text_color=current_leverage > 10 ? color.red : current_leverage > 5 ? color.orange : color.green,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    
+    // 평균 수익률
+    table.cell(main_table, 0, 3, "Avg P&L", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    table.cell(main_table, 1, 3, total_trades > 0 ? str.tostring(avg_profit_pct, "#.##") + "%" : "0.00%", 
+              text_color=avg_profit_pct > 0 ? color.green : avg_profit_pct < 0 ? color.red : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+
+// 강제청산 정보 테이블
+if barstate.islast and (long_active or short_active)
+    var table liq_table = table.new(position.top_center, 2, 3, 
+                                   bgcolor=color.new(color.white, 10), 
+                                   border_width=1, 
+                                   border_color=color.new(color.red, 30))
+    
+    // 헤더
+    table.cell(liq_table, 0, 0, "⚠️ Liquidation (Auto)", 
+              text_color=color.white, 
+              bgcolor=color.new(color.red, 0), 
+              text_size=size.normal)
+    table.cell(liq_table, 1, 0, "Prices", 
+              text_color=color.white, 
+              bgcolor=color.new(color.red, 0), 
+              text_size=size.normal)
+    
+    // 롱 청산가
+    table.cell(liq_table, 0, 1, "Long Liq.", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    table.cell(liq_table, 1, 1, long_liquidation_price > 0 ? str.tostring(long_liquidation_price, "#.####") : "N/A", 
+              text_color=color.red,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    
+    // 숏 청산가
+    table.cell(liq_table, 0, 2, "Short Liq.", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+    table.cell(liq_table, 1, 2, short_liquidation_price > 0 ? str.tostring(short_liquidation_price, "#.####") : "N/A", 
+              text_color=color.red,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.small)
+
+// 포지션 정보 테이블 (컴팩트)
+if barstate.islast
+    var table pos_table = table.new(position.top_right, 3, 4, 
+                                   bgcolor=color.new(color.white, 10), 
+                                   border_width=1, 
+                                   border_color=color.new(color.gray, 30))
+    
+    // 헤더
+    table.cell(pos_table, 0, 0, "🎯 Position", 
+              text_color=color.white, 
+              bgcolor=color.new(color.purple, 0), 
+              text_size=size.small)
+    table.cell(pos_table, 1, 0, "Long", 
+              text_color=color.white, 
+              bgcolor=color.new(color.green, 0), 
+              text_size=size.small)
+    table.cell(pos_table, 2, 0, "Short", 
+              text_color=color.white, 
+              bgcolor=color.new(color.red, 0), 
+              text_size=size.small)
+    
+    // 진입 횟수
+    table.cell(pos_table, 0, 1, "Entries", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    table.cell(pos_table, 1, 1, str.tostring(long_entry_count) + "/" + str.tostring(MAX_PYRAMID), 
+              text_color=long_entry_count > 0 ? color.green : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    table.cell(pos_table, 2, 1, str.tostring(short_entry_count) + "/" + str.tostring(MAX_PYRAMID), 
+              text_color=short_entry_count > 0 ? color.red : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    
+    // 평균가
+    table.cell(pos_table, 0, 2, "Avg Price", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    table.cell(pos_table, 1, 2, long_avg_price > 0 ? str.tostring(long_avg_price, "#.####") : "N/A", 
+              text_color=long_avg_price > 0 ? color.green : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    table.cell(pos_table, 2, 2, short_avg_price > 0 ? str.tostring(short_avg_price, "#.####") : "N/A", 
+              text_color=short_avg_price > 0 ? color.red : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    
+    // 다음 진입 물량 예시
+    table.cell(pos_table, 0, 3, "Next Size", 
+              text_color=color.new(color.black, 0), 
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    
+    next_long_qty = calculate_position_size(long_entry_count, long_total_qty, true)
+    next_short_qty = calculate_position_size(short_entry_count, short_total_qty, false)
+    
+    table.cell(pos_table, 1, 3, long_entry_count < MAX_PYRAMID ? str.tostring(next_long_qty, "#.##") : "MAX", 
+              text_color=long_entry_count < MAX_PYRAMID ? color.green : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+    table.cell(pos_table, 2, 3, short_entry_count < MAX_PYRAMID ? str.tostring(next_short_qty, "#.##") : "MAX", 
+              text_color=short_entry_count < MAX_PYRAMID ? color.red : color.gray,
+              bgcolor=color.new(color.white, 0),
+              text_size=size.tiny)
+
+View in Pine Editor・488 lines
+Use on chart
+1
+0
+6
+2 178
+Ultra Reversion DCA Strategy with Manual Leverage - V.1
+
+2025-10-27

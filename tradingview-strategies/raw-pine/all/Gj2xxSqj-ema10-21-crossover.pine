@@ -1,0 +1,44 @@
+//@version=3
+strategy(title="ema10-21", shorttitle="10/21", overlay=true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 2500, commission_type = strategy.commission.percent, commission_value = 0.2)
+
+len1 = input(10, minval=1, title="EMA #1 length")
+src1 = input(close, title="EMA Source #1")
+a = ema(src1, len1)
+plot(a, title="EMA #1", color=orange, linewidth=2, style=line)
+
+len2 = input(21, minval=1, title="EMA #2 length")
+src2 = input(close, title="EMA Source #2")
+b = ema(src2, len2)
+plot(b, title="EMA #2", color=blue, linewidth=2, style=line)
+
+threshold = ((a-b)*100)/((a+b)/2)
+thresholdUp = threshold > 0.15
+thresholdDown = threshold < -0.006
+
+if (thresholdUp) 
+    strategy.entry("Buy", strategy.long)
+if (thresholdDown) 
+    strategy.close("Buy", strategy.long)
+
+//goLong() => (crossover(a, b)) and (threshold >= 0.0025)
+//killLong() => (crossunder(a, b)) and (threshold <= -0.0025)
+//strategy.entry("Buy", strategy.long, when = goLong())
+//strategy.close("Buy", when = killLong())
+
+//threshold = ((a-b)*100)/((a+b)/2)
+
+//achat = out1 > out2
+//vente = out1 < out2 //and threshold < -0.025
+
+//strategy.entry("long", true, when = achat)
+//strategy.exit("exit", "long", when = vente)
+
+View in Pine Editor・34 lines
+Use on chart
+1
+6
+6
+1
+3 905
+First version of a simple EMA crossover strategy.
+

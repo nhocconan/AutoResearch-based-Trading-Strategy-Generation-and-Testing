@@ -1,0 +1,116 @@
+//@version=4
+strategy("EMA X BF 🚀", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0)
+
+/////////////// Time Frame ///////////////
+_1 = input(false,  "════════ Test Period ═══════")
+testStartYear = input(2017, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay, 0, 0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay, 0, 0)
+
+testPeriod() =>  time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////// EMA /////////////// 
+_2 = input(false,  "══════════ EMAs ════════")
+src1 = input(ohlc4, "EMA 1 source")
+ema1 = ema(src1, input(15, "EMA 1 Length"))
+src2 = input(hlc3, "EMA 2 source")
+ema2 = ema(src2, input(23, "EMA 2 Length"))
+
+///////////// Rate Of Change ///////////// 
+_3 = input(false,  "══════ Rate of Change ══════")
+source = close
+roclength = input(3, "ROC Length",  minval=1)
+pcntChange = input(5, "ROC % Change", minval=1)
+roc = 100 * (source - source[roclength]) / source[roclength]
+emaroc = ema(roc, roclength / 2)
+isMoving() => emaroc > (pcntChange / 2) or emaroc < (0 - (pcntChange / 2))
+
+/////////////// Strategy ///////////////
+long = ema1 > ema2 and isMoving()
+short = ema1 < ema2 and isMoving()
+
+last_long = 0.0
+last_short = 0.0
+last_long := long ? time : nz(last_long[1])
+last_short := short ? time : nz(last_short[1])
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long_signal = 0.0
+last_open_short_signal = 0.0
+last_open_long_signal := long_signal ? open : nz(last_open_long_signal[1])
+last_open_short_signal := short_signal ? open : nz(last_open_short_signal[1])
+
+last_long_signal = 0.0
+last_short_signal = 0.0
+last_long_signal := long_signal ? time : nz(last_long_signal[1])
+last_short_signal := short_signal ? time : nz(last_short_signal[1])
+
+in_long_signal = last_long_signal > last_short_signal
+in_short_signal = last_short_signal > last_long_signal
+
+last_high = 0.0
+last_low = 0.0
+last_high := not in_long_signal ? na : in_long_signal and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_short_signal ? na : in_short_signal and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+since_longEntry = barssince(last_open_long_signal != last_open_long_signal[1]) 
+since_shortEntry = barssince(last_open_short_signal != last_open_short_signal[1]) 
+_4 = input(false,  "════════ Stop Loss ═══════")
+sl_inp = input(6.0, title='Stop Loss %') / 100
+
+slLong = in_long_signal ? strategy.position_avg_price * (1 - sl_inp) : na
+slShort = strategy.position_avg_price * (1 + sl_inp)
+long_sl = in_long_signal ? slLong : na
+short_sl = in_short_signal ? slShort : na
+
+/////////////// Execution /////////////// 
+if testPeriod()
+    strategy.entry("Long", strategy.long, when=long)
+    strategy.entry("Short", strategy.short, when=short)
+    strategy.exit("Long SL", "Long", stop=long_sl, when=since_longEntry > 0)
+    strategy.exit("Short SL", "Short", stop=short_sl, when=since_shortEntry > 0)
+
+/////////////// Plotting /////////////// 
+col() => ema1 > ema2 ? color.lime : color.red
+p1 = plot(ema1, color=col(), title="EMA 1")
+p2 = plot(ema2, color=col(), title="EMA 2")
+fill(p1, p2, color = col(), transp=20)
+bgcolor(isMoving() ? col() : color.white, transp=70)
+bgcolor(long_signal ? color.lime : short_signal ? color.red : na, transp=60)
+
+View in Pine Editor・87 lines
+Use on chart
+1
+7
+4
+4 692
+EMA Crossover Strategy
+
+A simple EMA cross is a useful indication of a change in direction of a trend and is a very popular tool in trading. It can also be useful to judge price action momentum or severity by looking at the angle of the 2 EMAs, or the distance between them.
+
+There are 2 Exponential Moving Averages, one fast and one slow. When the fast EMA crosses above the slow EMA, this can be considered bullish and may signal an upside move. Conversely, a cross to the downside of the fast EMA under the slow EMA can be considered bearish.
+
+This strategy uses the same principle but uses different sources for the 2 EMAs; instead of using close values, we use ohlc4 values for the fast EMA and hlc3 values for the slow EMA.
+
+The idea is that a trader might enter a long position upon a cross up and reverse position and go short upon the next cross down.
+
+We use a simple 6% stop loss for both long and short positions.
+
+This strategy is tuned to a 6hr chart for Bitcoin USD pairs.
+
+INSTRUCTIONS
+
+Go Long when the background is green
+
+Go short when the background is red
+
+White background means sideways market: a no trade zone
+

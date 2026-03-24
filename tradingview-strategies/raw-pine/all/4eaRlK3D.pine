@@ -1,0 +1,80 @@
+//@version=5
+strategy("Estrategia Timing SMA 10 (Meb Faber/Cárpatos) [MENSUAL]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- CONFIGURACIÓN ---
+length = input.int(10, minval=1, title="Longitud de la Media (Meses)")
+// Forzamos la fuente a ser el cierre, ya que Cárpatos usa cierres mensuales.
+src_input = close 
+
+// --- CÁLCULOS MULTI-TIMEFRAME (MTF) ---
+// Aquí es donde ocurre la magia: solicitamos datos del timeframe "1M" (1 Mes)
+// independientemente de en qué gráfico estés.
+
+// 1. Obtenemos el precio de cierre actual de la vela MENSUAL
+monthly_close = request.security(syminfo.tickerid, "1M", src_input)
+
+// 2. Obtenemos la SMA calculada sobre velas MENSUALES
+monthly_ma = request.security(syminfo.tickerid, "1M", ta.sma(src_input, length))
+
+// --- LÓGICA DE TRADING (Meb Faber) ---
+// Comparamos el cierre mensual contra la media mensual
+longCondition = monthly_close > monthly_ma
+exitCondition = monthly_close < monthly_ma
+
+// --- EJECUCIÓN ---
+if (longCondition)
+    strategy.entry("Entrada", strategy.long)
+
+if (exitCondition)
+    strategy.close("Entrada", comment="A Cash")
+
+// --- VISUALIZACIÓN ---
+// Dibujamos la media móvil mensual. 
+// Se verá como una escalera si estás en gráfico diario (porque el valor es constante todo el mes).
+plot(monthly_ma, "SMA 10 Meses", color=color.blue, linewidth=2)
+
+// Coloreamos el fondo
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+
+View in Pine Editor・37 lines
+Use on chart
+1
+1
+700
+Introduction This strategy is based on the classic trend-following logic popularized by Meb Faber in his white papers (such as "A Quantitative Approach to Tactical Asset Allocation") and frequently discussed by financial analyst José Luis Cárpatos. The core philosophy is simple but effective: stay in the market during uptrends to capture growth, and move to cash during downtrends to protect capital from major drawdowns.
+
+This is a long-term "Timing" strategy designed for investors who want to filter out market noise and focus on the primary macro trend.
+
+How it Works The strategy utilizes a specific Moving Average on a Monthly timeframe to determine the trend direction.
+
+The Indicator: A 10-period Simple Moving Average (SMA) calculated on the Monthly timeframe (1M).
+
+Long Condition: When the Monthly Close price is above the 10-Month SMA, the strategy enters a Long position (Risk On).
+
+Exit Condition (Cash): When the Monthly Close price falls below the 10-Month SMA, the strategy closes the position and stays in Cash (Risk Off). It does not open short positions; it simply exits the market to preserve capital.
+
+Key Features (Multi-Timeframe) This script has been coded using request.security to force the calculation on Monthly data (1M), regardless of the chart timeframe you are currently viewing.
+
+This allows you to view the strategy on a Daily or Weekly chart while ensuring the mathematical logic remains strictly bound to the Monthly moving average.
+
+The SMA line will appear "stepped" on lower timeframes (e.g., Daily), representing the constant value of the SMA for that specific month.
+
+Settings
+
+Length: Default is 10 (representing 10 Months), but this can be adjusted if you wish to test other periods (e.g., 12 months).
+
+Source: Defaults to close.
+
+Visuals
+
+Blue Line: Represents the 10-Month SMA.
+
+Background Color:
+
+Green: Indicates the strategy is currently Long (Price > SMA).
+
+Red/Grey: Indicates the strategy is in Cash (Price < SMA).
+
+Important Note on Backtesting & Repainting Because this strategy requests Monthly data on lower timeframes (like Daily), please be aware that the current month's data is dynamic. The signal is technically confirmed only at the close of the monthly bar. When viewing on a Daily chart, the script evaluates the relationship between the current price and the current monthly SMA.
+
+Disclaimer This script is for educational and research purposes only. Past performance is not indicative of future results. Always manage your risk appropriately.

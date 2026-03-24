@@ -1,0 +1,129 @@
+//@version=2
+strategy("YK Fuller Strategy", overlay=true)
+
+pTail = input(title="Tail (default 51), %", type=integer, defval=51,  minval=0, maxval=100)
+tail = pTail * 0.01
+tail1 = 1 - tail
+
+ema1Value = input(title="EMA (default 8)", type=integer, defval=8,  minval=1)
+ema2Value = input(title="EMA (default 21)", type=integer, defval=21,  minval=1)
+
+minRlDistance = input(title="Minimum distance from Pin-Bar to the round level", type=float, defval=0,  minval=0)
+floatCount = input(title="The count of digits after the decimal point (for example, 3 - for GBPJPY, 5 - for EURUSD )", type=integer, defval=5,  minval=3, maxval=5)
+
+rDelimeter = (floatCount == 3) ? 1000 : (floatCount == 4 ? 10000 : 100000)
+
+intRoundLevel = close * rDelimeter
+intRemainder = intRoundLevel % 1000
+toRound = (intRemainder >= 500) ? 1000 : 0
+
+roundLevel = (intRoundLevel - intRemainder + toRound) / rDelimeter
+rlDistance = abs(close - roundLevel)
+
+showRl = input(title="Show round levels?", type=bool, defval=false)
+roundLevelPlot = iff(showRl, roundLevel, na)
+plot(roundLevelPlot, title='Round Level', color=lime, style=circles, linewidth=2)
+
+iIb = input(title="Ignore inside bars?", type=bool, defval=false)
+insideBar = iIb and ((high <= high[1] and low >= low[1]) or (high <= high[2] and low >= low[2] and high[1] <= high[2] and low[1] >= low[2]) or (high <= high[3] and low >= low[3] and high[2] <= high[3] and low[2] >= low[3] and high[1] <= high[3] and low[1] >= low[3]) or (high <= high[4] and low >= low[4] and high[3] <= high[4] and low[3] >= low[4] and high[2] <= high[4] and low[2] >= low[4] and high[1] <= high[4] and low[1] >= low[4]) or (high <= high[5] and low >= low[5] and high[4] <= high[5] and low[4] >= low[5] and high[3] <= high[5] and low[3] >= low[5] and high[2] <= high[5] and low[2] >= low[5] and high[1] <= high[5] and low[1] >= low[5]) or (high <= high[6] and low >= low[6] and high[5] <= high[6] and low[5] >= low[6] and high[4] <= high[6] and low[4] >= low[6] and high[3] <= high[6] and low[3] >= low[6] and high[2] <= high[6] and low[2] >= low[6] and high[1] <= high[6] and low[1] >= low[6]) or (high <= high[7] and low >= low[7] and high[6] <= high[7] and low[6] >= low[7] and high[5] <= high[7] and low[5] >= low[7] and high[4] <= high[7] and low[4] >= low[7] and high[3] <= high[7] and low[3] >= low[7] and high[2] <= high[7] and low[2] >= low[7] and high[1] <= high[7] and low[1] >= low[7]) or (high <= high[8] and low >= low[8] and high[7] <= high[8] and low[7] >= low[8] and high[6] <= high[8] and low[6] >= low[8] and high[5] <= high[8] and low[5] >= low[8] and high[4] <= high[8] and low[4] >= low[8] and high[3] <= high[8] and low[3] >= low[8] and high[2] <= high[8] and low[2] >= low[8] and high[1] <= high[8] and low[1] >= low[8]) or (high <= high[9] and low >= low[9] and high[8] <= high[9] and low[8] >= low[9] and high[7] <= high[9] and low[7] >= low[9] and high[6] <= high[9] and low[6] >= low[9] and high[5] <= high[9] and low[5] >= low[9] and high[4] <= high[9] and low[4] >= low[9] and high[3] <= high[9] and low[3] >= low[9] and high[2] <= high[9] and low[2] >= low[9] and high[1] <= high[9] and low[1] >= low[9]) or (high <= high[10] and low >= low[10] and high[9] <= high[10] and low[9] >= low[10] and high[8] <= high[10] and low[8] >= low[10] and high[7] <= high[10] and low[7] >= low[10] and high[6] <= high[10] and low[6] >= low[10] and high[5] <= high[10] and low[5] >= low[10] and high[4] <= high[10] and low[4] >= low[10] and high[3] <= high[10] and low[3] >= low[10] and high[2] <= high[10] and low[2] >= low[10] and high[1] <= high[10] and low[1] >= low[10])) ? true : false
+            
+emaCrossing = input(title="ЕМА crossing?", type=bool, defval=true)
+
+ema1 = ema(close, ema1Value)
+ema2 = ema(close, ema2Value)
+
+height = high - low
+bodyHeight = abs(open - close)
+
+fakeHighUp = high - close
+fakeLowUp = open - low
+
+pinHeightUp = height - min(fakeHighUp, fakeLowUp)
+
+getPinBarUp(ema1, ema2) => open < close and 
+           ((rlDistance > minRlDistance and 
+           fakeHighUp * 2 < fakeLowUp and 
+           bodyHeight > fakeHighUp and 
+           ema1 >= low and 
+           close > ema1 and 
+           open > ema1 and 
+           close > ema2 and 
+           open > ema2 and 
+           ((emaCrossing and ema1 > ema2) or emaCrossing == false) and 
+           open > (close - pinHeightUp * tail1) and 
+           close > (high - pinHeightUp * tail1)) 
+           or 
+           (rlDistance > minRlDistance and 
+           fakeHighUp > fakeLowUp * 2 and 
+           bodyHeight > fakeLowUp and 
+           high >= ema1 and 
+           close < ema1 and 
+           close < ema2 and 
+           ((emaCrossing and ema1 < ema2) or emaCrossing == false) and 
+           open < (high - pinHeightUp * tail) and 
+           close < (high - pinHeightUp * tail))) 
+           ? true : false
+           
+pinBarUp = getPinBarUp(ema1, ema2)
+          
+fakeHighDn = high - open
+fakeLowDn = close - low
+
+pinHeightDn = height - min(fakeHighDn, fakeLowDn)
+
+getPinBarDn(ema1, ema2) => open > close and 
+           ((rlDistance > minRlDistance and 
+           fakeHighDn > fakeLowDn * 2 and 
+           bodyHeight > fakeLowDn and 
+           high >= ema1 and 
+           close < ema1 and 
+           open < ema1 and 
+           close < ema2 and 
+           open < ema2 and 
+           ((emaCrossing and ema1 < ema2) or emaCrossing == false) and 
+           open < (high - pinHeightDn * tail) and 
+           close < (high - pinHeightDn * tail))
+           or 
+           (rlDistance > minRlDistance and 
+           fakeHighDn * 2 < fakeLowDn and 
+           bodyHeight > fakeHighDn and 
+           ema1 >= low and 
+           ema1 < close and 
+           ema2 < close and 
+           ((emaCrossing and ema1 > ema2) or emaCrossing == false) and 
+           open > (open - pinHeightDn * tail1) and 
+           close > (open - pinHeightDn * tail1)))
+           ? true : false
+
+pinBarDn = getPinBarDn(ema1, ema2)
+
+highlightBars = input(title="Highlight bars", type=bool, defval=true)
+
+barcolor((pinBarUp and highlightBars and insideBar == false) ? lime : na, title="Bullish bar")
+barcolor((pinBarDn and highlightBars and insideBar == false) ? red : na, title="Bearish bar")
+
+longCondition = ((pinBarUp and fakeHighUp < fakeLowUp) or (pinBarDn and fakeHighDn < fakeLowDn)) and insideBar == false
+
+lossProfit = input(title="Loss / Profit = 1 / X", type=float, defval=1,  minval=0, maxval=10000)
+
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    lossValue = (close - low) * rDelimeter
+    profitValue = lossValue * lossProfit
+    strategy.exit("Close", "Long", loss=lossValue, profit=profitValue)
+
+shortCondition = ((pinBarDn and fakeHighDn > fakeLowDn) or (pinBarUp and fakeHighUp > fakeLowUp)) and insideBar == false
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    lossValue = (high - close) * rDelimeter
+    profitValue = lossValue * lossProfit
+    strategy.exit("Close", "Short", loss=lossValue, profit=profitValue)
+
+View in Pine Editor・121 lines
+Use on chart
+7
+9
+5
+14 665
+Backtesting of Fuller strategy.

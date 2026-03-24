@@ -1,0 +1,68 @@
+//@version=5
+strategy("Smoothed Heiken Ashi Strategy Long Only", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+len = input.int(10, title="EMA Length")
+len2 = input.int(10, title="Smoothing Length")
+
+o = ta.ema(open, len)
+c = ta.ema(close, len)
+h = ta.ema(high, len)
+l = ta.ema(low, len)
+haclose = (o + h + l + c) / 4
+
+var float haopen = 0.0
+haopen := na(haopen[1]) ? (o + c) / 2 : (haopen[1] + haclose[1]) / 2
+hahigh = math.max(h, math.max(haopen, haclose))
+halow = math.min(l, math.min(haopen, haclose))
+
+o2 = ta.ema(haopen, len2)
+c2 = ta.ema(haclose, len2)
+col = o2 > c2 ? 0 : 1 // 0 for red, 1 for lime
+
+// Plotting candles without wicks
+plotcandle(o2, o2, c2, c2, title="Smoothed HA", color=col == 0 ? color.red : color.lime)
+
+// Strategy logic
+longEntryCondition = col == 1 and col[1] == 0
+longExitCondition = col == 0 and col[1] == 1
+
+if (longEntryCondition)
+    strategy.entry("Long", strategy.long)
+
+if (longExitCondition)
+    strategy.close("Long")
+
+// Plotting signals after the close of the candle
+plotshape(longEntryCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small, offset=1)
+plotshape(longExitCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small, offset=1)
+
+View in Pine Editor・37 lines
+Use on chart
+5
+7
+7
+3
+11 582
+This is a trend-following approach that uses a modified version of Heiken Ashi candles with additional smoothing. Here are the key components and features:
+
+1. Heiken Ashi Modification: The strategy starts by calculating Heiken Ashi candles, which are known for better trend visualization. However, it modifies the traditional Heiken Ashi by using Exponential Moving Averages (EMAs) of the open, high, low, and close prices.
+
+2. Double Smoothing: The strategy applies two layers of smoothing. First, it uses EMAs to calculate the Heiken Ashi values. Then, it applies another EMA to the Heiken Ashi open and close prices. This double smoothing aims to reduce noise and provide clearer trend signals.
+
+3. Long-Only Approach: As the name suggests, this strategy only takes long positions. It doesn't short the market during downtrends but instead exits existing long positions when the sell signal is triggered.
+
+4. Entry and Exit Conditions:
+- Entry (Buy): When the smoothed Heiken Ashi candle color changes from red to green (indicating a potential start of an uptrend).
+- Exit (Sell): When the smoothed Heiken Ashi candle color changes from green to red (indicating a potential end of an uptrend).
+
+5. Position Sizing: The strategy uses a percentage of equity for position sizing, defaulting to 100% of available equity per trade. This should be tailored to each persons unique approach. Responsible trading would use less than 5% for each trade. The starting capital used is a responsible and conservative $1000, reflecting the average trader.
+
+This strategy aims to provide a smooth, trend-following approach that may be particularly useful in markets with clear, sustained trends. However, it may lag in choppy or ranging markets due to its heavy smoothing. As with any strategy, it's important to thoroughly backtest and forward test before using it with real capital, and to consider using it in conjunction with other analysis tools and risk management techniques.
+
+This has been created mainly to provide data to judge what time frame is most profitable for any single asset, as the volatility of each asset is different. This can bee seen using it on AUXUSD, which has a higher profitable result on the daily time frame, whereas other currencies need a higher or lower time frame. The user can toggle between each time frame and watch for the higher profit results within the strategy tester window.
+
+Other smoothed Heiken Ashi indicators also do not provide buy and sell signals, and only show the change in color to dictate a change in trend. By adding buy and sell signals after the close of the candle in which the candle changes color, alerts can be programmed, which helps this be a more hands off protocol to experiment with. Other smoothed Heiken Ashi indicators do not allow for alarms to be set.
+
+This is a unique HODL strategy which helps identify a change in trend, without the noise of day to day volatility. By switching to a line chart, it removes the candles altogether to avoid even more noise. The goal is to HODL a coin while the color is bullish in an uptrend, but once the indicator gives a sell signal, to sell the holdings back to a stable coin and let the chart ride down. Once the chart gives the next buy signal, use that same capital to buy back into the asset. In essence this removes potential losses, and helps buy back in cheaper, gaining more quantitity fo the asset, and therefore reducing your average initial buy in price.
+
+Most HODL strategies ride the price up, miss selling at the top, then riding the price back down in anticipation that it will go back up to sell. This strategy will not hit the absolute tops, but it will greatly reduce potential losses.

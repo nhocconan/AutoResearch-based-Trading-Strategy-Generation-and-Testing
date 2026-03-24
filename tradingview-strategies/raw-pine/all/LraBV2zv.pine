@@ -1,0 +1,97 @@
+//@version=5
+strategy("Mean Reversion and Trendfollowing", overlay=true, pyramiding=1, default_qty_value=100000, initial_capital=100000, default_qty_type=strategy.cash, process_orders_on_close=false, calc_on_every_tick=false)
+
+// Input for the starting date
+start_date = input.time(timestamp("1 Feb 2000 12:00"), title="Starting Date")
+enableMeanReversion = input.bool(true)
+enableTrendfollowing = input.bool(true)
+trendPositionFactor = input.float(1)
+meanReversionPositionFactor = input.float(0.5)
+
+// Convert the input string to a timestamp
+start_ts = timestamp(year(start_date), month(start_date), dayofmonth(start_date), 0, 0)
+
+// Check if the current bar's time is greater than or equal to the start timestamp
+start_condition = time >= start_ts
+
+var tradeOrigin = ""
+
+sma200 = ta.sma(close,200)
+rsi2 = ta.rsi(close,2)
+
+isMeanReversionMode = close < sma200 or not(enableTrendfollowing)
+isTrendfollowingMode = close > sma200 or not(enableMeanReversion)
+
+isRsiBuy = rsi2 < 20 and enableMeanReversion
+isRsiClose = rsi2 > 80 and enableMeanReversion
+
+isSmaBuy = close > sma200 and enableTrendfollowing
+isSmaClose = close < sma200 * 0.95 and enableTrendfollowing
+
+isBuy = (isMeanReversionMode and isRsiBuy) or (isTrendfollowingMode and isSmaBuy)
+
+positionSizeFactor = isSmaBuy ? trendPositionFactor : meanReversionPositionFactor
+
+// Only execute the strategy after the starting date
+if (start_condition)
+    if (isBuy and strategy.opentrades == 0)
+        tradeOrigin := isSmaBuy ? "SMA" : "RSI"
+        strategy.entry("My Long Entry Id", strategy.long, qty=(strategy.equity / close) * positionSizeFactor, comment=str.tostring(positionSizeFactor))
+    isClose = tradeOrigin == "SMA" ? isSmaClose : isRsiClose
+    if (isClose)
+        strategy.exit("Exit", limit = close)
+
+plot(sma200)
+plot(sma200 * 0.95, color=color.orange)
+View in Pine Editor・48 lines
+Use on chart
+2
+2
+7
+1
+6 889
+Title: Mean Reversion and Trendfollowing
+
+Introduction:
+
+This script presents a hybrid trading strategy that combines mean reversion and trend following techniques. The strategy aims to capitalize on short-term price corrections during a downtrend (mean reversion) as well as ride the momentum of a trending market (trend following). It uses a 200-period Simple Moving Average (SMA) and a 2-period Relative Strength Index (RSI) to generate buy and sell signals.
+
+Key Features:
+
+Combines mean reversion and trend following techniques
+Utilizes 200-period SMA and 2-period RSI
+Customizable starting date
+Allows for enabling/disabling mean reversion or trend following modes
+Adjustable position sizing for trend following and mean reversion
+Script Description:
+
+The script implements a trading strategy that combines mean reversion and trend following techniques. Users can enable or disable either of these techniques through the input options. The strategy uses a 200-period Simple Moving Average (SMA) and a 2-period Relative Strength Index (RSI) to generate buy and sell signals.
+
+The mean reversion mode is active when the price is below the SMA200, while the trend following mode is active when the price is above the SMA200. The script generates buy signals when the RSI is below 20 (oversold) in mean reversion mode or when the price is above the SMA200 in trend following mode. The script generates sell signals when the RSI is above 80 (overbought) in mean reversion mode or when the price falls below 95% of the SMA200 in trend following mode.
+
+Users can adjust the position sizing for both trend following and mean reversion modes using the input options.
+
+To use this script on TradingView, follow these steps:
+
+Open TradingView and load your preferred chart.
+Click on the 'Pine Editor' tab located at the bottom of the screen.
+Paste the provided script into the Pine Editor.
+Click 'Add to Chart' to apply the strategy to your chart.
+
+Please note that the past performance of any trading system or methodology is not necessarily indicative of future results. Always use proper risk management and consult a financial advisor before making any investment decisions.
+
+------
+
+The following is a summary of the underlying whitepaper (onlinelibrary.wiley.com/doi/full/10.1111/0022-1082.00077)
+ for this strategy:
+
+This paper proposes a theory of securities market under- and overreactions based on two psychological biases: investor overconfidence about the precision of private information and biased self-attribution, which causes asymmetric shifts in investors' confidence as a function of their investment outcomes. The authors show that overconfidence implies negative long-lag autocorrelations, excess volatility, and public-event-based return predictability. Biased self-attribution adds positive short-lag autocorrelations (momentum), short-run earnings "drift," and negative correlation between future returns and long-term past stock market and accounting performance.
+
+The paper explains that there is empirical evidence challenging the traditional view that securities are rationally priced to reflect all publicly available information. Some of these anomalies include event-based return predictability, short-term momentum, long-term reversal, high volatility of asset prices relative to fundamentals, and short-run post-earnings announcement stock price "drift."
+
+The authors argue that investor overconfidence can lead to stock prices overreacting to private information signals and underreacting to public signals. This overreaction-correction pattern is consistent with long-run negative autocorrelation in stock returns, excess volatility, and further implications for volatility conditional on the type of signal. The market's tendency to over- or underreact to different types of information allows the authors to address the pattern that average announcement date returns in virtually all event studies are of the same sign as the average post-event abnormal returns.
+
+Biased self-attribution implies short-run momentum and long-term reversals in security prices. The dynamic analysis based on biased self-attribution can also lead to a lag-dependent response to corporate events. Cash flow or earnings surprises at first tend to reinforce confidence, causing a same-direction average stock price trend. Later reversal of overreaction can lead to an opposing stock price trend.
+
+The paper concludes by summarizing the findings, relating the analysis to the literature on exogenous noise trading, and discussing issues related to the survival of overconfident traders in financial markets.
+

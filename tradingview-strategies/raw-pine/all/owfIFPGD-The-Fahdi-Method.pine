@@ -1,0 +1,794 @@
+//@version=6
+strategy(
+     title                = "The Fahdi Method",
+     shorttitle           = "Fahdi",
+     overlay              = true,
+     calc_on_every_tick   = true,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 2,
+     initial_capital      = 10000,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.05,
+     slippage             = 2,
+     max_lines_count      = 500,
+     max_labels_count     = 500
+ )
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 1 ── INPUTS
+// ─────────────────────────────────────────────────────────────────
+
+grpMS = "Market Structure"
+len      = input.int(30, "CHoCH Detection Period", minval = 5,  maxval = 500, group = grpMS)
+shortLen = input.int(2,  "IDM Detection Period",   minval = 1,  maxval = 50,  group = grpMS)
+
+grpATR = "ATR Risk Management"
+atrLen       = input.int(7,     "ATR Period",          minval = 1,   group = grpATR)
+atrMult      = input.float(1.0, "ATR Multiplier",      minval = 0.1, step = 0.1,  group = grpATR)
+slAtrMult    = input.float(1.8, "Stop Loss (x ATR)",   minval = 0.5, step = 0.25, group = grpATR)
+tpAtrMult    = input.float(4.0, "Take Profit (x ATR)", minval = 0.5, step = 0.25, group = grpATR)
+usePartialTP = input.bool(true, "Partial TP at 2x ATR",        group = grpATR)
+trailStop    = input.bool(true, "Trail to Breakeven after TP1", group = grpATR)
+
+grpManual = "Your Trade (for Hold/Sell targets)"
+manualEntry = input.float(0.0, "Your Entry Price (0 = use strategy signal)", minval = 0.0, step = 0.0001, group = grpManual, tooltip = "Enter your actual buy price here to get accurate Hold To / Sell At targets")
+
+grpRSI = "RSI Filter"
+useRSI       = input.bool(true, "Enable RSI Filter",        group = grpRSI)
+rsiLen       = input.int(14,    "RSI Period",               minval = 2,  group = grpRSI)
+rsiBullMin   = input.int(35,    "RSI Min for Longs",        minval = 1,  maxval = 70, group = grpRSI)
+rsiBearMax   = input.int(65,    "RSI Max for Shorts",       minval = 30, maxval = 99, group = grpRSI)
+rsiHardBlock = input.int(88,    "RSI Hard Block (extreme)", group = grpRSI)
+rsiOSLevel   = input.int(25,    "RSI Oversold",             group = grpRSI)
+rsiDivLen    = input.int(3,     "RSI Divergence Lookback",  minval = 2, maxval = 20, group = grpRSI)
+
+grpVol = "Volume Filter"
+useVol         = input.bool(true,  "Enable Volume Filter",    group = grpVol)
+volLen         = input.int(20,     "Volume MA Period",         minval = 2,  group = grpVol)
+volMult        = input.float(1.5,  "Min Volume (x MA)",        minval = 0.5, step = 0.1, group = grpVol)
+volExhaustMult = input.float(6.0,  "Volume Exhaustion (x MA)", minval = 1.0, step = 0.1, group = grpVol)
+rvolLen        = input.int(10,     "RVOL Lookback Days",       minval = 3, maxval = 30, group = grpVol)
+
+grpEMA = "EMA Trend Filter"
+useEMA  = input.bool(true, "Enable EMA Filter", group = grpEMA)
+emaFast = input.int(8,     "Fast EMA",          minval = 2,  group = grpEMA)
+emaSlow = input.int(13,    "Slow EMA",          minval = 5,  group = grpEMA)
+emaLong = input.int(200,   "Long-Term EMA",     minval = 20, group = grpEMA)
+
+grpADX = "ADX Filter"
+useADX = input.bool(true, "Enable ADX Filter", group = grpADX)
+adxLen = input.int(14,    "ADX Period",        minval = 2,  group = grpADX)
+adxMin = input.int(15,    "Min ADX",           minval = 5,  maxval = 60, group = grpADX)
+
+grpCandle = "Candle Quality"
+useCandleFilter = input.bool(true, "Enable Candle Filter", group = grpCandle)
+minWickRatio    = input.float(1.5, "Min Wick/Body Ratio",  minval = 0.5, step = 0.1, group = grpCandle)
+
+grpSess = "Session Filter"
+useSess    = input.bool(false,          "Enable Session Filter", group = grpSess)
+sessLondon = input.session("0300-1200", "London Session",        group = grpSess)
+sessNY     = input.session("0800-1700", "New York Session",      group = grpSess)
+
+grpDir = "Trade Direction"
+tradeDir = input.string("Both", "Direction", options = ["Both", "Longs Only", "Shorts Only"], group = grpDir)
+
+grpVWAP = "VWAP Filter"
+useVWAP        = input.bool(true,  "Enable VWAP Filter",              group = grpVWAP)
+vwapExtPct     = input.float(20.0, "VWAP Overextension Warning (%)",   minval = 5.0,  step = 1.0, group = grpVWAP)
+vwapHardExtPct = input.float(35.0, "VWAP Hard Overextension Sell (%)", minval = 10.0, step = 1.0, group = grpVWAP)
+
+grpHTF = "Higher Timeframe Bias"
+useHTF = input.bool(true, "Enable HTF Bias Filter", group = grpHTF)
+htfTF  = input.timeframe("5", "HTF Timeframe",      group = grpHTF)
+
+grpMACD = "MACD Confirmation"
+useMACD    = input.bool(true, "Enable MACD Confirm", group = grpMACD)
+macdFast   = input.int(12,   "MACD Fast",            minval = 2, group = grpMACD)
+macdSlow   = input.int(26,   "MACD Slow",            minval = 2, group = grpMACD)
+macdSignal = input.int(9,    "MACD Signal",          minval = 2, group = grpMACD)
+
+grpVis = "Style"
+bullCss     = input.color(#00e5a0, "Bull Color",  group = grpVis)
+bearCss     = input.color(#ff3b6b, "Bear Color",  group = grpVis)
+idmCss      = input.color(#f0b429, "IDM Color",   group = grpVis)
+sweepCss    = input.color(#aaa8ff, "Sweep Color", group = grpVis)
+showChoch   = input.bool(true, "Show CHoCH",   group = grpVis)
+showBos     = input.bool(true, "Show BOS",     group = grpVis)
+showIdm     = input.bool(true, "Show IDM",     group = grpVis)
+showSweeps  = input.bool(true, "Show Sweeps",  group = grpVis)
+showCircles = input.bool(true, "Show Circles", group = grpVis)
+showEntry   = input.bool(true, "Show Signals", group = grpVis)
+showTPSL    = input.bool(true, "Show TP/SL",   group = grpVis)
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 2 ── CORE CALCULATIONS
+// ─────────────────────────────────────────────────────────────────
+
+n      = bar_index
+atrRaw = ta.atr(atrLen)
+atrVal = atrRaw * atrMult
+rsiVal = ta.rsi(close, rsiLen)
+volMA  = ta.sma(volume, volLen)
+emaF   = ta.ema(close, emaFast)
+emaS   = ta.ema(close, emaSlow)
+emaL   = ta.ema(close, emaLong)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+vwapVal = ta.vwap(hlc3)
+[macdLine, signalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+htfEmaFast = request.security(syminfo.tickerid, htfTF, ta.ema(close, 8),  lookahead = barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfTF, ta.ema(close, 13), lookahead = barmerge.lookahead_off)
+htfBullish = htfEmaFast > htfEmaSlow
+htfBearish = htfEmaFast < htfEmaSlow
+
+// ── RVOL ─────────────────────────────────────────────────────────
+avgDayVol = ta.sma(volume, volLen * rvolLen)
+rvol      = math.round(volume / avgDayVol, 1)
+
+// ── VWAP Overextension ────────────────────────────────────────────
+vwapDistPct  = math.round((close - vwapVal) / vwapVal * 100, 1)
+vwapExtended = vwapDistPct > vwapExtPct
+vwapHardExt  = vwapDistPct > vwapHardExtPct
+
+// ── RSI Divergence ────────────────────────────────────────────────
+priceHighNow  = ta.highest(high, rsiDivLen)
+priceHighPrev = ta.highest(high, rsiDivLen * 2)[rsiDivLen]
+rsiHighNow    = ta.highest(rsiVal, rsiDivLen)
+rsiHighPrev   = ta.highest(rsiVal, rsiDivLen * 2)[rsiDivLen]
+bearishDivergence = priceHighNow > priceHighPrev and rsiHighNow < rsiHighPrev
+
+priceLowNow  = ta.lowest(low, rsiDivLen)
+priceLowPrev = ta.lowest(low, rsiDivLen * 2)[rsiDivLen]
+rsiLowNow    = ta.lowest(rsiVal, rsiDivLen)
+rsiLowPrev   = ta.lowest(rsiVal, rsiDivLen * 2)[rsiDivLen]
+bullishDivergence = priceLowNow < priceLowPrev and rsiLowNow > rsiLowPrev
+
+// ── RSI Momentum ──────────────────────────────────────────────────
+rsiRising  = rsiVal > rsiVal[1] and rsiVal[1] > rsiVal[2]
+rsiFalling = rsiVal < rsiVal[1] and rsiVal[1] < rsiVal[2]
+
+// ── Volume Exhaustion ─────────────────────────────────────────────
+volExhaustion = volume > volMA * volExhaustMult and close < open
+
+// ── Candle Patterns ───────────────────────────────────────────────
+candleBody   = math.abs(close - open)
+upperWick    = high - math.max(close, open)
+lowerWick    = math.min(close, open) - low
+totalRange   = high - low
+shootingStar = upperWick > candleBody * 2.0 and lowerWick < candleBody * 0.5 and totalRange > atrVal * 0.5
+hammer       = lowerWick > candleBody * 2.0 and upperWick < candleBody * 0.5 and totalRange > atrVal * 0.5
+doji         = candleBody < totalRange * 0.1 and totalRange > atrVal * 0.3
+
+// ── MACD Momentum ─────────────────────────────────────────────────
+macdMomentumBull = macdHist > 0 and macdHist > macdHist[1]
+macdMomentumBear = macdHist < 0 and macdHist < macdHist[1]
+macdCrossingDown = macdHist < 0 and macdHist[1] > 0
+macdCrossingUp   = macdHist > 0 and macdHist[1] < 0
+
+// ── Day Move % ────────────────────────────────────────────────────
+dayMove = math.round((close - open) / open * 100, 2)
+
+// Loss guard removed — strategy cannot track real brokerage trades
+tradingPaused = false
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 3 ── MARKET STRUCTURE ENGINE
+// ─────────────────────────────────────────────────────────────────
+
+swings(swingLen) =>
+    var int  os   = 0
+    var int  topx = na
+    var int  btmx = na
+    upper = ta.highest(swingLen)
+    lower = ta.lowest(swingLen)
+    os   := high[swingLen] > upper ? 0 : low[swingLen] < lower ? 1 : os[1]
+    top   = os == 0 and os[1] != 0 ? high[swingLen] : na
+    topx := os == 0 and os[1] != 0 ? n[swingLen]    : topx
+    btm   = os == 1 and os[1] != 1 ? low[swingLen]  : na
+    btmx := os == 1 and os[1] != 1 ? n[swingLen]    : btmx
+    [top, topx, btm, btmx]
+
+[top, topx, btm, btmx]     = swings(len)
+[stop, stopx, sbtm, sbtmx] = swings(shortLen)
+
+var int   os           = 0
+var bool  top_crossed  = false
+var bool  btm_crossed  = false
+var float max_level    = na
+var float min_level    = na
+var int   max_x1       = na
+var int   min_x1       = na
+var float topy         = na
+var float btmy         = na
+var bool  stop_crossed = false
+var bool  sbtm_crossed = false
+
+if not na(top)
+    topy        := top
+    top_crossed := false
+if not na(btm)
+    btmy        := btm
+    btm_crossed := false
+
+var bool choch_bull = false
+var bool choch_bear = false
+choch_bull := false
+choch_bear := false
+
+if not na(topy) and close > topy and not top_crossed
+    os          := 1
+    top_crossed := true
+    choch_bull  := true
+if not na(btmy) and close < btmy and not btm_crossed
+    os          := 0
+    btm_crossed := true
+    choch_bear  := true
+
+if os != os[1]
+    max_level    := high
+    min_level    := low
+    max_x1       := n
+    min_x1       := n
+    stop_crossed := false
+    sbtm_crossed := false
+
+if os != os[1] and showChoch
+    if os == 1
+        line.new(topx, topy, n, topy, color = bullCss, style = line.style_dashed)
+        label.new(int(math.avg(n, topx)), topy, "CHoCH", color = color(na), style = label.style_label_down, textcolor = bullCss, size = size.tiny)
+    else
+        line.new(btmx, btmy, n, btmy, color = bearCss, style = line.style_dashed)
+        label.new(int(math.avg(n, btmx)), btmy, "CHoCH", color = color(na), style = label.style_label_up, textcolor = bearCss, size = size.tiny)
+
+stopy = fixnan(stop)
+sbtmy = fixnan(sbtm)
+
+var bool idm_bull_fired = false
+var bool bos_bull_fired = false
+var bool idm_bear_fired = false
+var bool bos_bear_fired = false
+idm_bull_fired := false
+bos_bull_fired := false
+idm_bear_fired := false
+bos_bear_fired := false
+
+if low < sbtmy and not sbtm_crossed and os == 1 and sbtmy != btmy
+    if showIdm
+        line.new(sbtmx, sbtmy, n, sbtmy, color = idmCss, style = line.style_dotted)
+        label.new(int(math.avg(n, sbtmx)), sbtmy, "IDM", color = color(na), style = label.style_label_up, textcolor = idmCss, size = size.tiny)
+    sbtm_crossed   := true
+    idm_bull_fired := true
+
+if close > max_level and sbtm_crossed and os == 1
+    if showBos
+        line.new(max_x1, max_level, n, max_level, color = bullCss)
+        label.new(int(math.avg(n, max_x1)), max_level, "BOS", color = color(na), style = label.style_label_down, textcolor = bullCss, size = size.tiny)
+    sbtm_crossed   := false
+    bos_bull_fired := true
+
+if high > stopy and not stop_crossed and os == 0 and stopy != topy
+    if showIdm
+        line.new(stopx, stopy, n, stopy, color = idmCss, style = line.style_dotted)
+        label.new(int(math.avg(n, stopx)), stopy, "IDM", color = color(na), style = label.style_label_down, textcolor = idmCss, size = size.tiny)
+    stop_crossed   := true
+    idm_bear_fired := true
+
+if close < min_level and stop_crossed and os == 0
+    if showBos
+        line.new(min_x1, min_level, n, min_level, color = bearCss)
+        label.new(int(math.avg(n, min_x1)), min_level, "BOS", color = color(na), style = label.style_label_up, textcolor = bearCss, size = size.tiny)
+    stop_crossed   := false
+    bos_bear_fired := true
+
+var bool sweep_bull = false
+var bool sweep_bear = false
+sweep_bull := false
+sweep_bear := false
+
+if high > max_level and close < max_level and os == 1 and n - max_x1 > 1
+    if showSweeps
+        line.new(max_x1, max_level, n, max_level, color = sweepCss, style = line.style_dotted)
+        label.new(int(math.avg(n, max_x1)), max_level, "x", color = color(na), style = label.style_label_down, textcolor = sweepCss)
+    sweep_bear := true
+
+if low < min_level and close > min_level and os == 0 and n - min_x1 > 1
+    if showSweeps
+        line.new(min_x1, min_level, n, min_level, color = sweepCss, style = line.style_dotted)
+        label.new(int(math.avg(n, min_x1)), min_level, "x", color = color(na), style = label.style_label_up, textcolor = sweepCss)
+    sweep_bull := true
+
+max_level := math.max(high, max_level)
+min_level := math.min(low,  min_level)
+if max_level > max_level[1]
+    max_x1 := n
+if min_level < min_level[1]
+    min_x1 := n
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 4 ── SIGNAL FILTERS
+// ─────────────────────────────────────────────────────────────────
+
+inLondon  = not useSess or na(time(timeframe.period, sessLondon, "America/New_York")) == false
+inNY      = not useSess or na(time(timeframe.period, sessNY,     "America/New_York")) == false
+inSession = inLondon or inNY
+
+rsiMomentumOK = rsiRising and not bearishDivergence
+rsiBullOK  = not useRSI  or ((rsiVal > rsiBullMin and rsiVal < rsiHardBlock) and (rsiVal < 75 or rsiMomentumOK))
+rsiBearOK  = not useRSI  or (rsiVal < rsiBearMax and rsiVal > rsiOSLevel)
+volBullOK  = not useVol  or (volume > volMA * volMult)
+volBearOK  = not useVol  or (volume > volMA * volMult)
+emaBullOK  = not useEMA  or (emaF > emaS and close > emaL)
+emaBearOK  = not useEMA  or (emaF < emaS and close < emaL)
+adxOK      = not useADX  or (adxVal > adxMin)
+vwapBullOK = not useVWAP or (close > vwapVal and not vwapHardExt)
+vwapBearOK = not useVWAP or (close < vwapVal)
+htfBullOK  = not useHTF  or htfBullish
+htfBearOK  = not useHTF  or htfBearish
+macdBullOK = not useMACD or (macdHist > 0)
+macdBearOK = not useMACD or (macdHist < 0)
+
+sweepBullCandleOK = not useCandleFilter or (candleBody > 0 and lowerWick / candleBody >= minWickRatio)
+sweepBearCandleOK = not useCandleFilter or (candleBody > 0 and upperWick / candleBody >= minWickRatio)
+
+allowLong  = tradeDir != "Shorts Only"
+allowShort = tradeDir != "Longs Only"
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 5 ── ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────
+
+longFiltersOK  = rsiBullOK and volBullOK and emaBullOK and adxOK and inSession and allowLong  and vwapBullOK and htfBullOK and macdBullOK
+shortFiltersOK = rsiBearOK and volBearOK and emaBearOK and adxOK and inSession and allowShort and vwapBearOK and htfBearOK and macdBearOK
+
+longEntry_BOS    = bos_bull_fired and longFiltersOK
+shortEntry_BOS   = bos_bear_fired and shortFiltersOK
+longEntry_Sweep  = sweep_bull and os == 0 and longFiltersOK and sweepBullCandleOK
+shortEntry_Sweep = sweep_bear and os == 1 and shortFiltersOK and sweepBearCandleOK
+
+longEntry  = longEntry_BOS  or longEntry_Sweep
+shortEntry = shortEntry_BOS or shortEntry_Sweep
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 6 ── ATR SL/TP VARIABLES
+// ─────────────────────────────────────────────────────────────────
+
+var float entryPrice = na
+var float longSL     = na
+var float longTP     = na
+var float longTP1    = na
+var float shortSL    = na
+var float shortTP    = na
+var float shortTP1   = na
+var bool  tp1_hit_l  = false
+var bool  tp1_hit_s  = false
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 7 ── STRATEGY EXECUTION
+// ─────────────────────────────────────────────────────────────────
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+rrRatio = tpAtrMult / slAtrMult
+
+if longEntry and not inLong and not inShort
+    entryPrice := close
+    longSL     := close - slAtrMult * atrVal
+    longTP     := close + tpAtrMult * atrVal
+    longTP1    := close + 2.0 * atrVal
+    tp1_hit_l  := false
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long SL/TP", from_entry = "Long",
+         stop        = longSL,
+         limit       = longTP,
+         qty_percent = usePartialTP ? 50 : 100)
+    if showEntry
+        rsiNote = rsiVal >= 75 ? " HOT RSI" : ""
+        label.new(n, low - atrVal * 0.3,
+             "LONG  R:R " + str.tostring(math.round(rrRatio, 1)) + ":1" + rsiNote +
+             "\nEntry: $"  + str.tostring(math.round(close,  4)) +
+             "\nRSI:"      + str.tostring(math.round(rsiVal, 1)) +
+             "  ADX:"      + str.tostring(math.round(adxVal, 1)) +
+             "\nSL: $"     + str.tostring(math.round(longSL, 4)) +
+             "  TP: $"     + str.tostring(math.round(longTP, 4)),
+             color = bullCss, textcolor = color.black,
+             style = label.style_label_up, size = size.small)
+        label.new(n, low - atrVal * 1.4,
+             "BUY @ $"        + str.tostring(math.round(close,   4)) +
+             "\nSELL TP1 @ $" + str.tostring(math.round(longTP1, 4)) +
+             "\nSELL TP2 @ $" + str.tostring(math.round(longTP,  4)) +
+             "\nSTOP  @ $"    + str.tostring(math.round(longSL,  4)),
+             color = color.new(#00e5a0, 0), textcolor = color.black,
+             style = label.style_label_up, size = size.normal)
+
+if inLong and usePartialTP and not tp1_hit_l and high >= longTP1
+    tp1_hit_l := true
+    strategy.exit("Long TP1", from_entry = "Long",
+         limit       = longTP1,
+         qty_percent = 50)
+    if trailStop
+        strategy.exit("Long SL/TP", from_entry = "Long",
+             stop        = entryPrice,
+             limit       = longTP,
+             qty_percent = 100)
+
+if shortEntry and not inShort and not inLong
+    entryPrice := close
+    shortSL    := close + slAtrMult * atrVal
+    shortTP    := close - tpAtrMult * atrVal
+    shortTP1   := close - 2.0 * atrVal
+    tp1_hit_s  := false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short SL/TP", from_entry = "Short",
+         stop        = shortSL,
+         limit       = shortTP,
+         qty_percent = usePartialTP ? 50 : 100)
+    if showEntry
+        label.new(n, high + atrVal * 0.3,
+             "SHORT  R:R " + str.tostring(math.round(rrRatio, 1)) + ":1" +
+             "\nEntry: $"  + str.tostring(math.round(close,   4)) +
+             "\nRSI:"      + str.tostring(math.round(rsiVal,  1)) +
+             "  ADX:"      + str.tostring(math.round(adxVal,  1)) +
+             "\nSL: $"     + str.tostring(math.round(shortSL, 4)) +
+             "  TP: $"     + str.tostring(math.round(shortTP, 4)),
+             color = bearCss, textcolor = color.white,
+             style = label.style_label_down, size = size.small)
+        label.new(n, high + atrVal * 1.4,
+             "SELL @ $"        + str.tostring(math.round(close,    4)) +
+             "\nCOVER TP1 @ $" + str.tostring(math.round(shortTP1, 4)) +
+             "\nCOVER TP2 @ $" + str.tostring(math.round(shortTP,  4)) +
+             "\nSTOP  @ $"     + str.tostring(math.round(shortSL,  4)),
+             color = color.new(#ff3b6b, 0), textcolor = color.white,
+             style = label.style_label_down, size = size.normal)
+
+if inShort and usePartialTP and not tp1_hit_s and low <= shortTP1
+    tp1_hit_s := true
+    strategy.exit("Short TP1", from_entry = "Short",
+         limit       = shortTP1,
+         qty_percent = 50)
+    if trailStop
+        strategy.exit("Short SL/TP", from_entry = "Short",
+             stop        = entryPrice,
+             limit       = shortTP,
+             qty_percent = 100)
+
+if inLong and choch_bear
+    strategy.close("Long",  comment = "CHoCH Exit")
+if inShort and choch_bull
+    strategy.close("Short", comment = "CHoCH Exit")
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 8 ── VISUAL OVERLAYS
+// ─────────────────────────────────────────────────────────────────
+
+plot(showCircles ? top : na, "Swing High", color.new(bearCss, 50), 5, plot.style_circles, offset = -len)
+plot(showCircles ? btm : na, "Swing Low",  color.new(bullCss, 50), 5, plot.style_circles, offset = -len)
+plot(useEMA ? emaF : na, "EMA Fast", color = color.new(#ffeb3b, 70), linewidth = 1)
+plot(useEMA ? emaS : na, "EMA Slow", color = color.new(#ff9800, 60), linewidth = 1)
+plot(useEMA ? emaL : na, "EMA 200",  color = color.new(#e0e0e0, 50), linewidth = 2)
+plot(useVWAP ? vwapVal : na, "VWAP",  color = color.new(#00bcd4, 50), linewidth = 2)
+
+plotTP_L  = showTPSL and inLong  ? longTP  : na
+plotSL_L  = showTPSL and inLong  ? longSL  : na
+plotTP1_L = showTPSL and inLong  and not tp1_hit_l and usePartialTP ? longTP1 : na
+plotTP_S  = showTPSL and inShort ? shortTP  : na
+plotSL_S  = showTPSL and inShort ? shortSL  : na
+plotTP1_S = showTPSL and inShort and not tp1_hit_s and usePartialTP ? shortTP1 : na
+
+plot(plotTP_L,  "Long TP2",  color = color.new(bullCss, 20), linewidth = 1, style = plot.style_linebr)
+plot(plotTP1_L, "Long TP1",  color = color.new(bullCss, 50), linewidth = 1, style = plot.style_linebr)
+plot(plotSL_L,  "Long SL",   color = color.new(bearCss, 20), linewidth = 1, style = plot.style_linebr)
+plot(plotTP_S,  "Short TP2", color = color.new(bearCss, 20), linewidth = 1, style = plot.style_linebr)
+plot(plotTP1_S, "Short TP1", color = color.new(bearCss, 50), linewidth = 1, style = plot.style_linebr)
+plot(plotSL_S,  "Short SL",  color = color.new(bullCss, 20), linewidth = 1, style = plot.style_linebr)
+
+bgcolor(os == 1 ? color.new(bullCss, 97) : color.new(bearCss, 97), title = "Bias Background")
+
+plotshape(bearishDivergence, title = "Bear Divergence", location = location.abovebar, style = shape.triangledown, color = color.new(#ff3b6b, 0),  size = size.tiny)
+plotshape(bullishDivergence, title = "Bull Divergence", location = location.belowbar, style = shape.triangleup,   color = color.new(#00e5a0, 0),  size = size.tiny)
+plotshape(shootingStar,      title = "Shooting Star",   location = location.abovebar, style = shape.xcross,       color = color.new(#ff3b6b, 30), size = size.tiny)
+plotshape(vwapHardExt,       title = "VWAP Overext",    location = location.abovebar, style = shape.diamond,      color = color.new(#f0b429, 0),  size = size.tiny)
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 9 ── EXTENSIONS
+// ─────────────────────────────────────────────────────────────────
+
+var ext_choch     = line.new(na, na, na, na, style = line.style_dashed)
+var ext_bos       = line.new(na, na, na, na)
+var ext_idm       = line.new(na, na, na, na, style = line.style_dotted, color = idmCss)
+var ext_choch_lbl = label.new(na, na, "CHoCH", color = color(na), size = size.tiny)
+var ext_bos_lbl   = label.new(na, na, "BOS",   color = color(na), size = size.tiny)
+var ext_idm_lbl   = label.new(na, na, "IDM",   color = color(na), size = size.tiny, textcolor = idmCss)
+
+if barstate.islast
+    if os == 1
+        if showChoch
+            ext_choch.set_xy1(btmx, btmy), ext_choch.set_xy2(n, btmy), ext_choch.set_color(bearCss)
+            ext_choch_lbl.set_xy(n, btmy), ext_choch_lbl.set_style(label.style_label_up), ext_choch_lbl.set_textcolor(bearCss)
+        if showBos
+            ext_bos.set_xy1(max_x1, max_level), ext_bos.set_xy2(n, max_level), ext_bos.set_color(bullCss)
+            ext_bos_lbl.set_xy(n, max_level), ext_bos_lbl.set_style(label.style_label_down), ext_bos_lbl.set_textcolor(bullCss)
+        if not sbtm_crossed and showIdm
+            ext_idm.set_xy1(sbtmx, sbtmy), ext_idm.set_xy2(n + 15, sbtmy)
+            ext_idm_lbl.set_xy(n + 15, sbtmy), ext_idm_lbl.set_style(label.style_label_up)
+            ext_idm.set_color(idmCss), ext_idm_lbl.set_textcolor(idmCss)
+        else
+            ext_idm.set_color(na), ext_idm_lbl.set_textcolor(na)
+    else
+        if showChoch
+            ext_choch.set_xy1(topx, topy), ext_choch.set_xy2(n, topy), ext_choch.set_color(bullCss)
+            ext_choch_lbl.set_xy(n, topy), ext_choch_lbl.set_style(label.style_label_down), ext_choch_lbl.set_textcolor(bullCss)
+        if showBos
+            ext_bos.set_xy1(min_x1, min_level), ext_bos.set_xy2(n, min_level), ext_bos.set_color(bearCss)
+            ext_bos_lbl.set_xy(n, min_level), ext_bos_lbl.set_style(label.style_label_up), ext_bos_lbl.set_textcolor(bearCss)
+        if not stop_crossed and showIdm
+            ext_idm.set_xy1(stopx, stopy), ext_idm.set_xy2(n + 15, stopy)
+            ext_idm_lbl.set_xy(n + 15, stopy), ext_idm_lbl.set_style(label.style_label_down)
+            ext_idm.set_color(idmCss), ext_idm_lbl.set_textcolor(idmCss)
+        else
+            ext_idm.set_color(na), ext_idm_lbl.set_textcolor(na)
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION 10 ── FILTER STATUS TABLE
+// ─────────────────────────────────────────────────────────────────
+
+var table filterTable = table.new(position.top_right, 2, 24,
+     bgcolor      = color.new(color.black, 75),
+     border_color = color.new(color.white, 80),
+     border_width = 1,
+     frame_color  = color.new(color.white, 70),
+     frame_width  = 1)
+
+if barstate.islast
+
+    // ── Use manual entry if set, else use strategy price ──────────
+    refEntry = manualEntry > 0.0 ? manualEntry : entryPrice
+    hasEntry = manualEntry > 0.0 or not na(entryPrice)
+
+    // ── Price targets from entry ──────────────────────────────────
+    calcSL  = hasEntry ? refEntry - slAtrMult * atrVal : na
+    calcTP1 = hasEntry ? refEntry + 2.0 * atrVal       : na
+    calcTP2 = hasEntry ? refEntry + tpAtrMult * atrVal : na
+    pnlPct  = hasEntry and refEntry > 0 ? math.round((close - refEntry) / refEntry * 100, 2) : 0.0
+    pnlStr  = (pnlPct >= 0 ? "+" : "") + str.tostring(pnlPct) + "%"
+
+    // ── HEADER ────────────────────────────────────────────────────
+    table.cell(filterTable, 0, 0, "THE FAHDI METHOD", text_color = color.new(#aaa8ff, 0),      text_size = size.tiny, bgcolor = color.new(color.black, 40))
+    table.cell(filterTable, 1, 0, "STATUS",           text_color = color.new(color.white, 30), text_size = size.tiny, bgcolor = color.new(color.black, 40))
+
+    // ── FILTERS ───────────────────────────────────────────────────
+    table.cell(filterTable, 0, 1, "Bias", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 1, os == 1 ? "BULL" : "BEAR", text_color = os == 1 ? bullCss : bearCss, text_size = size.tiny)
+
+    table.cell(filterTable, 0, 2, "RSI (" + str.tostring(math.round(rsiVal, 1)) + ")", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 2,
+         rsiVal >= rsiHardBlock    ? "EXTREME"  :
+         bearishDivergence         ? "DIVERGE"  :
+         rsiRising and rsiVal > 70 ? "HIGH+MOM" :
+         (rsiBullOK or rsiBearOK)  ? "OK" : "BLOCK",
+         text_color =
+         rsiVal >= rsiHardBlock    ? bearCss :
+         bearishDivergence         ? color.new(#f0b429, 0) :
+         rsiRising and rsiVal > 70 ? color.new(#00e5a0, 0) :
+         (rsiBullOK or rsiBearOK)  ? bullCss : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 3, "Volume", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 3,
+         volExhaustion            ? "EXHAUST" :
+         (volBullOK or volBearOK) ? "OK" : "LOW",
+         text_color =
+         volExhaustion            ? color.new(#f0b429, 0) :
+         (volBullOK or volBearOK) ? bullCss : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 4, "RVOL", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 4,
+         str.tostring(rvol) + "x",
+         text_color =
+         rvol >= 5.0 ? color.new(#00e5a0, 0) :
+         rvol >= 2.0 ? color.new(#f0b429, 0) : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 5, "EMA Trend", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 5, (emaBullOK or emaBearOK) ? "OK" : "CHOP", text_color = (emaBullOK or emaBearOK) ? bullCss : bearCss, text_size = size.tiny)
+
+    table.cell(filterTable, 0, 6, "ADX (" + str.tostring(math.round(adxVal, 1)) + ")", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 6, adxOK ? "OK" : "WEAK", text_color = adxOK ? bullCss : bearCss, text_size = size.tiny)
+
+    table.cell(filterTable, 0, 7, "VWAP", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 7,
+         vwapHardExt      ? "OVEREXT "  + str.tostring(vwapDistPct) + "%" :
+         vwapExtended     ? "EXTENDED " + str.tostring(vwapDistPct) + "%" :
+         close > vwapVal  ? "ABOVE "    + str.tostring(vwapDistPct) + "%" :
+         "BELOW "         + str.tostring(vwapDistPct) + "%",
+         text_color =
+         vwapHardExt     ? bearCss :
+         vwapExtended    ? color.new(#f0b429, 0) :
+         close > vwapVal ? bullCss : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 8, "HTF Bias", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 8, htfBullish ? "BULL" : "BEAR", text_color = htfBullish ? bullCss : bearCss, text_size = size.tiny)
+
+    table.cell(filterTable, 0, 9, "MACD", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 9,
+         macdCrossingUp   ? "CROSS UP" :
+         macdCrossingDown ? "CROSS DN" :
+         macdMomentumBull ? "BULL+"    :
+         macdMomentumBear ? "BEAR-"    :
+         macdHist > 0     ? "BULL" : "BEAR",
+         text_color =
+         macdCrossingUp   ? color.new(#00e5a0, 0) :
+         macdCrossingDown ? color.new(#ff3b6b, 0) :
+         macdMomentumBull ? color.new(#00e5a0, 0) :
+         macdMomentumBear ? color.new(#ff3b6b, 0) :
+         macdHist > 0     ? bullCss : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 10, "Candle", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 10,
+         shootingStar ? "SHOOT STAR" :
+         hammer       ? "HAMMER"     :
+         doji         ? "DOJI"       : "NORMAL",
+         text_color =
+         shootingStar ? bearCss :
+         hammer       ? bullCss :
+         doji         ? color.new(#f0b429, 0) :
+         color.new(color.white, 40),
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 11, "Divergence", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 11,
+         bearishDivergence ? "BEAR DIV" :
+         bullishDivergence ? "BULL DIV" : "NONE",
+         text_color =
+         bearishDivergence ? bearCss :
+         bullishDivergence ? bullCss :
+         color.new(color.white, 40),
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 12, "Day Move", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 12,
+         (dayMove >= 0 ? "+" : "") + str.tostring(dayMove) + "%",
+         text_color =
+         dayMove >= 100 ? color.new(#aaa8ff, 0) :
+         dayMove >= 50  ? color.new(#00e5a0, 0) :
+         dayMove >= 0   ? bullCss : bearCss,
+         text_size = size.tiny)
+
+    table.cell(filterTable, 0, 13, "RVOL Alert", text_color = color.white, text_size = size.tiny)
+    table.cell(filterTable, 1, 13,
+         rvol >= 10 ? "INSANE " + str.tostring(rvol) + "x — news?"       :
+         rvol >= 5  ? "HIGH "   + str.tostring(rvol) + "x — strong move"  :
+         rvol >= 2  ? "ABOVE AVG " + str.tostring(rvol) + "x"            :
+         "NORMAL "  + str.tostring(rvol) + "x",
+         text_color =
+         rvol >= 10 ? color.new(#aaa8ff, 0) :
+         rvol >= 5  ? color.new(#00e5a0, 0) :
+         rvol >= 2  ? color.new(#f0b429, 0) :
+         color.new(color.white, 40),
+         text_size = size.tiny)
+
+    // ── DIVIDER ───────────────────────────────────────────────────
+    table.cell(filterTable, 0, 14, "--------", text_color = color.new(color.white, 60), text_size = size.tiny)
+    table.cell(filterTable, 1, 14, "--------", text_color = color.new(color.white, 60), text_size = size.tiny)
+
+    // ── YOUR TRADE TARGETS ────────────────────────────────────────
+    table.cell(filterTable, 0, 15, "Your Entry", text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 15,
+         hasEntry ? "$" + str.tostring(math.round(refEntry, 4)) + "  (" + pnlStr + ")" : "Set price in settings",
+         text_color = hasEntry ? (pnlPct >= 0 ? bullCss : bearCss) : color.new(color.white, 50),
+         text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    table.cell(filterTable, 0, 16, "Stop Loss", text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 16,
+         hasEntry ? "SELL ALL @ $" + str.tostring(math.round(calcSL, 4)) : "—",
+         text_color = hasEntry ? bearCss : color.new(color.white, 50),
+         text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    table.cell(filterTable, 0, 17, "Breakeven", text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 17,
+         hasEntry ? "HOLD ABOVE $" + str.tostring(math.round(refEntry, 4)) : "—",
+         text_color = hasEntry ? color.new(#f0b429, 0) : color.new(color.white, 50),
+         text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    table.cell(filterTable, 0, 18, "Sell Half", text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 18,
+         hasEntry ? "SELL 50% @ $" + str.tostring(math.round(calcTP1, 4)) : "—",
+         text_color = hasEntry ? color.new(#00e5a0, 40) : color.new(color.white, 50),
+         text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    table.cell(filterTable, 0, 19, "Sell Rest", text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 19,
+         hasEntry ? "SELL ALL @ $" + str.tostring(math.round(calcTP2, 4)) : "—",
+         text_color = hasEntry ? color.new(#00e5a0, 0) : color.new(color.white, 50),
+         text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    // ── DIVIDER ───────────────────────────────────────────────────
+    table.cell(filterTable, 0, 20, "--------", text_color = color.new(color.white, 60), text_size = size.tiny)
+    table.cell(filterTable, 1, 20, "--------", text_color = color.new(color.white, 60), text_size = size.tiny)
+
+    // ── SCORES ───────────────────────────────────────────────────
+    bullScore = (rsiBullOK ? 1 : 0) + (volBullOK ? 1 : 0) + (emaBullOK ? 1 : 0) + (adxOK ? 1 : 0) + (os == 1 ? 1 : 0) + (vwapBullOK ? 1 : 0) + (htfBullOK ? 1 : 0) + (macdBullOK ? 1 : 0)
+    bearScore = (rsiBearOK ? 1 : 0) + (volBearOK ? 1 : 0) + (emaBearOK ? 1 : 0) + (adxOK ? 1 : 0) + (os == 0 ? 1 : 0) + (vwapBearOK ? 1 : 0) + (htfBearOK ? 1 : 0) + (macdBearOK ? 1 : 0)
+
+    // ── BUY? ─────────────────────────────────────────────────────
+    buyText =
+         vwapHardExt                                               ? "DONT BUY — overextended"        :
+         (longFiltersOK and (longEntry_BOS or longEntry_Sweep))    ? "*** BUY NOW ***"                 :
+         (bullScore >= 7 and longFiltersOK)                        ? "MAYBE BUY — 1 filter away"       :
+         (bullScore >= 5 and volBullOK and not vwapExtended)       ? "WATCH — setup forming"           :
+         (bullScore >= 5 and volBullOK and vwapExtended)           ? "WATCH — wait for pullback"       :
+         bullishDivergence and os == 1                             ? "WATCH — bull divergence"         :
+         bullScore >= 3                                            ? "WAIT — not ready yet"            :
+         "DONT BUY — conditions weak"
+
+    buyColor =
+         str.contains(buyText, "BUY NOW")   ? color.new(#00e5a0, 0)  :
+         str.contains(buyText, "MAYBE BUY") ? color.new(#00e5a0, 40) :
+         str.contains(buyText, "WATCH")     ? color.new(#aaa8ff, 0)  :
+         str.contains(buyText, "WAIT")      ? color.new(#ffeb3b, 0)  :
+         color.new(#ff3b6b, 0)
+
+    table.cell(filterTable, 0, 21, "BUY?",  text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 21, buyText, text_color = buyColor,    text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    // ── SELL? ────────────────────────────────────────────────────
+    exitSignalCount =
+         (bearishDivergence          ? 1 : 0) +
+         (shootingStar               ? 1 : 0) +
+         (volExhaustion              ? 1 : 0) +
+         (macdCrossingDown           ? 1 : 0) +
+         (choch_bear                 ? 1 : 0) +
+         (close < vwapVal and inLong ? 1 : 0) +
+         (not htfBullish and inLong  ? 1 : 0) +
+         (rsiVal >= rsiHardBlock     ? 1 : 0) +
+         (vwapHardExt                ? 1 : 0)
+
+    sellText =
+         vwapHardExt and pnlPct > 0                                          ? "SELL NOW — " + str.tostring(vwapDistPct) + "% from VWAP (" + pnlStr + ")"      :
+         exitSignalCount >= 3                                                 ? "SELL NOW — " + str.tostring(exitSignalCount) + " exit signals (" + pnlStr + ")" :
+         choch_bear                                                           ? "SELL NOW — structure broke (" + pnlStr + ")"          :
+         rsiVal >= rsiHardBlock                                               ? "SELL NOW — RSI extreme (" + pnlStr + ")"              :
+         (bearishDivergence and shootingStar)                                 ? "SELL NOW — div + reversal (" + pnlStr + ")"           :
+         (bearishDivergence and volExhaustion)                                ? "SELL NOW — div + vol exhaust (" + pnlStr + ")"        :
+         (vwapExtended and bearishDivergence)                                 ? "SELL HALF — extended + diverging (" + pnlStr + ")"    :
+         (bearishDivergence and rsiVal > 70)                                  ? "SELL HALF — RSI div warning (" + pnlStr + ")"         :
+         (volExhaustion and pnlPct > 10)                                      ? "SELL HALF — vol spike, lock gains (" + pnlStr + ")"   :
+         (shootingStar and rsiVal > 65)                                       ? "SELL HALF — reversal candle (" + pnlStr + ")"         :
+         (close < vwapVal and inLong)                                         ? "SELL HALF — lost VWAP (" + pnlStr + ")"              :
+         (not htfBullish and inLong)                                          ? "SELL HALF — HTF turned bear (" + pnlStr + ")"         :
+         (macdCrossingDown and pnlPct > 5)                                    ? "SELL HALF — MACD crossed (" + pnlStr + ")"            :
+         (inLong and not tp1_hit_l and pnlPct > 0)                            ? "HOLD — TP1 not hit yet (" + pnlStr + ")"              :
+         (inLong and tp1_hit_l)                                               ? "HOLD — trail to TP2 (" + pnlStr + ")"                 :
+         (os == 1 and longFiltersOK and rsiVal < 70 and not bearishDivergence)? "HOLD STRONG (" + pnlStr + ")"                         :
+         (os == 1 and rsiVal >= 70 and rsiRising and not bearishDivergence)   ? "HOLD — RSI hot but rising (" + pnlStr + ")"           :
+         (doji and pnlPct > 5)                                                ? "HOLD — doji, watch next candle (" + pnlStr + ")"      :
+         os == 0                                                              ? "SELL — bias flipped BEAR"                             :
+         "HOLD — monitor (" + pnlStr + ")"
+
+    sellColor =
+         str.contains(sellText, "SELL NOW")       ? color.new(#ff3b6b, 0)  :
+         str.contains(sellText, "SELL HALF")      ? color.new(#ff3b6b, 35) :
+         str.contains(sellText, "SELL —")         ? color.new(#ff3b6b, 20) :
+         str.contains(sellText, "HOLD STRONG")    ? color.new(#00e5a0, 0)  :
+         str.contains(sellText, "HOLD — RSI hot") ? color.new(#00e5a0, 30) :
+         str.contains(sellText, "HOLD —")         ? color.new(#ffeb3b, 0)  :
+         color.new(#ffeb3b, 20)
+
+    table.cell(filterTable, 0, 22, "SELL?",  text_color = color.white, text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 22, sellText, text_color = sellColor,   text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+    // ── LAST UPDATED ──────────────────────────────────────────────
+    table.cell(filterTable, 0, 23, "Updated", text_color = color.new(color.white, 50), text_size = size.tiny, bgcolor = color.new(color.black, 50))
+    table.cell(filterTable, 1, 23, str.format_time(timenow, "HH:mm:ss", syminfo.timezone), text_color = color.new(#aaa8ff, 0), text_size = size.tiny, bgcolor = color.new(color.black, 30))
+
+// ─────────────────────────────────────────────────────────────────
+// END OF THE FAHDI METHOD
+// ─────────────────────────────────────────────────────────────────
+
+View in Pine Editor・800 lines
+Use on chart
+1
+6
+381
+TTEC is down -3.77% in the last 30 minutes while everything else is moving. That combined with MACD going bear and LOW volume means the move is done and it's bleeding out slowly.

@@ -1,0 +1,83 @@
+//@version=6
+strategy("PSAR with ATR Trailing Stop + SMA Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=0.5)
+
+start     = input(0.003, title="PSAR Start")
+increment = input(0.001, title="PSAR Increment")
+maximum   = input(0.1,  title="PSAR Maximum")
+atrLength = input(14,   title="ATR Length")
+atrMult   = input(6.0,  title="ATR Multiplier")
+smaLength = input(100,  title="Trend SMA Length")
+
+psar     = ta.sar(start, increment, maximum)
+atr      = ta.atr(atrLength)
+smaTrend = ta.sma(close, smaLength)
+
+// PSAR flip signals
+longSignal  = psar < low and psar[1] > high[1]
+shortSignal = psar > high and psar[1] < low[1]
+
+// Dynamic trailing stops
+longStop  = close - atrMult * atr
+shortStop = close + atrMult * atr
+
+// Entry conditions with SMA trend filter
+if longSignal and close > smaTrend
+    strategy.entry("Long", strategy.long)
+if shortSignal and close < smaTrend
+    strategy.entry("Short", strategy.short)
+
+// Trailing stop exits
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop)
+
+// Plots
+plot(psar,       "PSAR",       style=plot.style_cross, color=color.orange)
+plot(smaTrend,   "SMA Trend",  color=color.blue, linewidth=2)
+plot(longStop,   "Long Stop",  style=plot.style_cross, color=color.new(color.green, 50))
+plot(shortStop,  "Short Stop", style=plot.style_cross, color=color.new(color.red,   50))
+
+View in Pine Editor・39 lines
+Use on chart
+4
+1
+1 438
+📈 Strategy Overview: PSAR + 6×ATR Trailing Stop with SMA Filter
+
+This strategy is built around the principle of “Cut the losers, let the winners run” — a disciplined, trend-following approach that combines the Parabolic SAR indicator with dynamic risk management and a Simple Moving Average (SMA) trend filter.
+
+🔍 Strategy Logic
+Trend Filter Trades are only taken in the direction of the prevailing trend, defined by a user-selected SMA (default: 100).
+
+✅ Long trades only when price is above the SMA
+
+✅ Short trades only when price is below the SMA
+
+Entry Signal: A trade is triggered when the Parabolic SAR flips to the opposite side of the price bars, signaling a potential trend reversal.
+
+Stop Loss: The stop loss is dynamically set at 6×ATR from the entry price. This adapts to market volatility and is recalculated every bar — effectively acting as a trailing stop.
+
+Exit Logic: There is no fixed take profit. The trade remains open until the trailing stop is hit — allowing winners to run and losers to be cut quickly.
+
+Risk Management: Each trade risks 0.5% of total equity, ensuring consistent position sizing and capital preservation.
+
+📊 Visual Elements
+PSAR dots mark trend direction changes
+
+SMA line shows the broader trend filter
+
+Trailing stop crosses (with 50% opacity) indicate the current stop level without cluttering the chart
+
+⚙️ Customizable Inputs
+PSAR parameters: Start, Increment, Maximum
+
+ATR length and multiplier
+
+SMA length
+
+Risk percentage per trade
+
+This strategy is ideal for traders who want to stay aligned with the trend, automate disciplined exits, and avoid emotional decision-making. Clean, simple, and powerful.
+
+Wishing you calm and successful trades!

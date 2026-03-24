@@ -1,0 +1,161 @@
+//@version=6
+strategy(
+    "TSLA Mechanical Day Trading Strategy",
+    overlay = true,
+    initial_capital = 100000,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 10,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.01
+)
+
+// ==========================
+// SESSION FILTER (NYSE RTH)
+// ==========================
+sessionRTH = input.session("0930-1600", "Trading Session")
+inSession = not na(time(timeframe.period, sessionRTH))
+
+// ==========================
+// INPUTS
+// ==========================
+gapThreshold  = input.float(0.5, "Gap Threshold (%)") / 100
+vwapDeviation = input.float(0.3, "VWAP Deviation (%)") / 100
+stopLossPct   = input.float(0.4, "Stop Loss (%)") / 100
+takeProfitPct = input.float(0.8, "Take Profit (%)") / 100
+
+// ==========================
+// VWAP
+// ==========================
+vwapValue = ta.vwap(hlc3)
+
+// ==========================
+// PREVIOUS DAY CLOSE
+// ==========================
+prevClose = request.security(syminfo.tickerid, "D", close[1])
+
+// ==========================
+// GAP CONDITIONS
+// ==========================
+gapUp   = open >= prevClose * (1 + gapThreshold)
+gapDown = open <= prevClose * (1 - gapThreshold)
+
+// ==========================
+// TIME FILTERS (LOCAL EXCHANGE TIME)
+// ==========================
+afterOpen  = (hour > 9) or (hour == 9 and minute >= 45)
+beforeClose = (hour < 15) or (hour == 15 and minute <= 45)
+
+// ==========================
+// OPENING MOMENTUM PULLBACK
+// ==========================
+longMomentum = (
+    inSession and
+    afterOpen and
+    beforeClose and
+    gapUp and
+    close > vwapValue and
+    low <= vwapValue
+)
+
+shortMomentum = (
+    inSession and
+    afterOpen and
+    beforeClose and
+    gapDown and
+    close < vwapValue and
+    high >= vwapValue
+)
+
+// ==========================
+// VWAP MEAN REVERSION
+// ==========================
+longVWAP = (
+    inSession and
+    afterOpen and
+    beforeClose and
+    close < vwapValue * (1 - vwapDeviation)
+)
+
+shortVWAP = (
+    inSession and
+    afterOpen and
+    beforeClose and
+    close > vwapValue * (1 + vwapDeviation)
+)
+
+// ==========================
+// ENTRIES
+// ==========================
+if (longMomentum or longVWAP)
+    strategy.entry("Long", strategy.long)
+
+if (shortMomentum or shortVWAP)
+    strategy.entry("Short", strategy.short)
+
+// ==========================
+// EXITS
+// ==========================
+strategy.exit(
+    "Long Exit",
+    from_entry = "Long",
+    stop  = strategy.position_avg_price * (1 - stopLossPct),
+    limit = strategy.position_avg_price * (1 + takeProfitPct)
+)
+
+strategy.exit(
+    "Short Exit",
+    from_entry = "Short",
+    stop  = strategy.position_avg_price * (1 + stopLossPct),
+    limit = strategy.position_avg_price * (1 - takeProfitPct)
+)
+
+// ==========================
+// END-OF-DAY FLATTEN
+// ==========================
+if (hour == 15 and minute >= 55)
+    strategy.close_all()
+
+// ==========================
+// PLOTS
+// ==========================
+plot(vwapValue, title="VWAP", color=color.orange, linewidth=2)
+
+View in Pine Editor・121 lines
+Use on chart
+1
+2
+464
+📌 How to Use This
+
+Apply to TSLA
+
+Recommended timeframe: 1-minute or 5-minute
+
+Session: Regular Trading Hours (9:30–16:00 NY time)
+
+Designed for day trading only (no overnight holds)
+
+⚙️ Strategy Logic (Mechanical Rules)
+1️⃣ Opening Momentum Pullback
+
+Gap ≥ ±0.5% vs prior close
+
+Trade only after 9:45
+
+Pullback toward VWAP
+
+Enter in direction of gap
+
+2️⃣ VWAP Mean Reversion
+
+Price deviates from VWAP by ≥ 0.3%
+
+Enters counter-move back toward VWAP
+
+3️⃣ Risk Management
+
+Fixed % stop loss
+
+Fixed % take profit
+
+Flat before close

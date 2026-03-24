@@ -1,0 +1,205 @@
+//@version=3
+// @author GianlucaBezziccheri
+
+strategy(title="Multiple Moving Averages+TransientZones+Volumes", shorttitle="MultipleMA+TransientZones+Volumes", overlay=true)
+
+/// MULTIPLE MA ///
+// Simple MA
+enable1a = input(true, title="Enable 1st MA")
+len1a = input(20, minval=1, title="1st MA Length")
+src1a = input(close, title="1st MA Source")
+out1a = sma(src1a, len1a)
+enable2a = input(true, title="Enable 2nd MA")
+len2a = input(50, minval=1, title="2nd MA Length")
+src2a = input(close, title="2nd MA Source")
+out2a = sma(src2a, len2a)
+enable3a = input(true, title="Enable 3rd MA")
+len3a = input(100, minval=1, title="3rd MA Length")
+src3a = input(close, title="3rd MA Source")
+out3a = sma(src3a, len3a)
+enable4a = input(true, title="Enable 4th MA")
+len4a = input(200, minval=1, title="4th MA Length")
+src4a = input(close, title="4th MA Source")
+out4a = sma(src4a, len4a)
+// Exponential MA
+enable1b = input(false, title="Enable 1st EMA")
+len1b = input(20, minval=1, title="1st EMA Length")
+src1b = input(close, title="1st EMA Source")
+out1b = ema(src1b, len1b)
+enable2b = input(false, title="Enable 2nd EMA")
+len2b = input(50, minval=1, title="2nd EMA Length")
+src2b = input(close, title="2nd EMA Source")
+out2b = ema(src2b, len2b)
+enable3b = input(false, title="Enable 3rd EMA")
+len3b = input(100, minval=1, title="3rd EMA Length")
+src3b = input(close, title="3rd EMA Source")
+out3b = ema(src3b, len3b)
+enable4b = input(false, title="Enable 4th EMA")
+len4b = input(200, minval=1, title="4th EMA Length")
+src4b = input(close, title="4th EMA Source")
+out4b = ema(src4b, len4b)
+// Weighted MA
+enable1c = input(false, title="Enable 1st WMA")
+len1c = input(20, minval=1, title="1st WMA Length")
+src1c = input(close, title="1st WMA Source")
+out1c = wma(src1c, len1c)
+enable2c = input(false, title="Enable 2nd WMA")
+len2c = input(50, minval=1, title="2nd WMA Length")
+src2c = input(close, title="2nd WMA Source")
+out2c = wma(src2c, len2c)
+enable3c = input(false, title="Enable 3rd WMA")
+len3c = input(100, minval=1, title="3rd WMA Length")
+src3c = input(close, title="3rd WMA Source")
+out3c = wma(src3c, len3c)
+enable4c = input(false, title="Enable 4th WMA")
+len4c = input(200, minval=1, title="4th WMA Length")
+src4c = input(close, title="4th WMA Source")
+out4c = wma(src4c, len4c)
+// Volume weighted MA
+enable1d = input(false, title="Enable 1st VWMA")
+len1d = input(20, minval=1, title="1st VWMA Length")
+src1d = input(close, title="1st VWMA Source")
+out1d = vwma(src1d, len1d)
+enable2d = input(false, title="Enable 2nd VWMA")
+len2d = input(50, minval=1, title="2nd VWMA Length")
+src2d = input(close, title="2nd VWMA Source")
+out2d = vwma(src2d, len2d)
+enable3d = input(false, title="Enable 3rd VWMA")
+len3d = input(100, minval=1, title="3rd VWMA Length")
+src3d = input(close, title="3rd VWMA Source")
+out3d = vwma(src3d, len3d)
+enable4d = input(false, title="Enable 4th VWMA")
+len4d = input(200, minval=1, title="4th VWMA Length")
+src4d = input(close, title="4th VWMA Source")
+out4d = vwma(src4d, len4d)
+// Hull MA
+enable1e = input(false, title="Enable 1st HMA")
+len1e = input(20, minval=1, title="1st HMA Length")
+src1e = input(close, title="1st HMA Source")
+out1e = wma(2*wma(src1e, len1e/2)-wma(src1e, len1e), round(sqrt(len1e)))
+enable2e = input(false, title="Enable 2nd HMA")
+len2e = input(50, minval=1, title="2nd HMA Length")
+src2e = input(close, title="2nd HMA Source")
+out2e = wma(2*wma(src2e, len2e/2)-wma(src2e, len2e), round(sqrt(len2e)))
+enable3e = input(false, title="Enable 3rd HMA")
+len3e = input(100, minval=1, title="3rd HMA Length")
+src3e = input(close, title="3rd HMA Source")
+out3e = wma(2*wma(src3e, len3e/2)-wma(src3e, len3e), round(sqrt(len3e)))
+enable4e = input(false, title="Enable 4th HMA")
+len4e = input(200, minval=1, title="4th HMA Length")
+src4e = input(close, title="4th HMA Source")
+out4e = wma(2*wma(src4e, len4e/2)-wma(src4e, len4e), round(sqrt(len4e)))
+//Simple MA charts
+plot(enable1a and out1a ? out1a : na, color=lime, title="SMA1", linewidth=2, transp=0)
+plot(enable2a and out2a ? out2a : na, color=yellow, title="SMA2", linewidth=2, transp=0)
+plot(enable3a and out3a ? out3a : na, color=orange, title="SMA3", linewidth=2, transp=0)
+plot(enable4a and out4a ? out4a : na, color=red, title="SMA4", linewidth=2, transp=0)
+//Exponential MA charts
+plot(enable1b and out1b ? out1b : na, color=lime, title="EMA1", linewidth=2, transp=0)
+plot(enable2b and out2b ? out2b : na, color=yellow, title="EMA2", linewidth=2, transp=0)
+plot(enable3b and out3b ? out3b : na, color=orange, title="EMA3", linewidth=2, transp=0)
+plot(enable4b and out4b ? out4b : na, color=red, title="EMA4", linewidth=2, transp=0)
+//Weighted MA charts
+plot(enable1c and out1c ? out1c : na, color=lime, title="WMA1", linewidth=2, transp=0)
+plot(enable2c and out2c ? out2c : na, color=yellow, title="WMA2", linewidth=2, transp=0)
+plot(enable3c and out3c ? out3c : na, color=orange, title="WMA3", linewidth=2, transp=0)
+plot(enable4c and out4c ? out4c : na, color=red, title="WMA4", linewidth=2, transp=0)
+//Volume Weighted MA charts
+plot(enable1d and out1d ? out1d : na, color=lime, title="VWMA1", linewidth=2, transp=0)
+plot(enable2d and out2d ? out2d : na, color=yellow, title="VWMA2", linewidth=2, transp=0)
+plot(enable3d and out3d ? out3d : na, color=orange, title="VWMA3", linewidth=2, transp=0)
+plot(enable4d and out4d ? out4d : na, color=red, title="VWMA4", linewidth=2, transp=0)
+//Hull MA charts
+plot(enable1e and out1e ? out1e : na, color=lime, title="HMA1", linewidth=2, transp=0)
+plot(enable2e and out2e ? out2e : na, color=yellow, title="HMA2", linewidth=2, transp=0)
+plot(enable3e and out3e ? out3e : na, color=orange, title="HMA3", linewidth=2, transp=0)
+plot(enable4e and out4e ? out4e : na, color=red, title="HMA4", linewidth=2, transp=0)
+
+
+///TRANSIENT ZONES///
+//inputs
+h_left = input(title="H left", type=integer, defval=10)
+h_right = input(title="H right", type=integer, defval=10)
+sample_period = input(title="Sample bars for % TZ", type=integer, defval=5000)
+show_ptz = input(title="Show PTZ", type=bool, defval=true)
+show_channel = input(title="Show channel", type=bool, defval=true)
+//barCount = nz(barCount[1]) + 1
+//check history and realtime PTZ
+h_left_low = lowest(h_left)
+h_left_high = highest(h_left)
+newlow = low <= h_left_low
+newhigh = high >= h_left_high
+channel_high = plot(show_channel ? h_left_low : 0, color=white, linewidth=1, transp=0)
+channel_low = plot (show_channel ? h_left_high : 0, color=white, linewidth=1, transp=0)
+fill(channel_high, channel_low, color=white, transp=90 )
+//check true TZ back in history
+central_bar_low = low[h_right + 1]
+central_bar_high = high[h_right + 1]
+full_zone_low = lowest(h_left + h_right + 1)
+full_zone_high = highest(h_left + h_right + 1)
+central_bar_is_highest = central_bar_high >= full_zone_high
+central_bar_is_lowest = central_bar_low <= full_zone_low
+plotarrow(central_bar_is_highest ? -1 : 0, offset=-h_right-1, maxheight=40)
+plotarrow(central_bar_is_lowest ? 1 : 0, offset=-h_right-1, maxheight=40)
+//TZ probability calc
+x = central_bar_is_highest ? 1 : 0
+high_bar_tz_count = cum(x)
+y = central_bar_is_lowest ? 1 : 0
+low_bar_tz_count = cum(y)
+total_tz = high_bar_tz_count + low_bar_tz_count
+percent_tz_high = (high_bar_tz_count / sample_period) * 100
+//plot(percent_tz_high, color = lime, transp=100)
+percent_tz_low = (low_bar_tz_count / sample_period) * 100
+//plot(low_bar_tz_count, color=red, transp=100)
+percent_total_tz = (percent_tz_high + percent_tz_low)
+plot(percent_total_tz, color=black, transp=100)
+//PTZ probability calc
+i = newhigh ? 1 : 0
+high_bar_ptz_count = cum(i)
+j = newlow ? 1 : 0
+low_bar_ptz_count = cum(j)
+total_ptz = high_bar_ptz_count + low_bar_ptz_count
+percent_ptz_high = (high_bar_ptz_count / sample_period) * 100
+//plot(percent_ptz_high, color=green, transp=100)
+percent_ptz_low = (low_bar_ptz_count / sample_period) * 100
+//plot(percent_ptz_low, color=maroon, transp=100)
+percent_total_ptz = (percent_ptz_high + percent_ptz_low)
+plot(percent_total_ptz, color=navy,  transp=100)
+//PTZ resolving probability calc
+percent_ptz_resolved = (1 - (total_tz / total_ptz)) * 100
+plot(percent_ptz_resolved, color=gray,  transp=100)
+
+
+//VOLUMES
+showMA = input(false)
+Vol=volume
+barColorsOnPrevClose = input(title="Color bars based on previous close", type=bool, defval=false)
+palette = barColorsOnPrevClose ? close[1] > close ? red : green : open > close ? red : green
+plot(Vol, color = palette, style=columns, title="Volume", transp=80)
+plot(showMA ? sma(volume,20)/2 : na, style=area, color=blue, title="Volume MA", transp=80)
+
+View in Pine Editor・194 lines
+Use on chart
+1
+2
+9
+2
+4 392
+///////////////////////////////////////////////////////////////////////////////////////////
+//// MULTIPLE_MA+TRANSIENT_ZONES+VOLUMES ////
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// Author GianlucaBezziccheri
+
+// A simple script including:
+// 1) 4x Simple Moving Averages
+// 2) 4x Exponential Moving Averages
+// 3) 4x Weighted Moving Averages
+// 4) 4x Volume Weighted Moving Averages
+// 5) 4x Hull Moving Averages
+// 6) Transient Zones v1.1 (by Jurij)
+// 7) Volumes
+
+// You can choose MA type you prefer and even to activate all of them at the same time,
+// though i don't recommend doing this.
+// For more details about 6) check the original script

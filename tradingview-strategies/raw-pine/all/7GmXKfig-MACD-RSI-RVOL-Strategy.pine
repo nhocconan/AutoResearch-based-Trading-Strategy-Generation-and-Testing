@@ -1,0 +1,65 @@
+//@version=4
+strategy("MACD, RSI, & RVOL Strategy", overlay=true, max_bars_back=5000, 
+ default_qty_type= strategy.cash, calc_on_order_fills=false, calc_on_every_tick=false, 
+ pyramiding=0, default_qty_value=100000, initial_capital=100000)
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+length = input( 14 )
+overSold = input( 30 )
+overBought = input( 70 )
+price = close
+vrsi = rsi(price, length)
+co = crossover(vrsi, overSold)
+cu = crossunder(vrsi, overBought)
+fastLength = input(12)
+slowlength = input(26)
+MACDLength = input(9)
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+RVOLlen = input(14, minval=1, title="RVOL Length")
+av = sma(volume, RVOLlen)
+RVOL = volume / av
+
+
+
+if (not na(vrsi)) 
+    if ((co and crossover(delta, 0)) or (co and crossover(RVOL, 2)) or (crossover(delta, 0) and crossover(RVOL, 2)))
+        strategy.entry("MACD & RSI BUY Long", strategy.long, comment="BUY LONG")
+
+        
+    if ((cu and crossunder(delta, 0)) or (cu and crossunder(RVOL, 5)) or (crossunder(delta, 0) and crossunder(RVOL, 5)))
+        strategy.entry("MACD & RSI SELL Short", strategy.short, comment="SELL LONG")
+    
+        
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・39 lines
+Use on chart
+9
+3
+5
+4
+26 513
+
+This strategy combines the use of MACD (12, 26, 9), RSI (14, 30, 70), and RVOL (14) to create Long Buy and Sell signals. This works well with many different time intervals but was developed with 15-minute intervals in mind.
+
+Using MACD as a reference, the strategy identifies when the MACD line crosses over (a factor in a buy signal) and under (a factor in a Sell signal) the Signal line. This shows a shift in positive (cross over) and negative (cross under) of a security.
+
+Using the Relative Strength Index ( RSI ) as an indicator, the strategy notices when the velocity and magnitude of the directional price movements cross over the Oversold signal (30) and crosses under the Overbought signal (70) as a factor in creating a Buy and Sell signal.
+
+Using Relative Volume (RVOL) as an indicator, the strategy calculates when the current volume has crossed over the 2x average volume indicator over a given period and is then used as a factor in creating a Buy signal. RVOL is also used when the change in volume crosses under a set RVOL number (in this strategy, it is set to a RVOL of 5).
+RVOL = Current Volume / Average Volume over a certain period
+
+This strategy indicates a Buy signal when 2/3 conditions are met:
+- RSI Cross Over the Over Sold signal (default 30)
+- MACD Cross Over of Signal ( MACD > Signal)
+- RVOL Cross Over of 2 (RVOL > 2)
+
+This strategy indicates a Sell signal when 2/3 conditions are met:
+- RSI Cross Under the Over Bought signal (default 70)
+- MACD Cross Under of Signal ( MACD < Signal)
+- RVOL Cross Under 5 (RVOL < 5)
+
+Enjoy and leave feedback!

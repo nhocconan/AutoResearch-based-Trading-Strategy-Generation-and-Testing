@@ -1,0 +1,6 @@
+//@version=5
+threshold_low=##input(defval=0.4,type='INPUT_FLOAT',##id='in_1')
+##root(root_metainfo,rm_0,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_2,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_3,threshold_low,input__float)

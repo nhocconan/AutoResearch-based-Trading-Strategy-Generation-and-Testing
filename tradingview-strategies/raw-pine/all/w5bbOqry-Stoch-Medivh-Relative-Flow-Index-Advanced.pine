@@ -1,0 +1,116 @@
+//@version=4
+strategy(title="Stoch Medivh Relative Flow Index Advanced", shorttitle="StochMRFI Adv 1D BLX", default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, precision=2, initial_capital=1000000)
+my_sma(src, len) =>
+    sum = 0.0
+    sum := nz(sum[1]) - nz(src[len]) + src
+    sum/len
+
+rsi_src = close
+mfi_src = hlc3
+
+sl_inp = input(2.0, title='Stop Loss %')/100
+tp_inp = input(15.0, title='Take Profit %')/100
+sm_len = input(defval=14, type=input.integer, minval=1, title="Periods for SMMRFI")
+len = input(defval=20, type=input.integer, minval=1, title="RSI Length")
+length = input(title="MFI Length", type=input.integer, defval=16, minval=1, maxval=2000)
+
+stop_level = strategy.position_avg_price * (1 - sl_inp)
+take_level = strategy.position_avg_price * (1 + tp_inp)
+
+up = rma(max(change(rsi_src), 0), len)
+down = rma(-min(change(rsi_src), 0), len)
+relative_strength = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+band1 = hline(70)
+band0 = hline(30)
+
+upper = sum(volume * (change(mfi_src) <= 0 ? 0 : mfi_src), length)
+lower = sum(volume * (change(mfi_src) >= 0 ? 0 : mfi_src), length)
+mf = rsi(upper, lower)
+
+overbought=hline(80, title="Overbought", color=#c0c0c0)
+oversold=hline(20, title="Oversold", color=#c0c0c0)
+
+
+mrfi_line_aux = (mf/ relative_strength   ) * ((relative_strength + mf) /2)
+mrfi_line = if mrfi_line_aux > 100
+    100
+else
+    mrfi_line_aux
+    
+mrfi_inverse_aux = ( relative_strength / mf ) * ((relative_strength + mf) /2)
+mrfi_inverse = if mrfi_line_aux > 100 
+    100 
+else
+    mrfi_inverse_aux
+    
+mrfi_avg_aux = (mrfi_line + mrfi_inverse) / 2
+mrfi_avg = if mrfi_avg_aux > 100
+    100
+else
+    mrfi_avg_aux
+
+smmrfi_aux = my_sma(mrfi_avg, sm_len)
+smmrfi = if smmrfi_aux > 100
+    100
+else
+    smmrfi_aux
+    
+smmrfi_line_aux = my_sma(mrfi_line, sm_len)
+smmrfi_line = if smmrfi_line_aux > 100
+    100
+else
+    smmrfi_line_aux
+
+smmrfi_inverse_aux = my_sma(mrfi_inverse, sm_len)
+smmrfi_inverse = if smmrfi_inverse_aux > 100
+    100
+else
+    smmrfi_inverse_aux
+
+smoothK = input(14, minval=1), smoothD = input(3, minval=1)
+stoch = sma(stoch(close, high, low, smoothK), 3)
+sma_stoch = sma(stoch, smoothD)
+plot(stoch, color=color.black, title="Stochastic RSI")
+plot(sma_stoch, color=color.red, title="Stochastic RSI SMA")
+
+fill(band1, band0, color=color.green, transp=85)
+fill(overbought, oversold, color=color.red, transp=95)
+
+plot(smmrfi, color=color.yellow, title="SMMRFI")
+
+// Plot equity
+//plot(strategy.equity, color=color.blue, title="Strategy Equity")
+
+ATR = atr(7)
+
+orderSize = floor((strategy.equity)/close)
+
+longCondition = (crossover(stoch, smmrfi) or (stoch <= 5 and smmrfi_line < 15) )
+
+if(longCondition)
+    stop_level = low - ATR
+    profit_level = close * 1.65
+    strategy.entry("buy", strategy.long, orderSize)
+    strategy.exit("SL/TP", "buy", stop=stop_level, limit=profit_level) 
+
+shortCondition = (crossunder(stoch, smmrfi) or (stoch >= 95 and smmrfi_line > 85) )
+
+if(shortCondition)
+    xunder = false
+    stop_level = high + ATR
+    profit_level = close * 0.85
+    strategy.entry("sell", strategy.short, orderSize)
+    strategy.exit("SL/TP", "sell", stop=stop_level, limit=profit_level) 
+    
+    
+strategy.close("buy", when=( (smmrfi_line > 80 and stoch > 80) ))
+strategy.close("sell", when=( (smmrfi_line < 30 and stoch < 30) or (stoch <= 10)) )
+
+View in Pine Editor・108 lines
+Use on chart
+3
+5
+1
+2 136
+~9 yrs 167k%

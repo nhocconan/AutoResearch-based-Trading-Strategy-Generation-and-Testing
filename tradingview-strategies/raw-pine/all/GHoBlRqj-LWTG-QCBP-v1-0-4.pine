@@ -1,0 +1,1417 @@
+//@version=5
+strategy(
+     title             = "LWTG QCBP v1.0.4",
+     shorttitle        = "LWTG QCBP v1.0.4",
+     overlay           = true,
+     initial_capital   = 25000,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 0.50,
+     slippage          = 1
+ )
+
+// ============================================================
+// === INSTRUMENT PRESET SELECTOR ===
+// ============================================================
+i_preset = input.string("MES 1c", "⚡ Instrument Preset",
+     options=["MES 1c","MES 2c","MES 3c",
+              "MNQ 1c","MNQ 2c","MNQ 3c",
+              "MYM 1c","MYM 2c","MYM 3c",
+              "SIL 1c","SIL 2c","SIL 3c",
+              "MGC 1c","MGC 2c","MGC 3c",
+              "CUSTOM"],
+     group="⚡ Preset")
+
+
+// ============================================================
+// === PRESET PARAMETER BLOCKS ===
+// To update 2c/3c when optimized: change the values in those blocks
+// Format: conf, rsiLen, rsiOS, rsiOB, adxLen, adxMin, atrPeriod, sl1, sl2, tp1, tp2, qty
+// ============================================================
+
+// --- MES 1c (optimized) ---
+mes1c_conf = 8
+mes1c_rsiLen = 14
+mes1c_rsiOS = 24
+mes1c_rsiOB = 62
+mes1c_adxLen = 11
+mes1c_adxMin = 24
+mes1c_atr = 16
+mes1c_qty = 1
+mes1c_sl1 = 2.20
+mes1c_sl2 = 2.20
+mes1c_tp1 = 1.00
+mes1c_tp2 = 1.00
+// --- MES 2c (mirrors 1c until optimized) ---
+mes2c_conf = 8
+mes2c_rsiLen = 14
+mes2c_rsiOS = 24
+mes2c_rsiOB = 62
+mes2c_adxLen = 11
+mes2c_adxMin = 24
+mes2c_atr = 16
+mes2c_qty = 2
+mes2c_sl1 = 2.1
+mes2c_sl2 = 2.1
+mes2c_tp1 = 1.00
+mes2c_tp2 = 1.00
+// --- MES 3c (mirrors 1c until optimized) ---
+mes3c_conf = 8
+mes3c_rsiLen = 14
+mes3c_rsiOS = 24
+mes3c_rsiOB = 62
+mes3c_adxLen = 11
+mes3c_adxMin = 24
+mes3c_atr = 16
+mes3c_qty = 3
+mes3c_sl1 = 2.1
+mes3c_sl2 = 2.1
+mes3c_tp1 = 1.00
+mes3c_tp2 = 1.00
+
+// --- MNQ 1c (optimized) ---
+mnq1c_conf = 8
+mnq1c_rsiLen = 16
+mnq1c_rsiOS = 40
+mnq1c_rsiOB = 64
+mnq1c_adxLen = 12
+mnq1c_adxMin = 19
+mnq1c_atr = 14
+mnq1c_qty = 1
+mnq1c_sl1 = 1.75
+mnq1c_sl2 = 1.75
+mnq1c_tp1 = 1.50
+mnq1c_tp2 = 1.50
+// --- MNQ 2c (mirrors 1c until optimized) ---
+mnq2c_conf = 8
+mnq2c_rsiLen = 16
+mnq2c_rsiOS = 40
+mnq2c_rsiOB = 64
+mnq2c_adxLen = 12
+mnq2c_adxMin = 19
+mnq2c_atr = 14
+mnq2c_qty = 2
+mnq2c_sl1 = 1.75
+mnq2c_sl2 = 1.75
+mnq2c_tp1 = 1.50
+mnq2c_tp2 = 1.50
+// --- MNQ 3c (mirrors 1c until optimized) ---
+mnq3c_conf = 8
+mnq3c_rsiLen = 16
+mnq3c_rsiOS = 40
+mnq3c_rsiOB = 64
+mnq3c_adxLen = 12
+mnq3c_adxMin = 19
+mnq3c_atr = 14
+mnq3c_qty = 3
+mnq3c_sl1 = 1.75
+mnq3c_sl2 = 1.75
+mnq3c_tp1 = 1.50
+mnq3c_tp2 = 1.50
+
+// --- MYM 1c (optimized) ---
+mym1c_conf = 8
+mym1c_rsiLen = 14
+mym1c_rsiOS = 35
+mym1c_rsiOB = 62
+mym1c_adxLen = 27
+mym1c_adxMin = 17
+mym1c_atr = 34
+mym1c_qty = 1
+mym1c_sl1 = 1.30
+mym1c_sl2 = 1.30
+mym1c_tp1 = 0.85
+mym1c_tp2 = 0.85
+// --- MYM 2c (mirrors 1c until optimized) ---
+mym2c_conf = 8
+mym2c_rsiLen = 14
+mym2c_rsiOS = 35
+mym2c_rsiOB = 62
+mym2c_adxLen = 27
+mym2c_adxMin = 17
+mym2c_atr = 34
+mym2c_qty = 2
+mym2c_sl1 = 1.30
+mym2c_sl2 = 1.30
+mym2c_tp1 = 0.85
+mym2c_tp2 = 0.85
+// --- MYM 3c (mirrors 1c until optimized) ---
+mym3c_conf = 8
+mym3c_rsiLen = 14
+mym3c_rsiOS = 35
+mym3c_rsiOB = 62
+mym3c_adxLen = 27
+mym3c_adxMin = 17
+mym3c_atr = 34
+mym3c_qty = 3
+mym3c_sl1 = 1.30
+mym3c_sl2 = 1.30
+mym3c_tp1 = 0.85
+mym3c_tp2 = 0.85
+
+// --- SIL 1c (optimized) ---
+sil1c_conf = 9
+sil1c_rsiLen = 15
+sil1c_rsiOS = 37
+sil1c_rsiOB = 81
+sil1c_adxLen = 14
+sil1c_adxMin = 37
+sil1c_atr = 13
+sil1c_qty = 1
+sil1c_sl1 = 0.85
+sil1c_sl2 = 0.85
+sil1c_tp1 = 0.70
+sil1c_tp2 = 0.70
+// --- SIL 2c (mirrors 1c until optimized) ---
+sil2c_conf = 9
+sil2c_rsiLen = 15
+sil2c_rsiOS = 37
+sil2c_rsiOB = 81
+sil2c_adxLen = 14
+sil2c_adxMin = 37
+sil2c_atr = 13
+sil2c_qty = 2
+sil2c_sl1 = 0.85
+sil2c_sl2 = 0.85
+sil2c_tp1 = 0.70
+sil2c_tp2 = 0.70
+// --- SIL 3c (mirrors 1c until optimized) ---
+sil3c_conf = 9
+sil3c_rsiLen = 15
+sil3c_rsiOS = 37
+sil3c_rsiOB = 81
+sil3c_adxLen = 14
+sil3c_adxMin = 37
+sil3c_atr = 13
+sil3c_qty = 3
+sil3c_sl1 = 0.85
+sil3c_sl2 = 0.85
+sil3c_tp1 = 0.70
+sil3c_tp2 = 0.70
+
+// --- MGC 1c (optimized) ---
+mgc1c_conf = 9
+mgc1c_rsiLen = 15
+mgc1c_rsiOS = 35
+mgc1c_rsiOB = 65
+mgc1c_adxLen = 17
+mgc1c_adxMin = 21
+mgc1c_atr = 12
+mgc1c_qty = 1
+mgc1c_sl1 = 2.00
+mgc1c_sl2 = 2.00
+mgc1c_tp1 = 1.25
+mgc1c_tp2 = 1.25
+// --- MGC 2c (mirrors 1c until optimized) ---
+mgc2c_conf = 9
+mgc2c_rsiLen = 15
+mgc2c_rsiOS = 35
+mgc2c_rsiOB = 65
+mgc2c_adxLen = 17
+mgc2c_adxMin = 21
+mgc2c_atr = 12
+mgc2c_qty = 2
+mgc2c_sl1 = 2.00
+mgc2c_sl2 = 2.00
+mgc2c_tp1 = 1.25
+mgc2c_tp2 = 1.25
+// --- MGC 3c (mirrors 1c until optimized) ---
+mgc3c_conf = 9
+mgc3c_rsiLen = 15
+mgc3c_rsiOS = 35
+mgc3c_rsiOB = 65
+mgc3c_adxLen = 17
+mgc3c_adxMin = 21
+mgc3c_atr = 12
+mgc3c_qty = 3
+mgc3c_sl1 = 2.00
+mgc3c_sl2 = 2.00
+mgc3c_tp1 = 1.25
+mgc3c_tp2 = 1.25
+
+// ============================================================
+// === CUSTOM OVERRIDE INPUTS (only active when CUSTOM selected) ===
+// ============================================================
+i_cust_conf   = input.int(8,     "Confluences",     minval=7, maxval=9,  group="Custom Settings (CUSTOM preset only)")
+i_cust_rsiLen = input.int(14,    "RSI Length",                           group="Custom Settings (CUSTOM preset only)")
+i_cust_rsiOS  = input.int(38,    "RSI Oversold",    minval=10, maxval=50, group="Custom Settings (CUSTOM preset only)")
+i_cust_rsiOB  = input.int(62,    "RSI Overbought",  minval=50, maxval=90, group="Custom Settings (CUSTOM preset only)")
+i_cust_adxLen = input.int(14,    "ADX Length",                           group="Custom Settings (CUSTOM preset only)")
+i_cust_adxMin = input.int(22,    "ADX Minimum",     minval=10, maxval=50, group="Custom Settings (CUSTOM preset only)")
+i_cust_atr    = input.int(14,    "ATR Period",                           group="Custom Settings (CUSTOM preset only)")
+i_cust_sl1    = input.float(2.0, "SL1 Mult",        step=0.05,           group="Custom Settings (CUSTOM preset only)")
+i_cust_sl2    = input.float(1.5, "SL2 Mult",        step=0.05,           group="Custom Settings (CUSTOM preset only)")
+i_cust_tp1    = input.float(1.0, "TP1 Mult",        step=0.05,           group="Custom Settings (CUSTOM preset only)")
+i_cust_tp2    = input.float(2.5, "TP2 Mult",        step=0.05,           group="Custom Settings (CUSTOM preset only)")
+i_cust_qty    = input.int(1,     "Qty (contracts)", minval=1,            group="Custom Settings (CUSTOM preset only)")
+i_cust_sym    = input.string("CUSTOM", "Webhook Symbol",                 group="Custom Settings (CUSTOM preset only)")
+
+// --- Optimizer Overrides ---
+// Enable to micro-tune parameters live from settings screen OR run QC Optimizer
+// Set values to match your active preset before tuning
+// Toggle OFF for live trading — preset values take over automatically
+i_useOverrides = input.bool(false,  "Enable Optimizer Overrides (micro tuning on)",  group="Optimizer Overrides")
+i_ovr_conf     = input.int(8,       "Confluences",     minval=7,   maxval=9,   group="Optimizer Overrides")
+i_ovr_rsiLen   = input.int(14,      "RSI Length",      minval=2,               group="Optimizer Overrides")
+i_ovr_rsiOS    = input.int(38,      "RSI Oversold",    minval=10,  maxval=50,  group="Optimizer Overrides")
+i_ovr_rsiOB    = input.int(62,      "RSI Overbought",  minval=50,  maxval=90,  group="Optimizer Overrides")
+i_ovr_adxLen   = input.int(14,      "ADX Length",      minval=2,               group="Optimizer Overrides")
+i_ovr_adxMin   = input.int(20,      "ADX Minimum",     minval=5,   maxval=50,  group="Optimizer Overrides")
+i_ovr_atr      = input.int(14,      "ATR Period",      minval=1,               group="Optimizer Overrides")
+i_ovr_sl1      = input.float(2.0,   "SL1 Mult",        step=0.05,              group="Optimizer Overrides")
+i_ovr_sl2      = input.float(1.5,   "SL2 Mult",        step=0.05,              group="Optimizer Overrides")
+i_ovr_tp1      = input.float(1.0,   "TP1 Mult",        step=0.05,              group="Optimizer Overrides")
+i_ovr_tp2      = input.float(2.5,   "TP2 Mult",        step=0.05,              group="Optimizer Overrides")
+i_ovr_qty      = input.int(1,       "Qty (contracts)", minval=1,               group="Optimizer Overrides")
+
+// ============================================================
+// === RESOLVE ACTIVE PARAMETERS FROM PRESET ===
+// ============================================================
+p_conf_preset = i_preset=="MES 1c"?mes1c_conf : i_preset=="MES 2c"?mes2c_conf : i_preset=="MES 3c"?mes3c_conf : i_preset=="MNQ 1c"?mnq1c_conf : i_preset=="MNQ 2c"?mnq2c_conf : i_preset=="MNQ 3c"?mnq3c_conf : i_preset=="MYM 1c"?mym1c_conf : i_preset=="MYM 2c"?mym2c_conf : i_preset=="MYM 3c"?mym3c_conf : i_preset=="SIL 1c"?sil1c_conf : i_preset=="SIL 2c"?sil2c_conf : i_preset=="SIL 3c"?sil3c_conf : i_preset=="MGC 1c"?mgc1c_conf : i_preset=="MGC 2c"?mgc2c_conf : i_preset=="MGC 3c"?mgc3c_conf : i_cust_conf
+p_conf = i_useOverrides ? i_ovr_conf : p_conf_preset
+
+p_rsiLen_preset = i_preset=="MES 1c"?mes1c_rsiLen : i_preset=="MES 2c"?mes2c_rsiLen : i_preset=="MES 3c"?mes3c_rsiLen : i_preset=="MNQ 1c"?mnq1c_rsiLen : i_preset=="MNQ 2c"?mnq2c_rsiLen : i_preset=="MNQ 3c"?mnq3c_rsiLen : i_preset=="MYM 1c"?mym1c_rsiLen : i_preset=="MYM 2c"?mym2c_rsiLen : i_preset=="MYM 3c"?mym3c_rsiLen : i_preset=="SIL 1c"?sil1c_rsiLen : i_preset=="SIL 2c"?sil2c_rsiLen : i_preset=="SIL 3c"?sil3c_rsiLen : i_preset=="MGC 1c"?mgc1c_rsiLen : i_preset=="MGC 2c"?mgc2c_rsiLen : i_preset=="MGC 3c"?mgc3c_rsiLen : i_cust_rsiLen
+p_rsiLen = i_useOverrides ? i_ovr_rsiLen : p_rsiLen_preset
+
+p_rsiOS_preset = i_preset=="MES 1c"?mes1c_rsiOS : i_preset=="MES 2c"?mes2c_rsiOS : i_preset=="MES 3c"?mes3c_rsiOS : i_preset=="MNQ 1c"?mnq1c_rsiOS : i_preset=="MNQ 2c"?mnq2c_rsiOS : i_preset=="MNQ 3c"?mnq3c_rsiOS : i_preset=="MYM 1c"?mym1c_rsiOS : i_preset=="MYM 2c"?mym2c_rsiOS : i_preset=="MYM 3c"?mym3c_rsiOS : i_preset=="SIL 1c"?sil1c_rsiOS : i_preset=="SIL 2c"?sil2c_rsiOS : i_preset=="SIL 3c"?sil3c_rsiOS : i_preset=="MGC 1c"?mgc1c_rsiOS : i_preset=="MGC 2c"?mgc2c_rsiOS : i_preset=="MGC 3c"?mgc3c_rsiOS : i_cust_rsiOS
+p_rsiOS = i_useOverrides ? i_ovr_rsiOS : p_rsiOS_preset
+
+p_rsiOB_preset = i_preset=="MES 1c"?mes1c_rsiOB : i_preset=="MES 2c"?mes2c_rsiOB : i_preset=="MES 3c"?mes3c_rsiOB : i_preset=="MNQ 1c"?mnq1c_rsiOB : i_preset=="MNQ 2c"?mnq2c_rsiOB : i_preset=="MNQ 3c"?mnq3c_rsiOB : i_preset=="MYM 1c"?mym1c_rsiOB : i_preset=="MYM 2c"?mym2c_rsiOB : i_preset=="MYM 3c"?mym3c_rsiOB : i_preset=="SIL 1c"?sil1c_rsiOB : i_preset=="SIL 2c"?sil2c_rsiOB : i_preset=="SIL 3c"?sil3c_rsiOB : i_preset=="MGC 1c"?mgc1c_rsiOB : i_preset=="MGC 2c"?mgc2c_rsiOB : i_preset=="MGC 3c"?mgc3c_rsiOB : i_cust_rsiOB
+p_rsiOB = i_useOverrides ? i_ovr_rsiOB : p_rsiOB_preset
+
+p_adxLen_preset = i_preset=="MES 1c"?mes1c_adxLen : i_preset=="MES 2c"?mes2c_adxLen : i_preset=="MES 3c"?mes3c_adxLen : i_preset=="MNQ 1c"?mnq1c_adxLen : i_preset=="MNQ 2c"?mnq2c_adxLen : i_preset=="MNQ 3c"?mnq3c_adxLen : i_preset=="MYM 1c"?mym1c_adxLen : i_preset=="MYM 2c"?mym2c_adxLen : i_preset=="MYM 3c"?mym3c_adxLen : i_preset=="SIL 1c"?sil1c_adxLen : i_preset=="SIL 2c"?sil2c_adxLen : i_preset=="SIL 3c"?sil3c_adxLen : i_preset=="MGC 1c"?mgc1c_adxLen : i_preset=="MGC 2c"?mgc2c_adxLen : i_preset=="MGC 3c"?mgc3c_adxLen : i_cust_adxLen
+p_adxLen = i_useOverrides ? i_ovr_adxLen : p_adxLen_preset
+
+p_adxMin_preset = i_preset=="MES 1c"?mes1c_adxMin : i_preset=="MES 2c"?mes2c_adxMin : i_preset=="MES 3c"?mes3c_adxMin : i_preset=="MNQ 1c"?mnq1c_adxMin : i_preset=="MNQ 2c"?mnq2c_adxMin : i_preset=="MNQ 3c"?mnq3c_adxMin : i_preset=="MYM 1c"?mym1c_adxMin : i_preset=="MYM 2c"?mym2c_adxMin : i_preset=="MYM 3c"?mym3c_adxMin : i_preset=="SIL 1c"?sil1c_adxMin : i_preset=="SIL 2c"?sil2c_adxMin : i_preset=="SIL 3c"?sil3c_adxMin : i_preset=="MGC 1c"?mgc1c_adxMin : i_preset=="MGC 2c"?mgc2c_adxMin : i_preset=="MGC 3c"?mgc3c_adxMin : i_cust_adxMin
+p_adxMin = i_useOverrides ? i_ovr_adxMin : p_adxMin_preset
+
+p_atr_preset = i_preset=="MES 1c"?mes1c_atr : i_preset=="MES 2c"?mes2c_atr : i_preset=="MES 3c"?mes3c_atr : i_preset=="MNQ 1c"?mnq1c_atr : i_preset=="MNQ 2c"?mnq2c_atr : i_preset=="MNQ 3c"?mnq3c_atr : i_preset=="MYM 1c"?mym1c_atr : i_preset=="MYM 2c"?mym2c_atr : i_preset=="MYM 3c"?mym3c_atr : i_preset=="SIL 1c"?sil1c_atr : i_preset=="SIL 2c"?sil2c_atr : i_preset=="SIL 3c"?sil3c_atr : i_preset=="MGC 1c"?mgc1c_atr : i_preset=="MGC 2c"?mgc2c_atr : i_preset=="MGC 3c"?mgc3c_atr : i_cust_atr
+p_atr = i_useOverrides ? i_ovr_atr : p_atr_preset
+
+p_sl1_preset = i_preset=="MES 1c"?mes1c_sl1 : i_preset=="MES 2c"?mes2c_sl1 : i_preset=="MES 3c"?mes3c_sl1 : i_preset=="MNQ 1c"?mnq1c_sl1 : i_preset=="MNQ 2c"?mnq2c_sl1 : i_preset=="MNQ 3c"?mnq3c_sl1 : i_preset=="MYM 1c"?mym1c_sl1 : i_preset=="MYM 2c"?mym2c_sl1 : i_preset=="MYM 3c"?mym3c_sl1 : i_preset=="SIL 1c"?sil1c_sl1 : i_preset=="SIL 2c"?sil2c_sl1 : i_preset=="SIL 3c"?sil3c_sl1 : i_preset=="MGC 1c"?mgc1c_sl1 : i_preset=="MGC 2c"?mgc2c_sl1 : i_preset=="MGC 3c"?mgc3c_sl1 : i_cust_sl1
+p_sl1 = i_useOverrides ? i_ovr_sl1 : p_sl1_preset
+
+p_sl2_preset = i_preset=="MES 1c"?mes1c_sl2 : i_preset=="MES 2c"?mes2c_sl2 : i_preset=="MES 3c"?mes3c_sl2 : i_preset=="MNQ 1c"?mnq1c_sl2 : i_preset=="MNQ 2c"?mnq2c_sl2 : i_preset=="MNQ 3c"?mnq3c_sl2 : i_preset=="MYM 1c"?mym1c_sl2 : i_preset=="MYM 2c"?mym2c_sl2 : i_preset=="MYM 3c"?mym3c_sl2 : i_preset=="SIL 1c"?sil1c_sl2 : i_preset=="SIL 2c"?sil2c_sl2 : i_preset=="SIL 3c"?sil3c_sl2 : i_preset=="MGC 1c"?mgc1c_sl2 : i_preset=="MGC 2c"?mgc2c_sl2 : i_preset=="MGC 3c"?mgc3c_sl2 : i_cust_sl2
+p_sl2 = i_useOverrides ? i_ovr_sl2 : p_sl2_preset
+
+p_tp1_preset = i_preset=="MES 1c"?mes1c_tp1 : i_preset=="MES 2c"?mes2c_tp1 : i_preset=="MES 3c"?mes3c_tp1 : i_preset=="MNQ 1c"?mnq1c_tp1 : i_preset=="MNQ 2c"?mnq2c_tp1 : i_preset=="MNQ 3c"?mnq3c_tp1 : i_preset=="MYM 1c"?mym1c_tp1 : i_preset=="MYM 2c"?mym2c_tp1 : i_preset=="MYM 3c"?mym3c_tp1 : i_preset=="SIL 1c"?sil1c_tp1 : i_preset=="SIL 2c"?sil2c_tp1 : i_preset=="SIL 3c"?sil3c_tp1 : i_preset=="MGC 1c"?mgc1c_tp1 : i_preset=="MGC 2c"?mgc2c_tp1 : i_preset=="MGC 3c"?mgc3c_tp1 : i_cust_tp1
+p_tp1 = i_useOverrides ? i_ovr_tp1 : p_tp1_preset
+
+p_tp2_preset = i_preset=="MES 1c"?mes1c_tp2 : i_preset=="MES 2c"?mes2c_tp2 : i_preset=="MES 3c"?mes3c_tp2 : i_preset=="MNQ 1c"?mnq1c_tp2 : i_preset=="MNQ 2c"?mnq2c_tp2 : i_preset=="MNQ 3c"?mnq3c_tp2 : i_preset=="MYM 1c"?mym1c_tp2 : i_preset=="MYM 2c"?mym2c_tp2 : i_preset=="MYM 3c"?mym3c_tp2 : i_preset=="SIL 1c"?sil1c_tp2 : i_preset=="SIL 2c"?sil2c_tp2 : i_preset=="SIL 3c"?sil3c_tp2 : i_preset=="MGC 1c"?mgc1c_tp2 : i_preset=="MGC 2c"?mgc2c_tp2 : i_preset=="MGC 3c"?mgc3c_tp2 : i_cust_tp2
+p_tp2 = i_useOverrides ? i_ovr_tp2 : p_tp2_preset
+
+p_qty_preset = i_preset=="MES 1c"?mes1c_qty : i_preset=="MES 2c"?mes2c_qty : i_preset=="MES 3c"?mes3c_qty : i_preset=="MNQ 1c"?mnq1c_qty : i_preset=="MNQ 2c"?mnq2c_qty : i_preset=="MNQ 3c"?mnq3c_qty : i_preset=="MYM 1c"?mym1c_qty : i_preset=="MYM 2c"?mym2c_qty : i_preset=="MYM 3c"?mym3c_qty : i_preset=="SIL 1c"?sil1c_qty : i_preset=="SIL 2c"?sil2c_qty : i_preset=="SIL 3c"?sil3c_qty : i_preset=="MGC 1c"?mgc1c_qty : i_preset=="MGC 2c"?mgc2c_qty : i_preset=="MGC 3c"?mgc3c_qty : i_cust_qty
+p_qty = i_useOverrides ? i_ovr_qty : p_qty_preset
+
+p_sym    = i_preset=="MES 1c" or i_preset=="MES 2c" or i_preset=="MES 3c" ? "MES" :
+           i_preset=="MNQ 1c" or i_preset=="MNQ 2c" or i_preset=="MNQ 3c" ? "MNQ" :
+           i_preset=="MYM 1c" or i_preset=="MYM 2c" or i_preset=="MYM 3c" ? "MYM" :
+           i_preset=="SIL 1c" or i_preset=="SIL 2c" or i_preset=="SIL 3c" ? "SIL" :
+           i_preset=="MGC 1c" or i_preset=="MGC 2c" or i_preset=="MGC 3c" ? "MGC" : i_cust_sym
+
+// ============================================================
+// === SHARED INPUTS (same across all instruments) ===
+// ============================================================
+
+// --- EMA Settings ---
+i_fastEMA  = input.int(9,  "Fast EMA",    minval=1, group="EMA Trend System")
+i_slowEMA  = input.int(18, "Slow EMA",    minval=1, group="EMA Trend System")
+i_sigEMA   = input.int(27, "Signal EMA",  minval=1, group="EMA Trend System")
+i_ema8     = input.int(8,  "Trend EMA 1", minval=1, group="EMA Trend System")
+i_ema21    = input.int(21, "Trend EMA 2", minval=1, group="EMA Trend System")
+i_ema55    = input.int(55, "Trend EMA 3", minval=1, group="EMA Trend System")
+
+// --- WaveTrend Settings ---
+i_wtChanLen = input.int(9,   "WT Channel Length",   group="WaveTrend Oscillator")
+i_wtAvgLen  = input.int(12,  "WT Average Length",   group="WaveTrend Oscillator")
+i_wtMALen   = input.int(3,   "WT MA Length",        group="WaveTrend Oscillator")
+i_wtOB      = input.int(60,  "WT Overbought Level", group="WaveTrend Oscillator")
+i_wtOS      = input.int(-60, "WT Oversold Level",   group="WaveTrend Oscillator")
+
+// --- Smoothed Momentum ---
+i_momLen    = input.int(10, "Momentum Length", minval=1, group="Smoothed Momentum")
+i_momSmooth = input.int(3,  "Momentum Smooth", minval=1, group="Smoothed Momentum")
+
+// --- Squeeze Momentum ---
+i_sqzBBLen  = input.int(20,    "Squeeze BB Length",    group="Breakout + Squeeze")
+i_sqzBBMult = input.float(2.0, "Squeeze BB Mult",      group="Breakout + Squeeze")
+i_sqzKCLen  = input.int(20,    "Squeeze KC Length",    group="Breakout + Squeeze")
+i_sqzKCMult = input.float(1.5, "Squeeze KC Mult",      group="Breakout + Squeeze")
+i_sqzMomLen = input.int(12,    "Squeeze Momentum Len", group="Breakout + Squeeze")
+
+// --- ATR Trail Mult (ATR period comes from preset) ---
+i_atrMult = input.float(2.0, "ATR Trail Mult", group="Stops & Targets")
+
+// --- Volume Flow Indicator ---
+i_vfiLen     = input.int(130,   "VFI Length",   group="Volume Flow Indicator")
+i_vfiCoef    = input.float(0.2, "VFI Coef",     group="Volume Flow Indicator")
+i_vfiVolCoef = input.float(2.5, "VFI Vol Coef", group="Volume Flow Indicator")
+
+// --- Smart Money Concepts ---
+i_swingLen = input.int(5, "Swing Lookback", minval=2, group="Smart Money Concepts")
+
+// --- Filter Toggles (thresholds come from preset) ---
+i_useRSI = input.bool(true, "Use RSI Filter", group="Filters")
+i_useADX = input.bool(true, "Use ADX Filter", group="Filters")
+
+// --- Display Panel ---
+i_showPanel    = input.bool(true,  "Show Panel",               group="Display Panel")
+i_barCloseOnly = input.bool(false, "Smooth Display (Bar Close Only)", group="Display Panel")
+i_panelPos  = input.string("Top Right", "Panel Position",
+     options=["Top Right","Top Left","Top Center","Bottom Right","Bottom Left","Bottom Center"],
+     group="Display Panel")
+i_panelSize = input.string("Small", "Panel Text Size", options=["Tiny","Small","Normal","Large"], group="Display Panel")
+i_showSignalMarkers = input.bool(true, "Show BUY/SELL Signal Markers", group="Display Panel")
+i_markerOffset      = input.float(1.5, "Signal Marker Offset (ATR)", minval=0.1, maxval=10.0, step=0.1, group="Display Panel")
+i_markerSize        = input.string("Normal", "Signal Marker Size", options=["Tiny","Small","Normal","Large"], group="Display Panel")
+
+// --- Trade Log ---
+i_showTradeLog = input.bool(false, "Show Trade Log",           group="Trade Log")
+i_tradeLogPos  = input.string("Bottom Left", "Trade Log Position",
+     options=["Top Right","Top Left","Top Center","Bottom Right","Bottom Left","Bottom Center"],
+     group="Trade Log")
+i_tradeLogSize = input.string("Tiny", "Trade Log Text Size", options=["Tiny","Small","Normal","Large"], group="Trade Log")
+i_tradeLogMax  = input.int(10, "Max Trades To Show", minval=3, maxval=20, group="Trade Log")
+
+// --- Diagnostics (Optional) ---
+// NOTE: These are pure visualization / debugging aids. They do NOT affect entries/exits.
+
+var int bullCalloutStack = 0
+var int bearCalloutStack = 0
+
+i_calloutOffsetATR = input.float(0.28, "Callout Offset (ATR)", minval=0.05, maxval=2.0, step=0.01, group="Diagnostics")
+i_calloutStackATR  = input.float(0.12, "Callout Stack Step (ATR)", minval=0.00, maxval=1.0, step=0.01, group="Diagnostics")
+i_calloutFade      = input.int(18, "Callout Transparency", minval=0, maxval=90, group="Diagnostics")
+
+i_bigTimelineLbl   = input.bool(true,  "Use Large Wrapped Timeline Labels", group="Diagnostics")
+i_timelineLblSize  = input.string("Normal", "Timeline Label Size", options=["Tiny","Small","Normal","Large"], group="Diagnostics")
+i_timelineShowBars = input.bool(true, "Show Bars Ago In Timeline Labels", group="Diagnostics")
+i_showDiagPanel   = input.bool(false, "Show Diagnostics Panel (Separate)", group="Diagnostics")
+i_diagPanelPos    = input.string("Bottom Left", "Diagnostics Panel Position",
+     options=["Top Right","Top Left","Top Center","Bottom Right","Bottom Left","Bottom Center"],
+     group="Diagnostics")
+i_diagPanelSize   = input.string("Tiny", "Diagnostics Panel Text Size", options=["Tiny","Small","Normal","Large"], group="Diagnostics")
+
+i_showDelay       = input.bool(true, "Show Confluence Delay Detector (Panel)", group="Diagnostics")
+i_showTimeline    = input.bool(true, "Show Confluence Timeline (Panel)", group="Diagnostics")
+i_showTimelineLbl = input.bool(false, "Show Timeline Labels On Signal Bars", group="Diagnostics")
+i_showEntryMarks  = input.bool(true, "Show Entry Debug Markers (Signal Bars)", group="Diagnostics")
+
+// --- Trading Hours Filter ---
+i_useTimeFilter = input.bool(false, "Use Trading Hours Filter", group="Trading Hours")
+i_startHour     = input.int(9,  "Start Hour (Exchange TZ)", minval=0, maxval=23, group="Trading Hours")
+i_startMin      = input.int(30, "Start Minute",             minval=0, maxval=59, group="Trading Hours")
+i_stopHour      = input.int(16, "Stop Hour (Exchange TZ)",  minval=0, maxval=23, group="Trading Hours")
+i_stopMin       = input.int(0,  "Stop Minute",              minval=0, maxval=59, group="Trading Hours")
+
+// --- Trade Level Lines ---
+i_showLines  = input.bool(true, "Show Trade Level Lines", group="Trade Lines")
+i_lineLen    = input.int(20,    "Line Length (bars)",     group="Trade Lines", minval=1, maxval=200)
+
+i_entryColor = input.color(color.white,               "Entry Line Color", group="Trade Lines")
+i_entryStyle = input.string("Solid",  "Entry Line Style", options=["Solid","Dashed","Dotted"], group="Trade Lines")
+i_entryWidth = input.int(1, "Entry Line Width", minval=1, maxval=4, group="Trade Lines")
+
+i_tp1Color   = input.color(color.new(color.green,  0), "TP1 Line Color", group="Trade Lines")
+i_tp1Style   = input.string("Dashed", "TP1 Line Style", options=["Solid","Dashed","Dotted"], group="Trade Lines")
+i_tp1Width   = input.int(1, "TP1 Line Width", minval=1, maxval=4, group="Trade Lines")
+
+i_tp2Color   = input.color(color.new(color.lime,   0), "TP2 Line Color", group="Trade Lines")
+i_tp2Style   = input.string("Dotted", "TP2 Line Style", options=["Solid","Dashed","Dotted"], group="Trade Lines")
+i_tp2Width   = input.int(1, "TP2 Line Width", minval=1, maxval=4, group="Trade Lines")
+
+i_sl1Color   = input.color(color.new(color.red,    0), "SL1 Line Color", group="Trade Lines")
+i_sl1Style   = input.string("Dashed", "SL1 Line Style", options=["Solid","Dashed","Dotted"], group="Trade Lines")
+i_sl1Width   = input.int(1, "SL1 Line Width", minval=1, maxval=4, group="Trade Lines")
+
+i_sl2Color   = input.color(color.new(color.orange, 0), "SL2 Line Color", group="Trade Lines")
+i_sl2Style   = input.string("Dotted", "SL2 Line Style", options=["Solid","Dashed","Dotted"], group="Trade Lines")
+i_sl2Width   = input.int(1, "SL2 Line Width", minval=1, maxval=4, group="Trade Lines")
+
+// ============================================================
+// === CONFLUENCE 1 & 2: EMA TREND SYSTEM ===
+// ============================================================
+fastEMA = ta.ema(close, i_fastEMA)
+slowEMA = ta.ema(close, i_slowEMA)
+sigEMA  = ta.ema(close, i_sigEMA)
+ema8    = ta.ema(close, i_ema8)
+ema21   = ta.ema(close, i_ema21)
+ema55   = ta.ema(close, i_ema55)
+
+c1_bull = fastEMA > slowEMA
+c1_bear = fastEMA < slowEMA
+c2_bull = close > fastEMA
+c2_bear = close < fastEMA
+
+// ============================================================
+// === CONFLUENCE 3: WAVETREND OSCILLATOR ===
+// ============================================================
+wtHlc3       = hlc3
+wtEsa        = ta.ema(wtHlc3, i_wtChanLen)
+wtD          = ta.ema(math.abs(wtHlc3 - wtEsa), i_wtChanLen)
+wtCi         = (wtHlc3 - wtEsa) / (0.015 * wtD)
+wt1          = ta.ema(wtCi, i_wtAvgLen)
+wt2          = ta.sma(wt1, i_wtMALen)
+wtCross_bull = ta.crossover(wt1, wt2)  and wt1 < i_wtOS
+wtCross_bear = ta.crossunder(wt1, wt2) and wt1 > i_wtOB
+
+c3_bull = wt1 > wt2 or wtCross_bull
+c3_bear = wt1 < wt2 or wtCross_bear
+
+// ============================================================
+// === CONFLUENCE 4: SMOOTHED MOMENTUM ===
+// ============================================================
+momentum    = close - close[i_momLen]
+smoothedMom = ta.ema(momentum, i_momSmooth)
+
+c4_bull = smoothedMom > 0
+c4_bear = smoothedMom < 0
+
+// ============================================================
+// === CONFLUENCE 5: CANDLE COLOR ===
+// ============================================================
+c5_bull = close >= open
+c5_bear = close  < open
+
+// ============================================================
+// === CONFLUENCE 6: BREAKOUT + SQUEEZE MOMENTUM ===
+// ============================================================
+sqzBasis = ta.sma(close, i_sqzBBLen)
+sqzDev   = i_sqzBBMult * ta.stdev(close, i_sqzBBLen)
+sqzUBB   = sqzBasis + sqzDev
+sqzLBB   = sqzBasis - sqzDev
+sqzRange = ta.tr(true)
+sqzUKC   = sqzBasis + i_sqzKCMult * ta.ema(sqzRange, i_sqzKCLen)
+sqzLKC   = sqzBasis - i_sqzKCMult * ta.ema(sqzRange, i_sqzKCLen)
+sqzOn    = (sqzLBB > sqzLKC) and (sqzUBB < sqzUKC)
+sqzVal   = ta.linreg(close - math.avg(math.avg(ta.highest(high, i_sqzMomLen), ta.lowest(low, i_sqzMomLen)), ta.sma(close, i_sqzMomLen)), i_sqzMomLen, 0)
+
+c6_bull = sqzVal > 0 and sqzVal > sqzVal[1]
+c6_bear = sqzVal < 0 and sqzVal < sqzVal[1]
+
+// ============================================================
+// === CONFLUENCE 7: SMART TRAIL (ATR-based) ===
+// ============================================================
+atrVal   = ta.atr(p_atr)
+trailAmt = i_atrMult * atrVal
+
+var float trailStop = na
+if na(trailStop)
+    trailStop := close
+if close > trailStop
+    trailStop := math.max(trailStop, close - trailAmt)
+else if close < trailStop
+    trailStop := math.min(trailStop, close + trailAmt)
+
+c7_bull = close > trailStop
+c7_bear = close < trailStop
+
+// ============================================================
+// === CONFLUENCE 8: VOLUME FLOW INDICATOR (VFI) ===
+// ============================================================
+vfiInter  = math.log(close) - math.log(close[1])
+vfiVinter = ta.stdev(vfiInter, 30)
+vfiCutoff = i_vfiCoef * vfiVinter * close
+vfiVave   = ta.sma(volume, i_vfiLen)
+vfiVmax   = vfiVave * i_vfiVolCoef
+vfiVc     = math.min(volume, vfiVmax)
+vfiMf     = close - close[1]
+vfiVcp    = vfiMf > vfiCutoff ? vfiVc : (vfiMf < -vfiCutoff ? -vfiVc : 0)
+vfi       = ta.ema(math.sum(vfiVcp, i_vfiLen) / vfiVave, 3)
+
+c8_bull = vfi > 0
+c8_bear = vfi < 0
+
+// ============================================================
+// === CONFLUENCE 9: SMART MONEY CONCEPTS (BOS / CHoCH) ===
+// ============================================================
+swingHigh = ta.pivothigh(high, i_swingLen, i_swingLen)
+swingLow  = ta.pivotlow(low,  i_swingLen, i_swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+bos_bull = not na(lastSwingHigh) and close > lastSwingHigh
+bos_bear = not na(lastSwingLow)  and close < lastSwingLow
+
+c9_bull = bos_bull
+c9_bear = bos_bear
+
+// ============================================================
+// === RSI & ADX FILTERS ===
+// ============================================================
+rsiVal = ta.rsi(close, p_rsiLen)
+
+[diPlus, diMinus, adxVal] = ta.dmi(p_adxLen, p_adxLen)
+
+rsiFilter_bull = i_useRSI ? rsiVal < p_rsiOB : true
+rsiFilter_bear = i_useRSI ? rsiVal > p_rsiOS : true
+adxFilter      = i_useADX ? adxVal >= p_adxMin : true
+
+// ============================================================
+// === TRADING HOURS FILTER ===
+// Overnight wrap: if start > stop (e.g. 23:00->08:00) handled automatically
+// ============================================================
+barMins   = hour(time, syminfo.timezone) * 60 + minute(time, syminfo.timezone)
+startMins = i_startHour * 60 + i_startMin
+stopMins  = i_stopHour  * 60 + i_stopMin
+timeAllowed = i_useTimeFilter ? (startMins <= stopMins ? (barMins >= startMins and barMins < stopMins) : (barMins >= startMins or barMins < stopMins)) : true
+
+// ============================================================
+// === CONFLUENCE SCORING ===
+// ============================================================
+bullScore = (c1_bull ? 1 : 0) + (c2_bull ? 1 : 0) + (c3_bull ? 1 : 0) + (c4_bull ? 1 : 0) + (c5_bull ? 1 : 0) + (c6_bull ? 1 : 0) + (c7_bull ? 1 : 0) + (c8_bull ? 1 : 0) + (c9_bull ? 1 : 0)
+bearScore = (c1_bear ? 1 : 0) + (c2_bear ? 1 : 0) + (c3_bear ? 1 : 0) + (c4_bear ? 1 : 0) + (c5_bear ? 1 : 0) + (c6_bear ? 1 : 0) + (c7_bear ? 1 : 0) + (c8_bear ? 1 : 0) + (c9_bear ? 1 : 0)
+
+bullSignal = bullScore >= p_conf and rsiFilter_bull and adxFilter and timeAllowed
+bearSignal = bearScore >= p_conf and rsiFilter_bear and adxFilter and timeAllowed
+
+
+
+// ============================================================
+// === DIAGNOSTICS: Confluence Delay Detector (Non-trading)
+// ============================================================
+// We track the most recent bar where each confluence flipped TRUE.
+// When bullSignal/bearSignal becomes true (even if an entry is blocked),
+// we report which confluence flipped most recently (likely the "late" one).
+var int bullFlip1 = na
+var int bullFlip2 = na
+var int bullFlip3 = na
+var int bullFlip4 = na
+var int bullFlip5 = na
+var int bullFlip6 = na
+var int bullFlip7 = na
+var int bullFlip8 = na
+var int bullFlip9 = na
+var int bearFlip1 = na
+var int bearFlip2 = na
+var int bearFlip3 = na
+var int bearFlip4 = na
+var int bearFlip5 = na
+var int bearFlip6 = na
+var int bearFlip7 = na
+var int bearFlip8 = na
+var int bearFlip9 = na
+
+if c1_bull and not c1_bull[1]
+    bullFlip1 := bar_index
+if c2_bull and not c2_bull[1]
+    bullFlip2 := bar_index
+if c3_bull and not c3_bull[1]
+    bullFlip3 := bar_index
+if c4_bull and not c4_bull[1]
+    bullFlip4 := bar_index
+if c5_bull and not c5_bull[1]
+    bullFlip5 := bar_index
+if c6_bull and not c6_bull[1]
+    bullFlip6 := bar_index
+if c7_bull and not c7_bull[1]
+    bullFlip7 := bar_index
+if c8_bull and not c8_bull[1]
+    bullFlip8 := bar_index
+if c9_bull and not c9_bull[1]
+    bullFlip9 := bar_index
+
+if c1_bear and not c1_bear[1]
+    bearFlip1 := bar_index
+if c2_bear and not c2_bear[1]
+    bearFlip2 := bar_index
+if c3_bear and not c3_bear[1]
+    bearFlip3 := bar_index
+if c4_bear and not c4_bear[1]
+    bearFlip4 := bar_index
+if c5_bear and not c5_bear[1]
+    bearFlip5 := bar_index
+if c6_bear and not c6_bear[1]
+    bearFlip6 := bar_index
+if c7_bear and not c7_bear[1]
+    bearFlip7 := bar_index
+if c8_bear and not c8_bear[1]
+    bearFlip8 := bar_index
+if c9_bear and not c9_bear[1]
+    bearFlip9 := bar_index
+
+f_confName(_idx) =>
+    string _name = "n/a"
+
+    if _idx == 1
+        _name := "1 EMA Trend"
+    else if _idx == 2
+        _name := "2 Price Pos"
+    else if _idx == 3
+        _name := "3 WaveTrend"
+    else if _idx == 4
+        _name := "4 Momentum"
+    else if _idx == 5
+        _name := "5 Candle"
+    else if _idx == 6
+        _name := "6 Sqz+Break"
+    else if _idx == 7
+        _name := "7 SmartTrail"
+    else if _idx == 8
+        _name := "8 Vol Flow"
+    else if _idx == 9
+        _name := "9 SMC"
+
+    _name
+
+f_confColor(_idx, _isBull) =>
+    color _c = _isBull ? color.new(color.green, 70) : color.new(color.red, 70)
+
+    if _idx == 1
+        _c := _isBull ? color.new(color.blue, 65)   : color.new(color.blue, 80)
+    else if _idx == 2
+        _c := _isBull ? color.new(color.teal, 65)   : color.new(color.teal, 80)
+    else if _idx == 3
+        _c := _isBull ? color.new(color.purple, 65) : color.new(color.purple, 80)
+    else if _idx == 4
+        _c := _isBull ? color.new(color.orange, 65) : color.new(color.orange, 80)
+    else if _idx == 5
+        _c := _isBull ? color.new(color.green, 65)  : color.new(color.red, 80)
+    else if _idx == 6
+        _c := _isBull ? color.new(color.yellow, 55) : color.new(color.maroon, 75)
+    else if _idx == 7
+        _c := _isBull ? color.new(color.aqua, 60)   : color.new(color.navy, 75)
+    else if _idx == 8
+        _c := _isBull ? color.new(color.lime, 60)   : color.new(color.fuchsia, 75)
+    else if _idx == 9
+        _c := _isBull ? color.new(color.silver, 60) : color.new(color.gray, 75)
+
+    _c
+
+f_timelineSize(_sz) =>
+    _out = size.normal
+
+    if _sz == "Tiny"
+        _out := size.tiny
+    else if _sz == "Small"
+        _out := size.small
+    else if _sz == "Large"
+        _out := size.large
+
+    _out
+
+
+f_confShortName(_idx) =>
+    string _name = "n/a"
+
+    if _idx == 1
+        _name := "EMA Trend"
+    else if _idx == 2
+        _name := "Price Pos"
+    else if _idx == 3
+        _name := "WaveTrend"
+    else if _idx == 4
+        _name := "Momentum"
+    else if _idx == 5
+        _name := "Candle"
+    else if _idx == 6
+        _name := "Sqz+Break"
+    else if _idx == 7
+        _name := "SmartTrail"
+    else if _idx == 8
+        _name := "Vol Flow"
+    else if _idx == 9
+        _name := "SMC"
+
+    _name
+
+f_calloutText(_isBull, _score, _thr, _lastIdx, _lastAgo, _showBars) =>
+    string _head = _isBull ? "B " : "S "
+    string _txt  = _head + str.tostring(_score) + "/" + str.tostring(_thr) + "\n" + f_confShortName(_lastIdx)
+    _txt += _showBars and not na(_lastAgo) ? "\n" + str.tostring(_lastAgo) + "b" : ""
+    _txt
+
+
+// Return [lastIdx, barsAgo] for bull/bear based on "most recently flipped TRUE"
+f_lastFlip(_b1,_b2,_b3,_b4,_b5,_b6,_b7,_b8,_b9, _f1,_f2,_f3,_f4,_f5,_f6,_f7,_f8,_f9) =>
+    int lastIdx = na
+    int lastBar = na
+    if _b1 and not na(_f1)
+        lastIdx := 1
+        lastBar := _f1
+    if _b2 and not na(_f2) and (na(lastBar) or _f2 > lastBar)
+        lastIdx := 2
+        lastBar := _f2
+    if _b3 and not na(_f3) and (na(lastBar) or _f3 > lastBar)
+        lastIdx := 3
+        lastBar := _f3
+    if _b4 and not na(_f4) and (na(lastBar) or _f4 > lastBar)
+        lastIdx := 4
+        lastBar := _f4
+    if _b5 and not na(_f5) and (na(lastBar) or _f5 > lastBar)
+        lastIdx := 5
+        lastBar := _f5
+    if _b6 and not na(_f6) and (na(lastBar) or _f6 > lastBar)
+        lastIdx := 6
+        lastBar := _f6
+    if _b7 and not na(_f7) and (na(lastBar) or _f7 > lastBar)
+        lastIdx := 7
+        lastBar := _f7
+    if _b8 and not na(_f8) and (na(lastBar) or _f8 > lastBar)
+        lastIdx := 8
+        lastBar := _f8
+    if _b9 and not na(_f9) and (na(lastBar) or _f9 > lastBar)
+        lastIdx := 9
+        lastBar := _f9
+    int barsAgo = na(lastBar) ? na : (bar_index - lastBar)
+    [lastIdx, barsAgo]
+
+// Compute delay text only when signals are true (Mode 2B: even if entry is blocked)
+int bullLastIdx = na
+int bullLastAgo = na
+int bearLastIdx = na
+int bearLastAgo = na
+string bullDelayTxt = ""
+string bearDelayTxt = ""
+string bullTimelineTxt = ""
+string bearTimelineTxt = ""
+
+if i_showDelay and bullSignal
+    [bullLastIdx, bullLastAgo] = f_lastFlip(c1_bull,c2_bull,c3_bull,c4_bull,c5_bull,c6_bull,c7_bull,c8_bull,c9_bull, bullFlip1,bullFlip2,bullFlip3,bullFlip4,bullFlip5,bullFlip6,bullFlip7,bullFlip8,bullFlip9)
+    bullDelayTxt := na(bullLastIdx) ? "Last: n/a" : ("Last: " + f_confName(bullLastIdx) + (i_timelineShowBars and not na(bullLastAgo) ? " (" + str.tostring(bullLastAgo) + " bars ago)" : ""))
+    bullTimelineTxt := na(bullLastIdx) ? "B " + str.tostring(bullScore) + "/" + str.tostring(p_conf) + "\nLast: n/a" :
+         "B " + str.tostring(bullScore) + "/" + str.tostring(p_conf) +
+         "\n" + f_confName(bullLastIdx) +
+         (i_timelineShowBars and not na(bullLastAgo) ? "\n" + str.tostring(bullLastAgo) + " bars" : "")
+
+if i_showDelay and bearSignal
+    [bearLastIdx, bearLastAgo] = f_lastFlip(c1_bear,c2_bear,c3_bear,c4_bear,c5_bear,c6_bear,c7_bear,c8_bear,c9_bear, bearFlip1,bearFlip2,bearFlip3,bearFlip4,bearFlip5,bearFlip6,bearFlip7,bearFlip8,bearFlip9)
+    bearDelayTxt := na(bearLastIdx) ? "Last: n/a" : ("Last: " + f_confName(bearLastIdx) + (i_timelineShowBars and not na(bearLastAgo) ? " (" + str.tostring(bearLastAgo) + " bars ago)" : ""))
+    bearTimelineTxt := na(bearLastIdx) ? "S " + str.tostring(bearScore) + "/" + str.tostring(p_conf) + "\nLast: n/a" :
+         "S " + str.tostring(bearScore) + "/" + str.tostring(p_conf) +
+         "\n" + f_confName(bearLastIdx) +
+         (i_timelineShowBars and not na(bearLastAgo) ? "\n" + str.tostring(bearLastAgo) + " bars" : "")
+
+
+// Optional chart labels for timeline events (signal bars, even if entry is blocked)
+
+if i_showTimelineLbl and bullSignal
+    bullCalloutStack := bullSignal[1] ? bullCalloutStack + 1 : 0
+
+    bullCalloutTxt = f_calloutText(true, bullScore, p_conf, bullLastIdx, bullLastAgo, i_timelineShowBars)
+
+    label.new(bar_index, low - atrVal * (i_calloutOffsetATR + bullCalloutStack * i_calloutStackATR), bullCalloutTxt, style=label.style_label_up, textcolor=color.white, color=color.new(f_confColor(bullLastIdx, true), i_calloutFade), size=f_timelineSize(i_timelineLblSize))
+
+if i_showTimelineLbl and bearSignal
+    bearCalloutStack := bearSignal[1] ? bearCalloutStack + 1 : 0
+
+    bearCalloutTxt = f_calloutText(false, bearScore, p_conf, bearLastIdx, bearLastAgo, i_timelineShowBars)
+
+    label.new(bar_index, high + atrVal * (i_calloutOffsetATR + bearCalloutStack * i_calloutStackATR), bearCalloutTxt, style=label.style_label_down, textcolor=color.white, color=color.new(f_confColor(bearLastIdx, false), i_calloutFade), size=f_timelineSize(i_timelineLblSize))
+
+if not bullSignal
+    bullCalloutStack := 0
+
+if not bearSignal
+    bearCalloutStack := 0
+
+// Optional entry debug markers (signal bars, not necessarily actual entries)
+
+plotshape(i_showEntryMarks and bullSignal, title="DEBUG BullSignal", style=shape.circle, size=size.tiny, location=location.belowbar, color=color.new(color.green, 0))
+plotshape(i_showEntryMarks and bearSignal, title="DEBUG BearSignal", style=shape.circle, size=size.tiny, location=location.abovebar, color=color.new(color.red, 0))
+
+// ============================================================
+// === STOP LOSS & TAKE PROFIT PRICE LEVELS ===
+// ============================================================
+sl1 = atrVal * p_sl1
+sl2 = atrVal * p_sl2
+tp1 = atrVal * p_tp1
+tp2 = atrVal * p_tp2
+
+longTP1  = close + tp1
+longTP2  = close + tp2
+longSL1  = close - sl1
+longSL2  = close - sl2
+
+shortTP1 = close - tp1
+shortTP2 = close - tp2
+shortSL1 = close + sl1
+shortSL2 = close + sl2
+
+// ============================================================
+// === STRATEGY ENTRIES & EXITS ===
+// ============================================================
+if bullSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=p_qty)
+    if p_qty == 1
+        strategy.exit("Long Exit", "Long", limit=longTP1, stop=longSL1, comment="TP1")
+    else
+        strategy.exit("Long TP1", "Long", qty_percent=50,  limit=longTP1, stop=longSL1, comment="TP1")
+        strategy.exit("Long TP2", "Long", qty_percent=100, limit=longTP2, stop=longSL2, comment="TP2")
+
+if bearSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=p_qty)
+    if p_qty == 1
+        strategy.exit("Short Exit", "Short", limit=shortTP1, stop=shortSL1, comment="TP1")
+    else
+        strategy.exit("Short TP1", "Short", qty_percent=50,  limit=shortTP1, stop=shortSL1, comment="TP1")
+        strategy.exit("Short TP2", "Short", qty_percent=100, limit=shortTP2, stop=shortSL2, comment="TP2")
+
+// Tick value — declared here for use in both exit webhook and trade log table
+tl_tick = str.contains(p_sym, "MNQ") ? 2.0 : str.contains(p_sym, "MYM") ? 0.5 : str.contains(p_sym, "SIL") ? 50.0 : str.contains(p_sym, "MGC") ? 10.0 : 5.0
+
+// ============================================================
+// === WEBHOOK ALERT MESSAGES ===
+// ============================================================
+longAlertMsg =
+     '{'                                                                              +
+     '"action":      "long",'                                                         +
+     '"symbol":      "' + p_sym                                            + '",'   +
+     '"price":       '  + str.tostring(math.round(close,   2))            + ','    +
+     '"tp":          '  + str.tostring(math.round(longTP1, 2))            + ','    +
+     '"sl":          '  + str.tostring(math.round(longSL1, 2))            + ','    +
+     '"qty":         '  + str.tostring(p_qty)                              + ','    +
+     '"contracts":   '  + str.tostring(p_qty)                              + ','    +
+     '"atr":         '  + str.tostring(math.round(atrVal,  4))            + ','    +
+     '"confluence":  '  + str.tostring(bullScore)                         + ','    +
+     '"rsi":         '  + str.tostring(math.round(rsiVal,  1))            + ','    +
+     '"adx":         '  + str.tostring(math.round(adxVal,  1))            + ','    +
+     '"timeframe":   "' + timeframe.period                                 + '",'   +
+     '"bar_time":    "' + str.format_time(time, "yyyy-MM-dd HH:mm", "UTC") + '"'   +
+     '}'
+
+shortAlertMsg =
+     '{'                                                                              +
+     '"action":      "short",'                                                        +
+     '"symbol":      "' + p_sym                                             + '",'  +
+     '"price":       '  + str.tostring(math.round(close,    2))            + ','   +
+     '"tp":          '  + str.tostring(math.round(shortTP1, 2))            + ','   +
+     '"sl":          '  + str.tostring(math.round(shortSL1, 2))            + ','   +
+     '"qty":         '  + str.tostring(p_qty)                               + ','  +
+     '"contracts":   '  + str.tostring(p_qty)                               + ','  +
+     '"atr":         '  + str.tostring(math.round(atrVal,   4))            + ','   +
+     '"confluence":  '  + str.tostring(bearScore)                          + ','   +
+     '"rsi":         '  + str.tostring(math.round(rsiVal,   1))            + ','   +
+     '"adx":         '  + str.tostring(math.round(adxVal,   1))            + ','   +
+     '"timeframe":   "' + timeframe.period                                  + '",'  +
+     '"bar_time":    "' + str.format_time(time, "yyyy-MM-dd HH:mm", "UTC") + '"'   +
+     '}'
+
+if bullSignal and strategy.position_size == 0 and barstate.isconfirmed
+    alert(longAlertMsg, alert.freq_once_per_bar_close)
+
+if bearSignal and strategy.position_size == 0 and barstate.isconfirmed
+    alert(shortAlertMsg, alert.freq_once_per_bar_close)
+
+// ============================================================
+// === TRADE LOG WEBHOOK (Google Sheets) ===
+// Fires on trade close with full entry + exit + P&L data.
+// Create a SEPARATE alert using "Trade Log Exit" condition
+// and point it at your Google Apps Script webhook URL.
+// ============================================================
+var float  wh_entryPrice = na
+var float  wh_entryTP    = na
+var float  wh_entrySL    = na
+var float  wh_entryATR   = na
+var int    wh_entryConf  = na
+var float  wh_entryRSI   = na
+var float  wh_entryADX   = na
+var string wh_entryDir   = na
+var string wh_entryTime  = na
+
+// Capture entry data when position opens
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    wh_entryPrice := strategy.position_avg_price
+    wh_entryDir   := strategy.position_size > 0 ? "long" : "short"
+    wh_entryTP    := strategy.position_size > 0 ? longTP1  : shortTP1
+    wh_entrySL    := strategy.position_size > 0 ? longSL1  : shortSL1
+    wh_entryATR   := atrVal
+    wh_entryConf  := strategy.position_size > 0 ? bullScore : bearScore
+    wh_entryRSI   := rsiVal
+    wh_entryADX   := adxVal
+    wh_entryTime  := str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")
+
+// Fire exit webhook when position closes
+var bool exitAlertFired = false
+exitAlertFired := false
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and barstate.isconfirmed
+    exitAlertFired := true
+    _idx      = strategy.closedtrades - 1
+    _exitP    = strategy.closedtrades.exit_price(_idx)
+    _isLong   = wh_entryDir == "long"
+    _pnlPts   = _isLong ? (_exitP - wh_entryPrice) : (wh_entryPrice - _exitP)
+    _pnlDollar = _pnlPts * tl_tick * p_qty
+    _result   = _pnlPts > 0 ? "TP" : "SL"
+
+    exitLogMsg =
+         '{'                                                                                    +
+         '"action":      "exit_' + wh_entryDir                              + '",'            +
+         '"symbol":      "' + p_sym                                          + '",'            +
+         '"timeframe":   "' + timeframe.period                               + '",'            +
+         '"direction":   "' + wh_entryDir                                    + '",'            +
+         '"price":       '  + str.tostring(math.round(wh_entryPrice, 2))    + ','             +
+         '"exit_price":  '  + str.tostring(math.round(_exitP, 2))           + ','             +
+         '"tp":          '  + str.tostring(math.round(wh_entryTP, 2))       + ','             +
+         '"sl":          '  + str.tostring(math.round(wh_entrySL, 2))       + ','             +
+         '"pnl_points":  '  + str.tostring(math.round(_pnlPts, 2))          + ','             +
+         '"pnl_dollar":  '  + str.tostring(math.round(_pnlDollar, 2))       + ','             +
+         '"result":      "' + _result                                         + '",'            +
+         '"contracts":   '  + str.tostring(p_qty)                            + ','             +
+         '"confluence":  '  + str.tostring(wh_entryConf)                    + ','             +
+         '"rsi":         '  + str.tostring(math.round(wh_entryRSI, 1))      + ','             +
+         '"adx":         '  + str.tostring(math.round(wh_entryADX, 1))      + ','             +
+         '"atr":         '  + str.tostring(math.round(wh_entryATR, 4))      + ','             +
+         '"bar_time":    "' + wh_entryTime                                    + '"'             +
+         '}'
+
+    alert(exitLogMsg, alert.freq_once_per_bar_close)
+
+// ============================================================
+// === TRADE LOG — Arrays & Tracking ===
+// ============================================================
+var string[] tl_dir    = array.new_string(0)
+var float[]  tl_entry  = array.new_float(0)
+var float[]  tl_exit   = array.new_float(0)
+var string[] tl_result = array.new_string(0)
+var float[]  tl_pnl    = array.new_float(0)
+var int      tl_wins   = 0
+var int      tl_losses = 0
+
+if strategy.closedtrades > strategy.closedtrades[1]
+    idx       = strategy.closedtrades - 1
+    entryP    = strategy.closedtrades.entry_price(idx)
+    exitP     = strategy.closedtrades.exit_price(idx)
+    entryId   = strategy.closedtrades.entry_id(idx)
+    isLong    = str.contains(entryId, "Long")
+    pnlPts    = isLong ? (exitP - entryP) : (entryP - exitP)
+    pnlDollar = pnlPts * tl_tick * p_qty
+    isWin     = pnlPts > 0
+    resStr    = isWin ? "TP ✓" : "SL ✗"
+
+    array.unshift(tl_dir,    isLong ? "L" : "S")
+    array.unshift(tl_entry,  entryP)
+    array.unshift(tl_exit,   exitP)
+    array.unshift(tl_result, resStr)
+    array.unshift(tl_pnl,    pnlDollar)
+
+    tl_wins   := isWin ? tl_wins + 1 : tl_wins
+    tl_losses := isWin ? tl_losses : tl_losses + 1
+
+    if array.size(tl_dir) > i_tradeLogMax
+        array.pop(tl_dir)
+        array.pop(tl_entry)
+        array.pop(tl_exit)
+        array.pop(tl_result)
+        array.pop(tl_pnl)
+
+// ============================================================
+// === VISUALS — Chart Overlays ===
+// ============================================================
+plot(fastEMA,   "Fast EMA",    color=color.new(color.lime, 0),  linewidth=3)
+plot(slowEMA,   "Slow EMA",    color=color.new(color.yellow, 0),  linewidth=2)
+plot(ema55,     "EMA 55",      color=color.new(color.blue,   40), linewidth=2)
+plot(trailStop, "Smart Trail", color=c7_bull ? color.green : color.red, linewidth=1, style=plot.style_circles)
+
+markerSize = i_markerSize == "Tiny" ? size.tiny : i_markerSize == "Small" ? size.small : i_markerSize == "Large" ? size.large : size.normal
+
+if i_showSignalMarkers and bullSignal and strategy.position_size == 0
+    label.new(bar_index, low - atrVal * i_markerOffset,
+         "▲", style=label.style_label_up,
+         textcolor=color.white, color=color.new(color.green, 0), size=markerSize)
+
+if i_showSignalMarkers and bearSignal and strategy.position_size == 0
+    label.new(bar_index, high + atrVal * i_markerOffset,
+         "▼", style=label.style_label_down,
+         textcolor=color.white, color=color.new(color.red, 0), size=markerSize)
+
+// ============================================================
+// === STATUS LINE PLOTS ===
+// ============================================================
+plot(rsiVal,      "RSI Value",   color=color.new(color.purple, 0), display=display.status_line)
+plot(adxVal,      "ADX Value",   color=color.new(color.teal,   0), display=display.status_line)
+plot(atrVal,      "ATR Value",   color=color.new(color.gray,   0), display=display.status_line)
+plot(wt1,         "WT1",         color=color.new(color.green,  0), display=display.status_line)
+plot(wt2,         "WT2",         color=color.new(color.red,    0), display=display.status_line)
+plot(smoothedMom, "Momentum",    color=color.new(color.yellow, 0), display=display.status_line)
+plot(sqzVal,      "Squeeze Val", color=color.new(color.orange, 0), display=display.status_line)
+plot(vfi,         "VFI",         color=color.new(color.blue,   0), display=display.status_line)
+plot(bullSignal ? 1 : 0, "Bull Signal", color=color.new(color.green, 0), display=display.status_line)
+plot(bearSignal ? 1 : 0, "Bear Signal", color=color.new(color.red,   0), display=display.status_line)
+plot(longTP1,  "Long TP1",  color=color.new(color.green, 0), display=display.status_line)
+plot(longTP2,  "Long TP2",  color=color.new(color.green, 0), display=display.status_line)
+plot(longSL1,  "Long SL1",  color=color.new(color.red,   0), display=display.status_line)
+plot(longSL2,  "Long SL2",  color=color.new(color.red,   0), display=display.status_line)
+plot(shortTP1, "Short TP1", color=color.new(color.green, 0), display=display.status_line)
+plot(shortTP2, "Short TP2", color=color.new(color.green, 0), display=display.status_line)
+plot(shortSL1, "Short SL1", color=color.new(color.red,   0), display=display.status_line)
+plot(shortSL2, "Short SL2", color=color.new(color.red,   0), display=display.status_line)
+plot(strategy.position_size, "Position Size", color=color.new(color.white, 0), display=display.status_line)
+plot(strategy.netprofit,     "Net Profit",    color=color.new(color.green, 0), display=display.status_line)
+
+// ============================================================
+// === RENDER TIMING ===
+// ============================================================
+shouldUpdate = i_barCloseOnly ? barstate.isconfirmed : barstate.islast
+
+// ============================================================
+// === TRADE LEVEL LINES ===
+// ============================================================
+lineStyle(s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+var line entryLine = na
+var line tp1Line   = na
+var line tp2Line   = na
+var line sl1Line   = na
+var line sl2Line   = na
+
+var float tradeEntryPrice = na
+var float tradeTP1        = na
+var float tradeTP2        = na
+var float tradeSL1        = na
+var float tradeSL2        = na
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    tradeEntryPrice := strategy.position_avg_price
+    if strategy.position_size > 0
+        tradeTP1 := tradeEntryPrice + tp1
+        tradeTP2 := tradeEntryPrice + tp2
+        tradeSL1 := tradeEntryPrice - sl1
+        tradeSL2 := tradeEntryPrice - sl2
+    else
+        tradeTP1 := tradeEntryPrice - tp1
+        tradeTP2 := tradeEntryPrice - tp2
+        tradeSL1 := tradeEntryPrice + sl1
+        tradeSL2 := tradeEntryPrice + sl2
+
+if i_showLines and strategy.position_size != 0 and shouldUpdate
+    lineEnd = bar_index + i_lineLen
+    line.delete(entryLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(sl1Line)
+    line.delete(sl2Line)
+    entryLine := line.new(bar_index, tradeEntryPrice, lineEnd, tradeEntryPrice,
+         color=i_entryColor, style=lineStyle(i_entryStyle), width=i_entryWidth)
+    tp1Line := line.new(bar_index, tradeTP1, lineEnd, tradeTP1,
+         color=i_tp1Color, style=lineStyle(i_tp1Style), width=i_tp1Width)
+    sl1Line := line.new(bar_index, tradeSL1, lineEnd, tradeSL1,
+         color=i_sl1Color, style=lineStyle(i_sl1Style), width=i_sl1Width)
+    if p_qty > 1
+        tp2Line := line.new(bar_index, tradeTP2, lineEnd, tradeTP2,
+             color=i_tp2Color, style=lineStyle(i_tp2Style), width=i_tp2Width)
+        sl2Line := line.new(bar_index, tradeSL2, lineEnd, tradeSL2,
+             color=i_sl2Color, style=lineStyle(i_sl2Style), width=i_sl2Width)
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    line.delete(entryLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(sl1Line)
+    line.delete(sl2Line)
+    tradeEntryPrice := na
+    tradeTP1 := na
+    tradeTP2 := na
+    tradeSL1 := na
+    tradeSL2 := na
+
+// ============================================================
+// === INFO PANEL ===
+// ============================================================
+panelPos(p) =>
+    p == "Top Left"       ? position.top_left      :
+     p == "Top Center"    ? position.top_center    :
+     p == "Bottom Right"  ? position.bottom_right  :
+     p == "Bottom Left"   ? position.bottom_left   :
+     p == "Bottom Center" ? position.bottom_center :
+     position.top_right
+
+pSize = i_panelSize == "Tiny" ? size.tiny : i_panelSize == "Normal" ? size.normal : i_panelSize == "Large" ? size.large : size.small
+
+clrHeader    = color.new(#1a1a2e, 0)
+clrHeaderTxt = color.new(#ffffff, 0)
+clrRowDark   = color.new(#0d0d1a, 0)
+clrRowLight  = color.new(#12122a, 0)
+clrLabel     = color.new(#00d4ff, 0)
+clrValue     = color.new(#ffffff, 0)
+clrBull      = color.new(#00ff88, 0)
+clrBear      = color.new(#ff3355, 0)
+clrWarn      = color.new(#ffcc00, 0)
+clrGray      = color.new(#666688, 0)
+clrTP        = color.new(#00ff88, 0)
+clrTP2       = color.new(#00ffcc, 0)
+clrSL1       = color.new(#ff3355, 0)
+clrSL2       = color.new(#ff8800, 0)
+clrHide      = color.new(#0d0d1a, 100)
+
+isFlat   = strategy.position_size == 0
+posDir   = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : ""
+exitMode = p_qty == 1 ? "Single (TP1/SL1)" : "Split (TP1+TP2)"
+
+rsiLongOK  = rsiVal < p_rsiOB
+rsiBearOK  = rsiVal > p_rsiOS
+rsiDisplay = str.tostring(math.round(rsiVal, 1)) + " (" + str.tostring(p_rsiOB) + "/" + str.tostring(p_rsiOS) + ")"
+rsiColor   = (rsiLongOK or rsiBearOK) ? clrBull : clrBear
+
+adxOK      = adxVal >= p_adxMin
+adxDisplay = str.tostring(math.round(adxVal, 1)) + " (" + str.tostring(p_adxMin) + ")"
+adxColor   = adxOK ? clrBull : clrBear
+
+var table infoTable = i_showPanel ? table.new(panelPos(i_panelPos), 2, 15,
+     bgcolor=clrRowDark, border_width=1, border_color=color.new(#334466, 0),
+     frame_width=2, frame_color=color.new(#00d4ff, 0)) : na
+
+
+// ============================================================
+// === DIAGNOSTICS PANEL (Separate Table; does not replace native panel)
+// ============================================================
+diagSize = i_diagPanelSize == "Tiny" ? size.tiny : i_diagPanelSize == "Small" ? size.small : i_diagPanelSize == "Normal" ? size.normal : size.large
+
+var table diagTable = i_showDiagPanel ? table.new(panelPos(i_diagPanelPos), 3, 14,
+     bgcolor=clrRowDark, border_width=1, border_color=color.new(#334466, 0),
+     frame_width=2, frame_color=color.new(#ffaa00, 0)) : na
+
+var bool diagLabelsDrawn = false
+
+if i_showDiagPanel and not diagLabelsDrawn
+    table.cell(diagTable, 0, 0, "Diagnostics", text_color=clrHeaderTxt, bgcolor=clrHeader, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 1, 0, "Bull",        text_color=clrHeaderTxt, bgcolor=clrHeader, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 0, "Bear",        text_color=clrHeaderTxt, bgcolor=clrHeader, text_size=diagSize, text_halign=text.align_center)
+
+    // Confluence rows (1-9)
+    table.cell(diagTable, 0, 1, "1 EMA Trend",   text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+    table.cell(diagTable, 0, 2, "2 Price Pos",   text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 3, "3 WaveTrend",   text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+    table.cell(diagTable, 0, 4, "4 Momentum",    text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 5, "5 Candle",      text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+    table.cell(diagTable, 0, 6, "6 Sqz+Break",   text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 7, "7 SmartTrail",  text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+    table.cell(diagTable, 0, 8, "8 Vol Flow",    text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 9, "9 SMC",         text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+
+    table.cell(diagTable, 0, 10, "Score (thr)",  text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 11, "Filters",      text_color=clrLabel, bgcolor=clrRowDark,  text_size=diagSize)
+    table.cell(diagTable, 0, 12, "Delay (last)", text_color=clrLabel, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 0, 13, "Timeline", text_color=clrLabel, bgcolor=clrRowDark, text_size=diagSize)
+
+    diagLabelsDrawn := true
+
+// Update values
+if i_showDiagPanel and shouldUpdate
+    // Confluences as compact checkmarks
+    table.cell(diagTable, 1, 1, c1_bull ? "✓" : "·", text_color=c1_bull ? clrBull : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 1, c1_bear ? "✓" : "·", text_color=c1_bear ? clrBear : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 2, c2_bull ? "✓" : "·", text_color=c2_bull ? clrBull : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 2, c2_bear ? "✓" : "·", text_color=c2_bear ? clrBear : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 3, c3_bull ? "✓" : "·", text_color=c3_bull ? clrBull : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 3, c3_bear ? "✓" : "·", text_color=c3_bear ? clrBear : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 4, c4_bull ? "✓" : "·", text_color=c4_bull ? clrBull : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 4, c4_bear ? "✓" : "·", text_color=c4_bear ? clrBear : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 5, c5_bull ? "✓" : "·", text_color=c5_bull ? clrBull : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 5, c5_bear ? "✓" : "·", text_color=c5_bear ? clrBear : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 6, c6_bull ? "✓" : "·", text_color=c6_bull ? clrBull : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 6, c6_bear ? "✓" : "·", text_color=c6_bear ? clrBear : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 7, c7_bull ? "✓" : "·", text_color=c7_bull ? clrBull : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 7, c7_bear ? "✓" : "·", text_color=c7_bear ? clrBear : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 8, c8_bull ? "✓" : "·", text_color=c8_bull ? clrBull : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 8, c8_bear ? "✓" : "·", text_color=c8_bear ? clrBear : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+
+    table.cell(diagTable, 1, 9, c9_bull ? "✓" : "·", text_color=c9_bull ? clrBull : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 9, c9_bear ? "✓" : "·", text_color=c9_bear ? clrBear : clrGray, bgcolor=clrRowDark,  text_size=diagSize, text_halign=text.align_center)
+
+    // Score row
+    table.cell(diagTable, 1, 10, str.tostring(bullScore) + " (" + str.tostring(p_conf) + ")", text_color=bullScore >= p_conf ? clrBull : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 10, str.tostring(bearScore) + " (" + str.tostring(p_conf) + ")", text_color=bearScore >= p_conf ? clrBear : clrGray, bgcolor=clrRowLight, text_size=diagSize, text_halign=text.align_center)
+
+    // Filters row (compact)
+    fltTxt = (i_useRSI ? "RSI" : "") + (i_useADX ? (i_useRSI ? "+ADX" : "ADX") : "") + (i_useTimeFilter ? ((i_useRSI or i_useADX) ? "+Time" : "Time") : (i_useRSI or i_useADX ? "" : "Off"))
+    fltOK  = (not i_useRSI or (rsiFilter_bull and rsiFilter_bear)) and (not i_useADX or adxFilter) and (not i_useTimeFilter or timeAllowed)
+    table.cell(diagTable, 1, 11, fltTxt, text_color=fltOK ? clrValue : clrBear, bgcolor=clrRowDark, text_size=diagSize, text_halign=text.align_center)
+    table.cell(diagTable, 2, 11, fltOK ? "OK" : "BLK", text_color=fltOK ? clrBull : clrBear, bgcolor=clrRowDark, text_size=diagSize, text_halign=text.align_center)
+
+    // Delay row (only meaningful when a signal is present)
+    table.cell(diagTable, 1, 12, bullSignal ? bullDelayTxt : "", text_color=clrWarn, bgcolor=clrRowLight, text_size=diagSize)
+    table.cell(diagTable, 2, 12, bearSignal ? bearDelayTxt : "", text_color=clrWarn, bgcolor=clrRowLight, text_size=diagSize)
+
+    // Timeline row (compact event summary; useful in replay)
+    table.cell(diagTable, 1, 13, (i_showTimeline and bullSignal) ? bullTimelineTxt : "", text_color=clrValue, bgcolor=clrRowDark, text_size=diagSize)
+    table.cell(diagTable, 2, 13, (i_showTimeline and bearSignal) ? bearTimelineTxt : "", text_color=clrValue, bgcolor=clrRowDark, text_size=diagSize)
+
+
+var bool labelsDrawn = false
+
+// Static labels written once
+if i_showPanel and not labelsDrawn
+    table.cell(infoTable, 0, 0, "LWTG QCBP",  text_color=clrHeaderTxt, bgcolor=clrHeader,   text_size=pSize, text_halign=text.align_center)
+    table.cell(infoTable, 0, 1, "Bull Score",  text_color=clrLabel,     bgcolor=clrRowDark,  text_size=pSize)
+    table.cell(infoTable, 0, 2, "Bear Score",  text_color=clrLabel,     bgcolor=clrRowLight, text_size=pSize)
+    table.cell(infoTable, 0, 3, "RSI",         text_color=clrLabel,     bgcolor=clrRowDark,  text_size=pSize)
+    table.cell(infoTable, 0, 4, "ADX",         text_color=clrLabel,     bgcolor=clrRowLight, text_size=pSize)
+    table.cell(infoTable, 0, 5, "Position",    text_color=clrLabel,     bgcolor=clrRowDark,  text_size=pSize)
+    labelsDrawn := true
+
+// Values updated every tick
+if i_showPanel and shouldUpdate
+    // Row 0: Preset name in header
+    table.cell(infoTable, 1, 0, i_useOverrides ? i_preset + " [OVR]" : i_preset,
+         text_color=i_useOverrides ? clrBear : clrWarn, bgcolor=clrHeader, text_size=pSize, text_halign=text.align_center)
+
+    // Row 1: Bull Score
+    table.cell(infoTable, 1, 1, str.tostring(bullScore) + " (" + str.tostring(p_conf) + ")",
+         text_color=bullScore >= p_conf ? clrBull : clrGray, bgcolor=clrRowDark, text_size=pSize)
+
+    // Row 2: Bear Score
+    table.cell(infoTable, 1, 2, str.tostring(bearScore) + " (" + str.tostring(p_conf) + ")",
+         text_color=bearScore >= p_conf ? clrBear : clrGray, bgcolor=clrRowLight, text_size=pSize)
+
+    // Row 3: RSI
+    table.cell(infoTable, 1, 3, rsiDisplay, text_color=rsiColor, bgcolor=clrRowDark, text_size=pSize)
+
+    // Row 4: ADX
+    table.cell(infoTable, 1, 4, adxDisplay, text_color=adxColor, bgcolor=clrRowLight, text_size=pSize)
+
+    // Row 5: Position
+    table.cell(infoTable, 1, 5, isFlat ? "Flat" : "Open — " + posDir,
+         text_color=isFlat ? clrGray : posDir == "LONG" ? clrBull : clrBear,
+         bgcolor=clrRowDark, text_size=pSize)
+
+    // Row 6: Contracts / Exit Mode
+    table.cell(infoTable, 0, 6, isFlat ? "Exit Mode" : "Contracts",
+         text_color=clrLabel, bgcolor=clrRowLight, text_size=pSize)
+    table.cell(infoTable, 1, 6, isFlat ? exitMode : str.tostring(math.abs(strategy.position_size)),
+         text_color=isFlat ? clrValue : clrWarn, bgcolor=clrRowLight, text_size=pSize)
+
+    // Row 7: Buy/Sell Price / Webhook
+    table.cell(infoTable, 0, 7, isFlat ? "Webhook" : (posDir == "LONG" ? "Buy Price" : "Sell Price"),
+         text_color=clrLabel, bgcolor=clrRowDark, text_size=pSize)
+    table.cell(infoTable, 1, 7,
+         isFlat ? (p_sym + " x" + str.tostring(p_qty)) : str.tostring(math.round(tradeEntryPrice, 2)),
+         text_color=isFlat ? clrWarn : (posDir == "LONG" ? clrBull : clrBear),
+         bgcolor=clrRowDark, text_size=pSize)
+
+    // Rows 8-13: trade details — invisible when flat
+    table.cell(infoTable, 0, 8,  isFlat ? "" : "ATR",  text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+    table.cell(infoTable, 1, 8,  isFlat ? "" : str.tostring(math.round(atrVal, 4)), text_color=clrWarn, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+
+    table.cell(infoTable, 0, 9,  isFlat ? "" : "TP1",  text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowDark, text_size=pSize)
+    table.cell(infoTable, 1, 9,  isFlat ? "" : str.tostring(math.round(tradeTP1, 2)), text_color=clrTP, bgcolor=isFlat ? clrHide : clrRowDark, text_size=pSize)
+
+    table.cell(infoTable, 0, 10, isFlat or p_qty == 1 ? "" : "TP2", text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+    table.cell(infoTable, 1, 10, isFlat or p_qty == 1 ? "" : str.tostring(math.round(tradeTP2, 2)), text_color=clrTP2, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+
+    table.cell(infoTable, 0, 11, isFlat ? "" : "SL1",  text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowDark, text_size=pSize)
+    table.cell(infoTable, 1, 11, isFlat ? "" : str.tostring(math.round(tradeSL1, 2)), text_color=clrSL1, bgcolor=isFlat ? clrHide : clrRowDark, text_size=pSize)
+
+    table.cell(infoTable, 0, 12, isFlat or p_qty == 1 ? "" : "SL2", text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+    table.cell(infoTable, 1, 12, isFlat or p_qty == 1 ? "" : str.tostring(math.round(tradeSL2, 2)), text_color=clrSL2, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+
+    table.cell(infoTable, 0, 13, isFlat ? "" : "Exit Mode", text_color=clrLabel, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+    table.cell(infoTable, 1, 13, isFlat ? "" : exitMode,    text_color=clrValue, bgcolor=isFlat ? clrHide : clrRowLight, text_size=pSize)
+
+    // Row 14: Trading Hours status
+    timeStatus = not i_useTimeFilter ? "Off" : timeAllowed ? "In Window" : "Outside"
+    timeColor  = not i_useTimeFilter ? clrGray : timeAllowed ? clrBull : clrBear
+    table.cell(infoTable, 0, 14, "Trade Hours", text_color=clrLabel,  bgcolor=clrRowDark, text_size=pSize)
+    table.cell(infoTable, 1, 14, timeStatus,    text_color=timeColor, bgcolor=clrRowDark, text_size=pSize)
+
+// ============================================================
+// === TRADE LOG TABLE ===
+// ============================================================
+tlSize = i_tradeLogSize == "Tiny" ? size.tiny : i_tradeLogSize == "Small" ? size.small : i_tradeLogSize == "Normal" ? size.normal : size.large
+
+var table tlTable = i_showTradeLog ? table.new(panelPos(i_tradeLogPos), 5, 22,
+     bgcolor=clrRowDark, border_width=1, border_color=color.new(#334466, 0),
+     frame_width=2, frame_color=color.new(#00ff88, 0)) : na
+
+var bool tlLabelsDrawn = false
+
+if i_showTradeLog and not tlLabelsDrawn
+    table.cell(tlTable, 0, 0, "TRADE LOG",  text_color=clrHeaderTxt, bgcolor=clrHeader,   text_size=tlSize, text_halign=text.align_center)
+    table.cell(tlTable, 1, 0, p_sym,        text_color=clrWarn,      bgcolor=clrHeader,   text_size=tlSize, text_halign=text.align_center)
+    table.cell(tlTable, 2, 0, "Entry",      text_color=clrLabel,     bgcolor=clrHeader,   text_size=tlSize, text_halign=text.align_center)
+    table.cell(tlTable, 3, 0, "Exit",       text_color=clrLabel,     bgcolor=clrHeader,   text_size=tlSize, text_halign=text.align_center)
+    table.cell(tlTable, 4, 0, "P&L $",      text_color=clrLabel,     bgcolor=clrHeader,   text_size=tlSize, text_halign=text.align_center)
+    tlLabelsDrawn := true
+
+if i_showTradeLog and shouldUpdate
+    // Summary row
+    totalTrades = tl_wins + tl_losses
+    winRate     = totalTrades > 0 ? math.round(tl_wins / totalTrades * 100) : 0
+    totalPnl    = totalTrades > 0 ? 0.0 : 0.0
+    for k = 0 to array.size(tl_pnl) - 1
+        totalPnl := totalPnl + array.get(tl_pnl, k)
+
+    table.cell(tlTable, 0, 1, "Trades: " + str.tostring(totalTrades), text_color=clrValue,  bgcolor=clrRowLight, text_size=tlSize)
+    table.cell(tlTable, 1, 1, "W:" + str.tostring(tl_wins) + " L:" + str.tostring(tl_losses), text_color=clrValue, bgcolor=clrRowLight, text_size=tlSize)
+    table.cell(tlTable, 2, 1, "WR: " + str.tostring(winRate) + "%", text_color=winRate >= 60 ? clrBull : winRate >= 40 ? clrWarn : clrBear, bgcolor=clrRowLight, text_size=tlSize, text_halign=text.align_center)
+    table.cell(tlTable, 3, 1, "Net P&L", text_color=clrLabel, bgcolor=clrRowLight, text_size=tlSize)
+    table.cell(tlTable, 4, 1, "$" + str.tostring(math.round(totalPnl, 0)), text_color=totalPnl >= 0 ? clrBull : clrBear, bgcolor=clrRowLight, text_size=tlSize, text_halign=text.align_right)
+
+    // Trade rows
+    logCount = array.size(tl_dir)
+    for i = 0 to 19
+        row = i + 2
+        if i < logCount
+            dir    = array.get(tl_dir,    i)
+            entryP = array.get(tl_entry,  i)
+            exitP  = array.get(tl_exit,   i)
+            res    = array.get(tl_result, i)
+            pnl    = array.get(tl_pnl,    i)
+            isW    = str.contains(res, "TP")
+            rowBg  = i % 2 == 0 ? clrRowDark : clrRowLight
+            dirClr = dir == "L" ? clrBull : clrBear
+            pnlClr = pnl >= 0 ? clrBull : clrBear
+            table.cell(tlTable, 0, row, str.tostring(logCount - i), text_color=clrGray,  bgcolor=rowBg, text_size=tlSize, text_halign=text.align_center)
+            table.cell(tlTable, 1, row, dir,                        text_color=dirClr,   bgcolor=rowBg, text_size=tlSize, text_halign=text.align_center)
+            table.cell(tlTable, 2, row, str.tostring(math.round(entryP, 2)), text_color=clrValue, bgcolor=rowBg, text_size=tlSize, text_halign=text.align_right)
+            table.cell(tlTable, 3, row, str.tostring(math.round(exitP,  2)), text_color=clrValue, bgcolor=rowBg, text_size=tlSize, text_halign=text.align_right)
+            table.cell(tlTable, 4, row, (pnl >= 0 ? "+" : "") + str.tostring(math.round(pnl, 0)), text_color=pnlClr, bgcolor=rowBg, text_size=tlSize, text_halign=text.align_right)
+        else
+            rowBg = i % 2 == 0 ? clrRowDark : clrRowLight
+            table.cell(tlTable, 0, row, "", bgcolor=rowBg, text_size=tlSize)
+            table.cell(tlTable, 1, row, "", bgcolor=rowBg, text_size=tlSize)
+            table.cell(tlTable, 2, row, "", bgcolor=rowBg, text_size=tlSize)
+            table.cell(tlTable, 3, row, "", bgcolor=rowBg, text_size=tlSize)
+            table.cell(tlTable, 4, row, "", bgcolor=rowBg, text_size=tlSize)
+
+View in Pine Editor・1412 lines
+Use on chart
+2
+5
+492
+// ============================================================
+// LWTG QCBP v1.0.4 - Instrument Preset System
+// Replicates all 9 confluences + RSI/ADX filters + dynamic exits
+// Instruments: MES(5m), MNQ(15m), MYM(5m), SIL(5m), MGC(5m)
+// ALL CREDIT and IP for code goes to Aaron @ Quantcrawler.com
+// ============================================================
+// Preset System:
+// Select instrument + contract count from dropdown
+// All parameters (RSI/ADX/ATR/SL/TP/Confluences) load automatically
+// 2c/3c blocks mirror 1c settings until individually optimized
+// Use CUSTOM to override all parameters manually
+// ============================================================
+// Exit Logic:
+// 1 contract → full position exits at TP1, protected by SL1
+// 2+ contracts → 50% exits at TP1/SL1, 50% exits at TP2/SL2
+// ============================================================
+
+// ============================================================
+// RELEASE NOTES (Diagnostics Add-on) — 2026-03-05
+// - Fixed Pine typing/syntax issues in diagnostics helpers/variables to ensure compilation.
+// - Added OPTIONAL Confluence Timeline row + optional chart labels in the separate diagnostics panel.
+// ============================================================
+// - Added OPTIONAL 9-Confluence Heatmap pane (Bull/Bear lanes) for visual timing analysis.
+// - Added OPTIONAL separate Diagnostics Panel (table) with confluence checklist + score/filters.
+// - Added OPTIONAL Confluence Delay Detector: reports which confluence flipped most recently
+// on ANY bar where bullSignal/bearSignal becomes true (even if an entry is blocked).
+// - Added OPTIONAL Entry Debug Markers (small dots) at bullSignal/bearSignal bars.
+// - Trading engine (presets, p_* parameters, confluence logic, entries, exits) intentionally unchanged.
+// - Removed OPTIONAL 9-Confluence Heatmap pane (Moved to a standalone indicator).
+// - Changed colors & thickness on EMA's
+// ============================================================

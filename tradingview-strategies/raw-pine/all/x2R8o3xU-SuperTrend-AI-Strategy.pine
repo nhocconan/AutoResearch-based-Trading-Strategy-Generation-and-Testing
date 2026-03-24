@@ -1,0 +1,344 @@
+//@version=6
+strategy("SuperTrend AI Strategy", overlay=true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------
+length = input.int(10, 'ATR Length', group = 'SuperTrend AI')
+
+minMult = input.int(1, 'Factor Range', minval = 0, inline = 'factor', group = 'SuperTrend AI')
+maxMult = input.int(5, '', minval = 0, inline = 'factor', group = 'SuperTrend AI')
+step    = input.float(.5, 'Step', minval = 0, step = 0.1, group = 'SuperTrend AI')
+
+//Trigger error
+if minMult > maxMult
+    runtime.error('Minimum factor is greater than maximum factor in the range')
+
+perfAlpha = input.float(10, 'Performance Memory', minval = 2, group = 'SuperTrend AI')
+fromCluster = input.string('Best', 'From Cluster', options = ['Best', 'Average', 'Worst'], group = 'SuperTrend AI')
+
+//Optimization
+maxIter = input.int(1000, 'Maximum Iteration Steps', minval = 0, group = 'Optimization')
+maxData = input.int(10000, 'Historical Bars Calculation', minval = 0, group = 'Optimization')
+
+//Strategy Settings
+enterOnSameCandle = input.bool(true, 'Enter on Same Candle as Close', group = 'Strategy', tooltip = "If enabled, enter new position on same candle after closing previous one. If disabled, enter on third candle.")
+useTrailingStop = input.bool(false, 'Use Trailing Stop for Exit', group = 'Strategy')
+useAMAExit = input.bool(false, 'Use AMA for Exit', group = 'Strategy')
+enableLongs = input.bool(true, 'Enable Long Positions', group = 'Strategy')
+enableShorts = input.bool(true, 'Enable Short Positions', group = 'Strategy')
+
+//-----------------------------------------------------------------------------
+//UDT's
+//-----------------------------------------------------------------------------
+type supertrend
+    float upper = hl2
+    float lower = hl2
+    float output
+    float perf = 0
+    float factor
+    int trend = 0
+
+type vector
+    array<float> out
+
+//-----------------------------------------------------------------------------
+//Supertrend
+//-----------------------------------------------------------------------------
+var holder = array.new<supertrend>(0)
+var factors = array.new<float>(0)
+
+//Populate supertrend type array
+if barstate.isfirst
+    for i = 0 to int((maxMult - minMult) / step)
+        factors.push(minMult + i * step)
+        holder.push(supertrend.new())
+
+atr = ta.atr(length)
+
+//Compute Supertrend for multiple factors
+k = 0
+for factor in factors
+    get_spt = holder.get(k)
+
+    up = hl2 + atr * factor
+    dn = hl2 - atr * factor
+    
+    get_spt.trend := close > get_spt.upper ? 1 : close < get_spt.lower ? 0 : get_spt.trend
+    get_spt.upper := close[1] < get_spt.upper ? math.min(up, get_spt.upper) : up
+    get_spt.lower := close[1] > get_spt.lower ? math.max(dn, get_spt.lower) : dn
+    
+    diff = nz(math.sign(close[1] - get_spt.output))
+    get_spt.perf += 2/(perfAlpha+1) * (nz(close - close[1]) * diff - get_spt.perf)
+    get_spt.output := get_spt.trend == 1 ? get_spt.lower : get_spt.upper
+    get_spt.factor := factor
+    k += 1
+
+//-----------------------------------------------------------------------------
+//K-means clustering
+//-----------------------------------------------------------------------------
+factor_array = array.new<float>(0)
+data = array.new<float>(0)
+
+//Populate data arrays
+if last_bar_index - bar_index <= maxData
+    for element in holder
+        data.push(element.perf)
+        factor_array.push(element.factor)
+
+//Intitalize centroids using quartiles
+centroids = array.new<float>(0)
+if data.size() > 0
+    centroids.push(data.percentile_linear_interpolation(25))
+    centroids.push(data.percentile_linear_interpolation(50))
+    centroids.push(data.percentile_linear_interpolation(75))
+
+//Intialize clusters
+var array<vector> factors_clusters = na
+var array<vector> perfclusters = na
+
+if last_bar_index - bar_index <= maxData and data.size() > 0
+    for _ = 0 to maxIter
+        factors_clusters := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+        perfclusters := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+        
+        //Assign value to cluster
+        i = 0
+        for value in data
+            dist = array.new<float>(0)
+            for centroid in centroids
+                dist.push(math.abs(value - centroid))
+
+            idx = dist.indexof(dist.min())
+            perfclusters.get(idx).out.push(value)
+            factors_clusters.get(idx).out.push(factor_array.get(i))
+            i += 1
+
+        //Update centroids
+        new_centroids = array.new<float>(0)
+        for cluster_ in perfclusters
+            new_centroids.push(cluster_.out.avg())
+
+        //Test if centroid changed
+        if new_centroids.get(0) == centroids.get(0) and new_centroids.get(1) == centroids.get(1) and new_centroids.get(2) == centroids.get(2)
+            break
+
+        centroids := new_centroids
+
+//-----------------------------------------------------------------------------
+//Signals and trailing stop
+//-----------------------------------------------------------------------------
+//Get associated supertrend
+var float target_factor = na
+var float perf_idx = na
+var float perf_ama = na
+
+var from = switch fromCluster
+    'Best' => 2
+    'Average' => 1
+    'Worst' => 0
+
+//Performance index denominator
+den = ta.ema(math.abs(close - close[1]), int(perfAlpha))
+
+if not na(perfclusters)
+    //Get average factors within target cluster 
+    target_factor := nz(factors_clusters.get(from).out.avg(), target_factor)
+    
+    //Get performance index of target cluster 
+    perf_idx := math.max(nz(perfclusters.get(from).out.avg()), 0) / den
+
+//Get new supertrend
+var upper = hl2
+var lower = hl2
+var os = 0
+
+up = hl2 + atr * target_factor
+dn = hl2 - atr * target_factor
+upper := close[1] < upper ? math.min(up, upper) : up
+lower := close[1] > lower ? math.max(dn, lower) : dn
+os := close > upper ? 1 : close < lower ? 0 : os
+ts = os == 1 ? lower : upper
+
+//Get trailing stop adaptive MA
+if na(ts[1]) and not na(ts)
+    perf_ama := ts
+else
+    perf_ama += perf_idx * (ts - perf_ama)
+
+//-----------------------------------------------------------------------------
+//Strategy Logic
+//-----------------------------------------------------------------------------
+//Entry signals
+longCondition = os > os[1]  // Trend changes to bullish
+shortCondition = os < os[1]  // Trend changes to bearish
+
+//Exit signals
+longExitCondition = useAMAExit ? close < perf_ama : os < os[1]  // Exit long on trend reversal or AMA cross
+shortExitCondition = useAMAExit ? close > perf_ama : os > os[1]  // Exit short on trend reversal or AMA cross
+
+//Track the bar index when position was opened
+var int longOpenedBar = -1
+var int shortOpenedBar = -1
+//Track entry prices for P&L calculation
+var float longEntryPrice = na
+var float shortEntryPrice = na
+
+//3-bar sequence tracking:
+//Bar 1: Trend changes (detected on close) → set exit flag for next bar OR enter flag if no position
+//Bar 2: Exit position (if exit flag is set) OR Enter position (if no position and enter flag is set)
+//Bar 3: Enter new position (if exit happened on bar 2)
+var bool exitLongNextBar = false  // Flag to exit Long on next bar
+var bool exitShortNextBar = false  // Flag to exit Short on next bar
+var bool enterLongOnSecondBar = false  // Flag to enter Long on second bar (no position case)
+var bool enterShortOnSecondBar = false  // Flag to enter Short on second bar (no position case)
+var bool enterLongOnThirdBar = false  // Flag to enter Long on third bar
+var bool enterShortOnThirdBar = false  // Flag to enter Short on third bar
+var bool justClosedLong = false  // Track if we just closed Long on this bar
+var bool justClosedShort = false  // Track if we just closed Short on this bar
+
+//3-bar sequence: Trend change → Exit → Enter
+if barstate.isconfirmed
+    //Bar 1: Detect trend change on candle close (only verified on close)
+    trendChangedToBearish = shortCondition  // os < os[1] - trend changes to bearish
+    trendChangedToBullish = longCondition  // os > os[1] - trend changes to bullish
+    
+    //If trend changes and position exists, set exit flag for next bar (Bar 2)
+    if trendChangedToBearish and strategy.position_size > 0 and longOpenedBar != bar_index
+        exitLongNextBar := true  // Will exit Long on next bar
+    
+    if trendChangedToBullish and strategy.position_size < 0 and shortOpenedBar != bar_index
+        exitShortNextBar := true  // Will exit Short on next bar
+    
+    //If trend changes and NO position exists, set enter flag for next bar (Bar 2)
+    if trendChangedToBullish and strategy.position_size == 0 and enableLongs
+        enterLongOnSecondBar := true  // Will enter Long on next bar
+    
+    if trendChangedToBearish and strategy.position_size == 0 and enableShorts
+        enterShortOnSecondBar := true  // Will enter Short on next bar
+    
+    //Bar 2: Exit position OR Enter position (if no position existed)
+    //Reset flags at start of each bar
+    justClosedLong := false
+    justClosedShort := false
+    
+    //Exit Long if flag is set (trend changed to bearish on previous bar)
+    if exitLongNextBar and strategy.position_size > 0 and longOpenedBar != bar_index
+        //Calculate profit/loss
+        pnl = not na(longEntryPrice) ? (close - longEntryPrice) / longEntryPrice * 100 : 0
+        pnlText = pnl >= 0 ? "+" + str.tostring(pnl, "#.##") + "%" : str.tostring(pnl, "#.##") + "%"
+        pnlColor = pnl >= 0 ? color.green : color.red
+        
+        strategy.close("Long", comment = "Exit Long")
+        longOpenedBar := -1
+        longEntryPrice := na  // Reset entry price
+        exitLongNextBar := false
+        justClosedLong := true  // Track that we just closed Long
+        
+        //Show P&L label
+        label.new(bar_index, high, "Exit Long\n" + pnlText, style = label.style_label_down, color = pnlColor, textcolor = color.white, size = size.small)
+        
+        //If same-candle entry is enabled, enter Short immediately after close
+        if enterOnSameCandle and os == 0 and enableShorts
+            strategy.entry("Short", strategy.short, comment = "Enter Short")
+            shortOpenedBar := bar_index
+            shortEntryPrice := close  // Track entry price
+            justClosedLong := false  // Reset since we entered
+            enterShortOnThirdBar := false  // Prevent Bar 3 entry since we already entered
+        else if enableShorts
+            enterShortOnThirdBar := true  // Set flag to enter Short on third bar
+    
+    //Exit Short if flag is set (trend changed to bullish on previous bar)
+    if exitShortNextBar and strategy.position_size < 0 and shortOpenedBar != bar_index
+        //Calculate profit/loss
+        pnl = not na(shortEntryPrice) ? (shortEntryPrice - close) / shortEntryPrice * 100 : 0
+        pnlText = pnl >= 0 ? "+" + str.tostring(pnl, "#.##") + "%" : str.tostring(pnl, "#.##") + "%"
+        pnlColor = pnl >= 0 ? color.green : color.red
+        
+        strategy.close("Short", comment = "Exit Short")
+        shortOpenedBar := -1
+        shortEntryPrice := na  // Reset entry price
+        exitShortNextBar := false
+        justClosedShort := true  // Track that we just closed Short
+        
+        //Show P&L label
+        label.new(bar_index, low, "Exit Short\n" + pnlText, style = label.style_label_up, color = pnlColor, textcolor = color.white, size = size.small)
+        
+        //If same-candle entry is enabled, enter Long immediately after close
+        if enterOnSameCandle and os == 1 and enableLongs
+            strategy.entry("Long", strategy.long, comment = "Enter Long")
+            longOpenedBar := bar_index
+            longEntryPrice := close  // Track entry price
+            justClosedShort := false  // Reset since we entered
+            enterLongOnThirdBar := false  // Prevent Bar 3 entry since we already entered
+        else if enableLongs
+            enterLongOnThirdBar := true  // Set flag to enter Long on third bar
+    
+    //Enter Long on second bar if no position existed and trend changed to bullish
+    if enterLongOnSecondBar and strategy.position_size == 0 and os == 1 and enableLongs
+        strategy.entry("Long", strategy.long, comment = "Enter Long")
+        longOpenedBar := bar_index
+        longEntryPrice := close  // Track entry price
+        enterLongOnSecondBar := false
+    
+    //Enter Short on second bar if no position existed and trend changed to bearish
+    if enterShortOnSecondBar and strategy.position_size == 0 and os == 0 and enableShorts
+        strategy.entry("Short", strategy.short, comment = "Enter Short")
+        shortOpenedBar := bar_index
+        shortEntryPrice := close  // Track entry price
+        enterShortOnSecondBar := false
+    
+    //Bar 3: Enter new position on third candle after trend change (only if same-candle entry is disabled)
+    //Enter Long on third bar if exit happened on bar 2 and trend is still bullish
+    if enterLongOnThirdBar and strategy.position_size == 0 and os == 1 and enableLongs
+        strategy.entry("Long", strategy.long, comment = "Enter Long")
+        longOpenedBar := bar_index
+        longEntryPrice := close  // Track entry price
+        enterLongOnThirdBar := false
+    
+    //Enter Short on third bar if exit happened on bar 2 and trend is still bearish
+    if enterShortOnThirdBar and strategy.position_size == 0 and os == 0 and enableShorts
+        strategy.entry("Short", strategy.short, comment = "Enter Short")
+        shortOpenedBar := bar_index
+        shortEntryPrice := close  // Track entry price
+        enterShortOnThirdBar := false
+
+//Trailing stop exit - only on confirmed bars, and not if position was just opened
+if useTrailingStop and barstate.isconfirmed
+    if strategy.position_size > 0 and longOpenedBar != bar_index
+        strategy.exit("Long Exit", "Long", stop = ts, comment = "Trailing Stop")
+    if strategy.position_size < 0 and shortOpenedBar != bar_index
+        strategy.exit("Short Exit", "Short", stop = ts, comment = "Trailing Stop")
+
+//-----------------------------------------------------------------------------
+//Plots
+//-----------------------------------------------------------------------------
+css = os == 1 ? color.teal : color.red
+
+plot(ts, 'Trailing Stop', os != os[1] ? na : css, linewidth = 2)
+
+plot(perf_ama, 'Trailing Stop AMA',
+  ta.cross(close, perf_ama) ? na
+  : close > perf_ama ? color.new(color.teal, 50) : color.new(color.red, 50), linewidth = 1)
+
+//Plot entry/exit signals
+plotshape(longCondition, style = shape.triangleup, location = location.belowbar, color = color.green, size = size.small, title = "Long Entry")
+plotshape(shortCondition, style = shape.triangledown, location = location.abovebar, color = color.red, size = size.small, title = "Short Entry")
+
+View in Pine Editor・330 lines
+Use on chart
+5
+1
+1 649
+Nov 25, 2025
+A Simple strategy tests for SuperTrend AI indicator
+Nov 26, 2025
+Release Notes
+Fix bugs
+Nov 26, 2025
+Release Notes
+Update defaults
+Nov 29, 2025
+Release Notes
+- Add option to toggle Longs , Shorts only trades
+- Add label with PnL%

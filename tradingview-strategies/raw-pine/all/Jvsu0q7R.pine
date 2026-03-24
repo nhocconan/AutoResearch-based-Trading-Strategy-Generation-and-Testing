@@ -1,0 +1,37 @@
+//@version=5
+strategy("Gemini Scalper V1", overlay=true, initial_capital=1000, currency=currency.USD)
+
+// --- CONFIGURACIÓN ---
+ema_rapida = ta.ema(close, 50)
+ema_lenta = ta.ema(close, 200)
+rsi = ta.rsi(close, 14)
+
+// --- LÓGICA DE ENTRADA ---
+// Compra: EMA 50 cruza sobre EMA 200 y el RSI no está caro (debajo de 70)
+compra = ta.crossover(ema_rapida, ema_lenta) and rsi < 70
+
+// Venta: EMA 50 cruza bajo EMA 200 y el RSI no está barato (encima de 30)
+venta = ta.crossunder(ema_rapida, ema_lenta) and rsi > 30
+
+// --- EJECUCIÓN ---
+if (compra)
+    strategy.entry("Compra", strategy.long, comment="Entrada Long")
+
+if (venta)
+    strategy.entry("Venta", strategy.short, comment="Entrada Short")
+
+// --- GESTIÓN DE RIESGO ---
+// TP de 1% y SL de 0.5%
+strategy.exit("Cerrar", "Compra", limit=strategy.position_avg_price * 1.01, stop=strategy.position_avg_price * 0.995)
+strategy.exit("Cerrar", "Venta", limit=strategy.position_avg_price * 0.99, stop=strategy.position_avg_price * 1.005)
+
+// Dibujar las EMAs para verlas
+plot(ema_rapida, color=color.blue, title="EMA 50")
+plot(ema_lenta, color=color.orange, linewidth=2, title="EMA 200")
+
+View in Pine Editor・30 lines
+Use on chart
+2
+1
+663
+"Estrategia de Scalping basada en cruce de EMAs (50/200) y filtro de RSI para Bitcoin y acciones."

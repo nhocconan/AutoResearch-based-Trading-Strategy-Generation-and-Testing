@@ -1,0 +1,23 @@
+//@version=3
+strategy("linreg ATR Strategy",overlay=false)
+lengthKC=input(30,"Length")
+SignalPeriod=input(10, title="Signal Length")
+sc=close-avg(avg(highest(high, lengthKC), lowest(low, lengthKC)),sma(close,lengthKC))
+lineregs=linreg(sc,lengthKC,0)
+emasc=sma(lineregs,SignalPeriod)
+plot(lineregs)
+plot(emasc, color=red, linewidth=2)
+longCondition = crossover(lineregs,emasc)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+shortCondition = crossunder(lineregs,emasc)
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・15 lines
+Use on chart
+1
+0
+4
+5 811
+Use linreg change strategy

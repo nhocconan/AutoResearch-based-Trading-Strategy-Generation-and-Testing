@@ -1,0 +1,257 @@
+//@version=5
+strategy("MTF Pullback Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+htf = input.timeframe("240", "Higher Timeframe (4H)", group="Timeframes")
+emaLength = input.int(50, "EMA Length", group="Trend Filter")
+rsiLength = input.int(14, "RSI Length", group="RSI")
+rsiOversold = input.int(30, "RSI Oversold Level", group="RSI")
+rsiOverbought = input.int(70, "RSI Overbought Level", group="RSI")
+divergenceLookback = input.int(10, "Divergence Lookback Bars", group="RSI")
+swingLookback = input.int(5, "Swing Detection Lookback", group="Swing Detection")
+atrLength = input.int(14, "ATR Length", group="Risk Management")
+atrMultiplier = input.float(2.0, "Stop Loss ATR Multiplier", group="Risk Management")
+tpPercent = input.float(2.0, "Take Profit %", group="Risk Management")
+tradeLongs = input.bool(true, "Trade Longs", group="Trade Direction")
+tradeShorts = input.bool(true, "Trade Shorts", group="Trade Direction")
+
+// ============================================================================
+// HIGHER TIMEFRAME DATA (4H)
+// ============================================================================
+ema50_htf = request.security(syminfo.tickerid, htf, ta.ema(close, emaLength), lookahead=barmerge.lookahead_off)
+ema50_htf_prev = request.security(syminfo.tickerid, htf, ta.ema(close[1], emaLength), lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htf, close, lookahead=barmerge.lookahead_off)
+
+htfUptrend = htfClose > ema50_htf and ema50_htf > ema50_htf_prev
+htfDowntrend = htfClose < ema50_htf and ema50_htf < ema50_htf_prev
+
+htfSwingHigh = request.security(syminfo.tickerid, htf, ta.pivothigh(high, swingLookback, swingLookback), lookahead=barmerge.lookahead_off)
+htfSwingLow = request.security(syminfo.tickerid, htf, ta.pivotlow(low, swingLookback, swingLookback), lookahead=barmerge.lookahead_off)
+
+var float lastHtfSwingHigh = na
+var float lastHtfSwingLow = na
+if not na(htfSwingHigh)
+    lastHtfSwingHigh := htfSwingHigh
+if not na(htfSwingLow)
+    lastHtfSwingLow := htfSwingLow
+
+pullbackFromHigh = htfUptrend and not na(lastHtfSwingHigh) and htfClose < lastHtfSwingHigh
+pullbackFromLow = htfDowntrend and not na(lastHtfSwingLow) and htfClose > lastHtfSwingLow
+
+// ============================================================================
+// ENTRY TIMEFRAME DATA
+// ============================================================================
+rsi = ta.rsi(close, rsiLength)
+rsiOversoldCondition = rsi < rsiOversold
+rsiOverboughtCondition = rsi > rsiOverbought
+
+priceLow = ta.lowest(low, divergenceLookback)
+rsiLow = ta.lowest(rsi, divergenceLookback)
+priceLL = low <= priceLow[1] and low < low[1]
+rsiHL = rsi > rsiLow[1]
+bullishDivergence = priceLL and rsiHL and rsiOversoldCondition
+
+priceHigh = ta.highest(high, divergenceLookback)
+rsiHigh = ta.highest(rsi, divergenceLookback)
+priceHH = high >= priceHigh[1] and high > high[1]
+rsiLH = rsi < rsiHigh[1]
+bearishDivergence = priceHH and rsiLH and rsiOverboughtCondition
+
+// Candlestick Patterns
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+// Swing Detection
+swingLowEntry = ta.pivotlow(low, swingLookback, swingLookback)
+swingHighEntry = ta.pivothigh(high, swingLookback, swingLookback)
+
+var bool recentSwingLow = false
+var bool recentSwingHigh = false
+var int barsSinceSwingLow = 0
+var int barsSinceSwingHigh = 0
+
+if not na(swingLowEntry)
+    recentSwingLow := true
+    barsSinceSwingLow := 0
+else
+    barsSinceSwingLow += 1
+    if barsSinceSwingLow > swingLookback + 2
+        recentSwingLow := false
+
+if not na(swingHighEntry)
+    recentSwingHigh := true
+    barsSinceSwingHigh := 0
+else
+    barsSinceSwingHigh += 1
+    if barsSinceSwingHigh > swingLookback + 2
+        recentSwingHigh := false
+
+swingLowBullishEngulfing = (not na(swingLowEntry) and bullishEngulfing) or (recentSwingLow and barsSinceSwingLow <= 2 and bullishEngulfing)
+swingHighBearishEngulfing = (not na(swingHighEntry) and bearishEngulfing) or (recentSwingHigh and barsSinceSwingHigh <= 2 and bearishEngulfing)
+
+// ATR
+atr = ta.atr(atrLength)
+
+// ============================================================================
+// ENTRY CONDITIONS
+// ============================================================================
+longCondition = tradeLongs and htfUptrend and close > ema50_htf and pullbackFromHigh and
+     (rsiOversoldCondition or rsi < 40) and (bullishDivergence or (rsi > rsi[1] and rsi[1] < rsiOversold)) and swingLowBullishEngulfing
+
+shortCondition = tradeShorts and htfDowntrend and close < ema50_htf and pullbackFromLow and
+     (rsiOverboughtCondition or rsi > 60) and (bearishDivergence or (rsi < rsi[1] and rsi[1] > rsiOverbought)) and swingHighBearishEngulfing
+
+// ============================================================================
+// TRADE EXECUTION
+// ============================================================================
+if longCondition and strategy.position_size == 0
+    stopLoss = close - (atr * atrMultiplier)
+    takeProfit = close * (1 + tpPercent / 100)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stopLoss, limit=takeProfit)
+
+if shortCondition and strategy.position_size == 0
+    stopLoss = close + (atr * atrMultiplier)
+    takeProfit = close * (1 - tpPercent / 100)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+plot(ema50_htf, "50 EMA 4H", color=color.blue, linewidth=2)
+plotshape(longCondition and strategy.position_size == 0, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.normal)
+plotshape(shortCondition and strategy.position_size == 0, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.normal)
+bgcolor(htfUptrend ? color.new(color.green, 95) : htfDowntrend ? color.new(color.red, 95) : na)
+
+// Info Table
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    table.cell(infoTable, 0, 0, "4H Trend", text_color=color.white)
+    table.cell(infoTable, 1, 0, htfUptrend ? "UP ↑" : htfDowntrend ? "DOWN ↓" : "NEUTRAL", text_color=htfUptrend ? color.green : htfDowntrend ? color.red : color.gray)
+    table.cell(infoTable, 0, 1, "Price vs EMA", text_color=color.white)
+    table.cell(infoTable, 1, 1, close > ema50_htf ? "ABOVE" : "BELOW", text_color=close > ema50_htf ? color.green : color.red)
+    table.cell(infoTable, 0, 2, "Pullback L", text_color=color.white)
+    table.cell(infoTable, 1, 2, pullbackFromHigh ? "YES" : "NO", text_color=pullbackFromHigh ? color.green : color.gray)
+    table.cell(infoTable, 0, 3, "Pullback S", text_color=color.white)
+    table.cell(infoTable, 1, 3, pullbackFromLow ? "YES" : "NO", text_color=pullbackFromLow ? color.green : color.gray)
+    table.cell(infoTable, 0, 4, "Bull Div", text_color=color.white)
+    table.cell(infoTable, 1, 4, bullishDivergence ? "YES" : "NO", text_color=bullishDivergence ? color.green : color.gray)
+    table.cell(infoTable, 0, 5, "Bear Div", text_color=color.white)
+    table.cell(infoTable, 1, 5, bearishDivergence ? "YES" : "NO", text_color=bearishDivergence ? color.green : color.gray)
+
+alertcondition(longCondition, "Long Entry Signal", "Long entry conditions met")
+alertcondition(shortCondition, "Short Entry Signal", "Short entry conditions met")
+
+View in Pine Editor・146 lines
+Use on chart
+1
+5
+609
+MTF Pullback - RSI Panel Summary
+Purpose: Companion indicator for the main strategy that displays RSI with divergence detection in a separate pane below the price chart.
+
+Settings
+ParameterDefaultDescriptionRSI Length14Lookback period for RSI calculationRSI Oversold Level30Threshold for oversold conditionRSI Overbought Level70Threshold for overbought conditionDivergence Lookback Bars10How many bars to look back for divergence detection
+
+What It Displays
+RSI Line — Changes color based on zone:
+
+Purple = neutral (between 30-70)
+Green = oversold (below 30)
+Red = overbought (above 70)
+
+Horizontal Levels:
+
+Red dashed line at 70 (overbought)
+Green dashed line at 30 (oversold)
+Gray dotted line at 50 (midpoint)
+
+Zone Fills:
+
+Light red shading above 70
+Light green shading below 30
+
+Divergence Markers:
+
+"DIV" label with lime circle = bullish divergence (price makes lower low, RSI makes higher low while oversold)
+"DIV" label with fuchsia circle = bearish divergence (price makes higher high, RSI makes lower high while overbought)
+
+Background Flash:
+
+Green flash when bullish divergence detected
+Red flash when bearish divergence detected
+
+
+Divergence Logic
+Bullish: Price makes a lower low AND RSI makes a higher low AND RSI is in oversold territory → potential reversal up
+Bearish: Price makes a higher high AND RSI makes a lower high AND RSI is in overbought territory → potential reversal downand for the strategy15:36Outlined strategy script components and display mechanics.The user wants a summary of the main strategy script, similar to what I provided for the RSI panel. I should cover the purpose, settings, entry conditions, exit conditions, and what it displays on the chart.MTF Pullback Strategy Summary
+Purpose: Multi-timeframe pullback strategy that trades trend continuations. Uses 4H timeframe for trend direction and entry timeframe (typically 15M) for precise entries based on RSI divergence and engulfing patterns.
+
+Settings
+ParameterDefaultDescriptionTimeframesHigher Timeframe240 (4H)Timeframe for trend detectionTrend FilterEMA Length50EMA period for trend directionRSIRSI Length14RSI calculation periodRSI Oversold Level30Long entry RSI thresholdRSI Overbought Level70Short entry RSI thresholdDivergence Lookback10Bars to scan for divergenceSwing DetectionSwing Lookback5Bars left/right to confirm swingRisk ManagementATR Length14ATR calculation periodStop Loss ATR Multiplier2.0SL = 2× ATR from entryTake Profit %2.0TP = entry ± 2%Trade DirectionTrade LongstrueEnable long tradesTrade ShortstrueEnable short trades
+
+Entry Conditions
+Long Entry (all must be true):
+
+4H uptrend (price above 50 EMA + EMA rising)
+Current price above 4H 50 EMA
+Price pulling back from recent 4H swing high
+RSI oversold (<30) or below 40
+Bullish RSI divergence OR RSI turning up from oversold
+Bullish engulfing candle at or within 2 bars after swing low
+
+Short Entry (all must be true):
+
+4H downtrend (price below 50 EMA + EMA falling)
+Current price below 4H 50 EMA
+Price pulling back from recent 4H swing low
+RSI overbought (>70) or above 60
+Bearish RSI divergence OR RSI turning down from overbought
+Bearish engulfing candle at or within 2 bars after swing high
+
+
+Exit Conditions
+Exit TypeLongShortStop LossEntry - (2 × ATR)Entry + (2 × ATR)Take ProfitEntry × 1.02 (+2%)Entry × 0.98 (-2%)
+
+What It Displays
+On Chart:
+
+Blue line = 4H 50 EMA
+Green triangle below bar = long entry signal
+Red triangle above bar = short entry signal
+Green background tint = 4H uptrend active
+Red background tint = 4H downtrend active
+
+Info Table (top right):
+FieldShows4H TrendUP ↑ / DOWN ↓ / NEUTRALPrice vs EMAABOVE / BELOWPullback LYES/NO (long pullback active)Pullback SYES/NO (short pullback active)Bull DivYES/NO (bullish divergence)Bear DivYES/NO (bearish divergence)
+
+Strategy Logic Flow
+4H TREND CHECK
+↓
+PRICE VS 50 EMA
+↓
+PULLBACK DETECTED?
+↓
+RSI CONDITION MET?
+↓
+RSI DIVERGENCE?
+↓
+ENGULFING AT SWING?
+↓
+ENTRY → SL (2×ATR) + TP (2%)
+
+Alerts Available
+
+Long Entry Signal — Triggers when all long conditions align
+Short Entry Signal — Triggers when all short conditions align
+
+
+Recommended Usage
+
+Apply to 15-minute chart (fetches 4H data automatically)
+Use alongside the RSI Panel indicator for visual confirmation
+Backtest on trending pairs/assets (crypto, forex majors, indices)
+Adjust ATR multiplier if stops are too tight/wide for your asset

@@ -1,0 +1,110 @@
+//@version=6
+strategy("Iriza4 - DAX EMA+HULL+ADX TP40 SL20 (Streak & EMA/ATR Distance Filter)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// === INPUTS ===
+emaLen       = input.int(20, "EMA Length")
+hullLen      = input.int(21, "HULL Length")
+adxLen       = input.int(14, "ADX Length")
+adxThreshold = input.float(20, "ADX Threshold")
+useADX       = input.bool(true, "Use ADX filter (entry only)")
+
+tpPoints     = input.int(40, "TP (points)")
+slPoints     = input.int(20, "SL (points)")
+
+// Filters
+atrLen       = input.int(14, "ATR Length")
+atrMult      = input.float(2.0, "Max distance from EMA (ATR multiples)")
+maxBullStreak= input.int(3, "Block LONG if ≥ this many prior bull bars")
+maxBearStreak= input.int(3, "Block SHORT if ≥ this many prior bear bars")
+
+// === FUNCTIONS ===
+// Hull Moving Average (HMA)
+hma(src, length) =>
+    half   = math.round(length / 2)
+    sqrt_l = math.round(math.sqrt(length))
+    w1 = ta.wma(src, half)
+    w2 = ta.wma(src, length)
+    ta.wma(2 * w1 - w2, sqrt_l)
+
+// ADX (Wilder) manual calc
+calc_adx(len) =>
+    upMove   = ta.change(high)
+    downMove = -ta.change(low)
+    plusDM   = na(upMove) ? na : (upMove > downMove and upMove > 0 ? upMove : 0)
+    minusDM  = na(downMove) ? na : (downMove > upMove and downMove > 0 ? downMove : 0)
+    tr       = ta.tr(true)
+    trRma    = ta.rma(tr, len)
+    plusDI   = 100 * ta.rma(plusDM, len) / trRma
+    minusDI  = 100 * ta.rma(minusDM, len) / trRma
+    dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+    ta.rma(dx, len)
+
+// === INDICATORS ===
+ema  = ta.ema(close, emaLen)
+hull = hma(close, hullLen)
+adx  = calc_adx(adxLen)
+atr  = ta.atr(atrLen)
+
+// HULL slope state
+var float hull_dir = 0.0
+hull_dir := hull > hull[1] ? 1 : hull < hull[1] ? -1 : hull_dir
+
+// === STREAKS (consecutive bull/bear bars BEFORE current bar) ===
+var int bullStreak = 0
+var int bearStreak = 0
+bullStreak := close[1] > open[1] ? bullStreak[1] + 1 : 0
+bearStreak := close[1] < open[1] ? bearStreak[1] + 1 : 0
+
+blockLong  = bullStreak >= maxBullStreak
+blockShort = bearStreak >= maxBearStreak
+
+// === EMA DISTANCE FILTER ===
+distFromEMA = math.abs(close - ema)
+farFromEMA  = distFromEMA > atrMult * atr
+
+// === ENTRY CONDITIONS ===
+baseLong  = close > ema and hull_dir == 1 and (not useADX or adx > adxThreshold)
+baseShort = close < ema and hull_dir == -1 and (not useADX or adx > adxThreshold)
+
+longSignal  = barstate.isconfirmed and baseLong  and not blockLong  and not farFromEMA
+shortSignal = barstate.isconfirmed and baseShort and not blockShort and not farFromEMA
+
+// === ENTRIES ===
+if (longSignal and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long)
+if (shortSignal and strategy.position_size == 0)
+    strategy.entry("Short", strategy.short)
+
+// === EXITS === (no partials, no breakeven)
+if (strategy.position_size > 0)
+    entryPrice = strategy.position_avg_price
+    strategy.exit("Exit Long", from_entry="Long", stop=entryPrice - slPoints, limit=entryPrice + tpPoints)
+
+if (strategy.position_size < 0)
+    entryPrice = strategy.position_avg_price
+    strategy.exit("Exit Short", from_entry="Short", stop=entryPrice + slPoints, limit=entryPrice - tpPoints)
+
+// === VISUALS ===
+plot(ema,  color=color.orange, title="EMA 20")
+plot(hull, color=hull_dir == 1 ? color.green : color.red, title="HULL 21")
+plot(adx,  title="ADX 14", color=color.new(color.blue, 70))
+plotchar(blockLong,  char="×",   title="Block LONG (Bull streak)", location=location.top,   color=color.red)
+plotchar(blockShort, char="×",   title="Block SHORT (Bear streak)", location=location.bottom,color=color.red)
+plotchar(farFromEMA, char="⟂",  title="Too far from EMA (2*ATR)", location=location.top,   color=color.orange)
+
+plotshape(longSignal and strategy.position_size == 0,  title="Iriza4 Long",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.green)
+plotshape(shortSignal and strategy.position_size == 0, title="Iriza4 Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.red)
+
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 92) : strategy.position_size < 0 ? color.new(color.red, 92) : na)
+
+// === ALERTS ===
+alertcondition(longSignal,  title="Iriza4 Long",  message="Iriza4 LONG (streak & EMA/ATR filter)")
+alertcondition(shortSignal, title="Iriza4 Short", message="Iriza4 SHORT (streak & EMA/ATR filter)")
+
+View in Pine Editor・102 lines
+Use on chart
+1
+2
+792
+5 MIN SKALP. Additional filters improve accuracy: the strategy blocks trades after too many consecutive bullish or bearish candles (streak filter) and ignores signals when price is too far from the EMA (measured by ATR distance).
+Each position uses a fixed risk-to-reward ratio of 1 : 2 with clear stop-loss and take-profit targets, without partial exits or breakevens. The goal is to identify clean pullbacks inside strong trends and filter out late or exhausted entries

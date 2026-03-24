@@ -1,0 +1,191 @@
+//@version=5
+strategy("Optimized Squeeze Momentum Strategy", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=2, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Input variables
+src = input.source(hl2, title="Source")
+lengthBB = input.int(20, minval=1, title="Bollinger Bands Length")
+multBB = input.float(2.0, minval=0.5, maxval=5.0, title="Bollinger Bands Multiplier")
+lengthKC = input.int(20, minval=1, title="Keltner Channels Length")
+multKC = input.float(1.5, minval=0.5, maxval=5.0, title="Keltner Channels Multiplier")
+lengthMomentum = input.int(12, minval=1, title="Momentum Length")
+lengthTrendMA = input.int(50, minval=1, title="Trend MA Length")
+
+// Advanced Settings
+useATRStops = input.bool(true, title="Use ATR for Stop Loss and Take Profit")
+atrMultiplierSL = input.float(1.5, title="ATR Multiplier for Stop Loss", minval=0.5, step=0.1)
+atrMultiplierTP = input.float(2.5, title="ATR Multiplier for Take Profit", minval=1.0, step=0.1)
+atrLength = input.int(14, minval=1, title="ATR Length")
+minVolatility = input.float(0.5, title="Minimum ATR Volatility (%)", minval=0.0)
+holdingPeriodMultiplier = input.float(1.5, title="Holding Period Multiplier", minval=0.5, maxval=2.0)
+
+// Entry Filters
+useTrendFilter = input.bool(true, title="Use Trend Filter")
+useRSIFilter = input.bool(true, title="Use RSI Filter")
+rsiLength = input.int(14, minval=1, title="RSI Length")
+rsiOversold = input.int(40, minval=0, maxval=50, title="RSI Oversold Level")
+rsiOverbought = input.int(60, minval=50, maxval=100, title="RSI Overbought Level")
+momentumMultiplier = input.float(1.5, title="Momentum Multiplier", step=0.1)
+
+// Time Filter
+useTimeFilter = input.bool(true, title="Use Time Filter")
+sessionTime = input.session("0930-1600", title="Trading Session Time")
+
+// New Inputs for Long and Short Trading
+allowLong = input.bool(true, title="Allow Long Trades")
+allowShort = input.bool(true, title="Allow Short Trades")
+
+// Calculate Bollinger Bands
+basisBB = ta.sma(src, lengthBB)
+devBB = multBB * ta.stdev(src, lengthBB)
+upperBB = basisBB + devBB
+lowerBB = basisBB - devBB
+
+// Calculate Keltner Channels
+basisKC = ta.ema(src, lengthKC)
+rangeKC = multKC * ta.atr(lengthKC)
+upperKC = basisKC + rangeKC
+lowerKC = basisKC - rangeKC
+
+// Determine Squeeze
+squeezeOn = lowerBB > lowerKC and upperBB < upperKC
+squeezeOff = lowerBB < lowerKC and upperBB > upperKC
+
+// Squeeze Counter for Minimum Squeeze Length
+var int squeezeCounter = 0
+squeezeCounter := squeezeOn ? squeezeCounter + 1 : 0
+
+// Calculate Average Squeeze Duration
+var float squeezeDurations = na
+squeezeDurations := squeezeOff[1] and squeezeCounter[1] > 0 ? squeezeCounter[1] : nz(squeezeDurations[1], 0)
+avgSqueezeDuration = ta.sma(squeezeDurations, 10)
+minSqueezeLength = math.round(avgSqueezeDuration)
+
+// Calculate Momentum and Dynamic Threshold
+momentum = ta.linreg(src - src[1], lengthMomentum, 0)
+momentumStdDev = ta.stdev(momentum, lengthMomentum)
+dynamicMomentumThreshold = momentumStdDev * momentumMultiplier
+strongPositiveMomentum = momentum > dynamicMomentumThreshold
+strongNegativeMomentum = momentum < -dynamicMomentumThreshold
+
+// Calculate RSI Filter
+rsiValue = ta.rsi(src, rsiLength)
+rsiBuySignal = ta.crossover(rsiValue, rsiOversold)
+rsiSellSignal = ta.crossunder(rsiValue, rsiOverbought)
+
+// Calculate ATR and Volatility
+atr = ta.atr(atrLength)
+atrPercent = (atr / close) * 100
+sufficientVolatility = atrPercent > minVolatility
+
+// Trend Filter using EMA
+trendMA = ta.ema(close, lengthTrendMA)
+bullishTrend = close > trendMA
+bearishTrend = close < trendMA
+
+// Time Filter
+inTradingSession = useTimeFilter ? not na(time(timeframe.period, sessionTime)) : true
+
+// Generate Buy and Sell Signals with Enhanced Entry Criteria
+buySignal = inTradingSession and squeezeOff[1] and strongPositiveMomentum and sufficientVolatility and (not useTrendFilter or bullishTrend) and (not useRSIFilter or rsiBuySignal)
+sellSignal = inTradingSession and squeezeOff[1] and strongNegativeMomentum and sufficientVolatility and (not useTrendFilter or bearishTrend) and (not useRSIFilter or rsiSellSignal)
+
+// Strategy Entry
+if allowLong and buySignal
+    strategy.entry("Long", strategy.long)
+
+if allowShort and sellSignal
+    strategy.entry("Short", strategy.short)
+
+// Dynamic ATR-based Stop Loss and Take Profit
+if useATRStops and strategy.position_size > 0
+    stopPrice = strategy.position_avg_price - (atr * atrMultiplierSL)
+    profitTarget = strategy.position_avg_price + (atr * atrMultiplierTP)
+    strategy.exit("Exit Long", from_entry="Long", stop=stopPrice, limit=profitTarget)
+
+if useATRStops and strategy.position_size < 0
+    stopPrice = strategy.position_avg_price + (atr * atrMultiplierSL)
+    profitTarget = strategy.position_avg_price - (atr * atrMultiplierTP)
+    strategy.exit("Exit Short", from_entry="Short", stop=stopPrice, limit=profitTarget)
+
+// Time-Based Exit
+var int barsHeld = 0
+if strategy.position_size != 0
+    barsHeld := barsHeld + 1
+    maxHoldingBars = math.round(holdingPeriodMultiplier * lengthMomentum)
+    if barsHeld >= maxHoldingBars
+        strategy.close("Time Exit")
+        barsHeld := 0  // Reset bars held after closing the position
+else
+    barsHeld := 0  // Reset bars held if no position
+
+// Plotting for Visualization (Optional)
+plot(trendMA, color=color.gray, title="Trend EMA")
+plot(upperBB, color=color.blue, title="Upper Bollinger Band")
+plot(lowerBB, color=color.blue, title="Lower Bollinger Band")
+plot(upperKC, color=color.orange, title="Upper Keltner Channel")
+plot(lowerKC, color=color.orange, title="Lower Keltner Channel")
+plotshape(squeezeOn, title="Squeeze On", location=location.bottom, color=color.red, style=shape.circle, size=size.tiny)
+plotshape(squeezeOff, title="Squeeze Off", location=location.bottom, color=color.green, style=shape.circle, size=size.tiny)
+
+View in Pine Editor・128 lines
+Use on chart
+3
+3
+1 710
+The Adaptive Squeeze Momentum Strategy is a versatile trading algorithm designed to capitalize on periods of low volatility that often precede significant price movements. By integrating multiple technical indicators and customizable settings, this strategy aims to identify optimal entry and exit points for both long and short positions.
+
+Key Features:
+
+Long/Short Trade Control:
+
+Toggle Options: Easily enable or disable long and short trades according to your trading preferences or market conditions.
+Flexible Application: Adapt the strategy for bullish, bearish, or neutral market outlooks.
+Squeeze Detection Mechanism:
+
+Bollinger Bands and Keltner Channels: Utilizes the convergence of Bollinger Bands inside Keltner Channels to detect "squeeze" conditions, indicating a potential breakout.
+Dynamic Squeeze Length: Calculates the average squeeze duration to adapt to changing market volatility.
+Momentum Analysis:
+
+Linear Regression: Applies linear regression to price changes over a specified momentum length to gauge the strength and direction of momentum.
+Dynamic Thresholds: Sets momentum thresholds based on standard deviations, allowing for adaptive sensitivity to market movements.
+Momentum Multiplier: Adjustable setting to fine-tune the aggressiveness of momentum detection.
+Trend Filtering:
+
+Exponential Moving Average (EMA): Implements a trend filter using an EMA to align trades with the prevailing market direction.
+Customizable Length: Adjust the EMA length to suit different trading timeframes and assets.
+Relative Strength Index (RSI) Filtering:
+
+Overbought/Oversold Signals: Incorporates RSI to avoid entering trades during overextended market conditions.
+Adjustable Levels: Set your own RSI oversold and overbought thresholds for personalized signal generation.
+Advanced Risk Management:
+
+ATR-Based Stop Loss and Take Profit:
+Adaptive Levels: Uses the Average True Range (ATR) to set stop loss and take profit points that adjust to market volatility.
+Custom Multipliers: Modify ATR multipliers for both stop loss and take profit to control risk and reward ratios.
+Minimum Volatility Filter: Ensures trades are only taken when market volatility exceeds a user-defined minimum, avoiding periods of low activity.
+Time-Based Exit:
+Holding Period Multiplier: Defines a maximum holding period based on the momentum length to reduce exposure to adverse movements.
+Automatic Position Closure: Closes positions after the specified holding period is reached.
+Session Filtering:
+
+Trading Session Control: Limits trading to predefined market hours, helping to avoid illiquid periods.
+Custom Session Times: Set your preferred trading session to match market openings, closings, or specific timeframes.
+Visualization Tools:
+
+Indicator Plots: Displays Bollinger Bands, Keltner Channels, and trend EMA on the chart for visual analysis.
+Squeeze Signals: Marks squeeze conditions on the chart, providing clear visual cues for potential trade setups.
+Customization Options:
+
+Indicator Parameters: Fine-tune lengths and multipliers for Bollinger Bands, Keltner Channels, momentum calculation, and ATR.
+Entry Filters: Choose to use trend and RSI filters to refine trade entries based on your strategy.
+Risk Management Settings: Adjust stop loss, take profit, and holding periods to match your risk tolerance.
+Trade Direction Control: Enable or disable long and short trades independently to align with your market strategy or compliance requirements.
+Time Settings: Modify the trading session times and enable or disable the time filter as needed.
+Use Cases:
+
+Trend Traders: Benefit from aligning entries with the broader market trend while capturing breakout movements.
+Swing Traders: Exploit periods of low volatility leading to significant price swings.
+Risk-Averse Traders: Utilize advanced risk management features to protect capital and manage exposure.
+Disclaimer:
+
+This strategy is a tool to assist in trading decisions and should be used in conjunction with other analyses and risk management practices. Past performance is not indicative of future results. Always test the strategy thoroughly and adjust settings to suit your specific trading style and market conditions.

@@ -1,0 +1,375 @@
+//@version=6
+strategy("Axis-Pro System (by Moiso) [Fixed Exits + No Errors]", overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=2,
+     max_lines_count=500,
+     max_boxes_count=500,
+     max_labels_count=500,
+     pyramiding=0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+//──────────────────────────────────────────────────────────────────────────────
+grpBias   = "Bias / Trend"
+tfHTF      = input.timeframe("60", "HTF Bias Timeframe", group=grpBias)
+emaSlowHTF = input.int(200, "HTF EMA (Bias)", minval=1, group=grpBias)
+emaFastLTF = input.int(21,  "LTF EMA Fast", minval=1, group=grpBias)
+emaMidLTF  = input.int(50,  "LTF EMA Mid",  minval=1, group=grpBias)
+
+grpStruct = "Structure / Entry Logic"
+pL        = input.int(5, "Pivot Left",  minval=1, group=grpStruct)
+pR        = input.int(5, "Pivot Right", minval=1, group=grpStruct)
+impLook   = input.int(60, "Impulse Lookback (bars)", minval=10, group=grpStruct)
+fibMin    = input.float(0.38, "Pullback Fib Min", minval=0.0, maxval=1.0, step=0.01, group=grpStruct)
+fibMax    = input.float(0.62, "Pullback Fib Max", minval=0.0, maxval=1.0, step=0.01, group=grpStruct)
+fibCancel = input.float(0.80, "Invalidate if deeper than", minval=0.0, maxval=1.0, step=0.01, group=grpStruct)
+cooldownB = input.int(5, "Cooldown (bars) after entry", minval=0, group=grpStruct)
+
+grpVol    = "Quality Filters"
+useATRExp = input.bool(true, "Anti-range: ATR expansion filter", group=grpVol)
+atrLen    = input.int(14, "ATR Length", minval=1, group=grpVol)
+atrBaseL  = input.int(100, "ATR Baseline SMA Length", minval=20, group=grpVol)
+atrRatio  = input.float(1.05, "ATR / ATRbaseline min", minval=0.5, step=0.01, group=grpVol)
+
+grpRisk   = "Risk / Safety Lines"
+slXatr    = input.float(1.6, "Base SL (xATR)", minval=0.1, step=0.1, group=grpRisk)
+maxSlXatr = input.float(6.0, "Max SL (xATR) (0=off)", minval=0.0, step=0.1, group=grpRisk)
+swingLB   = input.int(50, "Swing lookback for safety SL", minval=10, group=grpRisk)
+
+grpTP     = "Targets / Management"
+tp1RR     = input.float(1.5, "TP1 (R)", minval=0.1, step=0.1, group=grpTP)
+tp2RR     = input.float(3.0, "TP2 (R)", minval=0.1, step=0.1, group=grpTP)
+moveBE    = input.bool(true, "Move SL to Break-even at TP1", group=grpTP)
+trailAfter= input.bool(true, "After TP1: Trailing SL by EMA Fast", group=grpTP)
+tp1Pct    = input.int(50, "TP1 close %", minval=1, maxval=99, group=grpTP)
+
+grpFilters = "Winrate Filters"
+useEMA200  = input.bool(true, "Filter: EMA200 LTF", group=grpFilters)
+useBOSbuf  = input.bool(true, "Filter: BOS ATR buffer", group=grpFilters)
+bosBufATR  = input.float(0.10, "BOS buffer (xATR)", minval=0.0, step=0.01, group=grpFilters)
+useStrongC = input.bool(true, "Filter: Strong confirmation (close>prevH / <prevL)", group=grpFilters)
+
+grpTrend  = "Trendlines Auto"
+showTrend = input.bool(true, "Show Auto Trendlines", group=grpTrend)
+tLenL     = input.int(20, "Trendline Pivot Left", minval=2, group=grpTrend)
+tLenR     = input.int(5, "Trendline Pivot Right", minval=2, group=grpTrend)
+
+//──────────────────────────────────────────────────────────────────────────────
+// CORE SERIES
+//──────────────────────────────────────────────────────────────────────────────
+atr      = ta.atr(atrLen)
+atrBase  = ta.sma(atr, atrBaseL)
+atrOk    = not useATRExp or (atrBase > 0 and atr / atrBase >= atrRatio)
+
+emaFast  = ta.ema(close, emaFastLTF)
+emaMid   = ta.ema(close, emaMidLTF)
+ema200   = ta.ema(close, 200)
+
+globalLowest  = ta.lowest(low, impLook)
+globalHighest = ta.highest(high, impLook)
+
+htfClose   = request.security(syminfo.tickerid, tfHTF, close[1], lookahead=barmerge.lookahead_on)
+htfEmaSlow = request.security(syminfo.tickerid, tfHTF, ta.ema(close, emaSlowHTF)[1], lookahead=barmerge.lookahead_on)
+biasLong   = htfClose > htfEmaSlow
+biasShort  = htfClose < htfEmaSlow
+
+bosBuffer = atr * bosBufATR
+
+//──────────────────────────────────────────────────────────────────────────────
+// ESTRUCTURA & ENTRY
+//──────────────────────────────────────────────────────────────────────────────
+ph = ta.pivothigh(high, pL, pR)
+pl = ta.pivotlow(low,  pL, pR)
+
+var float lastSH = na
+var float lastSL = na
+if not na(ph)
+    lastSH := ph
+if not na(pl)
+    lastSL := pl
+
+// CORRECCIÓN 1: Calcular cruces fuera de la condición booleana
+// Esto asegura que ta.crossover se ejecute en cada barra
+xo = ta.crossover(close, lastSH)
+xu = ta.crossunder(close, lastSL)
+
+bool crossUp   = not na(lastSH) and xo
+bool crossDown = not na(lastSL) and xu
+
+// BOS base
+bosUp0   = biasLong  and atrOk and crossUp
+bosDown0 = biasShort and atrOk and crossDown
+
+// BOS con buffer ATR (evita falsos breaks)
+bosUp    = useBOSbuf ? (bosUp0 and close > lastSH + bosBuffer) : bosUp0
+bosDown  = useBOSbuf ? (bosDown0 and close < lastSL - bosBuffer) : bosDown0
+
+var bool  armedLong  = false
+var bool  armedShort = false
+var float impStart   = na
+var float impEnd     = na
+
+if bosUp
+    armedLong := true
+    armedShort := false
+    impStart := globalLowest
+    impEnd := high
+
+if bosDown
+    armedShort := true
+    armedLong := false
+    impStart := globalHighest
+    impEnd := low
+
+// Zonas Fibonacci
+f_zoneLong(_s, _e) =>
+    rng = _e - _s
+    [_e - rng * fibMax, _e - rng * fibMin, _e - rng * fibCancel]
+
+f_zoneShort(_s, _e) =>
+    rng = _s - _e
+    [_e + rng * fibMin, _e + rng * fibMax, _e + rng * fibCancel]
+
+var float zLo = na
+var float zHi = na
+var float zInv= na
+
+if armedLong and not na(impStart) and not na(impEnd)
+    [z1, z2, z3] = f_zoneLong(impStart, impEnd)
+    zLo := z1
+    zHi := z2
+    zInv := z3
+
+if armedShort and not na(impStart) and not na(impEnd)
+    [z1, z2, z3] = f_zoneShort(impStart, impEnd)
+    zLo := z1
+    zHi := z2
+    zInv := z3
+
+if armedLong and not na(zInv) and low < zInv
+    armedLong := false
+if armedShort and not na(zInv) and high > zInv
+    armedShort := false
+
+// Señales
+touchLong     = armedLong  and not na(zLo) and not na(zHi) and low <= zHi and high >= zLo
+touchShort    = armedShort and not na(zLo) and not na(zHi) and high >= zLo and low <= zHi
+
+// Confirmación
+confirmLong0  = close > open and close > emaFast
+confirmShort0 = close < open and close < emaFast
+
+confirmLong   = useStrongC ? (close > emaFast and close > high[1]) : confirmLong0
+confirmShort  = useStrongC ? (close < emaFast and close < low[1])  : confirmShort0
+
+nearBandLong  = close >= math.min(emaFast, emaMid) and close <= math.max(emaFast, emaMid)
+nearBandShort = close <= math.max(emaFast, emaMid) and close >= math.min(emaFast, emaMid)
+
+// Cooldown
+var int lastEntryBar = na
+cdOk = na(lastEntryBar) or (bar_index - lastEntryBar) > cooldownB
+
+// Filtro EMA200
+emaOkLong  = not useEMA200 or close > ema200
+emaOkShort = not useEMA200 or close < ema200
+
+longSignal  = cdOk and touchLong  and confirmLong  and nearBandLong  and emaOkLong
+shortSignal = cdOk and touchShort and confirmShort and nearBandShort and emaOkShort
+
+//──────────────────────────────────────────────────────────────────────────────
+// GESTIÓN DE ESTRATEGIA
+//──────────────────────────────────────────────────────────────────────────────
+swingLow  = ta.lowest(low, swingLB)
+swingHigh = ta.highest(high, swingLB)
+
+var float sl_price  = na
+var float tp1_price = na
+var float tp2_price = na
+var bool  tp1_hit   = false
+
+// CORRECCIÓN 2: Función de actualización de línea visual arreglada
+// Ahora devuelve el objeto línea en lugar de intentar modificar la variable global directamente
+f_updateSlLine(_lineObj, _price) =>
+    line _l = _lineObj
+    if na(_l)
+        _l := line.new(bar_index, _price, bar_index + 1, _price, extend=extend.right, color=color.new(color.purple, 20), width=2)
+    else
+        line.set_xy1(_l, bar_index, _price)
+        line.set_xy2(_l, bar_index + 1, _price)
+    _l
+
+// Safety line visual variable
+var line slVis = na
+
+// Entradas
+if longSignal and strategy.position_size == 0
+    float _slAtr = close - atr * slXatr
+    float _slSw  = swingLow
+    float _initialSL = math.min(_slAtr, _slSw)
+
+    if maxSlXatr > 0 and (close - _initialSL) > (atr * maxSlXatr)
+        _initialSL := close - (atr * maxSlXatr)
+
+    float _risk = close - _initialSL
+    sl_price  := _initialSL
+    tp1_price := close + (_risk * tp1RR)
+    tp2_price := close + (_risk * tp2RR)
+    tp1_hit := false
+
+    strategy.entry("Long", strategy.long, comment="L")
+    armedLong := false
+    lastEntryBar := bar_index
+
+if shortSignal and strategy.position_size == 0
+    float _slAtr = close + atr * slXatr
+    float _slSw  = swingHigh
+    float _initialSL = math.max(_slAtr, _slSw)
+
+    if maxSlXatr > 0 and (_initialSL - close) > (atr * maxSlXatr)
+        _initialSL := close + (atr * maxSlXatr)
+
+    float _risk = _initialSL - close
+    sl_price  := _initialSL
+    tp1_price := close - (_risk * tp1RR)
+    tp2_price := close - (_risk * tp2RR)
+    tp1_hit := false
+
+    strategy.entry("Short", strategy.short, comment="S")
+    armedShort := false
+    lastEntryBar := bar_index
+
+// SALIDAS
+if strategy.position_size > 0
+    if not tp1_hit and high >= tp1_price
+        tp1_hit := true
+
+    if moveBE and tp1_hit
+        sl_price := math.max(sl_price, strategy.position_avg_price)
+
+    if trailAfter and tp1_hit
+        sl_price := math.max(sl_price, emaFast)
+
+    // Llamada corregida a la función
+    slVis := f_updateSlLine(slVis, sl_price)
+
+    strategy.exit("L_TP1", "Long", limit=tp1_price, qty_percent=tp1Pct)
+    strategy.exit("L_RUN", "Long", stop=sl_price, limit=tp2_price, qty_percent=100)
+
+if strategy.position_size < 0
+    if not tp1_hit and low <= tp1_price
+        tp1_hit := true
+
+    if moveBE and tp1_hit
+        sl_price := math.min(sl_price, strategy.position_avg_price)
+
+    if trailAfter and tp1_hit
+        sl_price := math.min(sl_price, emaFast)
+
+    // Llamada corregida a la función
+    slVis := f_updateSlLine(slVis, sl_price)
+
+    strategy.exit("S_TP1", "Short", limit=tp1_price, qty_percent=tp1Pct)
+    strategy.exit("S_RUN", "Short", stop=sl_price, limit=tp2_price, qty_percent=100)
+
+// Limpieza cuando no hay posición
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    sl_price := na
+    tp1_price := na
+    tp2_price := na
+    tp1_hit := false
+    if not na(slVis)
+        line.delete(slVis)
+        slVis := na
+
+//──────────────────────────────────────────────────────────────────────────────
+// TRENDLINES AUTO
+//──────────────────────────────────────────────────────────────────────────────
+phTrend = ta.pivothigh(high, tLenL, tLenR)
+plTrend = ta.pivotlow(low, tLenL, tLenR)
+
+var int   hx1 = na
+var float hy1 = na
+var int   hx2 = na
+var float hy2 = na
+var int   lx1 = na
+var float ly1 = na
+var int   lx2 = na
+var float ly2 = na
+
+var line tLineRes = na
+var line tLineSup = na
+
+if showTrend
+    if not na(phTrend)
+        hx1 := hx2
+        hy1 := hy2
+        hx2 := bar_index - tLenR
+        hy2 := phTrend
+        if not na(hx1)
+            if not na(tLineRes)
+                line.delete(tLineRes)
+            tLineRes := line.new(hx1, hy1, hx2, hy2, extend=extend.right, color=color.red, width=1)
+
+    if not na(plTrend)
+        lx1 := lx2
+        ly1 := ly2
+        lx2 := bar_index - tLenR
+        ly2 := plTrend
+        if not na(lx1)
+            if not na(tLineSup)
+                line.delete(tLineSup)
+            tLineSup := line.new(lx1, ly1, lx2, ly2, extend=extend.right, color=color.blue, width=1)
+
+View in Pine Editor・322 lines
+Use on chart
+7
+8
+2 012
+Axis-Pro System is a comprehensive Trend Following strategy designed to trade high-probability pullbacks. Unlike indicators that merely chase price, this system patiently waits for market structure alignment before seeking an entry.
+
+The system is built on the premise of "Quality over Quantity", utilizing volatility and structure filters to avoid choppy markets (ranges) and false breakouts.
+
+🧠 Strategy Logic
+The system makes decisions based on a strict 4-step hierarchy:
+
+Higher Timeframe (HTF) Bias:
+
+Analyzes the trend on a higher timeframe to ensure we are trading in the direction of the dominant flow.
+
+Structure & BOS (Break of Structure):
+
+Identifies clear impulses that break previous highs or lows. Once a BOS is confirmed, the system "arms" the trade and waits.
+
+Fibonacci Zone Pullback:
+
+It does not chase the breakout. Instead, it waits for a pullback into the "Discount Zone" (Golden Zone, configurable between 0.382 and 0.618) to improve the Risk/Reward ratio.
+
+Validation & Trigger:
+
+Uses an ATR expansion check to filter out low-volatility periods.
+
+Requires candle confirmation and alignment with fast EMAs before pulling the trigger.
+
+🛡️ Risk Management
+The system incorporates advanced position management using a split execution model (50/50):
+
+Dynamic Stop Loss: Automatically calculated using an ATR multiplier or the recent Swing High/Low (whichever offers better protection).
+
+TP1 (Take Profit 1): Closes 50% of the position at a fixed R-multiple (e.g., 1.5R) to lock in profit and moves the Stop Loss to Break-Even.
+
+TP2 (Runner): The remaining 50% is left to run for higher targets (e.g., 3.0R) or until the trend bends, maximizing gains during strong moves.
+
+Trailing Stop: Optional feature to trail price with a fast EMA once the first target is hit.
+
+⚙️ Settings & Features
+The script is highly customizable for different assets (Crypto, Forex, Indices):
+
+Date Range Filter: Includes a date selector to perform precise Backtesting on specific periods (e.g., testing specifically during a Bear Market vs. Bull Market).
+
+Auto Trendlines: Automatically draws relevant trendlines for visual support.
+
+Quality Filters: Options to toggle the EMA 200 filter and breakout buffers.
+
+⚠️ Disclaimer
+This strategy is a tool for analysis and backtesting purposes. Past performance does not guarantee future results. It is highly recommended to test the strategy on a Demo account first and adjust parameters according to the volatility of the specific asset being traded. Always use responsible risk management.

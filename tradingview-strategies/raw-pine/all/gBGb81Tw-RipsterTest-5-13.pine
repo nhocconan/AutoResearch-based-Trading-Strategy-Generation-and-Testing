@@ -1,0 +1,23 @@
+//@version=4
+strategy("RipsterTest", overlay=true)
+
+ema5=ema(close,5)
+ema13=ema(close,13)
+
+long = ema5 > ema13
+short = strategy.openprofit >300
+
+strategy.entry ("long",strategy.long,1000,when=long)
+//strategy.entry ("short",strategy.short,1000,when=short)
+
+strategy.close("long",when=short)
+//strategy.close("short",when=long)
+
+View in Pine Editor・14 lines
+Use on chart
+6
+6
+6
+5
+13 007
+5-13 cross on 30 min

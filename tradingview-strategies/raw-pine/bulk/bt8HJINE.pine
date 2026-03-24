@@ -1,0 +1,100 @@
+//@version=5
+strategy("Vinz Win – STRATEGY 1m AUTO", 
+     overlay=true, 
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     currency=currency.EUR)
+
+// ==============================
+// PARAMÈTRES STRATÉGIE
+// ==============================
+sessionTime   = input.session("0000-0900", "Session Asiatique")
+slBufferPips  = input.float(5.0, "Buffer SL (pips)", step=0.1)
+minBodyRatio  = input.float(0.4, "Filtre Anti-Doji")
+
+riskEUR       = input.float(500, "Risque par trade (€)", step=10)
+
+// ✅ RR LIBRE (1.2 / 2 / 3 / 4 / 6.7 etc.)
+rrMult        = input.float(2.0, "Risk / Reward (Libre)", step=0.1)
+
+// ==============================
+// SESSION
+// ==============================
+inSession = not na(time(timeframe.period, sessionTime))
+
+// ==============================
+// LOGIQUE BOUGIES (IDENTIQUE)
+// ==============================
+isRed(i)   => close[i] < open[i]
+isGreen(i) => close[i] > open[i]
+
+bodySize  = math.abs(close - open)
+rangeSize = high - low
+bodyRatio = rangeSize > 0 ? bodySize / rangeSize : 0
+
+isValidGreen = isGreen(0) and bodyRatio >= minBodyRatio
+twoReds      = isRed(1) and isRed(2)
+signalBuy    = inSession and twoReds and isValidGreen
+
+// ==============================
+// CALCUL PRIX
+// ==============================
+pipValue   = syminfo.mintick * 10
+entryPrice = close
+slPrice    = low - (slBufferPips * pipValue)
+riskPoints = entryPrice - slPrice
+
+// ==============================
+// ADAPTATION AUTOMATIQUE DES LOTS
+// (Risque en euros inchangé)
+// ==============================
+valuePerPoint = syminfo.pointvalue
+riskEURperLot = riskPoints * valuePerPoint
+positionSize  = riskEURperLot > 0 ? riskEUR / riskEURperLot : 0.01
+
+// ==============================
+// TP BASÉ SUR RR LIBRE
+// (SL inchangé, TP en fonction du RR)
+// ==============================
+tpPoints = (riskEUR * rrMult) / (valuePerPoint * positionSize)
+tpPrice  = entryPrice + tpPoints
+
+// ==============================
+// 1 SEUL TRADE À LA FOIS
+// ==============================
+canTrade = strategy.position_size == 0
+
+// ==============================
+// ENTRÉE AUTOMATIQUE
+// ==============================
+if signalBuy and canTrade
+    strategy.entry("BUY", strategy.long, qty=positionSize)
+    strategy.exit("TP/SL", "BUY", stop=slPrice, limit=tpPrice)
+View in Pine Editor・72 lines
+Use on chart
+1
+5
+8
+2 244
+🚀 VinzWin BTC Strategy – BTC Scalping AUTO 1 min
+
+The VinzWin strategy is based on a simple and highly effective price action pattern:
+
+✅ 2 red candles followed by 1 green candle
+✅ Doji filter set to 0
+✅ Trading exclusively on BTC
+✅ Session from 12:00 to 12:00 (24/7)
+✅ Fixed Risk/Reward at 1:2
+✅ Stop Loss set in fixed € amount
+✅ Automatic risk management based on the Stop Loss
+
+On every trade:
+The Stop Loss is defined in fixed euros,
+The Take Profit is always set at twice the risk,
+The lot size is automatically adjusted to market conditions,
+ensuring clean, stable, and fully controlled risk management.
+
+📊 Multi-year backtests are available and show truly outstanding results, with strong consistency and an excellent profit/loss ratio.
+
+👉 A simple, mechanical strategy with no over-optimization, perfectly suited for BTC scalping with fully controlled capital management in euros.
+

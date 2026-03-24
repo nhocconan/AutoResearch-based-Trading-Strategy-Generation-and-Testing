@@ -1,0 +1,152 @@
+//@version=5
+// ---------------------        Start of Code        ---------------------
+strategy("Swing Trades Validator", overlay=true, margin_long=100, pyramiding = 0)
+
+// Indicator Display Checks
+TakeProfitPercent       = input.float(title="Profit Target %", defval=10, minval=1, step=0.05)
+StopLossPercent         = input.float(title="Stop Loss %", defval=10, minval=1, step=0.05)
+pullbackchoice          = input.bool(true, "Enhanced Entry Rules")
+
+// EMAs
+emaH            = ta.ema(close, 8)
+emaHyest        = ta.ema(close[1], 8)
+emaHyest1       = ta.ema(close[2], 8)
+emaHyest2       = ta.ema(close[3], 8)
+emaL            = ta.ema(close, 21)
+emaLyest        = ta.ema(close[1], 21)
+emaLyest1       = ta.ema(close[2], 21)
+emaLyest2       = ta.ema(close[3], 21)
+emaf            = ta.ema(close, 50)
+emath           = ta.ema(close, 200)
+emathhigh       = ta.ema(high, 200)
+emathlow        = ta.ema(low, 200)
+emaslowmonthly  = request.security(syminfo.tickerid, "M", emaL) // Monthly 21ema
+emafastmonthly  = request.security(syminfo.tickerid, "M", emaH) // Monthly 8ema
+emaslowweekly   = request.security(syminfo.tickerid, "W", emaL) // Weekly 21ema
+emafastweekly   = request.security(syminfo.tickerid, "W", emaH) // Weekly 8ema
+emaslowdaily    = request.security(syminfo.tickerid, "D", emaL) // Daily 21ema
+emafastdaily    = request.security(syminfo.tickerid, "D", emaH) // Daily 8ema
+emafdaily       = request.security(syminfo.tickerid, "D", emaf) // Daily 50ema
+emathdaily      = request.security(syminfo.tickerid, "D", emath) // Daily ema
+emathdailyhigh  = request.security(syminfo.tickerid, "D", emathhigh) // Daily ema High
+emathdailylow   = request.security(syminfo.tickerid, "D", emathlow) // Daily ema Low
+ema21yest       = request.security(syminfo.tickerid, "D", emaLyest) // Daily 21ema 1 day ago
+ema21yest1      = request.security(syminfo.tickerid, "D", emaLyest1) // Daily 21ema 2 days ago
+ema21yest2      = request.security(syminfo.tickerid, "D", emaLyest2) // Daily 21ema 3 days ago
+ema8yest        = request.security(syminfo.tickerid, "D", emaHyest) // Daily 8ema 1 day ago
+ema8yest1       = request.security(syminfo.tickerid, "D", emaHyest1) // Daily 8ema 2 days ago
+ema8yest2       = request.security(syminfo.tickerid, "D", emaHyest2) // Daily 8ema 3 days ago
+
+
+// Prices
+monthopen       = request.security(syminfo.tickerid, 'M', open, barmerge.gaps_off, barmerge.lookahead_on)
+monthclose      = request.security(syminfo.tickerid, 'M', close, barmerge.gaps_off, barmerge.lookahead_on)
+weekopen        = request.security(syminfo.tickerid, 'W', open, barmerge.gaps_off, barmerge.lookahead_on)
+weekclose       = request.security(syminfo.tickerid, 'W', close, barmerge.gaps_off, barmerge.lookahead_on)
+dayopen         = request.security(syminfo.tickerid, 'D', open, barmerge.gaps_off, barmerge.lookahead_on)
+dayclose        = request.security(syminfo.tickerid, 'D', close, barmerge.gaps_off, barmerge.lookahead_on)
+threedayhigh    = request.security(syminfo.tickerid, 'D', high[3], barmerge.gaps_off, barmerge.lookahead_on)
+twodayhigh      = request.security(syminfo.tickerid, 'D', high[2], barmerge.gaps_off, barmerge.lookahead_on)
+yesthigh        = request.security(syminfo.tickerid, 'D', high[1], barmerge.gaps_off, barmerge.lookahead_on)
+yestlow         = request.security(syminfo.tickerid, 'D', low[1], barmerge.gaps_off, barmerge.lookahead_on)
+
+// Conditions 
+monthlybullish          = emafastmonthly > emaslowmonthly
+monthlybullishprice     = close > emafastmonthly
+monthlybullishcandle    = monthclose > monthopen
+weeklybullish           = emafastweekly > emaslowweekly
+weeklybullishprice      = close > emafastweekly
+weeklybullishcandle     = weekclose > weekopen
+realbullish             = dayclose > emathdailyhigh
+goldencross             = emafdaily > emathdailyhigh
+dailybullish1           = emafdaily > emathdaily
+dailybullish2           = emafastdaily > emaslowdaily
+dailybullishprice       = close > emafastdaily
+dailybullishcandle      = dayclose > dayopen
+ringlow                 = yestlow <= ema8yest
+aggropullback           = twodayhigh < threedayhigh
+pullback                = (pullbackchoice ? aggropullback : 0)
+pullbackfailure         = dayclose > yesthigh and yesthigh < twodayhigh or pullback
+emasetup                = ema8yest > ema21yest and ema8yest1 > ema21yest1 and ema8yest2 > ema21yest2
+
+// Target Profit and Stop Loss Inputs
+// Input parameters can be found at the beginning of the code
+ProfitTarget        = (close * (TakeProfitPercent / 100)) / syminfo.mintick
+StopLoss            = (close * (StopLossPercent / 100)) / syminfo.mintick
+
+longCondition = monthlybullish and monthlybullishprice and monthlybullishcandle and weeklybullish and weeklybullishprice and weeklybullishcandle and dailybullish1 and dailybullish2 and dailybullishprice and dailybullishcandle and ringlow and pullbackfailure and emasetup and realbullish and goldencross
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit ("Exit", "Long", profit = ProfitTarget, loss = StopLoss)
+
+// -----------xxxxxxxxxxx-------------    End of Code     -----------xxxxxxxxxxx---------------
+
+View in Pine Editor・86 lines
+Use on chart
+2
+7
+3
+2
+10 827
+Dec 26, 2021
+This swing trading strategy validator is built on the original strategy taught in my bootcamp for swing traders.
+
+The strategy is simple and follows a trend trading pattern on prices reacting to Exponential Moving Averages over a multiple time-frame analysis.
+The details of the strategy are as follows:
+
+- Holding Period : Upto a couple of months
+- Time-frames to be analysed : Month - Week - Day
+- Trade Execution : Daily Time-frame
+
+Analysis Details:
+
+Step 1 : On the Monthly time-frame, the candle needs to be bullish with the latest close being higher than the opening price of the month.
+Step 2 : The price needs to be above the 8ema on the Monthly time-frame.
+Step 3 : The 8ema must be above the 20ema on the Monthly time-frame.
+The above steps indicate a bullish strength in the instrument on the Monthly time-frame.
+
+Step 4 : On the Weekly time-frame, the candle needs to be bullish with the latest close being higher than the opening price of the week.
+Step 5 : The price needs to be above the 8ema on the Weekly time-frame.
+Step 6 : The 8ema must be above the 20ema on the Weekly time-frame.
+The above steps indicate a bullish strength in the instrument on the Weekly time-frame.
+
+Step 7 : On the Daily time-frame, the candle needs to be bullish with the latest close being higher than the opening price of the day.
+Step 8 : The price needs to be above the 8ema on the Daily time-frame.
+Step 9 : The 8ema must be above the 20ema on the Daily time-frame.
+The above steps indicate a bullish strength in the instrument on the Daily time-frame.
+
+Step 10 : While the 8ema is above the 20ema on the Daily time-frame, the price must be allowed to rise before a pullback is seen towards the moving averages, indicating a bearish move trying to change the trend.
+Step 11 : These pullback candles need to form a pattern called the Ring Low with the second pullback candle having a lower high and lower low and the low of the last pullback candle being lesser than or equal to the fat ema on the Daily time-frame.
+Step 12 : If the stock is still bullish and the trend is displaying a strength in the underlying bullish direction, then there will be a resumption candle that will have a closing price higher than the previous day's high price.
+
+This trend continuation signal is a confirmation that the instrument will continue in the underlying trend direction and we will be able to enter if this condition is satisfied.
+
+The profit and loss percentages are set at a default 10% as this can be a minimum risk : reward for swing trades on average, but the inputs have been made available to the users in order to adjust the risk : reward to find the most optimum breathing room for each individual stock or instrument. This will give the user a highly custom overview of the strategy on individual instruments based on their volatility and price movements.
+
+The strategy tester will auto back-test this strategy historically and find all the trades that were taken based on this strategy and populate a performance summary.
+The most important data in V1.0 of this script are as follows:
+1. No. of Trades Taken : We want to see many trades being taken on this strategy in that particular instrument. This shows us a healthy report on the number of winning vs. losing trades.
+2. Percentage Profitable : We want to see that this strategy has worked out in the past and is giving us a high probability of return. This in no way an indication that the strategy will definitely work out in the future as well, but gives us an idea of whether or not we should enter this trade.
+3. No. of Winning Trades vs. Losing Trades : We would like to see a significantly higher number of winning trades.
+4. Avg. # of bars in a trade : This gives us an idea of how long on average we might have to wait to see the results of this strategy either in favor of our reward or against our desired direction. Some trades can be completed in around 15-20 bars on average and some trades have shown to take upto 45 days to reach desired reward. This is in line with our planned holding period, but gives the trader a sense of time and increased level of patience.
+
+The future updates will have more utility of the various elements of the strategy tester and the entire exit strategy will be integrated into the script.
+This script is not to be used as a standalone method and must be studied well in order to execute trades. I have not hidden visibility on other time-frames, but since order execution is done on the Daily time-frame, the script must run on the Daily time-frame only.
+
+There are many other factors to be taken into consideration before entering a trade and proper risk management and position sizing rules must be followed.
+Our bootcamp participants will use this strategy tester in conjunction with the invite-only Trading Toolkit assigned to them.
+
+The development of this script will be ongoing and all comments and feedback are welcome.
+Dec 26, 2021
+Release Notes
+Relaxed entry rules has been renamed to Enhanced Entry Rules.
+
+- This means that the pullback failure method has an additional parameter that the pullback candles must form after the price has made a high after the bullish crossover on the Daily time-frame.
+- Additional parameters for entry have been added in this version where the daily closing price must be higher than the 200ema on the Daily time-frame.
+- Also the daily 50ema must be greater than the daily 200ema for a good entry.
+Jan 27, 2022
+Release Notes
+This version has a minor update:
+- The Enhanced Entry Rules have been set to be true by default. So users don't need to check this each time they use the validator.
+- The long conditions have been placed in order. No new calculations have been added.

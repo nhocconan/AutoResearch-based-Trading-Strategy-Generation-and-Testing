@@ -1,0 +1,207 @@
+//@version=6
+strategy("Session Opening Range Breakout (ORBO)",
+     overlay           = true,
+     initial_capital   = 100000,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.01)
+
+//──────────────────────────────
+// Inputs
+//──────────────────────────────
+orSession = input.session("0930-0950", "Opening range session")
+showRange = input.bool(true, "Show OR levels")
+fillRange = input.bool(true, "Fill range body")
+
+//──────────────────────────────
+// Session & day detection
+//──────────────────────────────
+inSession = not na(time(timeframe.period, orSession))
+isNewDay  = ta.change(time("D")) != 0
+
+//──────────────────────────────
+// Track Opening Range High / Low
+//──────────────────────────────
+var float orHigh = na
+var float orLow  = na
+
+// Reset OR levels at the start of a new day
+if isNewDay
+    orHigh := na
+    orLow  := na
+
+// Build opening range during the session
+if inSession
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow, low)
+
+//──────────────────────────────
+// Breakout logic (after OR session ends)
+//──────────────────────────────
+sessionFinished = not inSession and not na(orHigh) and not na(orLow)
+
+longBreak  = sessionFinished and ta.crossover(close, orHigh)
+shortBreak = sessionFinished and ta.crossunder(close, orLow)
+
+if longBreak
+    strategy.entry("OR Long", strategy.long)
+
+if shortBreak
+    strategy.entry("OR Short", strategy.short)
+
+//──────────────────────────────
+// Visuals
+//──────────────────────────────
+plotOrHigh = plot(
+     showRange ? orHigh : na,
+     title = "OR High",
+     color = color.new(color.green, 0),
+     style = plot.style_linebr)
+
+plotOrLow = plot(
+     showRange ? orLow : na,
+     title = "OR Low",
+     color = color.new(color.red, 0),
+     style = plot.style_linebr)
+
+// Global-scope fill (required in Pine)
+fillColor = showRange and fillRange ? color.new(color.yellow, 90) : na
+fill(plotOrHigh, plotOrLow, fillColor)
+
+// Highlight while OR is being built
+bgcolor(inSession ? color.new(color.yellow, 92) : na)
+
+View in Pine Editor・76 lines
+Use on chart
+1
+2
+1
+2 635
+This strategy automates a classic Opening Range Breakout (ORBO) approach: it builds a price range for the first minutes after the market opens, then looks for strong breakouts above or below that range to catch early directional moves.
+
+Concept
+The idea behind ORBO is simple:
+
+The first minutes after the session open are often highly informative.
+
+Price forms an “opening range” that acts as a mini support/resistance zone.
+
+A clean breakout beyond this zone can lead to high-momentum moves.
+
+
+This script turns that logic into a fully backtestable strategy in TradingView.
+
+How the strategy works
+Opening Range Session
+
+Default session: 09:30–09:50 (exchange time)
+
+During this window, the script tracks:
+
+
+
+orHigh → highest high within the session
+
+orLow → lowest low within the session
+
+
+This forms your Opening Range for the day.
+
+Breakout Logic (after the window ends)
+Once the defined session ends:
+Long Entry:
+If the close crosses above the Opening Range High (orHigh),
+
+→ strategy.entry("OR Long", strategy.long) is triggered.
+
+Short Entry:
+If the close crosses below the Opening Range Low (orLow),
+
+→ strategy.entry("OR Short", strategy.short) is triggered.
+
+Only one opening range per day is considered, which keeps the logic clean and easy to interpret.
+
+Daily Reset
+
+At the start of a new trading day, the script resets:
+
+
+
+orHigh := na
+
+orLow := na
+
+
+
+A fresh Opening Range is then built using the next session’s 09:30–09:50 candles.
+
+
+This ensures entries are always based on today’s structure, not yesterday’s.
+
+Visuals & Inputs
+Inputs:
+
+Opening range session → default: "0930-0950"
+
+Show OR levels → toggle visibility of OR High / Low lines
+
+Fill range body → optional shaded zone between OR High and OR Low
+
+
+Chart visuals:
+
+A green line marks the Opening Range High.
+
+A red line marks the Opening Range Low.
+
+Optional yellow fill highlights the entire OR zone.
+
+Background shading during the session shows when the range is currently being built.
+
+
+These visuals make it easy to see:
+
+Where the OR sits relative to current price
+
+How clean / noisy the breakout was
+
+How often price respects or rejects the opening zone
+
+
+Backtesting & Optimization
+Because this is written as a strategy():
+You can use TradingView’s Strategy Tester to view:
+
+Win rate
+
+Net profit
+
+Drawdown
+
+Profit factor
+
+Equity curve
+
+
+Ideas to experiment with:
+
+Change the session window (e.g., 09:15–09:45, 10:00–10:30)
+
+Apply to different:
+
+Markets: indices, FX, crypto, stocks
+
+Timeframes: 1m / 5m / 15m
+
+
+Add your own:
+
+Stop Loss & Take Profit levels
+
+Time filters (only trade certain days / times)
+
+Volatility filters (e.g., ATR, range size thresholds)
+
+Higher-timeframe trend filter (e.g., only take longs above 200 EMA)
+

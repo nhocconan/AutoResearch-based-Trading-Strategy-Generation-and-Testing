@@ -1,0 +1,90 @@
+//@version=6
+strategy("PRO Scalping Strategy EMA50 + RSI3 + ADX5", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===== INPUTS =====
+
+emaLength = input.int(50, "EMA Length")
+rsiLength = input.int(3, "RSI Length")
+
+rsiOverbought = input.int(80, "RSI Overbought")
+rsiOversold = input.int(20, "RSI Oversold")
+
+adxLength = input.int(5, "ADX Length")
+adxThreshold = input.int(30, "ADX Strength")
+
+riskReward = input.float(1.5, "Risk Reward", step=0.1)
+
+// sesiones
+sessionLondon = input.session("0800-1200", "London Session")
+sessionNY = input.session("1300-1700", "New York Session")
+
+// ===== INDICADORES =====
+
+ema50 = ta.ema(close, emaLength)
+
+rsi = ta.rsi(close, rsiLength)
+
+[diplus, diminus, adx] = ta.dmi(adxLength, adxLength)
+
+// pendiente EMA
+emaSlope = ema50 - ema50[5]
+
+// rango vela para detectar fuerza
+candleBody = math.abs(close - open)
+candleRange = high - low
+strongCandle = candleBody > candleRange * 0.6
+
+// sesiones activas
+inLondon = not na(time(timeframe.period, sessionLondon))
+inNY = not na(time(timeframe.period, sessionNY))
+
+sessionFilter = inLondon or inNY
+
+// ===== CONDICIONES =====
+
+// tendencia
+trendLong = close > ema50 and emaSlope > 0
+trendShort = close < ema50 and emaSlope < 0
+
+// momentum
+rsiLong = ta.crossover(rsi, rsiOversold)
+rsiShort = ta.crossunder(rsi, rsiOverbought)
+
+// volatilidad
+strongTrend = adx > adxThreshold
+
+// condiciones finales
+longCondition = trendLong and rsiLong and strongTrend and strongCandle and sessionFilter
+shortCondition = trendShort and rsiShort and strongTrend and strongCandle and sessionFilter
+
+// ===== ENTRADAS =====
+
+if longCondition
+    stop = low
+    risk = close - stop
+    target = close + risk * riskReward
+
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("TP/SL LONG", "LONG", stop=stop, limit=target)
+
+if shortCondition
+    stop = high
+    risk = stop - close
+    target = close - risk * riskReward
+
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("TP/SL SHORT", "SHORT", stop=stop, limit=target)
+
+// ===== PLOTS =====
+
+plot(ema50, color=color.orange, linewidth=2, title="EMA 50")
+
+plotshape(longCondition, title="BUY", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+
+plotshape(shortCondition, title="SELL", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+View in Pine Editor・84 lines
+Use on chart
+8
+397
+Consiste en unir varios indicadores como rsi adx y ema50 para hacer scalping

@@ -1,0 +1,75 @@
+//@version=2
+strategy("Momentuminator 1.0", title = "Momentuminator", overlay=true)
+
+//©2016 Boffin Hollow Lab
+//Author: Craig Harris
+
+//color the background by days of the week
+
+c = navy
+
+
+bgColor = (dayofweek == monday)    ? color(c, 94) :
+          (dayofweek == tuesday)   ? color(c, 90) :
+          (dayofweek == wednesday) ? color(c, 86) :
+          (dayofweek == thursday)  ? color(c, 84) :
+          (dayofweek == friday)    ? color(c, 82) : na
+          
+          
+bgcolor(color = bgColor)
+
+//input parms and variables
+
+length = input(12)
+tgtt = input(title = "profit target", defval=600, step = 5)
+mloss = input (title = "Maximum Loss",defval=-600, step=5)
+price = close
+
+//momentuminator function
+
+momentum(seria, length) =>
+    mom = seria - seria[length]
+    mom
+    
+// give it to a mom    
+
+momz = momentum(price, length)
+mom1 = momentum( momz, 1)
+
+if (momz > 0 and mom1 > 0)
+    strategy.entry("MomLE", strategy.long, stop=high+syminfo.mintick, comment="MomLE")
+else
+    strategy.cancel("MomLE")
+    
+strategy.close("MomLE", when = strategy.openprofit > (tgtt))    
+strategy.close("MomSE", when = strategy.openprofit > (tgtt))     
+
+if (momz < 0 and mom1 < 0)
+    strategy.entry("MomSE", strategy.short, stop=low-syminfo.mintick, comment="MomSE")
+else
+    strategy.cancel("MomSE")
+    
+strategy.close("MomLE", when = strategy.openprofit > (tgtt))    
+strategy.close("MomSE", when = strategy.openprofit > (tgtt)) 
+
+strategy.close("MomLE", when = strategy.openprofit < (mloss))    
+strategy.close("MomSE", when = strategy.openprofit < (mloss))    
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・58 lines
+Use on chart
+1
+1
+9
+1
+4 078
+Here we have a general purpose momentum based long and short flip flop with optional [when set low enough] profit target and maximum loss.
+
+Program development: Boffin Hollow Lab
+
+Author: Tarzan at tradingview.com
+
+Release: Version 1.0 May 2016
+
+Please Note: Past Performance is not necessarily indicative of future results

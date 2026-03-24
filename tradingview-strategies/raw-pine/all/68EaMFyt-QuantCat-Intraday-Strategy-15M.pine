@@ -1,0 +1,101 @@
+//@version=3
+strategy("QuantCat Intraday Strategy (15M)", overlay=true)
+
+//MA's for basic signals, can experiment with these values
+
+fastEMA = sma(close, 25)
+slowEMA = sma(close, 100)
+
+//Parameters for validation of position
+
+lookback_value = 25
+maxNoCross=10 //value used for maximum number of crosses on a certain MA to mitigate noise and maximise value from trending markets
+
+//Amount of crosses on MA to filter out noise
+
+ema25_crossover = (cross(close, fastEMA)) == true ? 1 : 0
+ema25_crossover_sum = sum(ema25_crossover, lookback_value) ///potentially change lookback value to alter results
+crossCount = (ema25_crossover_sum <= maxNoCross)
+
+//Entries long
+
+agrLong =  ((crossover(fastEMA, slowEMA)) and (crossCount == true)) ? true : false
+consLong = ((close < fastEMA) and (close > slowEMA) and (fastEMA > slowEMA) and (crossCount == true)) ? true : false
+
+//Entries short
+
+agrShort =  ((crossunder(fastEMA, slowEMA)) and (crossCount == true)) ? true : false
+consShort = ((close > fastEMA) and (close < slowEMA) and (fastEMA < slowEMA) and (crossCount == true)) ? true : false
+
+//ATR
+
+atrLkb = input(14, minval=1, title='ATR Stop Period')
+atrRes = input("15", type=resolution, title='ATR Resolution')
+atr = security(tickerid, atrRes, atr(atrLkb))
+
+//Strategy
+
+longCondition = ((agrLong or consLong) == true)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = ((agrShort or consShort) == true)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+//Stop multiplier 
+
+stopMult = 4
+
+//horizontal stoplosses
+
+longStop = na
+longStop :=  shortCondition ? na : longCondition and strategy.position_size <=0 ? close - (atr * stopMult) : longStop[1] 
+shortStop = na
+shortStop := longCondition ? na : shortCondition and strategy.position_size >=0 ? close + (atr * stopMult) : shortStop[1]
+
+//Strategy exit functions
+
+strategy.exit("Long ATR Stop", "Long", stop=longStop)
+strategy.exit("Short ATR Stop", "Short", stop=shortStop)
+
+//Plots 
+
+redgreen = (fastEMA > slowEMA) ? green : red
+    
+p1 = plot(fastEMA, title="Fast EMA", color=redgreen, linewidth=2) 
+p2 = plot(slowEMA, title="Slow EMA", color=redgreen, linewidth=2) 
+fill(p1, p2, color=redgreen)
+
+s1 = plot(longStop, style=linebr, color=red, linewidth=2,     title='Long ATR Stop')
+s2 = plot(shortStop, style=linebr, color=red, linewidth=2,  title='Short ATR Stop')
+
+fill(p2, s1, color=red, transp=95)
+fill(p2, s2, color=red, transp=95)
+
+View in Pine Editor・74 lines
+Use on chart
+9
+7
+0
+23 217
+QuantCat Intraday Strategy
+
+This strategy is designed to be used on the 15 minute time frame, on liquid x/btc pairs and BTC/USD.
+
+It works by having 2 moving averages, automatic stop loss calculation, and taking positions on MA crosses and MA zone bounces for confirmation.
+
+Stoploss is so crucial to minimise any damage from huge unexpected candles, the strategies can just be used for entries as well, you don't have to stick to the exact formula- of the long and short system, but this by itself is profitable.
+
+The system nets positive results on
+-BTC/USD
+-ETH/BTC
+-LTC/BTC
+-XRP/BTC
+
+There is a small element of trend filtering also for the MA's, but I found adding it in actually hindered performance when testing and training the strategies unless it was using a loose value.
+
+You can get live alerts for this strategy and speak to our developers by joining our server on discord! (Link in signature)
+
+
+

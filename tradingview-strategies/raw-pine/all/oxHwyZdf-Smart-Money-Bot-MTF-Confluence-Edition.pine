@@ -1,0 +1,171 @@
+//@version=5
+// NOTE: Use version 5 for maximum compatibility.
+
+// Risk 1% or 2% of your account per trade
+riskPerTrade = input.float(1.5, title="Risk Per Trade (%)", minval=0.1, maxval=5.0)
+
+strategy("Smart Money Bot [MTF Confluence - Memory Fix]", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, max_bars_back=5000)
+
+// ==========================================
+// ⚙️ SETTINGS
+// ==========================================
+// Strategy Settings
+momSize      = input.float(1.0, title="Min Momentum Candle Size (ATR Multiplier)", group="Strategy")
+riskReward   = input.float(2.0, title="Take Profit Ratio (Risk:Reward)", group="Strategy")
+
+// TRAILING STOP (The "Big Win" Locker)
+// You said 500 points works best for big wins.
+trail_activation = input.int(500, title="Trail Activation Points (Main)", group="Exits")
+trail_offset     = input.int(10, title="Trail Offset Points", group="Exits")
+
+// 🛡️ SAFETY TRIGGER (The Gross Loss Killer)
+// If price moves this many points, we move Stop to Breakeven.
+use_be      = input.bool(true, title="Use Safety Breakeven?", group="Exits")
+be_points   = input.int(200, title="Move to BE at (Points)", group="Exits")
+
+// Settings for Buffer
+sl_buffer_mult   = input.float(0.5, title="SL Buffer (ATR Multiplier)")
+
+// 🛑 MULTI-TIMEFRAME TREND FILTERS
+useHtfFilter = input.bool(true, title="Enable Multi-Timeframe Trend Filter?", group="Trend Filters")
+htf1         = input.timeframe("60", title="Higher Timeframe 1 (Default: 1 Hour)", group="Trend Filters")
+htf2         = input.timeframe("W", title="Higher Timeframe 2 (Default: Weekly)", group="Trend Filters")
+htfEmaLen    = input.int(200, title="Trend EMA Length (Standard: 200)", group="Trend Filters")
+
+// ==========================================
+// 🧠 MEMORY VARIABLES (The Fix)
+// ==========================================
+// We use 'var' to remember the Target Price across different candles
+var float stored_tp = na
+var float stored_sl = na
+
+// ==========================================
+// 📊 CALCULATIONS
+// ==========================================
+current_atr = ta.atr(14)
+buffer_size = current_atr * sl_buffer_mult
+
+// 1. IDENTIFY MOMENTUM
+is3Green = close > open and close[1] > open[1] and close[2] > open[2] and (high - low) > (current_atr * momSize)
+is3Red   = close < open and close[1] < open[1] and close[2] < open[2] and (high - low) > (current_atr * momSize)
+
+// 2. DRAW ZONES
+var float demandTop = na
+var float demandBot = na
+var float supplyTop = na
+var float supplyBot = na
+
+if is3Green
+    demandTop := high[3]
+    demandBot := low[3]
+
+if is3Red
+    supplyTop := high[3]
+    supplyBot := low[3]
+
+// Plot Zones
+p1 = plot(demandTop, color=color.new(color.green, 50), style=plot.style_linebr, title="Demand Top")
+p2 = plot(demandBot, color=color.new(color.green, 50), style=plot.style_linebr, title="Demand Bot")
+fill(p1, p2, color=color.new(color.green, 80), title="Demand Zone Fill")
+
+p3 = plot(supplyTop, color=color.new(color.red, 50), style=plot.style_linebr, title="Supply Top")
+p4 = plot(supplyBot, color=color.new(color.red, 50), style=plot.style_linebr, title="Supply Bot")
+fill(p3, p4, color=color.new(color.red, 80), title="Supply Zone Fill")
+
+// ==========================================
+// 🕵️ SIGNALS
+// ==========================================
+inDemandZone  = low <= demandTop and low >= demandBot
+bullishEngulf = close > open and close[1] < open[1] and close > open[1] and close > close[1]
+sdBuySignal   = inDemandZone and bullishEngulf
+
+inSupplyZone  = high >= supplyBot and high <= supplyTop
+bearishEngulf = close < open and close[1] > open[1] and close < open[1] and close < close[1]
+sdSellSignal  = inSupplyZone and bearishEngulf
+
+// ==========================================
+// 🚦 TREND FILTERS
+// ==========================================
+isBullish(tf) =>
+    request.security(syminfo.tickerid, tf, close > ta.ema(close, htfEmaLen))
+
+htf1_Bullish = isBullish(htf1)
+htf2_Bullish = isBullish(htf2)
+
+canBuy  = not useHtfFilter or (htf1_Bullish and htf2_Bullish)
+canSell = not useHtfFilter or (not htf1_Bullish and not htf2_Bullish)
+
+// ==========================================
+// 🚀 EXECUTION
+// ==========================================
+
+// --- BUY SIDE ---
+if (sdBuySignal and canBuy)
+    sl = demandBot - buffer_size
+    tp = close + ((close - sl) * riskReward)
+    riskPerShare = close - sl
+    riskAmount = strategy.equity * (riskPerTrade / 100)
+    qtySize = riskPerShare > 0 ? (riskAmount / riskPerShare) : 0
+    
+    // Store the TP/SL for memory
+    stored_tp := tp
+    stored_sl := sl
+    
+    strategy.entry("Long", strategy.long, qty=qtySize, comment = "Trend Buy")
+    strategy.exit("Exit Long", "Long", stop=sl, limit=tp, trail_points=trail_activation, trail_offset=trail_offset)
+
+// --- SELL SIDE ---
+if (sdSellSignal and canSell)
+    sl = supplyTop + buffer_size
+    tp = close - ((sl - close) * riskReward)
+    riskPerShare = sl - close
+    riskAmount = strategy.equity * (riskPerTrade / 100)
+    qtySize = riskPerShare > 0 ? (riskAmount / riskPerShare) : 0
+    
+    // Store the TP/SL for memory
+    stored_tp := tp
+    stored_sl := sl
+
+    strategy.entry("Short", strategy.short, qty=qtySize, comment="Trend Sell")
+    strategy.exit("Exit Short", "Short", stop = sl, limit = tp, trail_points=trail_activation, trail_offset=trail_offset)
+
+// ==========================================
+// 🛡️ SAFETY MONITOR (Corrected)
+// ==========================================
+// This checks ev ery candle to see if we should move to Breakeven
+
+if use_be and strategy.position_size != 0
+    be_dist = be_points * syminfo.mintick
+    avg_entry = strategy.position_avg_price
+    
+    // Check Longs
+    if strategy.position_size > 0
+        // If price is higher than Entry + 200 points...
+        if high > (avg_entry + be_dist)
+            // Move Stop to Entry. IMPORTANT: We re-state 'limit=stored_tp' so we don't lose the target!
+            strategy.exit("Exit Long", "Long", stop=avg_entry, limit=stored_tp, trail_points=trail_activation, trail_offset=trail_offset, comment="Safety BE")
+            
+    // Check Shorts
+    if strategy.position_size < 0
+        // If price is lower than Entry - 200 points...
+        if low < (avg_entry - be_dist)
+            // Move Stop to Entry. Re-state the Target!
+            strategy.exit("Exit Short", "Short", stop=avg_entry, limit=stored_tp, trail_points=trail_activation, trail_offset=trail_offset, comment="Safety BE")
+
+// Visuals
+plot(strategy.position_size != 0 ? strategy.opentrades.entry_price(strategy.opentrades - 1) : na, color=color.yellow, style=plot.style_linebr, title="Entry Price")
+
+View in Pine Editor・156 lines
+Use on chart
+3
+4
+1 209
+Dec 14, 2025
+Uses multi-time frame analysis and supply and demand strategy.
+Best used when swing trading.
+Dec 14, 2025
+Release Notes
+A professional-grade Supply & Demand strategy designed for the 4-Hour timeframe. Features Multi-Timeframe trend filtering, dynamic momentum detection, and a "Safety Breakeven" engine to protect capital while letting winners run.
+Dec 16, 2025
+Release Notes
+I have developed a 4-hour swing trading strategy called the Smart Money Bot that uses supply and demand zones filtered by multi-timeframe trends to capture institutional moves. It identifies zones based on momentum candles and only enters when an engulfing pattern confirms the direction in alignment with the weekly trend. The script features dynamic position sizing to risk a fixed percentage per trade, targeting a 1:2 risk-to-reward ratio. To manage open positions, it employs a 500-point trailing stop to lock in major swings and a configurable 200-point safety trigger to move stops to breakeven. I am seeking feedback on the code and logic, specifically looking for ways to reduce gross drawdown without cutting winners short. Please test this logic on various asset classes and share your optimization results so we can improve the overall robustness.

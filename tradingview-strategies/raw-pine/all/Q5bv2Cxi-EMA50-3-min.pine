@@ -1,0 +1,23 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+
+em = ema(close, 50)
+op = open
+cl = close
+
+if (em-op>0 and cl-em>0)
+    //strategy.entry("entry short", strategy.short, comment="Buy")
+    strategy.order("buy", strategy.short, 100)
+
+if (em-op<0 and cl-em<0)
+    //strategy.entry("entry long", strategy.long, comment="Sell")
+    strategy.order("sell", strategy.long, 100)
+
+View in Pine Editor・14 lines
+Use on chart
+1
+3
+4
+4 890
+simple strategy with 3 min candles and 76% profitable orders
+major pairs recommended

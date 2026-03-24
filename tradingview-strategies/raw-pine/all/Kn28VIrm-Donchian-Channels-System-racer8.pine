@@ -1,0 +1,53 @@
+//@version=4
+strategy("Donchian Channels System", overlay=true)
+
+n = input(20,"Period")
+hi = highest(n)
+lo = lowest(n)
+cl = close
+mid = 0.5*(hi + lo)
+
+if cl>hi[1]
+    strategy.entry("Buy", strategy.long)
+
+if cl<lo[1]
+    strategy.entry("Sell", strategy.short)
+    
+if close<mid
+    strategy.close("Buy")
+
+if close>mid
+    strategy.close("Sell")
+
+plot(hi,color=color.blue)
+plot(lo,color=color.red)
+plot(mid,color=color.gray)
+View in Pine Editor・26 lines
+Use on chart
+1
+9
+8
+3
+5 528
+Donchian Channels was developed by Richard Donchian in 1949. They have been used with great success by the Turtles, a group of traders in the 1980s who managed to obtain returns of 80% annually. Truly incredible story.
+
+This particular indicator is a trend trading system I coded that shows you when to enter long or short and when to exit those longs or shorts.
+In addition, this indicator shows the past performance results that are incredibly valuable information for backtesting this system.
+
+The high, mid, and low lines have been plotted to show how this system works. The blue line is the high line. The gray line is the mid line. The red line is the low line.
+
+Entry signals are generated when the current close closes above the highest price for a long trade or below the lowest price for a short trade over n periods.
+
+Exit signals are generated when the current close crosses the mid-line (aka. baseline) and closes.
+Baseline = (highest price + lowest price)/2
+
+I encourage you to play around with the settings, although I reccomend avoiding any period below 14.
+
+This system is no bullshit, it's the real deal.
+
+Good luck traders, and enjoy ;)
+
+
+
+
+

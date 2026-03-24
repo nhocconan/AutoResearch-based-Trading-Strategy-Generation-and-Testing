@@ -1,0 +1,145 @@
+//@version=5
+strategy('Automated Bitcoin (BTC) Investment Strategy', overlay=true, initial_capital=5000, pyramiding=0, currency='USD', default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+////////////  Functions
+
+Atr(p) =>
+    atr = 0.
+    Tr = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+    atr := nz(atr[1] + (Tr - atr[1]) / p, Tr)
+    atr
+
+//TEMA
+TEMA(series, length) =>
+    if length > 0
+        ema1 = ta.ema(series, length)
+        ema2 = ta.ema(ema1, length)
+        ema3 = ta.ema(ema2, length)
+        3 * ema1 - 3 * ema2 + ema3
+    else
+        na
+tradeType = input.string('LONG', title='What trades should be taken : ', options=['LONG', 'SHORT', 'BOTH', 'NONE'])
+
+///////////////////////////////////////////////////
+/// INDICATORS
+source = close
+
+/// TREND
+trend_type1 = input.string('TEMA', title='First Trend Line : ', options=['LSMA', 'TEMA', 'EMA', 'SMA'])
+trend_type2 = input.string('LSMA', title='First Trend Line : ', options=['LSMA', 'TEMA', 'EMA', 'SMA'])
+
+trend_type1_length = input(25, 'Length of the First Trend Line')
+trend_type2_length = input(100, 'Length of the Second Trend Line')
+
+leadLine1 = if trend_type1 == 'LSMA'
+    ta.linreg(close, trend_type1_length, 0)
+else if trend_type1 == 'TEMA'
+    TEMA(close, trend_type1_length)
+else if trend_type1 == 'EMA'
+    ta.ema(close, trend_type1_length)
+else
+    ta.sma(close, trend_type1_length)
+
+leadLine2 = if trend_type2 == 'LSMA'
+    ta.linreg(close, trend_type2_length, 0)
+else if trend_type2 == 'TEMA'
+    TEMA(close, trend_type2_length)
+else if trend_type2 == 'EMA'
+    ta.ema(close, trend_type2_length)
+else
+    ta.sma(close, trend_type2_length)
+
+p3 = plot(leadLine1, color=color.new(#53b987, 50), title='EMA', linewidth=1)
+p4 = plot(leadLine2, color=color.new(#eb4d5c, 50), title='SMA', linewidth=1)
+fill(p3, p4, color=leadLine1 > leadLine2 ? #53b987 : #eb4d5c, transp=60)
+
+//Upward Trend
+UT = ta.crossover(leadLine1, leadLine2)
+DT = ta.crossunder(leadLine1, leadLine2)
+
+// TP/ SL/  FOR LONG
+// TAKE PROFIT AND STOP LOSS
+long_tp1_inp = input.float(15, title='Long Take Profit 1 %', step=0.1) / 100
+long_tp1_qty = input.int(20, title='Long Take Profit 1 Qty', step=1)
+
+long_tp2_inp = input.float(30, title='Long Take Profit 2%', step=0.1) / 100
+long_tp2_qty = input.int(20, title='Long Take Profit 2 Qty', step=1)
+
+long_take_level_1 = strategy.position_avg_price * (1 + long_tp1_inp)
+long_take_level_2 = strategy.position_avg_price * (1 + long_tp2_inp)
+
+long_sl_input = input.float(5, title='stop loss in %', step=0.1) / 100
+long_sl_input_level = strategy.position_avg_price * (1 - long_sl_input)
+
+// Stop Loss
+multiplier = input.float(3.5, 'SL Mutiplier', minval=1, step=0.1)
+ATR_period = input.int(8, 'ATR period', minval=1, step=1)
+
+// Strategy
+//LONG STRATEGY CONDITION
+
+SC = input(close, 'Source')
+SL1 = multiplier * Atr(ATR_period)  // Stop Loss
+Trail1 = 0.0
+iff_1 = SC > nz(Trail1[1], 0) ? SC - SL1 : SC + SL1
+Trail1 := SC < nz(Trail1[1], 0) and SC[1] < nz(Trail1[1], 0) ? math.min(nz(Trail1[1], 0), SC + SL1) : iff_1
+Trail1_high = ta.highest(Trail1, 50)
+
+// iff(SC > nz(Trail1[1], 0) and SC[1] > nz(Trail1[1], 0), max(nz(Trail1[1], 0), SC - SL1),
+
+entry_long = ta.crossover(leadLine1, leadLine2) and Trail1_high < close
+exit_long = close < Trail1_high or ta.crossover(leadLine2, leadLine1) or close < long_sl_input_level
+
+///// BACKTEST PERIOD ///////
+testStartYear = input(2016, 'Backtest Start Year')
+testStartMonth = input(1, 'Backtest Start Month')
+testStartDay = input(1, 'Backtest Start Day')
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+
+testStopYear = input(9999, 'Backtest Stop Year')
+testStopMonth = input(12, 'Backtest Stop Month')
+testStopDay = input(31, 'Backtest Stop Day')
+testPeriodStop = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+if testPeriod()
+    if tradeType == 'LONG' or tradeType == 'BOTH'
+        if strategy.position_size == 0 or strategy.position_size > 0
+            strategy.entry('long', strategy.long, comment='b8f60da7_ENTER-LONG_BINANCE_BTC/USDT_b8f60da7-BTC-Investment_4H', when=entry_long)
+            strategy.exit('TP1', 'long', qty_percent=long_tp1_qty, limit=long_take_level_1)
+            strategy.exit('TP2', 'long', qty_percent=long_tp2_qty, limit=long_take_level_2)
+            strategy.close('long', when=exit_long, comment='b8f60da7_EXIT-LONG_BINANCE_BTC/USDT_b8f60da7-BTC-Investment_4H')
+
+
+// LONG POSITION
+
+plot(strategy.position_size > 0 ? long_take_level_1 : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='1st Long Take Profit')
+plot(strategy.position_size > 0 ? long_take_level_2 : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='2nd Long Take Profit')
+plot(strategy.position_size > 0 ? Trail1_high : na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='Long Stop Loss')
+View in Pine Editor・123 lines
+Use on chart
+8
+8
+8
+10
+18 418
+Jan 18, 2022
+Automated Bitcoin (BTC) Investment Strategy from Wunderbit Trading
+
+This strategy is designed for the automated long-term investment in Bitcoin. The BTC investment strategy is primarily suitable for long-term investors who want to increase the percentage of their investments through timely trading long-term transactions. The main feature is the difference from the indicator of long-term investment. Based on their statistics, this figure is 2 times less. That is, if we just bought Bitcoin and held it, we would receive 2 times less than if we applied the BTC Investment strategy.
+
+This strategy uses the intersection of the triple exponential moving average and the least squares moving average. We also control the profit you will make during an uptrend by implementing a trailing stop based on the ATR indicator.
+
+This is a spot market-only strategy and can be used primarily for long-term investors. The strategy is designed to create an automatic version of investing using a webhook.
+
+Automation allows you to safely ignore the state of your portfolio and exclude emotions.
+
+In order to create a cryptocurrency bot for this strategy, you need to:
+1. Create alerts and link the URL to the webhook.
+2. Connect the TradingView strategy with automated trading service.
+
+Sep 11, 2023
+Release Notes
+Upgrade to v5 Pine script

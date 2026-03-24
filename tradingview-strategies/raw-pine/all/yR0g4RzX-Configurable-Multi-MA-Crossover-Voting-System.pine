@@ -1,0 +1,83 @@
+//@version=5
+strategy(title='Configurable Multi MA Crossover Voting System', shorttitle='Configurable Multi MA Crossover Voting System', initial_capital=1000, overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+crossoverConfig= input.string(defval="2x4,3x5,4x6", title="Crossover Config")
+source= input.source(high)
+maType= input.string("WMA", title="Moving Average Type", options=["WMA","SMA","VWMA"])
+atrPeriod= input(14, title="ATR Period")
+profitAtr = input(10, title="Profit ATR x")
+lossAtr = input(5, title="Loss ATR x")
+
+
+ma(src,length,type) => 
+    float ma = switch type
+        "SMA" => ta.sma(src, length)
+        "WMA" => ta.wma(src, length)
+        "VWMA" => ta.vwma(src, length)
+
+crossoverGroups= str.split(crossoverConfig, ",")
+crossoverCount= array.size(crossoverGroups)
+crossovers= array.new_string(crossoverCount)
+positions= array.new_int(crossoverCount, 0)
+longVotes= 0
+for i= 0 to crossoverCount-1
+    crossover= str.tostring(array.get(crossoverGroups, i))
+    crossoverBoundaries= str.split(crossover, "x")
+    int fastLength= math.round(str.tonumber(array.get(crossoverBoundaries, 0)))
+    int slowLength= math.round(str.tonumber(array.get(crossoverBoundaries, 1)))
+    wmaFast= ma(source,fastLength,maType)
+    wmaSlow= ma(source,slowLength,maType)
+    if wmaFast>wmaSlow
+        longVotes:= longVotes + 1
+        array.set(positions, i, 1)
+
+longCondition= longVotes==crossoverCount and strategy.position_size==0
+
+
+//profitTicks = profitAtr*ta.atr(atrPeriod)/syminfo.mintick
+//lossTicks = lossAtr*ta.atr(atrPeriod)/syminfo.mintick
+profitPrice= close+profitAtr*ta.atr(atrPeriod)
+lossPrice= close-lossAtr*ta.atr(atrPeriod)
+
+if strategy.position_size>0
+    profitPrice:= profitPrice[1]
+    lossPrice:= lossPrice[1]
+
+plot(profitPrice, color=color.green)
+plot(lossPrice, color=color.red)
+
+if longCondition and profitPrice>0
+    strategy.entry("Long", strategy.long)
+
+if longVotes<crossoverCount and strategy.position_size>0 and (high>profitPrice or low<lossPrice)
+    strategy.close("Long")
+    
+longVotes:= 0
+
+View in Pine Editor・57 lines
+Use on chart
+6
+7
+2 905
+This strategy goes long when all fast moving averages that you have defined are above their counterpart slow moving averages.
+
+Long position is closed when profit or loss target is hit and at least one of the fast moving averages is below its counterpart slow moving average.
+
+The format of the config is simple. The format is : FASTxSLOW,FASTxSLOW,...
+Example : If you want 2 moving averages fast=9,slow=14 and fast=20,slow=50 you define it like this : 9x14,20x50
+Another example : 5x10,10x15,15x20 => means 3 moving average setups : first wih fast=5/slow=10, second with fast=10/slow=15, last with fast=15/slow=20
+
+You can chose the type of moving average : SMA, WMA, VWMA (i got issues with EMA/RMA so i removed them)
+You can chose the source of the moving average : high, close, hl2 etc.
+
+You can chose the period on which ATR is calculated and ATR profit/loss factors.
+
+Profit is calculated like : buy_price + atr_factor*atr
+Loss is calculated like : buy_price - atr_factor*atr
+
+Performance in backtest is variable depending on the timeframe, the options and the market.
+Performance in backtest suggests it works better for higher timeframes like 1d, 4h etc.
+
+Disclaimer
+Please remember that past performance may not be indicative of future results.
+Due to various factors, including changing market conditions, the strategy may no longer perform as well as in historical backtesting.
+This post and the script don’t provide any financial advice.

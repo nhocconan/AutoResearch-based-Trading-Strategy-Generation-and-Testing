@@ -1,0 +1,147 @@
+//@version=3
+// Author: @nilux
+// Credit to mortdiggiddy for providing the study:
+// https://www.tradingview.com/script/ZEJ7oIRC-Fisher-Transform-Multi-Timeframe/
+
+strategy("Fisher Transform Multi-Timeframe Backtest")
+
+length = input(10, title = "Length", minval = 1)
+weight = input(0.33, title = "Normalized Price Weighting (0 < weight < 1)", type = float, minval = 0.001, maxval = 0.999, step = 0.01)
+
+src = input("HL2", "Price Source", options=["Close", "HL2", "HL3", "OHLC4"])
+intval1 = input("Day", "Interval Close Length", options=["M01", "M03", "M05", "M15", "M30", "M45", "H01", "H02", "H03", "H04", "H08", "H12", "Day", "Week", "Month", "Year"])
+
+useChartIntVal1 = input(false, "Always Use Chart Interval Instead?")
+colorBars = input(false, "Color Price Bars?")
+showTrend = input(true, "Show Fisher Trend?")
+
+fixedSL = input(title="SL Activation", defval=70)
+trailSL = input(title="SL Trigger", defval=10)
+fixedTP = input(title="TP Activation", defval=50)
+trailTP = input(title="TP Trigger", defval=10)
+
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2019, title = "From Year", minval = 2015)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2015)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+// Correct the interval used
+
+getRez(intval) =>
+    int = iff(intval == "M01", "1", iff(intval == "M03", "3", iff(intval == "M05", "5", iff(intval == "M15", "15", iff(intval == "M30", "30", iff(intval == "M45", "45", iff(intval == "H01", "60", iff(intval == "H02", "120", iff(intval == "H03", "180", iff(intval == "H04", "240", iff(intval == "H08", "480", iff(intval == "H12", "720", iff(intval == "Day", "D", iff(intval == "Week", "W", iff(intval == "Month", "M", iff(intval == "Year", "12M", "60"))))))))))))))))
+
+res = getRez(intval1)
+
+// Show intermediate values for fisher transform along the time frame desired
+
+getFisher(len, rez, useChartIntVal) =>
+    start = security(tickerid, rez, time, lookahead = true)
+    newSession = iff(change(start), 1, 0)
+    sinceNew = barssince(newSession)
+    
+    barsInInt = 0
+    barsInInt := na(barsInInt[1]) or sinceNew > nz(barsInInt[1]) ? sinceNew : nz(barsInInt[1]) 
+    
+    isChartIntVal = useChartIntVal or barsInInt == 0
+    
+    // calc
+    
+    h = high
+    h := isChartIntVal ? high : newSession ? high : max(nz(h[1]), high) 
+    
+    l = low
+    l := isChartIntVal ? low : newSession ? low : min(nz(l[1]), low)
+    
+    op = open
+    op := newSession or isChartIntVal ? open : nz(op[1])
+    p = src == "HL2" ? (h + l) / 2 : src == "HL3" ? (h + l + close) / 3 : src == "OHLC4" ? (op + h + l + close) / 3 : close
+    
+    hh1 = highest(p, max(length - 1, 1))
+    ll1 = lowest(p, max(length - 1, 1))
+    
+    hh2 = security(tickerid, rez, hh1[1], lookahead = true) // grab previous highest-mid that is historical
+    ll2 = security(tickerid, rez, ll1[1], lookahead = true) // grab previous lowest-mid that is historical
+    
+    hh = isChartIntVal ? highest(p, length) : max(hh2, p) // merge the (length -1) highest-mid with current value
+    ll = isChartIntVal ? lowest(p, length) : min(ll2, p) // merge the (length -1) lowest-mid with current value
+    
+    v0 = 2 * ((p - ll) / (hh - ll) - 0.5) // price normalized to -1 <= p <= 1
+    v1 = 0.5
+    
+    v1_p = v1
+    v1_p := newSession or isChartIntVal ? nz(v1[1]) : nz(v1_p[1])
+    
+    v1 := weight * v0 + (1.0 - weight) * v1_p
+    v2 = max(min(v1, 0.9999), -0.9999) // cap values to prevent floating point errors
+    
+    sFisher = 0.0
+    
+    sFisher_p = 0.0
+    sFisher_p := newSession or isChartIntVal ? nz(sFisher[1]) : nz(sFisher_p[1])
+    
+    fisher = log((1 + v2) / (1 - v2)) // fisher transform function
+    sFisher := 0.5 * (fisher + sFisher_p) // smoothed fisher transform
+    
+    sFisherR = round(sFisher / 0.0001) * 0.0001
+    
+    trend = 0
+    trend := barsInInt == sinceNew or useChartIntVal ? fisher > sFisher and change(sFisherR) >= 0 ? 1 : fisher < sFisher and change(sFisherR) <= 0 ? -1 : nz(trend[1]) : nz(trend[1])
+    
+    trendChange = change(trend)
+    
+    [sFisher, sFisher_p, trend, trendChange]
+    
+[fisher, fisher1, trend, trendChange, bandH, bandL] = getFisher(length, res, useChartIntVal1)
+
+// plots
+
+f1 = plot(fisher, color = trend > 0 ? #008000C0 : #C00000C0, title = "Fisher Transform")
+f2 = plot(fisher1, color = trend > 0 ? #008080C0 : #C000C0C0, title = "Previous Fisher Transform")
+fill(f1, f2, title = "Fisher Fill Color", color = trend > 0 ? #00FF0028 : #FF000028)
+
+// plot(bandH, color = #00FFFF30, title = "Donchian Band High")
+// plot(bandL, color = #00FFFF30, title = "Donchian Band Low")
+
+hline(0.0, title = "Zero Line", color = #808080FF, linestyle = dashed)
+
+// bar color
+
+barcolor(colorBars ? trend > 0 ? (fisher > fisher1 ? #008000 : #00FFFF) : (fisher < fisher1 ? #FF0000 : #FF00FF) : na, title = "Bar Color")
+
+// trend
+
+plotshape(showTrend and trend > 0 ? 0.0 : na, title = "Trend Up Shapes", style = shape.triangleup, location = location.absolute, size = size.tiny, color = fisher > fisher1 ? #00FF0040 : #00FFFF80)
+plotshape(showTrend and trend < 0 ? 0.0 : na, title = "Trend Down Shapes", style = shape.triangledown, location = location.absolute, size = size.tiny, color = fisher < fisher1 ? #FF000040 : #FF00FF80)
+
+plotchar(showTrend and trendChange > 0 ? fisher1 : na, title = "Trend Change Up Shape", char = '⇑', location = location.absolute, size = size.small, color = #00FF00FF)
+plotchar(showTrend and trendChange < 0 ? fisher1 : na, title = "Trend Change Down Shape", char = '⇓', location = location.absolute, size = size.small, color = #FF0000FF)
+
+strategy.entry("Long", strategy.long, when = window() and trendChange > 0)  // buy long when "within window of time" AND crossover
+strategy.exit("Exit Long", qty_percent = 100, loss=fixedSL, trail_offset=trailTP, trail_points=fixedTP)                // sell long when "within window of time" AND crossunder  
+
+strategy.entry("Short", strategy.short, when = window() and trendChange < 0)  // buy long when "within window of time" AND crossover
+strategy.exit("Exit Short", qty_percent = 100, loss=fixedSL, trail_offset=trailSL, trail_points=fixedTP)                // sell long when "within window of time" AND crossunder
+
+View in Pine Editor・132 lines
+Use on chart
+1
+4
+5
+6
+6 641
+Feb 16, 2019
+This is the Backtest Strategy for mortdiggiddy's "Fisher Transform Multi-Timeframe"
+
+For more details check his study:
+Feb 16, 2019
+Release Notes
+Added (Trailing) Take Profit and Stop Loss

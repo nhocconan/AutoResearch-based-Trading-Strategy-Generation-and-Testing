@@ -1,0 +1,56 @@
+//@version=5
+strategy(title="Balance of Power Heikin Ashi Swing Strategy")
+
+
+x_close = request.security(ticker.heikinashi("SPY"), "M", close)
+x_open = request.security(ticker.heikinashi("SPY"), "M", open)
+x_high =request.security(ticker.heikinashi("SPY"), "M", high)
+x_low = request.security(ticker.heikinashi("SPY"), "M", low)
+
+gog = (x_close - x_open) / (x_high - x_low)
+
+out = ta.ema(gog,input.int(252))
+
+plot(out, color = color.white)
+
+hline(0)
+
+
+length = input(75)
+p = input.int(99, 'Percentage', minval=0, maxval=100)
+p2 = input.int(1, 'Percentage', minval=0, maxval=100)
+
+
+pnr = ta.percentile_nearest_rank(out, length, p)
+pnr2 = ta.percentile_nearest_rank(out, length, p2)
+
+
+long =  pnr > pnr[1] and ( out > 0 or (out >-0.35 and out[1] <-0.35))  
+short = (out < 0 and ( pnr < pnr[1] and pnr2 < pnr2[1]))  or ( out < 0.6 and out[1] > 0.6)
+
+
+strategy.entry("long",strategy.long,when=long)
+strategy.entry("short",strategy.short,when=short)
+
+View in Pine Editor・36 lines
+Use on chart
+1
+5
+7
+6 011
+Balance of Power Heikin Ashi Investing Strategy
+
+This is a swing strategy designed for investment help.
+
+Its made around the Balace of Power indicator, but has been adapted on using the Monthly Heikin Ashi candle from the SPY asset in order to be used with correlation for US Stock/ETF/Index Markets.
+
+The BOP acts as an oscilallator showing the power of a bull trend when its positive and a bearish trend when its in negative. At the same time we can spot reversals, based on the percentiles ( 99/1)
+
+
+The rules for entry :
+For long : The 99 percentile is ascending, and we are either in a positive value (>0), or we crossed the bottom place ( -0.35)
+
+For short : the 99 and 1 percentile are descending, and we are either in a negative value(<0), or we crossed down the top place ( 0.6)
+
+
+If you have any questions please let me know !

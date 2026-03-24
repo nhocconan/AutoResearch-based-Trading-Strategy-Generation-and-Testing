@@ -1,0 +1,57 @@
+//@version=3
+strategy("Sundays Suck for Bitcoin - Daily Strategy", overlay=true, initial_capital=100000, currency='USD')
+
+// Sundays Suck for Bitcoin
+//
+// Bitcoin tends to have bad Sundays, so this strategy just sells on Saturday,
+// and buys back the next Wednesday if the price is kinda going up!
+//
+// This works best if you set your chart time period to 1 day
+//
+// (Its Jonnys first script, so is this really just published for people 
+// looking for simple code to learn from :-)
+
+// this lets you change the start and end year using settings on the config dialog
+// these dates mean you can pick the years you are interested in running the strategy over
+start_year = input(defval = 2012, title = "Start Year")
+end_year = input(defval = 2018, title = "End Year")
+
+// draw a W on Wednesdays and S on Sundays on the chart
+plotchar(dayofweek == sunday, char="S")
+plotchar(dayofweek == wednesday, char="W")
+
+// work out if the price is kinda going up:
+// - here we just look at the current price average: hl2 which is is (high + low)/2)  
+//   then we see if it is above the 4 day moving average (sma)
+is_kinda_going_up = hl2 > sma(hl2, 4)
+
+// plot this moving average on the chart
+plot(sma(hl2, 4))
+
+// we buy on tuesday (the order is fulfilled on wednesday),
+// if the price is kinda going up
+buy_buy_buy_its_tuesday = is_kinda_going_up and dayofweek == tuesday
+
+// is the current year one we care about?
+this_is_a_year_we_care_about = year >= start_year and year <= end_year
+
+// put the order in if it is also a year we care about
+if (buy_buy_buy_its_tuesday and this_is_a_year_we_care_about)
+    strategy.entry("Sell on Saturday", strategy.long, comment="Buy on good Tuesday")
+ 
+// we always sell on saturdays (sell order goes in on sunday)
+sell_on_saturday = dayofweek == saturday
+
+if (sell_on_saturday)
+    strategy.close("Sell on Saturday")
+
+View in Pine Editor・46 lines
+Use on chart
+6
+3
+2 977
+Bitcoin tends to have bad Sundays, so this strategy just sells on Saturday, and buys back the next Wednesday if the price is kinda going up!
+
+(Its Jonnys first script, so is this really just published for people looking for simple code to learn from :-)
+
+(The strategy works best if you set your chart time period to 1 day.)

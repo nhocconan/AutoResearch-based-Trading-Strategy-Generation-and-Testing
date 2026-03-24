@@ -1,0 +1,75 @@
+{
+  "started_at": "2026-03-22T08:11:59.239148+00:00",
+  "items": {
+    "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:21:33.496937+00:00",
+      "last_stage": "convert_ok",
+      "raw_file": "raw-pine/bulk/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report.pine",
+      "last_error": null,
+      "classify_attempts": 1,
+      "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py"
+    },
+    "https://www.tradingview.com/script/M9tw82HU-3kilos-BTC-15m/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:32:26.078043+00:00",
+      "last_stage": "backtest_ok",
+      "python_file": "python-strategies/bulk/3kilos-btc-15m.py",
+      "last_error": null,
+      "backtest_attempts": 1
+    },
+    "https://www.tradingview.com/script/xGk5K4DE-BTC-15-min/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T08:16:49.282273+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/w6QJPRr3-BTC-Hashrate-ribbons/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:17:33.239561+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/b7zn25L6-Momentum-Strategy-BTC-USDT-1h-MACD-with-source-code/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T08:21:38.970490+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/Gyy3Q3tl-BTC-Daily-Strategy-BF/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:25:55.614845+00:00",
+      "last_stage": "convert_ok",
+      "raw_file": "raw-pine/bulk/Gyy3Q3tl-BTC-Daily-Strategy-BF.pine",
+      "last_error": null,
+      "classify_attempts": 1,
+      "python_file": "python-strategies/bulk/btc-daily-strategy-bf.py"
+    },
+    "https://www.tradingview.com/script/iImkk8VO-Pyramiding-BTC-5-min-no-security/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T08:27:40.155969+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/bt8HJINE/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:31:52.249649+00:00",
+      "last_stage": "convert_error",
+      "raw_file": "raw-pine/bulk/bt8HJINE.pine",
+      "last_error": "LLM call timed out after 240s",
+      "classify_attempts": 1
+    }
+  },
+  "last_seen_model": "qwen3.5-plus",
+  "summary": {
+    "queue_supported_timeframes": 602,
+    "extracted_ok": 4,
+    "extracted_error": 1,
+    "classified": 45,
+    "unsupported": 6,
+    "converted_import_ok": 39,
+    "backtested_strategy_files": 4,
+    "backtest_result_rows": 8,
+    "last_updated_at": "2026-03-22T08:32:26.081821+00:00"
+  }
+}

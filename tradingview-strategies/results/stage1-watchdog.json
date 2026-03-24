@@ -1,0 +1,32 @@
+{
+  "updated_at": "2026-03-23T01:38:01.743946+00:00",
+  "action": "stopped_for_shutdown",
+  "runner_pids": [],
+  "runner_state": {
+    "updated_at": "2026-03-23T01:38:01.743946+00:00",
+    "status": "stopped_for_shutdown",
+    "last_batch_status": "machine_shutdown",
+    "counts_before_batch": {
+      "total_items": 5403,
+      "cached_ok": 3792,
+      "pending": 0,
+      "errors": 1611
+    },
+    "counts_after_batch": null,
+    "batch_started_at": "2026-03-22T18:10:02.298711+00:00",
+    "batch_completed_at": null,
+    "batch_exit_code": null,
+    "shutdown_requested_at": "2026-03-23T01:38:01.743946+00:00"
+  },
+  "counts": {
+    "total_items": 5403,
+    "cached_ok": 3792,
+    "pending": 0,
+    "errors": 1611
+  },
+  "browser_counts": {
+    "agent_browser": 0,
+    "chrome_testing": 0
+  },
+  "next_check_at": null
+}

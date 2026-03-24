@@ -1,0 +1,993 @@
+//@version=4
+strategy(title = "WebhookDrive-V1", overlay = true, pyramiding = 0, initial_capital = 10000, currency = currency.USD)
+
+// -----------------------------
+// ---- Strategy Inputs
+// -----------------------------
+
+inputBuild           = input(defval = 101,    type = input.integer,  minval = 0.0,  title = "Build Number",           group = "[ SECTION 1 ]", tooltip = "This is a trend follow script that enters the market long above the purple line and short below. It is prone to losses on ranging markets where the trend line bisects the price stream")
+inputTradingMode     = input(defval = "BiDir", options = ["Long","Short","BiDir","Flip Flop","Crypto","Range","No Trade"], title = "Trading Mode", group = "[ SECTION 1 ]", tooltip = "BiDir is for margin trading with a stop. Flip Flop will alter direction on trend line cross. Crypto is long only with downward pyramids. Range only enters on a counter-trend")
+inputMinProfit       = input(defval = 0.50,   type = input.float,    minval = 0.0,  title = "Minimum Profit",         group = "[ SECTION 1 ]", tooltip = "Smallest take profit offset to permit a close order. This is a conditional exit not a limit (quote currency units)")
+inputStopOffset      = input(defval = 0.50,   type = input.float,    minval = 0.0,  title = "Stop Offset",            group = "[ SECTION 1 ]", tooltip = "Hard stop offset from the trade open price (quote currency units)")
+inputTickScaler      = input(defval = 10.0,   type = input.float,    minval = 1.0,  title = "Tick Scalar",            group = "[ SECTION 1 ]", tooltip = "Value used to remove the pipette from quote currency calculations. See the Summary Report to determine this value")
+inputChgDivisor      = input(defval = 1000.0, type = input.float,    minval = 1.0,  title = "Price Normalizer",       group = "[ SECTION 1 ]", tooltip = "Value used to normalize bar prices for differential calculations. Serves to increase the magnitude of significant digits. Applied to all inputs specifying net change and roc")
+inputPryramidSpan    = input(defval = 0.0,    type = input.float,    minval = 0.0,  title = "Pyramid Minimum Span",   group = "[ SECTION 1 ]", tooltip = "Minimum spacing between downward pyramid levels (quote currency units). Set to zero to disable downward pyramiding. To fully disable pyramiding zero the value in the Properties tab")
+inputPyramidBaleOut  = input(defval = true,   type = input.bool,                    title = "Position Bale Out",      group = "[ SECTION 1 ]", tooltip = "Enable to exit positions early. The algorithm ensures the position exits at a profit but not at the amount specified in the Minimum Profit input. Reduces the risk when pyramiding")
+inputMaxAddOns       = input(defval = 0,      type = input.integer,  minval = 0,    maxval = 20, title  = "Maximum DCA Increments", group = "[ SECTION 1 ]", tooltip = "Sets a whole number limit on the number of times a losing position can be averaged down")
+inputSignalPeriod    = input(defval = "60",   options = ["60","240","1440"],        title = "Signal Line Period",     group = "[ SECTION 2 ]", tooltip = "Sets the bar interval for the Blue, Green, Orange signal lines and the ZScore oscillator not visible")
+inputTrendPeriod     = input(defval = "240",  options = ["60","240","1440"],        title = "Trend Line Period",      group = "[ SECTION 2 ]", tooltip = "Sets the bar interval for the Purple trend line and Stochastic indicator")
+inputFastAlmaLen     = input(defval = 10,     type = input.integer,  minval = 1,    title = "Fast Alma Length",       group = "[ SECTION 2 ]", tooltip = "Sets the period length of the Blue line (Arnaud Legoux Moving Average indicator)")
+inputFastLinRegLen   = input(defval = 30,     type = input.integer,  minval = 1,    title = "Fast LinReg Length",     group = "[ SECTION 2 ]", tooltip = "Sets the period length of the Green line (Linear Regression indicator)")
+inputSlowLinRegLen   = input(defval = 100,    type = input.integer,  minval = 1,    title = "Slow LinReg Length",     group = "[ SECTION 2 ]", tooltip = "Sets the period length of the Orange line (Linear Regression indicator)")
+inputTrendDEMALen    = input(defval = 200,    type = input.integer,  minval = 1,    title = "Trend Line Length",      group = "[ SECTION 2 ]", tooltip = "Sets the period length of the Purple line (Double Smoothed Moving Average indicator)")
+inputStochastLen     = input(defval = 14,     type = input.integer,  minval = 1,    title = "Stochastic Length",      group = "[ SECTION 2 ]", tooltip = "Sets the period length of two Stochastic indicators. One at the Purple line. Second at the chart interval")
+inputFastCrossLen    = input(defval = 9,      type = input.integer,  minval = 1,    title = "Fast Cross Length",      group = "[ SECTION 3 ]", tooltip = "Sets the period length of the Simple Moving Average indicator used for trade entry (Crossover Setup). The same exact one used in the TV example strategy. Cross up is a long entry. Cross down is short")
+inputSlowCrossLen    = input(defval = 24,     type = input.integer,  minval = 1,    title = "Slow Cross Length",      group = "[ SECTION 3 ]", tooltip = "Sets the period length of the Simple Moving Average indicator used for trade entry (Crossover Setup). The same exact one used in the TV example strategy. Cross up is a long entry. Cross down is short")
+inputFastEMALen      = input(defval = 8,      type = input.integer,  minval = 1,    title = "Fast EMA Length",        group = "[ SECTION 3 ]", tooltip = "Sets the period length of the Yellow line (Exponential Moving Average indicator). This is a chart interval indicator")
+inputFastEMARiseNet  = input(defval = 3.0,    type = input.float,    minval = 0.00, title = "Fast EMA Rise NetChg",   group = "[ SECTION 3 ]", tooltip = "Measures the delta percentage from the upward cross of the Yellow over the Blue line. A larger number means the market must swing higher to generate a signal. Trades will stay in longer")
+inputFastEMARiseROC  = input(defval = 0.8,    type = input.float,    minval = 0.00, title = "Fast EMA Rise ROC",      group = "[ SECTION 3 ]", tooltip = "Measures the rate of change from the upward cross of the Yellow over the Blue line. A larger number means the swing higher has to occur over a commensurately shorter time. Trades will stay in longer")
+inputFastEMAFallNet  = input(defval = 4.0,    type = input.float,    minval = 0.00, title = "Fast EMA Fall NetChg",   group = "[ SECTION 3 ]", tooltip = "Measures the delta percentage from the downward cross of the Yellow under the Blue line. A larger number means the market must swing lower to generate a signal. Trades will stay in longer")
+inputFastEMAFallROC  = input(defval = 0.8,    type = input.float,    minval = 0.00, title = "Fast EMA Fall ROC",      group = "[ SECTION 3 ]", tooltip = "Measures the rate of change from the downward cross of the Yellow under the Blue line. A larger number means the swing lower has to occur over a commensurately shorter time. Trades will stay in longer")
+inputLongNascent     = input(defval = false,  type = input.bool,                    title = "Enter Long On Nascent",  group = "[ SECTION 4 ]", tooltip = "Enables rudimentary counter-trend trading. If checked long trades will signal below the Purple trend line and will exit above. The strategy will perform poorly in trending markets")
+inputLongCrossExit   = input(defval = true,   type = input.bool,                    title = "Long Natural Exit",      group = "[ SECTION 4 ]", tooltip = "A natural long exit is when the Blue line crosses under the Green Line (downward). The position must be profitable to exit")
+inputLongSignalExit  = input(defval = true,   type = input.bool,                    title = "Long Signal Exit",       group = "[ SECTION 4 ]", tooltip = "A signal event is when the Blue crosses over the Green line at the magnitude and rate specified in section #6. The ZScore oscillator must have reached the positive value specified in section #6. The position must be profitable to exit")
+inputLongEventExit   = input(defval = true,   type = input.bool,                    title = "Long Price Event Exit",  group = "[ SECTION 4 ]", tooltip = "A price event is when the Yellow crosses over the Blue line at the magnitude and rate specified in section #3. The position must be profitable to exit")
+inputLongStochExit   = input(defval = true,   type = input.bool,                    title = "Long Stochastic Exit",   group = "[ SECTION 4 ]", tooltip = "This exit occurs when the Stochastic oscillator measuring the Purple line exceeds the overbought threshold (80). The position must be profitable to exit")
+inputShortNascent    = input(defval = false,  type = input.bool,                    title = "Enter Short On Nascent", group = "[ SECTION 5 ]", tooltip = "Enables rudimentary counter-trend trading. If checked short trades will signal above the Purple trend line and will exit below. The strategy will perform poorly in trending markets")
+inputShortCrossExit  = input(defval = true,   type = input.bool,                    title = "Short Natural Exit",     group = "[ SECTION 5 ]", tooltip = "A natural short exit is when the Blue line crosses over the Green Line. (upward) The position must be profitable to exit")
+inputShortSignalExit = input(defval = true,   type = input.bool,                    title = "Short Signal Exit",      group = "[ SECTION 5 ]", tooltip = "A signal event is when the Blue crosses under the Green line at the magnitude and rate specified in section #6. The ZScore oscillator must have reached the negative value specified in section #6. The position must be profitable to exit")
+inputShortEventExit  = input(defval = true,   type = input.bool,                    title = "Short Price Event Exit", group = "[ SECTION 5 ]", tooltip = "A price event is when the Yellow crosses under the Blue line at the magnitude and rate specified in section #3. The position must be profitable to exit")
+inputShortStochExit  = input(defval = true,   type = input.bool,                    title = "Short Stochastic Exit",  group = "[ SECTION 5 ]", tooltip = "This exit occurs when the Stochastic oscillator measuring the Purple line exceeds the oversold threshold (20). The position must be profitable to exit")
+inputRiseEventNet    = input(defval = 10.0,   type = input.float,    minval = 0.00, title = "Rise Event Net Change",  group = "[ SECTION 6 ]", tooltip = "Measures the delta percentage from the upward cross of the Blue over the Green line. A larger number means the market must swing higher to generate a signal. Trades will stay in longer")
+inputRiseEventROC    = input(defval = 0.1,    type = input.float,    minval = 0.00, title = "Rise Event ROC",         group = "[ SECTION 6 ]", tooltip = "Measures the rate of change from the upward cross of the Blue over the Green line. A larger number means the swing higher has to occur over a commensurately shorter time. Trades will stay in longer")
+inputMinZScoreABZ    = input(defval = 5.0,    type = input.float,    minval = 0.00, title = "Min Above Zero ZScore",  group = "[ SECTION 6 ]", tooltip = "Specifies the overbought threshold of the ZScore oscillator. If the [Long Signal Exit] option in Section #4 is enabled a high value here will cause the long trade to stay in the market longer")
+inputFallEventNet    = input(defval = 10.0,   type = input.float,    minval = 0.00, title = "Fall Event Net Change",  group = "[ SECTION 6 ]", tooltip = "Measures the delta percentage from the downward cross of the Blue under the Green line. A larger number means the market must swing lower to generate a signal. Trades will stay in longer")
+inputFallEventROC    = input(defval = 0.1,    type = input.float,    minval = 0.00, title = "Fall Event ROC",         group = "[ SECTION 6 ]", tooltip = "Measures the rate of change from the downward cross of the Blue under the Green line. A larger number means the swing lower has to occur over a commensurately shorter time. Trades will stay in longer")
+inputMinZScoreBLZ    = input(defval = 5.0,    type = input.float,    minval = 0.00, title = "Min Below Zero ZScore",  group = "[ SECTION 6 ]", tooltip = "Specifies the oversold threshold of the ZScore oscillator. If the [Short Signal Exit] option in Section #5 is enabled a high value here will cause the short trade to stay in the market longer")
+inputShowLines       = input(defval = true,   type = input.bool,                    title = "Show Trend Lines",       group = "[ SECTION 7 ]", tooltip = "Display the Yellow, Blue, Green, Orange and Purple trend lines. They are rendered at a width of 2")
+inputShowCrosses     = input(defval = false,  type = input.bool,                    title = "Show Entry Regions",     group = "[ SECTION 7 ]", tooltip = "Background fill for the SMA crossovers specified in Section #3. The SMA is on the chart time frame so will display frequent transitions. Blue is an upward cross. Red is downward")
+inputShowEvents      = input(defval = false,  type = input.bool,                    title = "Display Event Regions",  group = "[ SECTION 7 ]", tooltip = "Background fill for signal events specified in Section #6. The Blue crossing the Green lines. Use it to configure Section #6. Blue is exceeding rise values. Red is is exceeding fall values")
+inputShowEMPeaks     = input(defval = false,  type = input.bool,                    title = "Display EMA Peaks",      group = "[ SECTION 7 ]", tooltip = "Background fill for price events specified in Section #3. The Yellow crossing the Blue lines. Use it to configure Section #3. Blue is exceeding rise values. Red is is exceeding fall values")
+inputShowStochEvent  = input(defval = false,  type = input.bool,                    title = "Show Stochastic Events", group = "[ SECTION 7 ]", tooltip = "Background fill for Stochastic events occurring on the Purple line. Use it verify selected exits in Section #4 and #5. Blue is exceeding overbought levels. Red is is exceeding oversold levels")
+inputShowConsecLoss  = input(defval = false,  type = input.bool,                    title = "Show Consecutive Losses",group = "[ SECTION 7 ]", tooltip = "Background fill for periods when consecutive losses are occurring. Red areas mean stops where hit and have not encountered a profitable exit. Use it to make adjustments to the values in Section #1")
+inputShowBaleOuts    = input(defval = false,  type = input.bool,                    title = "Show Bale Outs",         group = "[ SECTION 7 ]", tooltip = "Displays red labels under the bars where a position was exited prematurely. Each box contains information about the state of the trade at exit time. Use it when [Position Bale Out] in Section #1 is enabled")
+inputReport          = input(defval = false,  type = input.bool,                    title = "Show Summary Report",    group = "[ SECTION 7 ]", tooltip = "Displays a blue label at the live end of the chart. Contains useful strategy metrics which can aid in the development of the script. Relevant information should be added here as the script logic evolves. Happy Trading!")
+
+int  inputNormalizeLen    = 100
+bool inputAccumulateLong  = false
+bool inputAccumulateShort = false
+bool inputExclusiveLong   = false
+bool inputExclusiveShort  = false
+
+if (inputTradingMode == "Long")
+    inputExclusiveLong   := true
+if (inputTradingMode == "Short")
+    inputExclusiveShort  := true
+if (inputTradingMode == "Crypto")
+    inputAccumulateLong  := true
+    inputLongNascent     := true
+    inputExclusiveLong   := true
+if (inputTradingMode == "Range")
+    inputAccumulateLong  := true
+    inputAccumulateShort := true
+    inputLongNascent     := true
+    inputShortNascent    := true
+
+strategy.risk.allow_entry_in((inputTradingMode == "Long") ? strategy.direction.long : (inputTradingMode == "Short") ? strategy.direction.short : (inputTradingMode == "Crypto") ? strategy.direction.long : strategy.direction.all)
+
+if (inputTradingMode == "Crypto")
+    inputTradingMode := "Flip Flop"
+
+// -----------------------------
+// ---- Indicator Configurations
+// -----------------------------
+
+float fltBarPrice = close
+
+// Linear Regression
+int ncSlowLinRegLen = inputSlowLinRegLen
+int ncFastLinRegLen = inputFastLinRegLen
+int ncLinRegOffset  = 0
+
+// Arnaud Legoux Moving Average
+int ncFastAlmaLen = inputFastAlmaLen
+
+// Double Exponential Moving Average
+int ncTrendDEMALen = inputTrendDEMALen
+
+// ZScore Simple Moving Average
+int ncNormalizeLen = inputNormalizeLen
+
+// Fast Cross Simple Moving Average
+int ncFastCrossLen = inputFastCrossLen
+
+// Slow Cross Simple Moving Average
+int ncSlowCrossLen = inputSlowCrossLen
+
+// Fast Exponential Moving Average
+int ncFastEMALen   = inputFastEMALen
+
+// Stochastic Oscillator
+int ncStochasLen   = inputStochastLen
+int ncKn2Period    = 3
+int ncDn3Period    = 3
+
+// -----------------------------
+// ---- Series Utilities
+// -----------------------------
+int indexClosedBar = barstate.isrealtime ? 1 : 0
+int indexReadBar   = barstate.isrealtime ? 0 : 1
+
+calcDEMA(seriesData, ncMALength) =>
+    float emaAlpha   = ema(seriesData, ncMALength)
+    float emaOfEma   = ema(emaAlpha,   ncMALength)
+    float seriesDema = (2 * emaAlpha) - emaOfEma
+
+calcTrendDEMA() =>
+    float seriesOut = calcDEMA(fltBarPrice[indexClosedBar], ncTrendDEMALen)
+
+calcSlowLinReg() =>
+    float seriesOut = linreg(fltBarPrice[indexClosedBar], ncSlowLinRegLen, ncLinRegOffset)
+
+calcFastLinReg() =>
+    float seriesOut = linreg(fltBarPrice[indexClosedBar], ncFastLinRegLen, ncLinRegOffset)
+
+calcFastAlma() =>
+    float seriesOut = alma(fltBarPrice[indexClosedBar], ncFastAlmaLen, 0.85, 6)
+
+calcStochastic() =>
+    float seriesOut = stoch(close[indexClosedBar], high[indexClosedBar], low[indexClosedBar], ncStochasLen)
+
+// ----------------------------
+// ---- Series Creation
+// ----------------------------
+float seriesClose = close[indexClosedBar]
+float seriesHigh  = high[indexClosedBar]
+float seriesLow   = low[indexClosedBar]
+
+// ---- [ HIGHER TIME FRAME ] ----
+// Linear Regression
+float htf_seriesSlowLinReg = security(syminfo.tickerid, inputSignalPeriod, calcSlowLinReg())[indexReadBar]
+float htf_seriesFastLinReg = security(syminfo.tickerid, inputSignalPeriod, calcFastLinReg())[indexReadBar]
+
+// Arnaud Legoux Moving Average
+float htf_seriesFastAlma   = security(syminfo.tickerid, inputSignalPeriod, calcFastAlma())[indexReadBar]
+
+// Double Exponential Moving Average
+float htf_seriesTrendDEMA  = security(syminfo.tickerid, inputTrendPeriod,  calcTrendDEMA())[indexReadBar]
+
+// ZScore Simple Moving Average
+float htf_seriesAlmaMean   = sma(htf_seriesFastAlma, ncNormalizeLen)
+
+// ZScore Series
+float htf_seriesMarks      = htf_seriesFastAlma - htf_seriesAlmaMean
+float htf_seriesZScore     = htf_seriesMarks / stdev(htf_seriesMarks, ncNormalizeLen)
+
+// Stochastic Oscillator
+float htf_seriesFastK      = security(syminfo.tickerid, inputTrendPeriod,  calcStochastic())[indexReadBar]
+float htf_seriesDLine      = sma(htf_seriesFastK, ncKn2Period)
+float htf_seriesSlowD      = sma(htf_seriesDLine, ncDn3Period)
+
+// ---- [ CHART TIME FRAME ] ----
+// Fast Cross Simple Moving Average
+float seriesFastCross = sma(fltBarPrice, ncFastCrossLen)
+
+// Slow Cross Simple Moving Average
+float seriesSlowCross = sma(fltBarPrice, ncSlowCrossLen)
+
+// Fast Exponential Moving Average
+float seriesFastEMA   = ema(fltBarPrice, ncFastEMALen)
+
+// Stochastic Oscillator
+float seriesFastK     = stoch(seriesClose, seriesHigh, seriesLow, ncStochasLen)
+float seriesDLine     = sma(seriesFastK, ncKn2Period)
+float seriesSlowD     = sma(seriesDLine, ncDn3Period)
+
+// ----------------------------
+// ---- Indicator Conditions
+// ----------------------------
+
+bool bHTFSignalRise     = (htf_seriesFastAlma > htf_seriesFastLinReg)
+bool bHTFSignalFall     = (htf_seriesFastAlma < htf_seriesFastLinReg)
+bool bHTFFastAboveTrend = ((htf_seriesFastAlma > htf_seriesTrendDEMA) and (htf_seriesFastLinReg > htf_seriesTrendDEMA))
+bool bHTFFastBelowTrend = ((htf_seriesFastAlma < htf_seriesTrendDEMA) and (htf_seriesFastLinReg < htf_seriesTrendDEMA))
+bool bFastAboveSignal   = ((seriesFastEMA > htf_seriesFastAlma) and (htf_seriesFastAlma > htf_seriesFastLinReg))
+bool bFastBelowSignal   = ((seriesFastEMA < htf_seriesFastAlma) and (htf_seriesFastAlma < htf_seriesFastLinReg))
+bool bFullFanCone       = ((bFastAboveSignal == true) and (htf_seriesFastLinReg > htf_seriesSlowLinReg))
+bool bDownFanCone       = ((bFastBelowSignal == true) and (htf_seriesFastLinReg < htf_seriesSlowLinReg))
+bool bPartialTrendRise  = ((seriesFastEMA > htf_seriesFastAlma) and (htf_seriesFastAlma > htf_seriesSlowLinReg) and (htf_seriesFastLinReg > htf_seriesSlowLinReg))
+bool bPartialTrendFall  = ((seriesFastEMA < htf_seriesFastAlma) and (htf_seriesFastAlma < htf_seriesSlowLinReg) and (htf_seriesFastLinReg < htf_seriesSlowLinReg))
+bool bDurableTrendRise  = ((bPartialTrendRise == true) and (htf_seriesSlowLinReg > htf_seriesTrendDEMA))
+bool bDurableTrendFall  = ((bPartialTrendFall == true) and (htf_seriesSlowLinReg < htf_seriesTrendDEMA))
+bool bHTFNascentRise    = ((htf_seriesFastAlma > htf_seriesSlowLinReg) and (htf_seriesFastLinReg > htf_seriesSlowLinReg) and (htf_seriesSlowLinReg < htf_seriesTrendDEMA))
+bool bHTFNascentFall    = ((htf_seriesFastAlma < htf_seriesSlowLinReg) and (htf_seriesFastLinReg < htf_seriesSlowLinReg) and (htf_seriesSlowLinReg > htf_seriesTrendDEMA))
+
+// -------------------------------
+// ---- Event Utilities
+// -------------------------------
+
+float fltFXMinTick = syminfo.mintick * inputTickScaler
+
+calcRiseNetChg(fltFastPrice, fltSlowPrice) =>
+    float fltPercentChg = 0.0
+    float fltChgDivisor = (inputChgDivisor > 1.0) ? inputChgDivisor : fltSlowPrice
+
+    if (((na(fltSlowPrice) == false) and (fltSlowPrice > 0.0) and (fltFastPrice > fltSlowPrice)) == true)
+        fltPercentChg := (((fltFastPrice - fltSlowPrice) / fltFXMinTick) / fltChgDivisor) * 100.0
+    float fltResult = fltPercentChg
+
+calcFallNetChg(fltFastPrice, fltSlowPrice) =>
+    float fltPercentChg = 0.0
+    float fltChgDivisor = (inputChgDivisor > 1.0) ? inputChgDivisor : fltSlowPrice
+
+    if (((na(fltSlowPrice) == false) and (fltSlowPrice > 0.0) and (fltFastPrice < fltSlowPrice)) == true)
+        fltPercentChg := (((fltSlowPrice - fltFastPrice) / fltFXMinTick) / fltChgDivisor) * 100.0
+    float fltResult = fltPercentChg
+
+// -------------------------------
+// ---- HTF Fast Alma Crosses HTF Fast LinReg
+// -------------------------------
+// Alma Above and Below LinReg (AL)
+var float fltRiseALCrossPrice = 0.0
+var float fltRiseALNetChg     = 0.0
+var float fltFallALCrossPrice = 0.0
+var float fltFallALNetChg     = 0.0
+var int   ncRiseALBarsSince   = 0
+var int   ncFallALBarsSince   = 0
+
+if (htf_seriesFastAlma > htf_seriesFastLinReg)
+    if (ncFallALBarsSince > 0)     // We were previously falling
+        ncFallALBarsSince   := 0   // Zero means not in that direction
+        fltFallALCrossPrice := 0.0
+        ncRiseALBarsSince   := 1   // Non-zero means currently rising
+        fltRiseALCrossPrice := seriesClose
+        fltRiseALNetChg     := 0.0
+    else
+        ncRiseALBarsSince := ncRiseALBarsSince + 1 // Rise continues
+        fltRiseALNetChg   := calcRiseNetChg(seriesClose, fltRiseALCrossPrice) // Rising
+if (htf_seriesFastAlma < htf_seriesFastLinReg)
+    if (ncRiseALBarsSince > 0)     // We were previously rising
+        ncRiseALBarsSince   := 0   // Zero means not in that direction
+        fltRiseALCrossPrice := 0.0
+        ncFallALBarsSince   := 1   // Non-zero means currently falling
+        fltFallALCrossPrice := seriesClose
+        fltFallALNetChg     := 0.0
+    else
+        ncFallALBarsSince := ncFallALBarsSince + 1 // Fall continues
+        fltFallALNetChg   := calcFallNetChg(seriesClose, fltFallALCrossPrice) // Falling
+
+isMinimumNetChgROC(ncTypeBarsSince, fltTypeNetChg, fltMinNetChg, fltMinROC) =>
+    bool bPassed = false
+
+    bPassed := (((ncTypeBarsSince > 0) and (fltTypeNetChg > 0.0)) and (fltTypeNetChg >= fltMinNetChg) and ((fltTypeNetChg / ncTypeBarsSince) >= fltMinROC))
+
+// -------------------------------
+// ---- Fast EMA Crosses HTF Alma
+// -------------------------------
+// LTF EMA Above and Below HTF Alma (EM)
+var float fltRiseEMCrossPrice = 0.0
+var float fltRiseEMNetChg     = 0.0
+var float fltFallEMCrossPrice = 0.0
+var float fltFallEMNetChg     = 0.0
+var int   ncRiseEMBarsSince   = 0
+var int   ncFallEMBarsSince   = 0
+
+if (seriesFastEMA > htf_seriesFastAlma)
+    if (ncFallEMBarsSince > 0)     // We were previously falling
+        ncFallEMBarsSince   := 0   // Zero means not in that direction
+        fltFallEMCrossPrice := 0.0
+        ncRiseEMBarsSince   := 1   // Non-zero means currently rising
+        fltRiseEMCrossPrice := seriesClose
+        fltRiseEMNetChg     := 0.0
+    else
+        ncRiseEMBarsSince := ncRiseEMBarsSince + 1 // Rise continues
+        fltRiseEMNetChg   := calcRiseNetChg(seriesClose, fltRiseEMCrossPrice) // Rising
+if (seriesFastEMA < htf_seriesFastAlma)
+    if (ncRiseEMBarsSince > 0)     // We were previously rising
+        ncRiseEMBarsSince   := 0   // Zero means not in that direction
+        fltRiseEMCrossPrice := 0.0
+        ncFallEMBarsSince   := 1   // Non-zero means currently falling
+        fltFallEMCrossPrice := seriesClose
+        fltFallEMNetChg     := 0.0
+    else
+        ncFallEMBarsSince := ncFallEMBarsSince + 1 // Fall continues
+        fltFallEMNetChg   := calcFallNetChg(seriesClose, fltFallEMCrossPrice) // Falling
+
+// ----------------------------
+// ---- ZScore Histogram Tracking
+// ----------------------------
+// ZScore Above and Below Zero Line (ZS)
+bool bNewRiseZSHigh = false
+bool bNewFallZSLow  = false
+
+var int   ncRiseZSSince  = 0
+var int   ncFallZSSince  = 0
+var int   ncRiseZSCount  = 0
+var int   ncFallZSCount  = 0
+var float fltRiseZSValue = 0.0
+var float fltFallZSValue = 0.0
+var float fltRiseZSHigh  = 0.0
+var float fltFallZSLow   = 0.0
+var int   ncAboveZSCount = 0
+var int   ncBelowZSCount = 0
+var int   ncAboveZSSince = 0
+var int   ncBelowZSSince = 0
+
+ncRiseZSSince  := ncRiseZSSince  + 1
+ncFallZSSince  := ncFallZSSince  + 1
+ncAboveZSSince := ncAboveZSSince + 1
+ncBelowZSCount := ncBelowZSCount + 1
+if (htf_seriesZScore > htf_seriesZScore[1])
+    fltRiseZSValue := htf_seriesZScore[0]
+    fltRiseZSHigh  := seriesClose[0] // High
+    bNewRiseZSHigh := true
+    if (ncRiseZSSince > 0) // We were previously falling
+        ncRiseZSSince := 0
+        ncRiseZSCount := 1
+    else
+        ncRiseZSSince := 0
+        ncRiseZSCount := ncRiseZSCount + 1 // Rise continues
+if (htf_seriesZScore > 0.0)
+    if (ncAboveZSSince > 0) // We were previously below zero
+        ncAboveZSSince := 0
+        ncAboveZSCount := 1
+    else
+        ncAboveZSSince := 0
+        ncAboveZSCount := ncAboveZSCount + 1 // Above zero continues
+
+if (htf_seriesZScore < htf_seriesZScore[1])
+    fltFallZSValue := htf_seriesZScore[0]
+    fltFallZSLow   := seriesClose[0] // Low
+    bNewFallZSLow := true
+    if (ncFallZSSince > 0) // We were previously rising
+        ncFallZSSince := 0
+        ncFallZSCount := 1
+    else
+        ncFallZSSince := 0
+        ncFallZSCount := ncFallZSCount + 1 // Fall continues
+if (htf_seriesZScore < 0.0)
+    if (ncBelowZSSince > 0) // We were previously above zero
+        ncBelowZSSince := 0
+        ncBelowZSCount := 1
+    else
+        ncBelowZSSince := 0
+        ncBelowZSCount := ncBelowZSCount + 1 // Below zero continues
+
+// ----------------------------
+// ---- Strategy Variables
+// ----------------------------
+
+var float fltEntryPrice  = 0.0
+var float fltExitPrice   = 0.0
+var float fltStopPrice   = 0.0
+var float fltEntryHigh   = 0.0
+var float fltEntryLow    = 0.0
+var float fltDefaultSize = 0.0
+var float fltCurrentSize = 0.0
+var bool  bPullback      = false
+var bool  bFEERise       = false
+var bool  bFEEFall       = false
+var int   ncPyramidCount = 0
+var int   nPyramidWaveID = 0
+var int   nEntryTrendDir = 0
+var int   ncConsecLosses = 0
+var bool  bNascentEntry  = false
+var bool  bHemiTransit   = false
+var float fltLastLevel   = 0.0
+var float fltMAELevel    = 0.0
+
+string strLongName       = "WBHDrive-L"
+string strShortName      = "WBHDrive-S"
+string strLongStop       = "WBHD-L-Stop"
+string strShortStop      = "WBHD-S-Stop"
+string strTradingMode    = inputTradingMode
+float  fltMinProfit      = inputMinProfit
+float  fltStopOffset     = inputStopOffset
+float  fltPryramidSpan   = inputPryramidSpan
+float  fltRiseEventNet   = inputRiseEventNet
+float  fltRiseEventROC   = inputRiseEventROC
+float  fltMinZScoreABZ   = inputMinZScoreABZ
+float  fltFallEventNet   = inputFallEventNet
+float  fltFallEventROC   = inputFallEventROC
+float  fltMinZScoreBLZ   = inputMinZScoreBLZ
+float  fltFastEMARiseNet = inputFastEMARiseNet
+float  fltFastEMARiseROC = inputFastEMARiseROC
+float  fltFastEMAFallNet = inputFastEMAFallNet
+float  fltFastEMAFallROC = inputFastEMAFallROC
+int    ncMaxAddOns       = inputMaxAddOns
+bool   bPyramidBaleOut   = inputPyramidBaleOut
+bool   bAccumulateLong   = inputAccumulateLong
+bool   bAccumulateShort  = inputAccumulateShort
+bool   bLongNascent      = inputLongNascent
+bool   bLongCrossExit    = inputLongCrossExit
+bool   bLongSignalExit   = inputLongSignalExit
+bool   bLongEventExit    = inputLongEventExit
+bool   bLongStochExit    = inputLongStochExit
+bool   bShortNascent     = inputShortNascent
+bool   bShortCrossExit   = inputShortCrossExit
+bool   bShortSignalExit  = inputShortSignalExit
+bool   bShortEventExit   = inputShortEventExit
+bool   bShortStochExit   = inputShortStochExit
+float  fltNetProfit      = 0.0
+float  fltNumShares      = 0.0
+float  fltExpected       = 0.0
+bool   bAlreadyIn        = false
+bool   bProfitable       = false
+int    nPositionDir      = 0
+bool   bCrossRise        = false
+bool   bCrossFall        = false
+bool   bOpenLong         = false
+bool   bOpenShort        = false
+bool   bOpenTrade        = false
+bool   bCloseLong        = false
+bool   bCloseShort       = false
+bool   bCloseTrade       = false
+
+calcPipsProfit(nTradeDir, fltPriceNow, fltOpenPrice) =>
+    float fltProfit = 0.0
+
+    if (nTradeDir == 1)
+        fltProfit := fltPriceNow - fltOpenPrice
+    if (nTradeDir == -1)
+        fltProfit := fltOpenPrice - fltPriceNow
+    float fltResult = fltProfit
+
+// ---------------------------------
+// --- Statistical Event Calculation
+// ---------------------------------
+
+bool bRiseALEvent = (((fltRiseEventNet   > 0.0) and (fltRiseEventROC   > 0.0)) and (isMinimumNetChgROC(ncRiseALBarsSince, fltRiseALNetChg, fltRiseEventNet,   fltRiseEventROC)   == true))
+bool bFallALEvent = (((fltFallEventNet   > 0.0) and (fltFallEventROC   > 0.0)) and (isMinimumNetChgROC(ncFallALBarsSince, fltFallALNetChg, fltFallEventNet,   fltFallEventROC)   == true))
+bool bRiseEMEvent = (((fltFastEMARiseNet > 0.0) and (fltFastEMARiseROC > 0.0)) and (isMinimumNetChgROC(ncRiseEMBarsSince, fltRiseEMNetChg, fltFastEMARiseNet, fltFastEMARiseROC) == true))
+bool bFallEMEvent = (((fltFastEMAFallNet > 0.0) and (fltFastEMAFallROC > 0.0)) and (isMinimumNetChgROC(ncFallEMBarsSince, fltFallEMNetChg, fltFastEMAFallNet, fltFastEMAFallROC) == true))
+
+var float fltHTFEventHigh = 0.0
+var float fltHTFEventLow  = 0.0
+var int   nLastHTFEvent   = 0
+
+if (bRiseALEvent == true)
+    fltHTFEventHigh := seriesClose
+    nLastHTFEvent := 1
+if (bFallALEvent == true)
+    fltHTFEventLow  := seriesClose
+    nLastHTFEvent := -1
+
+bool bRiseStochas = (((htf_seriesDLine > 80) and (bFullFanCone == true)) or ((htf_seriesSlowD > 90) and (bDurableTrendRise == true)) or ((htf_seriesDLine > 90) and (bPartialTrendRise == true) and (fltHTFEventHigh > 0.0) and (seriesClose > fltHTFEventHigh)))
+bool bFallStochas = (((htf_seriesDLine < 20) and (bDownFanCone == true)) or ((htf_seriesSlowD < 10) and (bDurableTrendFall == true)) or ((htf_seriesDLine < 10) and (bPartialTrendFall == true) and (fltHTFEventLow  > 0.0) and (seriesClose < fltHTFEventLow)))
+
+var int nImpulseWaveDir = 0
+var int nImpulseWaveID  = 0
+int nWaveDirNow = 0
+
+if (htf_seriesFastLinReg > htf_seriesSlowLinReg)
+    nWaveDirNow :=  1
+if (htf_seriesFastLinReg < htf_seriesSlowLinReg)
+    nWaveDirNow := -1
+if (nWaveDirNow != nImpulseWaveDir)
+    nImpulseWaveDir := nWaveDirNow
+    nImpulseWaveID  := nImpulseWaveID + 1
+
+// ----------------------------
+// ---- Actual Strategy
+// ----------------------------
+
+nPositionDir := (strategy.position_size < 0) ? -1 : (strategy.position_size > 0) ? 1 : 0
+fltNumShares := abs(strategy.position_size)
+fltNetProfit := strategy.openprofit
+fltExpected  := (fltMinProfit * fltNumShares)
+bProfitable  := (fltNetProfit >= fltExpected)
+if ((strategy.position_entry_name == strLongName) or (strategy.position_entry_name == strShortName))
+    bAlreadyIn := true
+if (bProfitable == true)
+    bProfitable := (calcPipsProfit(nPositionDir, seriesClose, fltEntryPrice) >= fltMinProfit)
+
+if (bAlreadyIn == false)
+    if (fltEntryPrice > 0.0)
+        ncConsecLosses := ncConsecLosses + 1
+        ncPyramidCount := 0
+        fltLastLevel   := 0.0
+        fltEntryPrice  := 0.0
+        fltStopPrice   := 0.0
+        bPullback      := false
+        bFEERise       := false
+        bFEEFall       := false
+
+// ----------------------------
+// ---- Entry Condition - Long
+// ----------------------------
+
+bCrossRise := crossover(seriesFastCross, seriesSlowCross)
+if ((bAlreadyIn == false) and (strTradingMode != "No Trade"))
+    if (bCrossRise == true)
+        if ((seriesClose > htf_seriesTrendDEMA) and (strTradingMode != "Range"))
+            bOpenLong     := true
+            bNascentEntry := false
+        else if ((bLongNascent == true) and (bHTFNascentRise == true))
+            bOpenLong     := true
+            bNascentEntry := true
+
+// ----------------------------
+// ---- Entry Condition - Short
+// ----------------------------
+
+bCrossFall := crossunder(seriesFastCross, seriesSlowCross)
+if ((bAlreadyIn == false) and (bOpenLong == false) and (strTradingMode != "No Trade"))
+    if (bCrossFall == true)
+        if ((seriesClose < htf_seriesTrendDEMA) and (strTradingMode != "Range"))
+            bOpenShort    := true
+            bNascentEntry := false
+        else if ((bShortNascent == true) and (bHTFNascentFall == true))
+            bOpenShort    := true
+            bNascentEntry := true
+
+// ----------------------------
+// ---- Conditional Close
+// ----------------------------
+
+if (bAlreadyIn == true)
+    if (htf_seriesZScore > fltMinZScoreABZ)
+        bFEERise := true
+    if (htf_seriesZScore < (fltMinZScoreBLZ * (-1)))
+        bFEEFall := true
+
+if (bAlreadyIn == true)
+    if ((nPositionDir == 1) and (bProfitable == true))
+        if ((bLongCrossExit  == true)  and (bHTFSignalFall == true))
+            bCloseLong  := true
+        if ((bLongSignalExit == true)  and (bHTFSignalRise == true) and (bRiseALEvent == true) and (bFEERise == true))
+            bCloseLong  := true
+        if ((bLongEventExit  == true)  and (bRiseEMEvent == true) and (bFastAboveSignal == true) and (bHTFFastAboveTrend == true))
+            bCloseLong  := true
+        if ((bLongStochExit  == true)  and (bRiseStochas == true))
+            bCloseLong  := true
+    if ((nPositionDir == -1) and (bProfitable == true))
+        if ((bShortCrossExit  == true) and (bHTFSignalRise == true))
+            bCloseShort := true
+        if ((bShortSignalExit == true) and (bHTFSignalFall == true) and (bFallALEvent == true)  and (bFEEFall == true))
+            bCloseShort := true
+        if ((bShortEventExit  == true) and (bFallEMEvent == true) and (bFastBelowSignal == true) and (bHTFFastBelowTrend == true))
+            bCloseShort := true
+        if ((bShortStochExit  == true) and (bFallStochas == true))
+            bCloseShort  := true
+
+// ----------------------------
+// ---- Flip Flop Condition
+// ----------------------------
+
+if (bAlreadyIn == true)
+    if ((nPositionDir ==  1) and (seriesClose > htf_seriesTrendDEMA) and (bNascentEntry == true))
+        bHemiTransit := true
+    if ((nPositionDir == -1) and (seriesClose < htf_seriesTrendDEMA) and (bNascentEntry == true))
+        bHemiTransit := true
+
+if ((bAlreadyIn == true) and (strTradingMode == "Flip Flop"))
+    if (nPositionDir ==  1)
+        if ((seriesClose < fltEntryPrice) and (bFallEMEvent == true) and (bFastBelowSignal == true) and (bHTFFastBelowTrend == true) and (htf_seriesSlowLinReg < htf_seriesTrendDEMA))
+            if ((bNascentEntry == true) and (bHemiTransit == true))
+                bCloseLong  := true
+            if ((bNascentEntry == true) and (htf_seriesFastAlma < htf_seriesSlowLinReg) and (htf_seriesFastLinReg < htf_seriesSlowLinReg) and (bFallALEvent == true) and (bAccumulateLong == false))
+                bCloseLong  := true
+            if ((nEntryTrendDir ==  1)  and (bNascentEntry == false) and (inputExclusiveLong == false))
+                bCloseLong  := true
+    if (nPositionDir == -1)
+        if ((seriesClose > fltEntryPrice) and (bRiseEMEvent == true) and (bFastAboveSignal == true) and (bHTFFastAboveTrend == true) and (htf_seriesSlowLinReg > htf_seriesTrendDEMA))
+            if ((bNascentEntry == true) and (bHemiTransit == true))
+                bCloseShort := true
+            if ((bNascentEntry == true) and (htf_seriesFastAlma > htf_seriesSlowLinReg) and (htf_seriesFastLinReg > htf_seriesSlowLinReg) and (bRiseALEvent == true) and (bAccumulateShort == false))
+                bCloseShort := true
+            if ((nEntryTrendDir == -1)  and (bNascentEntry == false) and (inputExclusiveShort == false))
+                bCloseShort := true
+
+// ----------------------------
+// ---- Bale Out Condition
+// ----------------------------
+
+bool bBailingOut = false
+
+if (nPositionDir ==  1)
+    if ((bPyramidBaleOut == true) and (seriesClose > htf_seriesTrendDEMA) and (bRiseStochas == true) and (htf_seriesFastAlma > htf_seriesSlowLinReg) and (htf_seriesFastLinReg > htf_seriesSlowLinReg) and (htf_seriesSlowLinReg > htf_seriesTrendDEMA))
+        if (fltNetProfit > (fltExpected * 2.0))
+            bCloseLong  := true
+            bBailingOut := true
+if (nPositionDir == -1)
+    if ((bPyramidBaleOut == true) and (seriesClose < htf_seriesTrendDEMA) and (bFallEMEvent == true) and (bFastBelowSignal == true) and (bHTFFastBelowTrend == true) and (htf_seriesSlowLinReg < htf_seriesTrendDEMA))
+        if (fltNetProfit > (fltExpected * 2.0))
+            bCloseShort := true
+            bBailingOut := true
+
+// ----------------------------
+// ---- Open Trade
+// ----------------------------
+
+calcQuantity() =>
+    float fltTradeSize = fltCurrentSize
+
+    if (fltDefaultSize > 0.0)
+        fltTradeSize := ((ncMaxAddOns > 0) and (fltDefaultSize > 0.0) and (ncConsecLosses > 0) and (ncConsecLosses < ncMaxAddOns)) ? (fltDefaultSize * (ncConsecLosses + 1)) : fltDefaultSize
+    float fltResult = fltTradeSize
+
+float fltQuantity = 0.0
+if ((bOpenLong == true) or (bOpenShort == true))
+    fltQuantity    := calcQuantity()
+    fltEntryPrice  := seriesClose
+    fltEntryHigh   := seriesHigh
+    fltEntryLow    := seriesLow
+    fltLastLevel   := fltEntryPrice
+    fltMAELevel    := 0.0
+    fltStopPrice   := 0.0
+    bOpenTrade     := true
+    bFEERise       := false
+    bFEEFall       := false
+    bPullback      := false
+    bHemiTransit   := false
+    ncPyramidCount := 0
+    nEntryTrendDir := (seriesClose > htf_seriesTrendDEMA) ? 1 : -1
+
+if (bOpenLong == true)
+    if (fltStopOffset > 0.0)
+        fltStopPrice := (seriesLow - fltStopOffset)
+    if (fltQuantity  > 0.0)
+        strategy.entry(strLongName,  strategy.long,  qty = fltQuantity, alert_message = "entry stop = " + tostring(fltStopPrice))
+    if (fltQuantity == 0.0)
+        strategy.entry(strLongName,  strategy.long,  alert_message = "entry stop = " + tostring(fltStopPrice))
+        fltCurrentSize := abs(strategy.position_size)
+    if (fltStopPrice > 0.0)
+        strategy.exit(strLongStop, strLongName, stop = fltStopPrice, alert_message = "stop = " + tostring(fltStopPrice))
+
+if (bOpenShort == true)
+    if (fltStopOffset > 0.0)
+        fltStopPrice := (seriesHigh + fltStopOffset)
+    if (fltQuantity  > 0.0)
+        strategy.entry(strShortName, strategy.short, qty = fltQuantity, alert_message = "entry stop = " + tostring(fltStopPrice))
+    if (fltQuantity == 0.0)
+        strategy.entry(strShortName, strategy.short, alert_message = "entry stop = " + tostring(fltStopPrice))
+        fltCurrentSize := abs(strategy.position_size)
+    if (fltStopPrice > 0.0)
+        strategy.exit(strShortStop, strShortName, stop = fltStopPrice, alert_message = "stop = " + tostring(fltStopPrice))
+
+if (fltDefaultSize == 0.0)
+    fltDefaultSize := abs(strategy.position_size)
+
+// ----------------------------
+// ---- Close Trade
+// ----------------------------
+
+var int ncLastConsecs = 0
+if (bCloseLong == true)
+    fltExitPrice := seriesClose
+    strategy.close( strLongName, when = true, alert_message = "exit profit = " + tostring(fltExitPrice - fltEntryPrice))
+    strategy.cancel(strLongName)
+    bCloseTrade  := true
+
+if (bCloseShort == true)
+    fltExitPrice := seriesClose
+    strategy.close( strShortName, when = true, alert_message = "exit profit = " + tostring(fltEntryPrice - fltExitPrice))
+    strategy.cancel(strShortName)
+    bCloseTrade  := true
+
+if (bCloseTrade == true)
+    ncLastConsecs  := ncConsecLosses
+    ncConsecLosses := (bProfitable == true) ? 0 : ncConsecLosses + 1
+    fltLastLevel   := 0.0
+    fltEntryPrice  := 0.0
+    fltStopPrice   := 0.0
+    bPullback      := false
+    bFEERise       := false
+    bFEEFall       := false
+
+var string strBadRunDate = ""
+var int    ncMaxConsecs  = 0
+if (ncConsecLosses > ncMaxConsecs)
+    ncMaxConsecs  := ncConsecLosses
+    strBadRunDate := tostring(year) + "-" + tostring(month, "##") + "-" + tostring(dayofmonth, "##") + " [" + tostring(hour, "##") + ":" + tostring(minute, "##") + ":00]"
+
+// ----------------------------
+// ---- Pyramid Technology
+// ----------------------------
+
+if ((nPositionDir ==  1) and (seriesSlowD < 20) and ((bFallALEvent == true) or (bFallStochas == true)))
+    bPullback := true
+if ((nPositionDir == -1) and (seriesSlowD > 80) and ((bRiseALEvent == true) or (bRiseStochas == true)))
+    bPullback := true
+
+IsPyramidFall() =>
+    bool bResult = false
+    bool bPassed = false
+    bool bExceedingSpan = ((fltPryramidSpan > 0.0) and ((fltLastLevel - seriesClose) > fltPryramidSpan))
+
+    if ((bCrossRise == true) and (seriesClose > htf_seriesTrendDEMA) and (bHTFFastAboveTrend == true) and (seriesClose > fltLastLevel) and (bPullback == true))
+        bPassed := true
+    else if ((seriesClose < fltLastLevel) and (bExceedingSpan == true) and (seriesClose > fltEntryPrice) and ((bFallALEvent == true) or (bFallEMEvent == true) or (bFallStochas == true)))
+        bPassed := true
+    else if ((seriesClose < fltLastLevel) and (bExceedingSpan == true) and (seriesClose < fltEntryPrice) and (bFallALEvent == true) and (bFallStochas == true) and (bAccumulateLong == true) and (nImpulseWaveID > nPyramidWaveID))
+        bPassed := true
+    bResult := bPassed
+
+IsPyramidRise() =>
+    bool bResult = false
+    bool bPassed = false
+    bool bExceedingSpan = ((fltPryramidSpan > 0.0) and ((seriesClose - fltLastLevel) > fltPryramidSpan))
+
+    if ((bCrossFall == true) and (seriesClose < htf_seriesTrendDEMA) and (bHTFFastBelowTrend == true) and (seriesClose < fltLastLevel) and (bPullback == true))
+        bPassed := true
+    else if ((seriesClose > fltLastLevel) and (bExceedingSpan == true) and (seriesClose < fltEntryPrice) and ((bRiseALEvent == true) or (bRiseEMEvent == true) or (bRiseStochas == true)))
+        bPassed := true
+    else if ((seriesClose > fltLastLevel) and (bExceedingSpan == true) and (seriesClose > fltEntryPrice) and (bRiseALEvent == true) and (bRiseStochas == true) and (bAccumulateShort == true) and (nImpulseWaveID > nPyramidWaveID))
+        bPassed := true
+    bResult := bPassed
+
+bool bNewPyramidLevel = false
+bool bPyramidFall = IsPyramidFall()
+bool bPyramidRise = IsPyramidRise()
+
+if (bAlreadyIn == true)
+    if ((nPositionDir ==  1) and (bPyramidFall == true))
+        bNewPyramidLevel := true
+        strategy.entry(strLongName,  strategy.long,  alert_message="pyramid level = " + tostring(ncPyramidCount + 1))
+        strategy.exit(strLongStop, strLongName, stop = fltStopPrice,   alert_message="scale out level = " + tostring(ncPyramidCount + 1))
+    if ((nPositionDir == -1) and (bPyramidRise == true))
+        bNewPyramidLevel := true
+        strategy.entry(strShortName, strategy.short, alert_message="pyramid level = " + tostring(ncPyramidCount + 1))
+        strategy.exit(strShortStop, strShortName, stop = fltStopPrice, alert_message="scale out level = " + tostring(ncPyramidCount + 1))
+
+if (bNewPyramidLevel == true)
+    ncPyramidCount := ncPyramidCount + 1
+    nPyramidWaveID := nImpulseWaveID
+    fltLastLevel   := seriesClose
+    bPullback      := false
+    if (ncPyramidCount == 1)
+        fltMAELevel := seriesClose
+    if ((nPositionDir ==  1) and (seriesClose < fltMAELevel))
+        fltMAELevel := seriesClose
+    if ((nPositionDir == -1) and (seriesClose > fltMAELevel))
+        fltMAELevel := seriesClose
+
+var int ncHighestLevel = 0
+if (ncPyramidCount > ncHighestLevel)
+    ncHighestLevel := ncPyramidCount
+
+// ----------------------------
+// ---- Strategy Plots
+// ----------------------------
+
+// HTF Trend Lines
+float plotSlowLinReg = na
+float plotFastLinReg = na
+float plotTrendDEMA  = na
+float plotFastAlma   = na
+float plotFastEMA    = na
+
+if (inputShowLines == true)
+    plotSlowLinReg := htf_seriesSlowLinReg
+    plotFastLinReg := htf_seriesFastLinReg
+    plotTrendDEMA  := htf_seriesTrendDEMA
+    plotFastAlma   := htf_seriesFastAlma
+    plotFastEMA    := seriesFastEMA
+
+plot(plotSlowLinReg, color = color.orange, linewidth = 2, title = "SlowLinReg")
+plot(plotFastLinReg, color = color.green,  linewidth = 2, title = "FastLinReg")
+plot(plotTrendDEMA,  color = color.purple, linewidth = 2, title = "TrendDEMA")
+plot(plotFastAlma,   color = color.blue,   linewidth = 2, title = "FastAlma")
+plot(plotFastEMA,    color = color.yellow, linewidth = 2, title = "FastEMA")
+
+// Entry Crossover Background Fill
+bgcolor(((inputShowCrosses == true) and (bCrossRise == true)) ? color.blue : na)
+bgcolor(((inputShowCrosses == true) and (bCrossFall == true)) ? color.red  : na)
+
+// HTF Event Background Fill
+bgcolor(((inputShowEvents == true) and (bRiseALEvent == true)) ? color.blue : na)
+bgcolor(((inputShowEvents == true) and (bFallALEvent == true)) ? color.red  : na)
+
+// Entry EMA Event Background Fill
+bgcolor(((inputShowEMPeaks == true) and (bRiseEMEvent == true)) ? color.blue : na)
+bgcolor(((inputShowEMPeaks == true) and (bFallEMEvent == true)) ? color.red  : na)
+
+// Stochastic Event Background Fill
+bgcolor(((inputShowStochEvent == true) and (bRiseStochas == true)) ? color.blue : na)
+bgcolor(((inputShowStochEvent == true) and (bFallStochas == true)) ? color.red  : na)
+
+// Consecutive Losses Background Fill
+bgcolor(((inputShowConsecLoss == true) and (ncConsecLosses > 0)) ? color.red  : na)
+
+// -----------------------------------------------------------------------------
+// ----- [ BALE OUT MARKERS ]  -------------------------------------------------
+// -----------------------------------------------------------------------------
+
+if ((inputShowBaleOuts == true) and (bBailingOut == true))
+    string txtReport = " Bale Out Exit"
+    txtReport := txtReport + "\n" + " Net Profit: "    + tostring(fltNetProfit, "#.####")
+    txtReport := txtReport + "\n" + " Position Size: " + tostring(fltNumShares, "#.####")
+    txtReport := txtReport + "\n" + " Pyramid Count: " + tostring(ncPyramidCount)
+    txtReport := txtReport + "\n" + " MAE Level: "     + tostring(fltMAELevel,  "#.####")
+    txtReport := txtReport + "\n" + " Consec Losses: " + tostring(ncLastConsecs)
+    label.new(bar_index, high, txtReport, xloc=xloc.bar_index, yloc=yloc.belowbar, style=label.style_labelup, color=#FF0000, textcolor=color.white, size=size.normal, textalign=text.align_left)
+
+// -----------------------------------------------------------------------------
+// ----- [ REPORT ] ------------------------------------------------------------
+// -----------------------------------------------------------------------------
+
+int ncBarsOffChart = 8
+string txtReport = ""
+txtReport := txtReport +        "╒═════════════════╕"
+txtReport := txtReport + "\n" + "   Minimum Tick Size: "  + tostring(syminfo.mintick)
+txtReport := txtReport + "\n" + "   Maximum Pyramids: "   + tostring(ncHighestLevel + 1)
+txtReport := txtReport + "\n" + "   Consecutive Losses: " + tostring(ncMaxConsecs)
+txtReport := txtReport + "\n" + "   Date: "               + strBadRunDate
+txtReport := txtReport + "\n" + "   Max TV Drawdown: "    + tostring(strategy.max_drawdown, "#.####")
+txtReport := txtReport + "\n" + "   Max TV Contracts: "   + tostring(strategy.max_contracts_held_all, "#.####")
+txtReport := txtReport + "\n" + "╘═════════════════╛"
+
+if (inputReport == true)
+    lblEndOfChart = label.new(time + (40 * (time - time[1])), low, txtReport, xloc=xloc.bar_time, yloc=yloc.price, style=label.style_labeldown, color=color.navy, textcolor=color.white, size=size.normal, textalign=text.align_left)
+    label.delete(lblEndOfChart[1])
+
+View in Pine Editor・825 lines
+Use on chart
+5
+1
+2
+11
+13 609
+
+
+
+
+Introduction
+
+This is an open source strategy which provides a framework for webhook enabled projects. It is designed to work out-of-the-box on any instrument triggering on an intraday bar interval. This is a full featured script with an emphasis on actual trading at a brokerage through the TradingView alert mechanism and without requiring browser plugins.
+
+The source code is written in a self documenting style with clearly defined sections. The sections “communicate” with each other through state variables making it easy for the strategy to evolve and improve. This is an excellent place for Pine Language beginners to start their strategy building journey. The script exhibits many Pine Language features which will certainly ad power to your script building abilities.
+
+This script employs a basic trend follow strategy utilizing a forward pyramiding technique. Trend detection is implemented through the use of two higher time frame series. The market entry setup is a Simple Moving Average crossover. Positions exit by passing through conditional take profit logic. The script creates ten indicators including a Zscore oscillator to measure support and resistance levels. The indicator parameters are exposed through 47 strategy inputs segregated into seven sections. All of the inputs are equipped with detailed tool tips to help you get started.
+
+To improve the transition from simulation to execution, strategy.entry and strategy.exit calls show enhanced message text with embedded keywords that are combined with the TradingView placeholders at alert time. Thereby, enabling a single JSON message to generate multiple execution events. This is genius stuff from the Pine Language development team. Really excellent work!
+
+This document provides a sample alert message that can be applied to this script with relatively little modification. Without altering the code, the strategy inputs can alter the behavior to generate thousands of orders or simply a few dozen. It can be applied to crypto, stocks or forex instruments. A good way to look at this script is as a webhook lab that can aid in the development of your own endpoint processor, impress your co-workers and have hours of fun.
+
+By no means is a webhook required or even necessary to benefit from this script. The setups, exits, trend detection, pyramids and DCA algorithms can be easily replaced with more sophisticated versions. The modular design of the script logic allows you to incrementally learn and advance this script into a functional trading system that you can be proud of.
+
+Design
+
+This is a trend following strategy that enters long above the trend line and short below. There are five trend lines that are visible by default but can be turned off in Section 7. Identified, in frequency order, as follows:
+1. [ Yellow ] - EMA in the chart time frame. Intended to track price pressure. Configured in Section 3.
+2. [ Blue ] - ALMA in the higher time frame specified in Section 2 Signal Line Period.
+3. [ Green ] - Linear Regression in the higher time frame specified in Section 2 Signal Line Period.
+4. [ Orange ] - Linear Regression in the higher time frame specified in Section 2 Signal Line Period.
+5. [ Purple ] - DEMA in the higher time frame specified in Section 2 Trend Line Period.
+
+The Blue, Green and Orange lines are signal lines are on the same time frame. The time frame selected should be at least five times greater than the chart time frame. The Purple line represents the trend line for which prices above the line suggest a rising market and prices below a falling market. The time frame selected for the trend should be at least five times greater than the signal lines.
+
+Three oscillators are created as follows:
+1. Stochastic - In the chart time frame. Used to enter forward pyramids.
+2. Stochastic - In the Trend period. Used to detect exit conditions.
+3. Zscore - In the Signal period. Used to detect exit conditions.
+
+The Stochastics are configured identically other than the time frame. The period is set in Section 2.
+
+Two Simple Moving Averages provide the trade entry conditions in the form of a crossover. Crossing up is a long entry and down is a short. This is in fact the same setup you get when you select a basic strategy from the Pine editor. The crossovers are configured in Section 3. You can see where the crosses are occurring by enabling Show Entry Regions in Section 7.
+
+The script has the capacity for pyramids and DCA. Forward pyramids are enabled by setting the Pyramid properties tab with a non zero value. In this case add on trades will enter the market on dips above the position open price. This process will continue until the trade exits. Downward pyramids are available in Crypto and Range mode only. In this case add on trades are placed below the entry price in the drawdown space until the stop is hit. To enable downward pyramids set the Pyramid Minimum Span In Section 1 to a non zero value.
+
+This implementation of Dollar Cost Averaging (DCA) triggers off consecutive losses. Each loss in a run increments a sequence number. The position size is increased as a multiple of this sequence. When the position eventually closes at a profit the sequence is reset. DCA is enabled by setting the Maximum DCA Increments In Section 1 to a non zero value.
+
+It should be noted that the pyramid and DCA features are implemented using a rudimentary design and as such do not perform with the precision of my invite only scripts. They are intended as a feature to stress test your webhook endpoint. As is, you will need to buttress the logic for it to be part of an automated trading system. It is for this reason that I did not apply a Martingale algorithm to this pyramid implementation. But, hey, it’s an open source script so there is plenty of room for learning and your own experimentation.
+
+How does it work
+
+The overall behavior of the script is governed by the Trading Mode selection in Section 1. It is the very first input so you should think about what behavior you intend for this strategy at the onset of the configuration. As previously discussed, this script is designed to be a trend follower. The trend being defined as where the purple line is predominately heading. In BiDir mode, SMA crossovers above the purple line will open long positions and crosses below the line will open short. If pyramiding is enabled add on trades will accumulate on dips above the entry price. The value applied to the Minimum Profit input in Section 1 establishes the threshold for a profitable exit. This is not a hard number exit. The conditional exit logic must be satisfied in order to permit the trade to close. This is where the effort put into the indicator calibration is realized. There are four ways the trade can exit at a profit:
+
+1. Natural exit. When the blue line crosses the green line the trade will close. For a long position the blue line must cross under the green line (downward). For a short the blue must cross over the green (upward).
+2. Alma / Linear Regression event. The distance the blue line is from the green and the relative speed the cross is experiencing determines this event. The activation thresholds are set in Section 6 and relies on the period and length set in Section 2. A long position will exit on an upward thrust which exceeds the activation threshold. A short will exit on a downward thrust.
+3. Exponential event. The distance the yellow line is from the blue and the relative speed the cross is experiencing determines this event. The activation thresholds are set in Section 3 and relies on the period and length set in the same section.
+4. Stochastic event. The purple line stochastic is used to measure overbought and over sold levels with regard to position exits. Signal line positions combined with a reading over 80 signals a long profit exit. Similarly, readings below 20 signal a short profit exit.
+
+Another, optional, way to exit a position is by Bale Out. You can enable this feature in Section 1. This is a handy way to reduce the risk when carrying a large pyramid stack. Instead of waiting for the entire position to recover we exit early (bale out) as soon as the profit value has doubled.
+
+There are lots of ways to implement a bale out but the method I used here provides a succinct example. Feel free to improve on it if you like. To see where the Bale Outs occur, enable Show Bale Outs in Section 7. Red labels are rendered below each exit point on the chart.
+
+There are seven selectable Trading Modes available from the drop down in Section 1:
+
+1. Long - Uses the strategy.risk.allow_entry_in to execute long only trades. You will still see shorts on the chart.
+2. Short - Uses the strategy.risk.allow_entry_in to execute short only trades. You will still see long trades on the chart.
+3. BiDir - This mode is for margin trading with a stop. If a long position was initiated above the trend line and the price has now fallen below the trend, the position will be reversed after the stop is hit. Forward pyramiding is available in this mode if you set the Pyramiding value in the Properties tab. DCA can also be activated.
+4. Flip Flop - This is a bidirectional trading mode that automatically reverses on a trend line crossover. This is distinctively different from BiDir since you will get a reversal even without a stop which is advantageous in non-margin trading.
+5. Crypto - This mode is for crypto trading where you are buying the coins outright. In this case you likely want to accumulate coins on a crash. Especially, when all the news outlets are talking about the end of Bitcoin and you see nice deep valleys on the chart. Certainly, under these conditions, the market will be well below the purple line. No margin so you can’t go short. Downward pyramids are enabled for Crypto mode when two conditions are met. First the Pyramiding value in the Properties tab must be non zero. Second the Pyramid Minimum Span in Section 1 must be non zero.
+6. Range - This is a counter trend trading mode. Longs are entered below the purple trend line and shorts above. Useful when you want to test your webhook in a market where the trend line is bisecting the signal line series. Remember that this strategy is a trend follower. It’s going to get chopped out in a range bound market. By turning on the Range mode you will at least see profitable trades while stuck in the range. However, when the market eventually picks a direction, this mode will sustain losses. This range trading mode is a rudimentary implementation that will need a lot of improvement if you want to create a reliable switch hitter (trend/range combo).
+7. No Trade. Useful when setting up the trend lines and the entry and exit is not important.
+
+Once in the trade, long or short, the script tests the exit condition on every bar. If not a profitable exit then it checks if a pyramid is required. As mentioned earlier, the entry setups are quite primitive. Although they can easily be replaced by more sophisticated algorithms, what I really wanted to show is the diminished role of the position entry in the overall life of the trade. Professional traders spend much more time on the management of the trade beyond the market entry. While your trade entry is important, you can get in almost anywhere and still land a profitable exit.
+
+If DCA is enabled, the size of the position will increase in response to consecutive losses. The number of times the position can increase is limited by the number set in Maximum DCA Increments of Section 1. Once the position breaks the losing streak the trade size will return the default quantity set in the Properties tab. It should be noted that the Initial Capital amount set in the Properties tab does not affect the simulation in the same way as a real account. In reality, running out of money will certainly halt trading. In fact, your account would be frozen long before the last penny was committed to a trade. On the other hand, TradingView will keep running the simulation until the current bar even if your funds have been technically depleted.
+
+Entry and exit use the strategy.entry and strategy.exit calls respectfully. The alert_message parameter has special keywords that the endpoint expects to properly calculate position size and message sequence. The alert message will embed these keywords in the JSON object through the {{strategy.order.alert_message}} placeholder. You should use whatever keywords are expected from the endpoint you intend to webhook in to.
+
+Webhook Integration
+
+The TradingView alerts dialog provides a way to connect your script to an external system which could actually execute your trade. This is a fantastic feature that enables you to separate the data feed and technical analysis from the execution and reporting systems. Using this feature it is possible to create a fully automated trading system entirely on the cloud. Of course, there is some work to get it all going in a reliable fashion. Being a strategy type script place holders such as {{strategy.position_size}} can be embedded in the alert message text. There are more than 10 variables which can write internal script values into the message for delivery to the specified endpoint.
+
+Entry and exit use the strategy.entry and strategy.exit calls respectfully. The alert_message parameter has special keywords that my endpoint expects to properly calculate position size and message sequence. The alert message will embed these keywords in the JSON object through the {{strategy.order.alert_message}} placeholder. You should use whatever keywords are expected from the endpoint you intend to webhook in to.
+
+Here is an excerpt of the fields I use in my webhook signal:
+
+"broker_id": "kraken",
+"account_id": "XXX XXXX XXXX XXXX",
+"symbol_id": "XMRUSD",
+"action": "{{strategy.order.action}}",
+"strategy": "{{strategy.order.id}}",
+"lots": "{{strategy.order.contracts}}",
+"price": "{{strategy.order.price}}",
+"comment": "{{strategy.order.alert_message}}",
+"timestamp": "{{time}}"
+
+Though TradingView does a great job in dispatching your alert this feature does come with a few idiosyncrasies. Namely, a single transaction call in your script may cause multiple transmissions to the endpoint. If you are using placeholders each message describes part of the transaction sequence. A good example is closing a pyramid stack. Although the script makes a single strategy.close() call, the endpoint actually receives a close message for each pyramid trade. The broker, on the other hand, only requires a single close. The incongruity of this situation is exacerbated by the possibility of messages being received out of sequence. Depending on the type of order designated in the message, a close or a reversal. This could have a disastrous effect on your live account. This broker simulator has no idea what is actually going on at your real account. Its just doing the job of running the simulation and sending out the computed results. If your TradingView simulation falls out of alignment with the actual trading account lots of really bad things could happen. Like your script thinks your are currently long but the account is actually short. Reversals from this point forward will always be wrong with no one the wiser. Human intervention will be required to restore congruence. But how does anyone find out this is occurring? In closed systems engineering this is known as entropy. In practice your webhook logic should be robust enough to detect these conditions. Be generous with the placeholder usage and give the webhook code plenty of information to compare states. Both issuer and receiver. Don’t blindly commit incoming signals without verifying system integrity.
+
+Setup
+
+The following steps provide a very brief set of instructions that will get you started on your first configuration. After you’ve gone through the process a couple of times, you won’t need these anymore. It’s really a simple script after all. I have several example configurations that I used to create the performance charts shown. I can share them with you if you like. Of course, if you’ve modified the code then these steps are probably obsolete.
+
+There are 47 inputs divided into seven sections. For the most part, the configuration process is designed to flow from top to bottom. Handy, tool tips are available on every field to help get you through the initial setup.
+
+Step 1. Input the Base Currency and Order Size in the Properties tab. Set the Pyramiding value to zero.
+Step 2. Select the Trading Mode you intend to test with from the drop down in Section 1. I usually select No Trade until I’ve setup all of the trend lines, profit and stop levels.
+Step 3. Put in your Minimum Profit and Stop Loss in the first section. This is in pips or currency basis points (chart right side scale). Remember that the profit is taken as a conditional exit not a fixed limit. The actual profit taken will almost always be greater than the amount specified. The stop loss, on the other hand, is indeed a hard number which is executed by the TradingView broker simulator when the threshold is breached.
+Step 4. Apply the appropriate value to the Tick Scalar field in Section 1. This value is used to remove the pipette from the price. You can enable the Summary Report in Section 7 to see the TradingView minimum tick size of the current chart.
+Step 5. Apply the appropriate Price Normalizer value in Section 1. This value is used to normalize the instrument price for differential calculations. Basically, we want to increase the magnitude to significant digits to make the numbers more meaningful in comparisons. Though I have used many normalization techniques, I have always found this method to provide a simple and lightweight solution for less demanding applications. Most of the time the default value will be sufficient. The Tick Scalar and Price Normalizer value work together within a single calculation so changing either will affect all delta result values.
+Step 6. Turn on the trend line plots in Section 7. Then configure Section 2. Try to get the plots to show you what’s really happening not what you want to happen. The most important is the purple trend line. Select an interval and length that seem to identify where prices tend to go during non-consolidation periods. Remember that a natural exit is when the blue crosses the green line.
+Step 7. Enable Show Event Regions in Section 7. Then adjust Section 6. Blue background fills are spikes and red fills are plunging prices. These measurements should be hard to come by so you should see relatively few fills on the chart if you’ve set this up as intended. Section 6 includes the Zscore oscillator the state of which combines with the signal lines to detect statistically significant price movement. The Zscore is a zero based calculation with positive and negative magnitude readings. You want to input a reasonably large number slightly below the maximum amplitude seen on the chart. Both rise and fall inputs are entered as a positive real number. You can easily use my code to create a separate indicator if you want to see it in action. The default value is sufficient for most configurations.
+Step 8. Turn off Show Event Regions and enable Show Entry Regions in Section 7. Then adjust Section 3. This section contains two parts. The entry setup crossovers and EMA events. Adjust the crossovers first. That is the Fast Cross Length and Slow Cross Length. The frequency of your trades will be shown as blue and red fills. There should be a lot. Then turn off Show Event Regions and enable Display EMA Peaks. Adjust all the fields that have the word EMA. This is actually the yellow line on the chart. The blue and red fills should show much less than the crossovers but more than event fills shown in Step 7.
+Step 9. Change the Trading Mode to BiDir if you selected No Trades previously. Look on the chart and see where the trades are occurring. Make adjustments to the Minimum Profit and Stop Offset in Section 1 if necessary. Wider profits and stops reduce the trade frequency.
+Step 10. Go to Section 4 and 5 and make fine tuning adjustments to the long and short side.
+
+Example Settings
+
+To reproduce the performance shown on the chart please use the following configuration: (Bitcoin on the Kraken exchange)
+
+1. Select XBTUSD Kraken as the chart symbol.
+2. On the properties tab set the Order Size to: 0.01 Bitcoin
+3. On the properties tab set the Pyramiding to: 12
+4. In Section 1: Select “Crypto” for the Trading Model
+5. In Section 1: Input 2000 for the Minimum Profit
+6. In Section 1: Input 0 for the Stop Offset (No Stop)
+7. In Section 1: Input 10 for the Tick Scalar
+8. In Section 1: Input 1000 for the Price Normalizer
+9. In Section 1: Input 2000 for the Pyramid Minimum Span
+10. In Section 1: Check mark the Position Bale Out
+11. In Section 2: Input 60 for the Signal Line Period
+12. In Section 2: Input 1440 for the Trend Line Period
+13. In Section 2: Input 5 for the Fast Alma Length
+14. In Section 2: Input 22 for the Fast LinReg Length
+15. In Section 2: Input 100 for the Slow LinReg Length
+16. In Section 2: Input 90 for the Trend Line Length
+17. In Section 2: Input 14 Stochastic Length
+18. In Section 3: Input 9 Fast Cross Length
+19. In Section 3: Input 24 Slow Cross Length
+20. In Section 3: Input 8 Fast EMA Length
+21. In Section 3: Input 10 Fast EMA Rise NetChg
+22. In Section 3: Input 1 Fast EMA Rise ROC
+23. In Section 3: Input 10 Fast EMA Fall NetChg
+24. In Section 3: Input 1 Fast EMA Fall ROC
+25. In Section 4: Check mark the Long Natural Exit
+26. In Section 4: Check mark the Long Signal Exit
+27. In Section 4: Check mark the Long Price Event Exit
+28. In Section 4: Check mark the Long Stochastic Exit
+29. In Section 5: Check mark the Short Natural Exit
+30. In Section 5: Check mark the Short Signal Exit
+31. In Section 5: Check mark the Short Price Event Exit
+32. In Section 5: Check mark the Short Stochastic Exit
+33. In Section 6: Input 120 Rise Event NetChg
+34. In Section 6: Input 1 Rise Event ROC
+35. In Section 6: Input 5 Min Above Zero ZScore
+36. In Section 6: Input 120 Fall Event NetChg
+37. In Section 6: Input 1 Fall Event ROC
+38. In Section 6: Input 5 Min Below Zero ZScore
+
+In this configuration we are trading in long only mode and have enabled downward pyramiding. The purple trend line is based on the day (1440) period. The length is set at 90 days so it’s going to take a while for the trend line to alter course should this symbol decide to node dive for a prolonged amount of time. Your trades will still go long under those circumstances. Since downward accumulation is enabled, your position size will grow on the way down.
+
+The performance example is Bitcoin so we assume the trader is buying coins outright. That being the case we don’t need a stop since we will never receive a margin call. New buy signals will be generated when the price exceeds the magnitude and speed defined by the Event Net Change and Rate of Change.
+
+Feel free to PM me with any questions related to this script. Thank you and happy trading!
+
+CFTC RULE 4.41
+
+These results are based on simulated or hypothetical performance results that have certain inherent limitations. Unlike the results shown in an actual performance record, these results do not represent actual trading. Also, because these trades have not actually been executed, these results may have under-or over-compensated for the impact, if any, of certain market factors, such as lack of liquidity. Simulated or hypothetical trading programs in general are also subject to the fact that they are designed with the benefit of hindsight. No representation is being made that any account will or is likely to achieve profits or losses similar to these being shown.
+

@@ -1,0 +1,49 @@
+//@version=5
+strategy("EMA Crossover Strategy ($300 TP, 5-Minute, All Hours)", overlay=true, default_qty_type=strategy.fixed, default_qty_value=3)
+
+// === INPUTS ===
+emaFastLen     = input.int(9, title="Fast EMA Length")
+emaMidLen      = input.int(20, title="Mid EMA Length")
+emaSlowLen     = input.int(55, title="Slow EMA Length")
+dollarRisk     = input.float(100, title="Risk per Trade ($)")
+dollarTarget   = input.float(300, title="Profit Target per Trade ($)")
+
+// === INDICATORS ===
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// === CROSSOVER CONDITIONS ===
+crossUpMid  = ta.crossover(emaFast, emaMid)
+crossDownMid = ta.crossunder(emaFast, emaMid)
+crossUpSlow = ta.crossover(emaFast, emaSlow)
+crossDownSlow = ta.crossunder(emaFast, emaSlow)
+
+// === ENTRY CONDITIONS ===
+longEntry  = crossUpMid or crossUpSlow
+shortEntry = crossDownMid or crossDownSlow
+
+// === DOLLAR-BASED STOPS AND TARGETS ===
+tickSize = syminfo.mintick
+contractSize = 3
+longStop = close - dollarRisk / (tickSize * contractSize)
+shortStop = close + dollarRisk / (tickSize * contractSize)
+longTP   = close + dollarTarget / (tickSize * contractSize)
+shortTP  = close - dollarTarget / (tickSize * contractSize)
+
+// === STRATEGY EXECUTION ===
+if (longEntry)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", stop=longStop, limit=longTP)
+
+if (shortEntry)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry="Short", stop=shortStop, limit=shortTP)
+
+View in Pine Editor・41 lines
+Use on chart
+2
+6
+1 228
+This EMA Crossover Strategy is designed for intraday trading on the 5-minute chart.
+It uses three EMAs (fast, mid, slow) to identify momentum shifts and trigger long or short entries. Risk management is dollar-based, with default settings of $100 risk per trade and $300 profit target. Entries are taken when the fast EMA crosses above/below the mid or slow EMA, with stops and targets calculated dynamically. The strategy runs across all hours and uses fixed position sizing (default 3 contracts). It is intended as a framework for traders to adapt and optimize to their own instruments and risk preferences.

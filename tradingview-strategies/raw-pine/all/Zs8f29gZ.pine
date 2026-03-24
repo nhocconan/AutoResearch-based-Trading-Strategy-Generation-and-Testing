@@ -1,0 +1,116 @@
+//@version=6
+strategy("Test",
+     overlay=true,
+     pyramiding=3,
+     calc_on_every_tick=false,
+     process_orders_on_close=false,
+     commission_type=strategy.commission.percent,
+     commission_value=0,
+     initial_capital=10000,
+     margin_long=0,
+     margin_short=0,
+     max_labels_count=500)
+
+// === 参数 ===
+float lvl1 = 2301.42
+float qty1 = 0.1
+
+float lvl2 = 2291.68
+float qty2 = 0.2
+
+// === 北京时间戳 ===
+int t_place = timestamp("Asia/Shanghai", 2026, 02, 01, 02, 42, 30)
+int t_log1  = timestamp("Asia/Shanghai", 2026, 02, 01, 02, 42, 30)
+int t_log2  = timestamp("Asia/Shanghai", 2026, 02, 01, 02, 43, 00)
+int t_log3  = timestamp("Asia/Shanghai", 2026, 02, 01, 02, 43, 30)
+int t_log4  = timestamp("Asia/Shanghai", 2026, 02, 01, 02, 45, 00)  // ✅ 新增 02:45:00
+
+
+// === 检测是否出现“新平仓 trade” ===
+bool newClosed = strategy.closedtrades > strategy.closedtrades[1]
+
+if newClosed
+    int last = strategy.closedtrades - 1
+
+    // 最新平仓 trade 的关键信息
+    string eid = strategy.closedtrades.entry_id(last)
+    float  epx = strategy.closedtrades.entry_price(last)
+
+    string xid = strategy.closedtrades.exit_id(last)
+    float  xpx = strategy.closedtrades.exit_price(last)
+
+    float  pnl = strategy.closedtrades.profit(last)  // 注意：单位是策略币种/合约计价（受 commission 等影响）
+
+    // 判断是不是“止损”触发（看 exit_id）
+    bool isStop = str.startswith(xid, "S_SL_")
+
+    string msg = "CLOSED TRADE (new)\n" +"entry: " + eid + " @ " + str.tostring(epx) + "\n" +"exit : " + xid + " @ " + str.tostring(xpx) + "\n" +"pnl  : " + str.tostring(pnl) + "\n" +"isStop=" + str.tostring(isStop)
+    label.new(bar_index, high, msg, style=label.style_label_down, textalign=text.align_left)
+
+// === 工具函数：打印 opentrades 列表 ===
+f_dump_opentrades(string title) =>
+    int n = strategy.opentrades
+    string s = title + "\n" + "opentrades=" + str.tostring(n)
+
+    if n > 0
+        for i = 0 to n - 1
+            string eid = strategy.opentrades.entry_id(i)
+            float  px  = strategy.opentrades.entry_price(i)
+            s += "\n" + str.tostring(i) + ") " + eid + " @ " + str.tostring(px)
+
+    // 用 label 打印在图上（你也可以改成 table，但 label 最直观）
+    label.new(bar_index, high, s, style=label.style_label_down, textalign=text.align_left)
+
+// === 仅在指定那根 bar 上挂单一次 ===
+// 注意：time 是当前 bar 的开盘时间(毫秒时间戳)，在 30s 周期下，02:42:30 那根 bar 的 time 才会等于该时间点。
+float sl = 2329.53
+
+if time == t_place
+    // 1) 两个做空入场（跌破触发）
+    strategy.entry(id="S_BRK_2301_42", direction=strategy.short, qty=qty1, stop=lvl1)
+    strategy.entry(id="S_BRK_2291_68", direction=strategy.short, qty=qty2, stop=lvl2)
+
+    // 2) 给每个入场单分别挂止损（价格 >= 2329.53 触发平仓）
+    strategy.exit(id="S_SL_50", from_entry="", stop=sl, qty_percent=50)
+
+
+// === 在两个时间点打印 opentrades ===
+if time == t_log1
+    f_dump_opentrades("LOG @ 2026-02-01 02:42:30 (Asia/Shanghai)")
+
+if time == t_log2
+    f_dump_opentrades("LOG @ 2026-02-01 02:43:00 (Asia/Shanghai)")
+
+if time == t_log3
+    f_dump_opentrades("LOG @ 2026-02-01 02:43:30 (Asia/Shanghai)")  // ✅ 新增
+
+if time == t_log4
+    f_dump_opentrades("LOG @ 2026-02-01 02:45:00 (Asia/Shanghai)")
+
+View in Pine Editor・91 lines
+Use on chart
+4
+345
+this is a test script
+
+
+bool newClosed = strategy.closedtrades > strategy.closedtrades[1]
+
+if newClosed
+int last = strategy.closedtrades - 1
+
+// 最新平仓 trade 的关键信息
+string eid = strategy.closedtrades.entry_id(last)
+float epx = strategy.closedtrades.entry_price(last)
+
+string xid = strategy.closedtrades.exit_id(last)
+float xpx = strategy.closedtrades.exit_price(last)
+
+float pnl = strategy.closedtrades.profit(last) // 注意：单位是策略币种/合约计价（受 commission 等影响）
+
+// 判断是不是“止损”触发（看 exit_id）
+bool isStop = str.startswith(xid, "S_SL_")
+
+string msg = "CLOSED TRADE (new)\n" +"entry: " + eid + " @ " + str.tostring(epx) + "\n" +"exit : " + xid + " @ " + str.tostring(xpx) + "\n" +"pnl : " + str.tostring(pnl) + "\n" +"isStop=" + str.tostring(isStop)
+label.new(bar_index, high, msg, style=label.style_label_down, textalign=text.align_left)
+

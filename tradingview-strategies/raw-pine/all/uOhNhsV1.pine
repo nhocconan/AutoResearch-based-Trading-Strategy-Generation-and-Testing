@@ -1,0 +1,65 @@
+//@version=6
+strategy("週一普跌策略",
+ overlay=true,
+ default_qty_type=strategy.cash,
+ default_qty_value=100,
+ initial_capital=1000,
+ pyramiding=0,
+ margin_long=0,
+ margin_short=0
+ )
+
+// 判斷時間
+t = time(timeframe.period, "Asia/Taipei")
+isMonday = dayofweek(t) == dayofweek.sunday
+is8am = hour(t) == 23 and minute(t) == 0
+// 記錄是否已掛 TP/SL
+var bool ordersPlaced = false
+
+// 固定% 止盈止損
+tpPercent = input.float(0.1,'止盈', step=0.01)  // 止盈
+slPercent = input.float(0.01,'止損', step=0.01)  // 止損
+
+// 進場：每週一 08:00 第一根 K
+enterShort = isMonday and is8am and barstate.isnew
+
+// 計算本次下單金額 = 當前全部 equity
+cashToUse = strategy.equity
+
+if (enterShort and strategy.position_size == 0)
+    entryPrice = close[1]
+    qty = strategy.equity / entryPrice   // 全倉
+    strategy.entry("MonShort", strategy.short, qty = qty) // 市價進場
+    ordersPlaced := false
+
+// 持倉後掛 TP/SL
+if (strategy.position_size < 0 and not ordersPlaced)
+    avg = strategy.position_avg_price
+    tpPrice = avg * (1 - tpPercent)
+    slPrice = avg * (1 + slPercent)
+
+    strategy.exit("Exit", "MonShort", stop = slPrice, limit = tpPrice)
+    ordersPlaced := true
+
+// 平倉後 reset
+if (strategy.position_size == 0)
+    ordersPlaced := false
+
+View in Pine Editor・49 lines
+Use on chart
+1
+0
+624
+Strategy Description / 策略敘述
+
+EN
+This strategy takes a short position at the start of each Monday, based on the hypothesis that cryptocurrency markets tend to experience post-weekend risk-off behavior.
+The system enters a full-equity short position at the Tokyo open (Taipei 08:00), aiming to capture Monday downside pressure resulting from accumulated weekend information and macro sentiment adjustments when traditional financial markets reopen.
+Risk management uses fixed percentage take-profit and stop-loss levels, emphasizing asymmetric reward-to-risk (large occasional gains, small frequent losses).
+The model reflects the increasing alignment between crypto price behavior and traditional financial market cycles.
+
+ZH-TW
+本策略於每週一開盤時做空，基於假設加密資產在週末後具有風險釋放與補跌傾向。
+系統會在台北時間早上 08:00 以全倉做空，目標捕捉因週末累積消息與傳統金融市場重新開盤所造成的下跌壓力。
+風控採固定止盈、止損百分比，強調高報酬／低風險的不對稱結構（小虧多次、偶爾大賺）。
+此模型反映加密貨幣市場行為與華爾街週期愈趨一致的市場現象。

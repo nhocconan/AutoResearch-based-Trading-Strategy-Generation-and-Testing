@@ -1,0 +1,46 @@
+//@version=1
+strategy("DEMA Strategy with MACD", overlay=true)
+
+// === Trend Trader Strategy ===
+DemaLength = input(21, minval=1)
+MacdControl = input(false, title="Control 'MACD Histogram is positive?' when Buy condition")
+
+e1 = ema(close, DemaLength)
+e2 = ema(e1, DemaLength)
+dema1 = 2 * e1 - e2
+pos = close > dema1 ? 1 : 0 
+barcolor(pos == 0 ? red: pos == 1 ? green : blue )    
+plot(dema1, color= blue , title="DEMA Strategy with MACD")
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2020, title = "From Year", minval = 2017)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2017)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+// === MACD ===
+[macdLine, signalLine, histLine] = macd(close, 12, 26, 9)
+macdCond= MacdControl ? histLine[0] > 0 ? true : false : true
+
+strategy.entry("BUY", strategy.long, when = window() and pos == 1 and macdCond)
+strategy.entry("SELL", strategy.short, when = window() and pos == 0)
+
+View in Pine Editor・36 lines
+Use on chart
+9
+1
+9
+7
+26 419
+The Double Exponential Moving Average (DEMA) indicator was introduced in January 1994 by Patrick G. Mulloy, in an article in the "Technical Analysis of Stocks & Commodities" magazine: "Smoothing Data with Faster Moving Averages"
+
+It attempts to remove the inherent lag associated to Moving Averages by placing more weight on recent values. The name suggests this is achieved by applying a double exponential smoothing which is not the case. The name double comes from the fact that the value of an EMA (Exponential Moving Average) is doubled. To keep it in line with the actual data and to remove the lag the value "EMA of EMA" is subtracted from the previously doubled ema.
+
+DEMA is a very responsive system. A lot of signals can be generated only when trading with DEMA. In this strategy, I combined Dema buy-sell signals with MACD indicator. When you activate MACD confirmation from settings; When DEMA comes to long situation, the MACD histogram is checked to be positive.

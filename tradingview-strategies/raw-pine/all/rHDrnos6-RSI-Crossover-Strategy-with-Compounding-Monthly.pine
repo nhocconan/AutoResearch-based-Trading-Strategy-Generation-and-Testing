@@ -1,0 +1,67 @@
+//@version=5
+strategy("RSI Crossover Strategy with Compounding (Monthly)", overlay=true)
+
+// Initial capital settings
+var float initialCapital = 100000 // Starting capital of 1 lakh
+var float capital = initialCapital // Current capital
+var float investedCapital = 0.0 // Track capital invested in current trade
+
+// Parameters for RSI
+rsiLength = 14
+
+// Get the RSI and the RSI SMA on the monthly time frame
+rsiMonthly = request.security(syminfo.tickerid, "M", ta.rsi(close, rsiLength))
+rsiSmaMonthly = request.security(syminfo.tickerid, "M", ta.sma(rsiMonthly, rsiLength))
+
+// Define conditions for entry and exit based on monthly time frame
+rsiMonthlyHigher = rsiMonthly > rsiSmaMonthly
+rsiMonthlyLower = rsiMonthly < rsiSmaMonthly
+
+// Calculate the maximum number of shares we can buy with the current capital
+maxQuantity = capital > 0 ? math.floor(capital / close) : 0
+
+// Entry Condition: RSI > RSI SMA on the monthly time frame
+if (rsiMonthlyHigher and strategy.position_size == 0 and maxQuantity > 0)
+    strategy.entry("Long", strategy.long, qty=maxQuantity)
+    investedCapital := maxQuantity * close  // Update invested capital
+
+// Exit Condition: RSI < RSI SMA on the monthly time frame
+if (rsiMonthlyLower and strategy.position_size > 0)
+    strategy.close("Long")
+    // Update capital after closing the trade
+    capital := capital + (strategy.netprofit) // Update capital with net profit only
+    investedCapital := 0.0  // Reset invested capital
+
+// Plot the RSI and RSI SMA on the chart for visualization
+plot(rsiMonthly, color=color.blue, title="RSI (Monthly)")
+plot(rsiSmaMonthly, color=color.red, title="RSI SMA (Monthly)")
+
+View in Pine Editor・37 lines
+Use on chart
+1.1 K
+2
+15 842
+Explanation of the Code:
+Initial Setup:
+
+The strategy initializes with a capital of 100,000.
+Variables track the capital and the amount invested in the current trade.
+RSI Calculation:
+
+The RSI and its SMA are calculated on the monthly timeframe using request.security().
+Entry and Exit Conditions:
+
+Entry: A long position is initiated when the RSI is above its SMA and there’s no existing position. The quantity is based on available capital.
+Exit: The position is closed when the RSI falls below its SMA. The capital is updated based on the net profit from the trade.
+Capital Management:
+
+After closing a trade, the capital is updated with the net profit plus the initial investment.
+Plotting:
+
+The RSI and its SMA are plotted for visualization on the chart.
+A label displays the current capital.
+Notes:
+Test the strategy on different instruments and historical data to see how it performs.
+Adjust parameters as needed for your specific trading preferences.
+This script is a basic framework, and you might want to enhance it with risk management, stop-loss, or take-profit features as per your trading strategy.
+Feel free to modify it further based on your needs!

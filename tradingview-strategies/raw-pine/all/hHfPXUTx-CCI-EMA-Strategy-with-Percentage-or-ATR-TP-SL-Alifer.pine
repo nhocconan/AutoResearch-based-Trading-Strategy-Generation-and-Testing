@@ -1,0 +1,5 @@
+//@version=5
+overbought=##input(defval=150,type='INPUT_INTEGER',##id='in_1')
+oversold=##input(defval=-140,type='INPUT_INTEGER',##id='in_2')
+##root(root_metainfo,rm_0,overbought,input__float)
+##root(root_metainfo,rm_1,oversold,input__float)

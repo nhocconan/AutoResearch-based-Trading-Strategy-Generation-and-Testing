@@ -1,0 +1,103 @@
+//@version=2
+strategy("Public TS - FX", shorttitle="Strategy", overlay=false, default_qty_value=100)
+
+ts = input(5, "Trailing Stop") / 10000
+
+//Heiken Ashi Candles
+Factor = 3
+Pd = 7
+isHA = input(true, "HA Candles", bool)
+
+data = isHA ? heikenashi(tickerid) : tickerid
+
+r1 = input("3", "Resolution", resolution)
+r2 = input("5", "Resolution", resolution)
+r3 = input("15", "Resolution", resolution)
+r4 = input("30", "Resolution", resolution)
+
+o1 = security(data, r1, open[1])
+c1= security(data, r1, close[1])
+o2 = security(data, r2, open[1])
+c2 = security(data, r2, close[1])
+o3 = security(data, r3, open[1])
+c3 = security(data, r3, close[1])
+o4 = security(data, r4, open[1])
+c4 = security(data, r4, close[1])
+
+long = o4 < c4 and o3 < c3 and o2 < c2 and o1 < c1
+short = o4 > c4 and o3 > c3 and o2 > c2 and o1 > c1
+
+last_long = long ? time : nz(last_long[1])
+last_short = short ? time : nz(last_short[1])
+
+in_long = last_long > last_short
+in_short = last_short > last_long
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long = long ? open : nz(last_open_long[1])
+last_open_short = short ? open : nz(last_open_short[1])
+
+last_high = not in_long ? na : in_long and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low = not in_short ? na : in_short and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+long_ts = not na(last_high) and close <= (last_high - ts)
+short_ts = not na(last_low) and close >= (last_low + ts)
+
+strategy.entry("Long", strategy.long, when=long_signal)
+strategy.entry("Short", strategy.short, when=short_signal)
+
+strategy.close("Long", when=long_ts)
+strategy.close("Short", when=short_ts)
+
+price  = close[1]
+noleverage = price / 100
+leverage = 10 // noleverage * 4
+
+TP = input(0) * leverage
+SL = input(42, maxval=200) * leverage
+TS = input(0) * leverage
+CQ = 100
+
+TPP = (TP > 0) ? TP : na
+SLP = (SL > 0) ? SL : na
+TSP = (TS > 0) ? TS : na
+
+strategy.exit("Close Long", "Long", qty_percent=CQ, profit=TPP, loss=SLP, trail_points=TSP)
+strategy.exit("Close Short", "Short", qty_percent=CQ, profit=TPP, loss=SLP, trail_points=TSP)
+
+View in Pine Editor・68 lines
+Use on chart
+9
+1
+3
+20
+33 562
+The number one request since the creation of autoview
+ was to have alerts triggered for Take Profit, Stop Loss and Trailing Stops. Finally, we've figured it out, and as an additional bonus, this allows us to back test trailing stops in the strategy tester.
+
+YouTube Video about this script and setup: bit.ly/1S48a7z
+
+
+This script contains 2 things people have been asking for, multiple time frames and of course, a trailing stop that can be both back tested and setup for alerts.
+
+This strategy itself seems to perform better without the use of the Trailing Stop, so play around and monitor it before actually trying to trade it live.
+View all the trades being tracked in a Google Sheets here: bit.ly/1nI65Bj
+
+
+To learn more about back testing strategies, automation and AutoView join our free slack group via slack.crypto.pink/
+
+
+
+Referral Tax:
+This requires 4 alerts, so you are going to have to upgrade to PRO. It'd be greatly appreciated if you signed up using our referral link.
+bit.ly/1ZXbBS1
+
+
+1Broker
+bit.ly/1XvAV0c
+
+
+okcoin
+bit.ly/1OU13x2

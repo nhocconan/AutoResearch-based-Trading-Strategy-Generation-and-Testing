@@ -1,0 +1,99 @@
+//@version=5
+strategy("Alpha RSI Breakout Strategy", overlay=true, initial_capital=10000, default_qty_value=100)
+
+// Inputs
+sma_length = input(200, title="SMA Length")
+rsi_length = input(14, title="RSI Length")
+rsi_entry = input(34, title="RSI Entry Level")
+rsi_stop_loss = input(30, title="RSI Stop Loss Level")
+rsi_take_profit = input(50, title="RSI Take Profit Level")
+
+// Indicators
+sma_value = ta.sma(close, sma_length)
+rsi_value = ta.rsi(close, rsi_length)
+
+var bool trailing_stop_activate = false
+var float trailingStop = na
+var float lastClose = na
+
+// Conditions
+longCondition = ta.crossover(rsi_value, rsi_entry) and close > sma_value
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+    trailingStop := na
+    lastClose := na
+    trailing_stop_activate := false
+
+if (strategy.position_size > 0)
+    if (na(lastClose) or close < lastClose)
+        lastClose := close
+        trailingStop := close
+    if (rsi_value >= rsi_take_profit)
+        trailing_stop_activate := true
+
+if (trailing_stop_activate and not na(trailingStop) and close < trailingStop)
+    strategy.close("Buy")
+
+if (rsi_value <= rsi_stop_loss)
+    strategy.close("Buy")
+
+if (not trailing_stop_activate and rsi_value >= rsi_take_profit)
+    strategy.close("Buy")
+
+if (trailing_stop_activate and rsi_value >= rsi_take_profit)
+    strategy.close("Buy")
+
+// Plot
+plot(sma_value, color=color.red, linewidth=2)
+plot(rsi_value, color=color.blue, linewidth=2)
+
+View in Pine Editor・51 lines
+Use on chart
+1
+5
+1
+6 871
+Hello dear Traders,
+Here is a simple yet effective strategy to use, for best profit higher time frame, such as daily.
+
+
+
+Structure of the code
+
+The code defines inputs for SMA (simple moving average) length, RSI (relative strength index) length, RSI entry level, RSI stop loss level, and RSI take profit level. The default values of these variables can be customized as per the user's preferences.
+
+The script calculates SMA and RSI based on the input parameters and the closing price of the asset.
+
+Trading logic
+
+This strategy allows the placement of a long position when:
+
+The RSI crosses above the RSI entry level and
+The close price is above the SMA value.
+After entering a long position, it applies a trailing stop mechanism. The stop price is updated to the close price if the close price is lower than the last close price.
+
+The script closes the long position when:
+
+RSI falls below the stop loss level.
+RSI reaches or exceeds the take profit level.
+If the trailing stop is activated (once RSI reaches or exceeds the take profit level), the closing price falls below the trailing stop level.
+
+Strengths
+
+The strategy includes mechanisms for entering a position, taking profit, and stopping losses, which are fundamental aspects of a trading strategy.
+
+It applies a trailing stop mechanism that allows to capture further gains if the price keeps increasing while protecting from losses if the price starts to decrease.
+
+Weaknesses
+
+This strategy only contemplates long positions. Depending on the market situation, the strategy may miss opportunities for short selling when the market is on a downward trend.
+
+The choice of the fixed RSI entry, stop loss, and take profit levels may not be ideal for all market conditions or assets. It might benefit from a more adaptive mechanism that adjusts these levels according to market volatility or trend.
+
+The strategy doesn't factor in trading costs (such as spread or commission), which could have a significant impact on the net profit, especially if the user is trading with a high frequency or in a low liquidity market.
+
+How to trade with this strategy
+
+Given these parameters and the strategy outlined by the code, the trader would enter a long position when the RSI crosses above the RSI entry level (default 34) and the closing price is above the SMA value (SMA calculated with default period of 200). The trader would exit the position when either the RSI falls below the RSI stop loss level (default 30), or RSI rises above the RSI take profit level (default 50), or when the trailing stop is hit.
+
+Remember "The strategies I have prepared are entirely for educational purposes and should not be considered as investment advice. Support your trades using other tools. Wishing everyone profitable trades..."

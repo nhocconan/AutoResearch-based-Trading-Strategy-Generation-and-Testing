@@ -1,0 +1,154 @@
+//@version=6
+strategy("OB + Vol Signal + MT", overlay=true, initial_capital=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ========================== ⚙️ GENERAL SETTINGS ==========================
+group_general = "⚙️ General Settings"
+sma_len      = input.int(50, "SMA Length", minval=1, group=group_general)
+label_offset = input.float(0.5, "Label Offset (in ticks)", step=0.1, group=group_general)
+line_len     = input.int(15, "SL/TP Line Length (bars)", minval=1, group=group_general)
+
+// ========================== 🧭 HIGHER TIMEFRAME SETTINGS ==========================
+group_htf = "🧭 Higher Timeframe OB Settings"
+htf_tf     = input.timeframe("240", "HTF Timeframe", group=group_htf)
+box_extend = input.int(50, "Bars to extend OB box", minval=1, group=group_htf)
+
+// ========================== 📊 INDICATOR SETTINGS ==========================
+group_indicators = "📊 Indicators"
+rsi_len  = input.int(14, "RSI Length", minval=1, group=group_indicators)
+vol_len  = input.int(20, "Volume SMA Length", minval=1, group=group_indicators)
+
+// ========================== 💰 RISK MANAGEMENT ==========================
+group_risk = "💰 Risk Management"
+sl_pips = input.int(20, "Stop Loss (pips)", minval=1, group=group_risk)
+tp_pips = input.int(40, "Take Profit (pips)", minval=1, group=group_risk)
+
+// ========================== 🎯 BoS & CHoCH SETTINGS ==========================
+group_bos = "🎯 BoS & CHoCH Detection"
+bos_lookback = input.int(5, "BoS Lookback Bars", minval=2, group=group_bos)
+
+// ========================== 🔔 ALERT SETTINGS ==========================
+group_alerts = "🔔 Alerts"
+enable_alerts = input.bool(true, "Enable Alerts", group=group_alerts)
+alert_on_bos  = input.bool(true, "Alert on Break of Structure", group=group_alerts)
+alert_on_ob   = input.bool(true, "Alert on OB Entry", group=group_alerts)
+
+// =======================================================================
+// === INDICATORS ===
+sma     = ta.sma(close, sma_len)
+rsi     = ta.rsi(close, rsi_len)
+vol_sma = ta.sma(volume, vol_len)
+plot(sma, color=color.yellow, linewidth=2, title="SMA")
+
+// === HTF data ===
+htf_open  = request.security(syminfo.tickerid, htf_tf, open)
+htf_high  = request.security(syminfo.tickerid, htf_tf, high)
+htf_low   = request.security(syminfo.tickerid, htf_tf, low)
+htf_close = request.security(syminfo.tickerid, htf_tf, close)
+
+can_use_htf_prev = not na(htf_close[1])
+
+// === OB detection ===
+isBullOB = can_use_htf_prev and htf_open[1] > htf_close[1] and htf_close > htf_open
+isBearOB = can_use_htf_prev and htf_open[1] < htf_close[1] and htf_close < htf_open
+
+var float bull_ob_high = na
+var float bull_ob_low  = na
+var float bear_ob_high = na
+var float bear_ob_low  = na
+
+if isBullOB
+    bull_ob_high := htf_high[1]
+    bull_ob_low  := htf_low[1]
+
+if isBearOB
+    bear_ob_high := htf_high[1]
+    bear_ob_low  := htf_low[1]
+
+// === Plot OB levels ===
+plot(bull_ob_high, "Bull OB High", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(bull_ob_low,  "Bull OB Low",  color=color.new(color.green, 70), style=plot.style_linebr, linewidth=2)
+plot(bear_ob_high, "Bear OB High", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+plot(bear_ob_low,  "Bear OB Low",  color=color.new(color.red, 70), style=plot.style_linebr, linewidth=2)
+
+// === Break of Structure (BoS) ===
+bos_up   = high > ta.highest(high[1], bos_lookback)
+bos_down = low < ta.lowest(low[1], bos_lookback)
+
+plotshape(bos_up,   title="BoS UP",   style=shape.triangleup,   color=color.lime,   size=size.tiny, location=location.belowbar)
+plotshape(bos_down, title="BoS DOWN", style=shape.triangledown, color=color.red,    size=size.tiny, location=location.abovebar)
+
+// === Entry Conditions ===
+longCond  = close > sma and rsi > 50 and volume > vol_sma and not na(bull_ob_low) and close >= bull_ob_low and close <= bull_ob_high and bos_up
+shortCond = close < sma and rsi < 50 and volume > vol_sma and not na(bear_ob_high) and close <= bear_ob_high and close >= bear_ob_low and bos_down
+
+if longCond
+    strategy.entry("BUY", strategy.long)
+if shortCond
+    strategy.entry("SELL", strategy.short)
+
+// === Visuals ===
+var label lastLabel   = na
+var line  lastSLLine  = na
+var line  lastTPLine  = na
+tick = syminfo.mintick
+offset_price = label_offset * tick
+
+new_long_entry  = strategy.position_size > 0  and strategy.position_size[1] <= 0
+new_short_entry = strategy.position_size < 0  and strategy.position_size[1] >= 0
+
+// --- LONG ---
+if new_long_entry
+    if not na(lastLabel)
+        label.delete(lastLabel)
+        line.delete(lastSLLine)
+        line.delete(lastTPLine)
+    entry   = strategy.position_avg_price
+    long_sl = entry - sl_pips * tick
+    long_tp = entry + tp_pips * tick
+    txt = "BUY\nEntry: " + str.tostring(entry, format.mintick) +
+          "\nSL: " + str.tostring(long_sl, format.mintick) +
+          "\nTP: " + str.tostring(long_tp, format.mintick)
+    lastLabel := label.new(bar_index, low - offset_price, txt, style=label.style_label_up, color=color.green, textcolor=color.white)
+    lastSLLine := line.new(bar_index, long_sl, bar_index + line_len, long_sl, color=color.red, width=2)
+    lastTPLine := line.new(bar_index, long_tp, bar_index + line_len, long_tp, color=color.green, width=2)
+    if enable_alerts and alert_on_ob
+        alert("BUY Signal Detected at " + str.tostring(entry, format.mintick), alert.freq_once_per_bar_close)
+
+// --- SHORT ---
+if new_short_entry
+    if not na(lastLabel)
+        label.delete(lastLabel)
+        line.delete(lastSLLine)
+        line.delete(lastTPLine)
+    entry    = strategy.position_avg_price
+    short_sl = entry + sl_pips * tick
+    short_tp = entry - tp_pips * tick
+    txt2 = "SELL\nEntry: " + str.tostring(entry, format.mintick) +
+           "\nSL: " + str.tostring(short_sl, format.mintick) +
+           "\nTP: " + str.tostring(short_tp, format.mintick)
+    lastLabel := label.new(bar_index, high + offset_price, txt2, style=label.style_label_down, color=color.red, textcolor=color.white)
+    lastSLLine := line.new(bar_index, short_sl, bar_index + line_len, short_sl, color=color.red, width=2)
+    lastTPLine := line.new(bar_index, short_tp, bar_index + line_len, short_tp, color=color.green, width=2)
+    if enable_alerts and alert_on_ob
+        alert("SELL Signal Detected at " + str.tostring(entry, format.mintick), alert.freq_once_per_bar_close)
+
+// === Clean up when flat ===
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if not na(lastLabel)
+        label.delete(lastLabel)
+    if not na(lastSLLine)
+        line.delete(lastSLLine)
+    if not na(lastTPLine)
+        line.delete(lastTPLine)
+
+View in Pine Editor・142 lines
+Use on chart
+1
+1
+1
+2 300
+The Signals different Strategies
+OrderBlock
+Volume
+EMA
+RSI

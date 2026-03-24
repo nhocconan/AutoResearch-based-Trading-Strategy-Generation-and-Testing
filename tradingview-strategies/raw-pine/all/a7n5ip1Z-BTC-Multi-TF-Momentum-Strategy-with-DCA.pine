@@ -1,0 +1,213 @@
+//@version=5
+strategy("BTC Multi-TF Momentum Strategy with DCA", overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     pyramiding=3)
+
+// ----------------
+// Inputs
+// ----------------
+
+rsiLen = input.int(14)
+stochLen = input.int(14)
+atrLen = input.int(14)
+
+riskPercent = input.float(0.10)
+
+oversold = input.int(20)
+overbought = input.int(80)
+
+stopATR = input.float(1.5)
+tpATR = input.float(1.0)
+trailATR = input.float(0.8)
+
+dca1ATR = input.float(0.5)
+dca2ATR = input.float(1.0)
+
+// ----------------
+// Higher TF Trend
+// ----------------
+
+ema1h = request.security(syminfo.tickerid, "60", ta.ema(close,200))
+
+bullTrend = close > ema1h
+bearTrend = close < ema1h
+
+// ----------------
+// 15m RSI
+// ----------------
+
+rsi15 = request.security(syminfo.tickerid,"15", ta.rsi(close,rsiLen))
+
+// ----------------
+// 3m Stoch RSI
+// ----------------
+
+rsi3 = request.security(syminfo.tickerid,"3", ta.rsi(close,rsiLen))
+
+k = ta.stoch(rsi3,rsi3,rsi3,stochLen)
+d = ta.sma(k,3)
+
+longSignal = ta.crossover(k,d) and k < oversold
+shortSignal = ta.crossunder(k,d) and k > overbought
+
+// ----------------
+// Entry Conditions
+// ----------------
+
+longCond =
+     bullTrend and
+     rsi15 < 40 and
+     longSignal
+
+shortCond =
+     bearTrend and
+     rsi15 > 60 and
+     shortSignal
+
+// ----------------
+// ATR
+// ----------------
+
+atr = ta.atr(atrLen)
+
+qtyTotal = strategy.equity * riskPercent / close
+
+qtyBase = qtyTotal * 0.4
+qtyDCA1 = qtyTotal * 0.3
+qtyDCA2 = qtyTotal * 0.3
+
+// ----------------
+// Base Entry
+// ----------------
+
+if longCond
+    strategy.entry("Long Base", strategy.long, qty=qtyBase)
+
+if shortCond
+    strategy.entry("Short Base", strategy.short, qty=qtyBase)
+
+// ----------------
+// DCA Entries
+// ----------------
+
+longDCA1 = strategy.position_avg_price - atr * dca1ATR
+longDCA2 = strategy.position_avg_price - atr * dca2ATR
+
+shortDCA1 = strategy.position_avg_price + atr * dca1ATR
+shortDCA2 = strategy.position_avg_price + atr * dca2ATR
+
+if strategy.position_size > 0
+    strategy.entry("Long DCA1", strategy.long, qty=qtyDCA1, limit=longDCA1)
+    strategy.entry("Long DCA2", strategy.long, qty=qtyDCA2, limit=longDCA2)
+
+if strategy.position_size < 0
+    strategy.entry("Short DCA1", strategy.short, qty=qtyDCA1, limit=shortDCA1)
+    strategy.entry("Short DCA2", strategy.short, qty=qtyDCA2, limit=shortDCA2)
+
+// ----------------
+// Stop / Profit
+// ----------------
+
+stopLong = strategy.position_avg_price - atr * stopATR
+stopShort = strategy.position_avg_price + atr * stopATR
+
+tpLong = strategy.position_avg_price + atr * tpATR
+tpShort = strategy.position_avg_price - atr * tpATR
+
+trail = atr * trailATR
+
+strategy.exit("L Partial", from_entry="Long Base", qty_percent=50, limit=tpLong, stop=stopLong)
+strategy.exit("L Trail", from_entry="Long Base", qty_percent=50, trail_points=trail, stop=stopLong)
+
+strategy.exit("S Partial", from_entry="Short Base", qty_percent=50, limit=tpShort, stop=stopShort)
+strategy.exit("S Trail", from_entry="Short Base", qty_percent=50, trail_points=trail, stop=stopShort)
+
+View in Pine Editor・125 lines
+Use on chart
+1
+3
+347
+**BTC Multi-Timeframe Momentum Strategy with DCA**
+
+This strategy combines **multi-timeframe momentum signals** with a **controlled Dollar Cost Averaging (DCA) entry model** and **ATR-based risk management**. It is designed for volatile markets like Bitcoin where price frequently pulls back before continuing a trend.
+
+The system attempts to enter **high-probability pullbacks inside larger trends**, while improving average entry price through structured DCA layers.
+
+---
+
+### Core Concept
+
+The strategy aligns signals from three timeframes:
+
+• **1-Hour Trend Filter** – Determines the overall market direction using the 200-EMA.
+• **15-Minute Momentum Filter** – Identifies pullbacks using RSI.
+• **3-Minute Precision Entry** – Times entries using Stochastic RSI crossovers.
+
+Trades are only taken when **momentum, pullback, and higher-timeframe trend align**.
+
+---
+
+### Entry Logic
+
+**Long Conditions**
+
+1. Price is above the **1-hour 200 EMA** (bullish trend).
+2. **15-minute RSI < 40**, indicating a pullback within the uptrend.
+3. **3-minute Stoch RSI crosses upward from oversold**, signaling momentum reversal.
+
+**Short Conditions**
+
+1. Price is below the **1-hour 200 EMA**.
+2. **15-minute RSI > 60**, indicating a rally within a downtrend.
+3. **3-minute Stoch RSI crosses downward from overbought**.
+
+---
+
+### DCA Entry Model
+
+Instead of entering the full position immediately, the strategy scales into trades using **ATR-based DCA layers**.
+
+Position structure:
+
+• **Initial Entry:** 40% of position
+• **DCA Layer 1:** 30% at 0.5 ATR against entry
+• **DCA Layer 2:** 30% at 1.0 ATR against entry
+
+This improves the **average entry price** if the market briefly moves against the trade.
+
+Maximum pyramiding is limited to **three entries per position**.
+
+---
+
+### Risk Management
+
+Risk is controlled using **Average True Range (ATR)**.
+
+• **Stop Loss:** ~1.5 ATR from the average entry
+• **Partial Take Profit:** 50% of the position at ~1 ATR profit
+• **Runner Position:** Remaining 50% uses an **ATR trailing stop** to capture larger trends
+
+This structure allows the strategy to **lock profits early while still benefiting from extended market moves**.
+
+---
+
+### Position Sizing
+
+Each trade risks approximately **10% of account equity**, distributed across the base entry and DCA layers.
+
+---
+
+### Strategy Goals
+
+This strategy is designed to:
+
+• Enter **pullbacks within strong trends**
+• Improve entries using **controlled DCA scaling**
+• Capture large crypto trends with **trailing exits**
+• Reduce false signals using **multi-timeframe confirmation**
+
+It performs best in **trending or volatile crypto markets** where short-term pullbacks frequently occur before continuation.
+
+

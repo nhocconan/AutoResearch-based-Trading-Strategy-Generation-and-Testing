@@ -1,0 +1,97 @@
+//@version=4
+//3 Symbols with Hull Moving Averages and adjustable TimeFrame ~ made by SeaSide420
+//Daily candle Crossover and Hull Moving Average
+strategy("BTCBOT2",overlay=true,default_qty_type=strategy.percent_of_equity,default_qty_value=100,calc_on_order_fills=true,calc_on_every_tick=true,pyramiding=0)
+keh=input(title="HullMA's Period",type=input.integer,defval=100,minval=1)
+SL=input(defval=-2000.00,title="StopLoss $",type=input.float,step=1)
+TP=input(defval=2000.00,title="TargetPoint $",type=input.float,step=1)
+sym1=input(title="Market Symbol 1",type=input.symbol,defval="DXY")
+sym2=input(title="Market Symbol 2",type=input.symbol,defval="XAUUSD")
+sym3=input(title="Market Symbol 3",type=input.symbol,defval="BTCUSD")
+res=input(title="Symbols TimeFrame",type=input.resolution,defval="1")
+src=input(title="Source",type=input.source,defval=open)
+FromMonth=input(defval=9,title="FromMonth",minval=1,maxval=12)
+FromDay=input(defval=1,title="FromDay",minval=1,maxval=31)
+FromYear=input(defval=2018,title="FromYear",minval=2017)
+ToMonth=input(defval=1,title="ToMonth",minval=1,maxval=12)
+ToDay=input(defval=1,title="ToDay",minval=1,maxval=31)
+ToYear=input(defval=9999,title="ToYear",minval=2017)
+start=timestamp(FromYear,FromMonth,FromDay,00,00)
+finish=timestamp(ToYear,ToMonth,ToDay,23,59)
+window()=>time>=start and time<=finish?true:false
+dt=0.001
+Esym1=security(sym1,res,src,barmerge.gaps_off,barmerge.lookahead_on)
+e2ma=2*wma(Esym1,round(keh/2))
+ema=wma(Esym1,keh)
+ediff=e2ma-ema
+esqn=round(sqrt(keh))
+e2ma1=2*wma(Esym1[1],round(keh/2))
+ema1=wma(Esym1[1],keh)
+ediff1=e2ma1-ema1
+esqn1=round(sqrt(keh))
+e1=wma(ediff,esqn)
+e2=wma(ediff1,esqn)
+Nsym2=security(sym2,res,src,barmerge.gaps_off,barmerge.lookahead_on)
+n2ma=2*wma(Nsym2,round(keh/2))
+nma=wma(Nsym2,keh)
+ndiff=n2ma-nma
+nsqn=round(sqrt(keh))
+n2ma1=2*wma(Nsym2[1],round(keh/2))
+nma1=wma(Nsym2[1],keh)
+ndiff1=n2ma1-nma1
+nsqn1=round(sqrt(keh))
+n1=wma(ndiff,nsqn)
+n2=wma(ndiff1,nsqn)
+Csym3=security(sym3,res,src,barmerge.gaps_off,barmerge.lookahead_on)
+s2ma=2*wma(Csym3,round(keh/2))
+sma=wma(Csym3,keh)
+sdiff=s2ma-sma
+ssqn=round(sqrt(keh))
+s2ma1=2*wma(Csym3[1],round(keh/2))
+sma1=wma(Csym3[1],keh)
+sdiff1=s2ma1-sma1
+ssqn1=round(sqrt(keh))
+s1=wma(sdiff,ssqn)
+s2=wma(sdiff1,ssqn)
+s3=security(syminfo.tickerid,"D",open,barmerge.gaps_off,barmerge.lookahead_on)
+s4=security(syminfo.tickerid,"D",open[1],barmerge.gaps_off,barmerge.lookahead_on)
+dailycandle=(s3-s4/s4)
+c=s2<src?color.lime:color.red
+d=src>s4?color.lime:color.red
+c1=plot(s1+(s1/(src/10)),color=c,title="hull1",linewidth=1,transp=0)
+c2=plot(s2-(s2/(src/10)),color=c,title="hull1",linewidth=1,transp=0)
+//c3=plot(s3,color=color.black,title="DCX1",linewidth=1,transp=0)
+//c4=plot(s4,color=d,title="DCX2",linewidth=1,transp=0)
+fill(c1,c2,color=c,transp=75)
+closelong=s1<s2 and s4<src or strategy.openprofit<SL or strategy.openprofit>TP and e1>e2
+if closelong
+    strategy.close("Long")
+closeshort=s1>s2 and s4>src or strategy.openprofit<SL or strategy.openprofit>TP and e1<e2
+if closeshort
+    strategy.close("Short")
+longCondition=s4>src and strategy.opentrades<1 and s1>s2 and e1<e2 and n1>n2
+if longCondition
+    strategy.entry("Long",strategy.long,when=window())
+shortCondition=s4<src and strategy.opentrades<1 and s1<s2 and e1>e2 and n1<n2
+if shortCondition
+    strategy.entry("Short",strategy.short,when=window())
+
+View in Pine Editor・77 lines
+Use on chart
+5
+3
+5
+14
+6 981
+Watches 3 Symbols with separate timeframe control, with Hull Moving Average crossovers on each, 
+DXY
+ 
+XAU/USD
+ 
+BTC/USD
+
+and a daily candle crossover. With StopLoss and Target Price and Backtesting history selection control. Entry and Exit rules visible in script (script open)
+
+So if DXY chart is going down and Gold chart going up and Bitcoin chart going up then it will enter a buy, yes it is watching more than just bitcoin itself.
+it needs HMA to match on all 3 charts and with selected timeframes, the timeframe of users chart, the timeframe in settings for the HMA's on the symbols. Also a Daily Candle chart of the users selected chart (symbol)
+

@@ -1,0 +1,140 @@
+//@version=5
+strategy("TSLA Daily — Jayz_ze Combo D",
+         overlay=true,
+         initial_capital=2000,
+         default_qty_type=strategy.percent_of_equity,
+         commission_type=strategy.commission.percent,
+         commission_value=0.05)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+riskPct    = input.float(5.0, "Risk % per trade", minval=0.5, maxval=10)
+stopBars   = input.int(10,    "Stop lookback (bars)", minval=5, maxval=30)
+lengthFast = input.int(6,     "BlueWave fast length")
+lengthSlow = input.int(35,    "BlueWave slow length")
+rsiLen     = input.int(14,    "RSI length")
+stochLen   = input.int(14,    "Stoch length")
+mfiLen     = input.int(60,    "MFI length")
+mfiMult    = input.float(0.8, "MFI multiplier")
+
+// ─────────────────────────────────────────────
+// INDICATORS
+// ─────────────────────────────────────────────
+ema200 = ta.ema(close, 200)
+ema50  = ta.ema(close, 50)
+
+hlc3_val  = hlc3
+n1        = ta.ema(hlc3_val, 10)
+n2        = ta.ema(math.abs(hlc3_val - n1), 10)
+ci        = (hlc3_val - n1) / (0.015 * n2)
+tci       = ta.ema(ci, 21)
+comb      = (ta.rsi(close, rsiLen) + ta.stoch(close, high, low, stochLen)) / 2
+blueWave  = ta.ema(comb, lengthFast) - ta.ema(comb, lengthSlow) + tci / 2
+
+mfi_raw   = ta.mfi(hlc3, mfiLen) - 50
+moneyFlow = ta.ema(mfi_raw, 5) * mfiMult
+
+// ─────────────────────────────────────────────
+// COMBO D: bW>0 + mF>0 + both slopes rising
+// ─────────────────────────────────────────────
+bwSlope = blueWave  - blueWave[1]
+mfSlope = moneyFlow - moneyFlow[1]
+
+entrySignal = (blueWave  > 0)    and
+              (moneyFlow > 0)    and
+              (bwSlope   > 0)    and
+              (mfSlope   > 0)    and
+              (close > ema200)   and
+              (close > ema50)    and
+              strategy.position_size == 0
+
+prevSignal  = (blueWave[1]  > 0) and
+              (moneyFlow[1] > 0) and
+              (blueWave[1]  - blueWave[2]  > 0) and
+              (moneyFlow[1] - moneyFlow[2] > 0) and
+              (close[1] > ema200) and
+              (close[1] > ema50)
+
+// ─────────────────────────────────────────────
+// STRUCTURAL STOP
+// ─────────────────────────────────────────────
+structStop = ta.lowest(low, stopBars)
+
+// ─────────────────────────────────────────────
+// POSITION SIZING
+// ─────────────────────────────────────────────
+stopDist = math.max(close - structStop, close * 0.005)
+riskAmt  = strategy.equity * riskPct / 100
+qty      = riskAmt / stopDist
+
+// ─────────────────────────────────────────────
+// ENTRY
+// ─────────────────────────────────────────────
+if entrySignal and not prevSignal
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Stop", "Long", stop=structStop)
+
+// ─────────────────────────────────────────────
+// TRAIL STOP + EMA50 EXIT
+// ─────────────────────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("Stop", "Long", stop=structStop)
+
+if strategy.position_size > 0 and close < ema50
+    strategy.close("Long", comment="EMA50")
+
+// ─────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────
+plot(ema50,  "EMA50",  color=color.new(color.orange, 0), linewidth=1)
+plot(ema200, "EMA200", color=color.new(color.purple, 0), linewidth=2)
+
+stopLine = strategy.position_size > 0 ? structStop : na
+plot(stopLine, "Trailing Stop", color=color.new(color.red, 0),
+     style=plot.style_linebr, linewidth=1)
+
+plotshape(entrySignal and not prevSignal,
+          title="Entry", style=shape.triangleup,
+          location=location.belowbar, color=color.lime, size=size.small)
+
+bgcolor(close < ema200 ? color.new(color.red, 92) : na, title="Below EMA200")
+
+// ─────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 70), border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "TSLA Daily D",   text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, "Status",          text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 1, "EMA200",          text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 1, close > ema200 ? "Above ✓" : "Below ✗",
+               text_color=close > ema200 ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "EMA50",           text_color=color.gray,  text_size=size.small)
+    table.cell(t, 1, 2, close > ema50 ? "Above ✓" : "Below ✗",
+               text_color=close > ema50 ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 3, "bW > 0 + Rising", text_color=color.gray,  text_size=size.small)
+    bwOk = blueWave > 0 and bwSlope > 0
+    table.cell(t, 1, 3, bwOk ? "Yes ✓" : "No ✗",
+               text_color=bwOk ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 4, "MF > 0 + Rising", text_color=color.gray,  text_size=size.small)
+    mfOk = moneyFlow > 0 and mfSlope > 0
+    table.cell(t, 1, 4, mfOk ? "Yes ✓" : "No ✗",
+               text_color=mfOk ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 5, "Ready?",           text_color=color.gray,  text_size=size.small)
+    allGo = entrySignal and not prevSignal
+    table.cell(t, 1, 5, allGo ? "ENTRY ✓" : "WAIT",
+               text_color=allGo ? color.lime : color.orange, text_size=size.small)
+
+View in Pine Editor・128 lines
+Use on chart
+9
+360
+Mar 7
+Only for 1 hour Swing trading. Works best with 10% stop loss.
+Beats the buy and Hold by miles.
+Mar 8
+Release Notes
+Apply on Tesla Daily or Hourly timeframe.
+Hourly will have a bit more drawdown, but exponentially more returns than Daily.

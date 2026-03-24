@@ -1,0 +1,24 @@
+//@version=6
+strategy("超趨勢策略 (Supertrend)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+
+atrLength = input.int(10, "ATR 週期長度")
+factor = input.float(3.0, "乘數", step=0.01)
+
+[_, direction] = ta.supertrend(factor, atrLength)
+
+if ta.change(direction) < 0
+    strategy.entry("開多", strategy.long)
+
+if ta.change(direction) > 0
+    strategy.entry("開空", strategy.short)
+
+View in Pine Editor・13 lines
+Use on chart
+2
+7
+951
+if ta.change(direction) < 0
+strategy.entry("My Long Entry Id", strategy.long)
+
+if ta.change(direction) > 0
+strategy.entry("My Short Entry Id", strategy.short)

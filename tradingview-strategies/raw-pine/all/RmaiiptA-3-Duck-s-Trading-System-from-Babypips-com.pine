@@ -1,0 +1,74 @@
+//@version=3
+strategy("Babypips.com - 3 Duck's Trading System", overlay=true, max_bars_back=4000, default_qty_value=10000)
+duck1 = sma(close, 2880)
+duck2 = sma(close, 720)
+duck3 = sma(close, 60)
+plot(duck1, color=black, title="Duck 1")
+plot(duck2, color=red, title="Duck 2")
+plot(duck3, color=green, title="Duck 3")
+
+// Stops and Profit inputs
+inpTakeProfit   = input(defval = 500, title = "Take Profit", minval = 0)
+inpStopLoss     = input(defval = 0, title = "Stop Loss", minval = 0)
+inpTrailStop    = input(defval = 0, title = "Trailing Stop", minval = 0)
+inpTrailOffset  = input(defval = 0, title = "Trailing Stop Offset", minval = 0)
+
+// Stops and Profit Targets
+useTakeProfit   = inpTakeProfit  >= 1 ? inpTakeProfit  : na
+useStopLoss     = inpStopLoss    >= 1 ? inpStopLoss    : na
+useTrailStop    = inpTrailStop   >= 1 ? inpTrailStop   : na
+useTrailOffset  = inpTrailOffset >= 1 ? inpTrailOffset : na
+
+//Specific Time to Trade
+myspecifictradingtimes = input('0500-1600', type=session, title="My Defined Hours")
+
+longCondition1 = time(period, myspecifictradingtimes) != 0
+longCondition2 = duck2 >= duck1
+longCondition3 = duck3 >= duck1 and duck2
+if crossover(close, duck3) and longCondition3 and longCondition2 and longCondition1
+    strategy.entry("Long", strategy.long, comment="LongEntry")
+
+shortCondition1 = time(period, myspecifictradingtimes) != 0
+shortCondition2 = duck2 <= duck1
+shortCondition3 = duck3 <= duck1 and duck2
+if crossunder(close, duck3) and shortCondition3 and shortCondition2 and shortCondition1
+    strategy.entry("Short", strategy.short, comment="ShortEntry")
+
+strategy.exit("Exit Long", from_entry = "Long", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+strategy.exit("Exit Short", from_entry = "Short", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset)
+
+View in Pine Editor・38 lines
+Use on chart
+5
+3
+7
+6
+14 001
+The 3 Duck's Trading System from Babypips.com
+
+The 3 Duck's Trading System is the most popular and active trading system thread on the the babypips.com forum. It is a system that is mainly for beginners because it teaches you discipline, learning to cope with price moving against your position and learning to stay in a trade and keep profits running. For the thread and more info on the 3 Duck's Trading System click here
+
+
+How does it work?
+The system is a very simple enter/exit based on the 60 SMA of 3 different time frames: 4 hour, 1 hour and 5 minute.
+
+The Rules, er, the Ducks! The Ducks must all be in a row for a trade to take place!
+
+Duck 1 - To go long, price must be above the 60 SMA on the 4 hour chart.
+
+Duck 2 - To go long, price must be above the 60 SMA on the 1 hour chart.
+
+Duck 3 - To go long, price must cross above the 60 SMA on the 5 minute chart and the 60 SMA of the 5 minute chart must be below that of the 4 hour and 1 hour chart. (obviously the reverse for shorting)
+
+
+
+YOU MUST USE THIS SYSTEM ONLY ON THE 5 MINUTE CHART.
+
+I say this because I have already charted all of the Ducks into the 5 minute chart so you don't have to flip back and forth.
+
+I have also added some inputs for profit targets, stop targets, trailing stops and times to trade for backtesting.
+
+If you have any questions or comments, please let me know! If you see I messed up on something, please let me know!
+
+
+Also a VERY special thanks to the babypips.com user Captain_Currency. He wrote this strategy 10 years ago (2007 was 10 years ago?!) and he is still active on the thread and posting results and offering help!

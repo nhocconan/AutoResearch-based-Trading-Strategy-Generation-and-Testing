@@ -1,0 +1,29 @@
+//@version=2
+strategy("Grant's PSAR Signal", overlay=true)
+
+start = input(0.013)
+increment = input(0.005)
+maximum = input(0.2)
+
+psar = sar(start, increment, maximum)
+
+if (psar > high)
+    strategy.entry("ParLE", strategy.long, stop=psar, comment="Buy Long")
+else
+    strategy.cancel("ParLE")
+
+if (psar < low)
+    strategy.exit("ParSE", stop=psar, comment="Close Long")
+else
+    strategy.cancel("ParSE")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・20 lines
+Use on chart
+6
+1
+9
+7
+11 644
+Open and close signals for long positions on XJO.

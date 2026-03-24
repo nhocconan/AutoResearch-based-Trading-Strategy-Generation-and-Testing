@@ -1,0 +1,243 @@
+//@version=5
+strategy("Breadth-Driven Swing Strategy",
+         overlay           = false,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 100,      // invest entire equity
+         initial_capital   = 100000,
+         currency          = currency.USD,
+         commission_type   = strategy.commission.percent,
+         commission_value  = 0.02)     // 0.02% round-turn commission
+
+// ── Inputs ──────────────────────────────────────
+breadthSym      = input.symbol("INDEX:S5TH", "Breadth symbol")
+//tradeSym        = input.symbol("SPX",        "Trade symbol (e.g. SPX / SPY)")
+
+longLen         = input.int   (200, "Long EMA length",  minval = 100)
+shortLen        = input.int   (5,   "Short EMA length", minval = 1)
+
+pivotLen        = input.int   (20,  "Pivot width for 200‑EMA", minval = 1)
+pivotLenS       = input.int   (10,  "Pivot width for 5‑EMA",   minval = 1)
+
+promThresh      = input.float (0.5, "Prominence 200‑EMA (pct‑pts)", step = 0.1)
+promThreshS     = input.float (3.0, "Prominence 5‑EMA  (pct‑pts)", step = 0.1)
+
+longPeakLvl     = input.float(70, "200‑EMA peak level (%)")
+longTroughLvl   = input.float(40, "200‑EMA trough level (%)")
+shortTroughLvl  = input.float(20, "5‑EMA trough level (%)")
+
+useShortTroughEntries = input.bool(true, "Enter also on 5‑EMA trough")
+useStopLoss           = input.bool(true,  "Fixed stop (%)")
+stopPerc              = input.float(8.0,  "Stop width (%)", step = 0.1)
+
+// ── Series ──────────────────────────────────────
+breadth = request.security(breadthSym, timeframe.period, close)  // 0–100 (%)
+//tradePx = request.security(tradeSym,   timeframe.period, close)  // price of trade symbol
+
+ema200 = ta.ema(breadth, longLen)
+emaS   = ta.ema(breadth, shortLen)
+
+// ── 200‑EMA peak/trough detection ───────────────
+pivHi   = ta.pivothigh(ema200, pivotLen, pivotLen)
+pivLo   = ta.pivotlow (ema200, pivotLen, pivotLen)
+leftMin = ta.lowest   (ema200, pivotLen * 2 + 1)
+leftMax = ta.highest  (ema200, pivotLen * 2 + 1)
+
+promHiOk = not na(pivHi) and (pivHi - leftMin) >= promThresh
+promLoOk = not na(pivLo) and (leftMax - pivLo) >= promThresh
+levelLoOk = pivLo < longTroughLvl
+
+// consider a peak only if 200‑EMA value is ≥ longPeakLvl
+bool peak200   = promHiOk and not na(pivHi) and pivHi >= longPeakLvl
+bool trough200 = promLoOk and levelLoOk
+
+// ── 5-EMA trough ────────────────────────────────
+pivLoS   = ta.pivotlow(emaS, pivotLenS, pivotLenS)       // pivot candidate
+leftMaxS = ta.highest(emaS, pivotLenS * 2 + 1)           // highest in window
+promLoS  = not na(pivLoS) and (leftMaxS - pivLoS) >= promThreshS
+
+levelLoS = pivLoS < shortTroughLvl                       // existing check
+
+// NEW: lowest value over the last 20 bars
+min20S   = ta.lowest(breadth, 20)
+recentLowOk = min20S <= shortTroughLvl                   // new condition
+
+bool trough5 = promLoS and recentLowOk      // combine all
+
+// ── Entry & exit conditions ─────────────────────
+longEntry  = trough200 or (useShortTroughEntries and trough5)
+longExit   = peak200
+
+// ── Order execution ─────────────────────────────
+if longEntry
+    strategy.entry("Long", strategy.long, comment = "Long on breadth trough")
+
+if longExit and strategy.position_size > 0
+    strategy.close("Long", comment = "Exit on breadth peak")
+
+// ── Risk management ─────────────────────────────
+var float stopPrice = na
+var float trail     = na
+
+// fixed stop for long trades
+if strategy.position_size > 0 and useStopLoss
+    stopPrice := strategy.position_avg_price * (1 - stopPerc / 100)
+    strategy.exit("XL", from_entry = "Long",
+                  stop = stopPrice, comment = "Stop‑loss")
+
+// ── Plotting ─────────────────────────────────────
+plot(ema200, title = "Breadth 200‑EMA", color = color.orange, linewidth = 2)
+plot(emaS,   title = "Breadth 5‑EMA",   color = color.teal,   linewidth = 1)
+
+// ▼ 200‑EMA peak
+plotshape(peak200 ? pivHi : na,
+          title     = "200‑EMA peaks",
+          style     = shape.triangledown,
+          location  = location.absolute,
+          color     = color.red,
+          size      = size.small)
+
+// ▲ 200‑EMA trough
+plotshape(trough200 ? pivLo : na,
+          title     = "200‑EMA troughs",
+          style     = shape.triangleup,
+          location  = location.absolute,
+          color     = color.blue,
+          size      = size.small)
+
+// ▲ 5‑EMA trough (scale‑in signal)
+plotshape((trough5 and useShortTroughEntries) ? pivLoS : na,
+          title     = "5‑EMA troughs",
+          style     = shape.triangleup,
+          location  = location.absolute,
+          color     = color.green,
+          size      = size.small)
+
+View in Pine Editor・113 lines
+Use on chart
+9
+3
+2 454
+What it does
+
+This script trades the S&P 500 purely on market breadth extremes:
+• Data source : INDEX:S5TH = % of S&P 500 stocks above their own 200-day SMA (range 0–100).
+• Buy when breadth is washed-out.
+• Sell when breadth is overheated.
+
+It is long-only by design; shorting and ATR trailing stops have been removed to keep the logic minimal and transparent.
+
+⸻
+
+Signals in plain English
+1. Long entry
+A. A 200-EMA trough in bread­th is printed and the trough value is ≤ 40 %.
+or
+B. A 5-EMA trough appears, its prominence passes the user threshold, and the lowest breadth reading in the last 20 bars is ≤ 20 %.
+(Toggle this secondary trigger on/off with “ Enter also on 5-EMA trough ”.)
+2. Exit (close long)
+First 200-EMA peak whose breadth value is ≥ 70 %.
+3. Risk control
+A fixed stop-loss (% of entry price, default 8 %) is attached to every long trade.
+
+⸻
+
+Key parameters (defaults shown)
+• Long EMA length 200 • Short EMA length 5
+• Peak prominence 0.5 pct-pts • Trough prominence 3 pct-pts
+• Peak level 70 % • Trough level 40 % • 5-EMA trough level 20 %
+• Fixed stop-loss 8 %
+• “Enter also on 5-EMA trough” = true (allows additional entries on extreme momentum reversals)
+
+Feel free to tighten or relax any of these thresholds to match your risk profile or account for different market regimes.
+
+⸻
+
+How to use it
+1. Load the script on a daily SPX / SPY chart.
+(The price chart drives order execution; the breadth series is pulled internally and does not need to be on the chart.)
+2. Verify the breadth feed.
+INDEX:S5TH is updated after each session; your broker must provide it.
+3. Back-test across several cycles.
+Two decades of daily data is recommended to see how the rules behave in bear markets, range markets, and bull trends.
+4. Adjust position sizing in the Properties tab.
+The default is “100 % of equity”; change it if you prefer smaller allocations or pyramiding caps.
+
+⸻
+
+Why it can help
+• Breadth signals often lead price, allowing entries before index-level momentum turns.
+• Simple, rule-based exits prevent “waiting for confirmation” paralysis.
+• Only one input series—easy to audit, no black-box math.
+
+Trade-offs
+• Relies on a single breadth metric; other internals (advance/decline, equal-weight returns, etc.) are ignored.
+• May sit in cash during shallow pullbacks that never push breadth ≤ 40 %.
+• Signals arrive at the end of the session (breadth is EoD data).
+
+⸻
+
+Disclaimer
+This script is provided for educational purposes only and is not financial advice. Markets are risky; test thoroughly and use your own judgment before trading real money.
+
+
+ストラテジー概要
+
+本スクリプトは S&P500 のマーケットブレッド（内部需給） だけを手がかりに、指数をスイングトレードします。
+• ブレッドデータ : INDEX:S5TH
+（S&P500 採用銘柄のうち、それぞれの 200 日移動平均線を上回っている銘柄比率。0–100 %）
+• 買い : ブレッドが極端に売られたタイミング。
+• 売り : ブレッドが過熱状態に達したタイミング。
+
+余計な機能を削り、ロングオンリー & 固定ストップ のシンプル設計にしています。
+
+⸻
+
+シグナルの流れ
+1. ロングエントリー
+• 条件 A : 200-EMA がトラフを付け、その値が 40 % 以下
+• 条件 B : 5-EMA がトラフを付け、
+      ・プロミネンス条件を満たし
+      ・直近 20 本のブレッドス最小値が 20 % 以下
+• B 条件は「5-EMA トラフでもエントリー」を ON にすると有効
+2. ロング決済
+最初に出現した 200-EMA ピーク で、かつ値が 70 % 以上 のバーで手仕舞い。
+3. リスク管理
+各トレードに 固定ストップ（初期価格から 8 %）を設定。
+
+⸻
+
+主なパラメータ（デフォルト値）
+• 長期 EMA 長さ : 200 • 短期 EMA 長さ : 5
+• ピーク判定プロミネンス : 0.5 %pt • トラフ判定プロミネンス : 3 %pt
+• ピーク水準 : 70 % • トラフ水準 : 40 % • 5-EMA トラフ水準 : 20 %
+• 固定ストップ : 8 %
+• 「5-EMA トラフでもエントリー」 : ON
+
+相場環境やリスク許容度に合わせて閾値を調整してください。
+
+⸻
+
+使い方
+1. 日足の SPX / SPY チャート にスクリプトを適用。
+2. ブレッドデータの供給 (INDEX:S5TH) がブローカーで利用可能か確認。
+3. 20 年以上の期間でバックテスト し、強気相場・弱気相場・レンジ局面での挙動を確認。
+4. 資金配分 は プロパティ → 戦略実行 で調整可能（初期値は「資金の 100 %」）。
+
+⸻
+
+強み
+• ブレッドは 価格より先行 することが多く、天底を早期に捉えやすい。
+• ルールベースの出口で「もう少し待とう」と迷わずに済む。
+• 入力 series は 1 本のみ、ブラックボックス要素なし。
+
+注意点・弱み
+• 単一指標に依存。他の内部需給（A/D ライン等）は考慮しない。
+• 40 % を割らない浅い押し目では機会損失が起こる。
+• ブレッドは終値ベースの更新。ザラ場中の変化は捉えられない。
+
+⸻
+
+免責事項
+本スクリプトは 学習目的 で提供しています。投資助言ではありません。
+実取引の前に必ず自己責任で十分な検証とリスク管理を行ってください。
+

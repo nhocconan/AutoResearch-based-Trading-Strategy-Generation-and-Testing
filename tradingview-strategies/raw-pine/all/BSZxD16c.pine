@@ -1,0 +1,29 @@
+//@version=3
+strategy("MACD Strategy custom", overlay=false)
+
+fastLength = input(3)
+slowlength = input(11)
+MACDLength = input(27)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength) //signal
+delta = MACD - aMACD // histograma
+
+strategy.entry("MacdLE", strategy.long, comment="MacdLE",when=crossover(delta, 0))
+
+strategy.close("MacdLE",when=crossunder(delta, 0)) //strategy.entry("MacdSE", strategy.short, comment="MacdSE")
+    
+histColour = (delta > 0) ? green : (delta < 0) ? red :  #4169E1
+    
+plot(MACD,color=red,linewidth=2)
+plot(aMACD,color=blue,linewidth=2)
+plot(delta,style=histogram, color=histColour, linewidth=10)
+plot(0,color=white)
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・22 lines
+Use on chart
+5
+2
+2 163
+It is a MACD with strategy simulation implemented to "tune" the MACD parameters for cryptos, it only use long and close strategy, not short

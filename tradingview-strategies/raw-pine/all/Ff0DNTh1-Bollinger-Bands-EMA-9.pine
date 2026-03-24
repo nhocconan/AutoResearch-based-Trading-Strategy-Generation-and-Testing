@@ -1,0 +1,5 @@
+//@version=5
+bgcolor=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_7')
+bdcolor=##input(defval=#363A45,type='INPUT_COLOR',##id='in_8')
+##root(root_metainfo,rm_ic_0,bgcolor,input__color)
+##root(root_metainfo,rm_ic_1,bdcolor,input__color)

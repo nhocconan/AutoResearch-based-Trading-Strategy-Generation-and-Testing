@@ -1,0 +1,37 @@
+//@version=2
+strategy("HullMA Strategy", overlay=true)
+
+n=input(title="period",type=integer,defval=16)
+
+
+n2ma=2*wma(close,round(n/2))
+nma=wma(close,n)
+diff=n2ma-nma
+sqn=round(sqrt(n))
+
+
+n2ma1=2*wma(close[1],round(n/2))
+nma1=wma(close[1],n)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(n))
+
+
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+c=n1>n2?green:red
+ma=plot(n1,color=c)
+
+longCondition = n1>n2
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = longCondition != true
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・30 lines
+Use on chart
+3
+5
+3 359
+Hisse senedinin hull moving average gibi hızlı bir hareketli ortalamada 20 li paremetrege performansını göstermektedir. Kodu trdingwiewswn alınmıştır.

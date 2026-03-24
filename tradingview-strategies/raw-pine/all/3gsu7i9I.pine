@@ -1,0 +1,64 @@
+//@version=5
+strategy("Payday Anomaly Strategy", overlay=true, precision=2, calc_on_every_tick=true, initial_capital=50000, currency=currency.USD, slippage=1, commission_type=strategy.commission.cash_per_order, commission_value=0.05)
+
+// Checkbox inputs to select specific payday trading days
+trade1st = input.bool(true, title="Trade 1st of the Month")
+trade2nd = input.bool(true, title="Trade 2nd of the Month")
+trade16th = input.bool(true, title="Trade 16th of the Month")
+trade31st = input.bool(true, title="Trade 31st of the Month")
+
+// Define the target days for expected anomalies based on selected checkboxes
+target1st = (dayofmonth == 1 and trade1st)
+target2nd = (dayofmonth == 2 and trade2nd)
+target16th = (dayofmonth == 16 and trade16th)
+target31st = (dayofmonth == 31 and trade31st)
+
+// Combine target days based on the selected checkboxes
+targetDays = target1st or target2nd or target16th or target31st
+
+// Entry conditions: If today is one of the selected target days, enter a long position
+if (targetDays)
+    strategy.entry("Long Payday Entry", strategy.long)
+
+// Exit conditions: Close position at the end of each target day
+if (not targetDays and strategy.opentrades > 0)
+    strategy.close("Long Payday Entry")
+
+// Plotting indicators to show selected target days on the chart
+bgcolor(targetDays ? color.new(color.green, 80) : na, title="Payday Background")
+
+View in Pine Editor・28 lines
+Use on chart
+1
+9
+1 604
+The "Payday Effect" refers to a predictable anomaly in financial markets where stock returns exhibit significant fluctuations around specific pay periods. Typically, these are associated with the beginning, middle, or end of the month when many investors receive wages and salaries. This influx of funds, often directed automatically into retirement accounts or investment portfolios (such as 401(k) plans in the United States), temporarily increases the demand for equities. This phenomenon has been linked to a cycle where stock prices rise disproportionately on and around payday periods due to increased buy-side liquidity.
+
+Academic research on the payday effect suggests that this pattern is tied to systematic cash flows into financial markets, primarily driven by employee retirement and savings plans. The regularity of these cash infusions creates a calendar-based pattern that can be exploited in trading strategies. Studies show that returns on days around typical payroll dates tend to be above average, and this pattern remains observable across various time periods and regions.
+
+The rationale behind the payday effect is rooted in the behavioral tendencies of investors, specifically the automatic reinvestment mechanisms used in retirement funds, which align with monthly or semi-monthly salary payments. This regular injection of funds can cause market microstructure effects where stock prices temporarily increase, only to stabilize or reverse after the funds have been invested. Consequently, the payday effect provides traders with a potentially profitable opportunity by predicting these inflows.
+Scientific Bibliography on the Payday Effect
+
+Ma, A., & Pratt, W. R. (2017). Payday Anomaly: The Market Impact of Semi-Monthly Pay Periods. Social Science Research Network (SSRN).
+
+This study provides a comprehensive analysis of the payday effect, exploring how returns tend to peak around payroll periods due to semi-monthly cash flows. The paper discusses how systematic inflows impact returns, leading to predictable stock performance patterns on specific days of the month.
+
+Lakonishok, J., & Smidt, S. (1988). Are Seasonal Anomalies Real? A Ninety-Year Perspective. The Review of Financial Studies, 1(4), 403-425.
+
+This foundational study explores calendar anomalies, including the payday effect. By examining data over nearly a century, the authors establish a framework for understanding seasonal and monthly patterns in stock returns, which provides historical support for the payday effect.
+
+Owen, S., & Rabinovitch, R. (1983). On the Predictability of Common Stock Returns: A Step Beyond the Random Walk Hypothesis. Journal of Business Finance & Accounting, 10(3), 379-396.
+
+This paper investigates predictability in stock returns beyond random fluctuations. It considers payday effects among various calendar anomalies, arguing that certain dates yield predictable returns due to regular cash inflows.
+
+Loughran, T., & Schultz, P. (2005). Liquidity: Urban versus Rural Firms. Journal of Financial Economics, 78(2), 341-374.
+
+While primarily focused on liquidity, this study provides insight into how cash flows, such as those from semi-monthly paychecks, influence liquidity levels and consequently impact stock prices around predictable pay dates.
+
+Ariel, R. A. (1990). High Stock Returns Before Holidays: Existence and Evidence on Possible Causes. The Journal of Finance, 45(5), 1611-1626.
+
+Ariel’s work highlights stock return patterns tied to certain dates, including paydays. Although the study focuses on pre-holiday returns, it suggests broader implications of predictable investment timing, reinforcing the calendar-based effects seen with payday anomalies.
+
+Summary
+
+Research on the payday effect highlights a repeating pattern in stock market returns driven by scheduled payroll investments. This cyclical increase in stock demand aligns with behavioral finance insights and market microstructure theories, offering a valuable basis for trading strategies focused on the beginning, middle, and end of each month.

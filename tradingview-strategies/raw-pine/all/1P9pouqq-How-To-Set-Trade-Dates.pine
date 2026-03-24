@@ -1,0 +1,62 @@
+//@version=5
+strategy(title = "How To Set Trade Dates", shorttitle = "Seasonality", overlay = true, precision = 2, max_bars_back = 200, pyramiding = 0, initial_capital = 10000,
+     currency = currency.NONE, default_qty_type = strategy.cash, default_qty_value = 10000, commission_type = "percent", commission_value = 0.27)
+
+// Revision: 2
+// Author: @allanster
+
+// === INPUT BACKTEST RANGE ===
+toolTipA  = 'Use with Daily or lower timeframe. If using Daily set desired dates 1 day earlier.'
+toolTipB  = '\n\nUse 0 as wild card for all. Examples:\nEntry Year:    0 is "Every Year".\nEntry Month: 0 is "Every Month".'
+toolTipC  = '\n\nWhen using 0 wild card dates on Daily period will not buy on 1st day of month. If market is closed will buy on next open day.'
+inpEntrY  = input.int   (defval = 2020,      title = "Entry Year",  minval = 0, tooltip = toolTipA + toolTipB + toolTipC)
+inpEntrM  = input.int   (defval = 9,         title = "Entry Month", minval = 0, maxval = 12)
+inpEntrD  = input.int   (defval = 1,         title = "Entry Day",   minval = 0, maxval = 31)
+inpExitY  = input.int   (defval = 2021,      title = "Exit Year",   minval = 0)
+inpExitM  = input.int   (defval = 5,         title = "Exit Month",  minval = 0, maxval = 12)
+inpExitD  = input.int   (defval = 1,         title = "Exit Day",    minval = 0, maxval = 31)
+inpPostn  = input.string(defval = "LONG",    title = "Position",    confirm = false, options = ["LONG", "SHORT"])
+
+// === LOGIC ===
+dates2trade() =>
+    entrD = inpEntrD == 0 ? dayofmonth : inpEntrD
+    entrM = inpEntrM == 0 ? month      : inpEntrM
+    entrY = inpEntrY == 0 ? year       : inpEntrY
+    exitD = inpExitD == 0 ? dayofmonth : inpExitD
+    exitM = inpExitM == 0 ? month      : inpExitM
+    exitY = inpExitY == 0 ? year       : inpExitY
+    dates2entr = time >= timestamp(entrY, entrM, entrD, 00, 00, 00) and time <= timestamp(entrY, entrM, entrD + 4, 00, 00, 00)
+    dates2exit = time >= timestamp(exitY, exitM, exitD, 00, 00, 00) and time <= timestamp(exitY, exitM, exitD + 4, 00, 00, 00)
+    [dates2entr,dates2exit]
+[entr,exit] = dates2trade()
+
+// === EXECUTION ===
+strategy.entry("L", strategy.long,  when = inpPostn == "LONG"  and entr)
+strategy.entry("S", strategy.short, when = inpPostn == "SHORT" and entr)
+strategy.close_all(when = exit)
+
+View in Pine Editor・39 lines
+Use on chart
+4
+2
+1
+2
+10 865
+Sep 28, 2019
+
+Example how to backtest specific date(s) which can be useful for testing seasonality strategy ideas such as "Sell in May", etc.
+
+If using Daily period with wild card dates it will not trade on 1st day of month. If market is closed will trade on next open day.
+
+Works only with Daily or lower timeframes. When using on Daily timeframe set dates 1 day earlier to execute on desired dates.
+
+Entering 0 in any of the date fields acts a wild card. Example -> Entry Year: 0 is "Every Year", Exit Month: 0 is "Every Month", etc.
+
+
+NOTICE: This is an example script and not meant to be used as an actual strategy. By using this script or any portion thereof, you acknowledge that you have read and understood that this is for research purposes only and I am not responsible for any financial losses you may incur by using this script!
+Jan 21, 2020
+Release Notes
+Cosmetic.
+Nov 15, 2021
+Release Notes
+Updated for Pine Script v5.

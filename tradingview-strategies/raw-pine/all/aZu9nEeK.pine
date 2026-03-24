@@ -1,0 +1,11 @@
+//@version=6
+longColor=##input(defval=#4CAF50ff,type='INPUT_COLOR',##id='in_4')
+shortColor=##input(defval=#F23645ff,type='INPUT_COLOR',##id='in_5')
+entryLineColor=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_7')
+stopLossLineColor=##input(defval=#F23645,type='INPUT_COLOR',##id='in_9')
+takeProfitLineColor=##input(defval=#2962ff,type='INPUT_COLOR',##id='in_11')
+##root(root_metainfo,rm_ic_0,longColor,input__color)
+##root(root_metainfo,rm_ic_1,shortColor,input__color)
+##root(root_metainfo,rm_ic_2,entryLineColor,input__color)
+##root(root_metainfo,rm_ic_3,stopLossLineColor,input__color)
+##root(root_metainfo,rm_ic_4,takeProfitLineColor,input__color)

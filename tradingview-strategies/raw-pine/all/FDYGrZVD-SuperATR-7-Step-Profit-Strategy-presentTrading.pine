@@ -1,0 +1,356 @@
+//@version=5
+strategy("SuperATR 7-Step Profit - Strategy [presentTrading] ", overlay=true, precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital=10000)
+
+// ————————
+// User Inputs
+// ————————
+short_period = input.int(3, minval=1, title="Short Period")
+long_period = input.int(7, minval=1, title="Long Period")
+momentum_period = input.int(7, minval=1, title="Momentum Period")
+atr_sma_period = input.int(7, minval=1, title="ATR SMA Period for Confirmation")
+trend_strength_threshold = input.float(1.618, minval=0.0, title="Trend Strength Threshold", step=0.1)
+
+// ————————
+// Take Profit Inputs
+// ————————
+useMultiStepTP = input.bool(true, title="Enable Multi-Step Take Profit")
+
+// ATR-based Take Profit Inputs
+atrLengthTP = input.int(14, minval=1, title="ATR Length for Take Profit")
+atrMultiplierTP1 = input.float(2.618, minval=0.1, title="ATR Multiplier for TP Level 1")
+atrMultiplierTP2 = input.float(5.0, minval=0.1, title="ATR Multiplier for TP Level 2")
+atrMultiplierTP3 = input.float(10.0, minval=0.1, title="ATR Multiplier for TP Level 3")
+atrMultiplierTP4 = input.float(13.82, minval=0.1, title="ATR Multiplier for TP Level 4")
+
+// Fixed Percentage Take Profit Inputs
+tp_level_percent1 = input.float(3.0, minval=0.1, title="Fixed TP Level 1 (%)")
+tp_level_percent2 = input.float(8.0, minval=0.1, title="Fixed TP Level 2 (%)")
+tp_level_percent3 = input.float(17.0, minval=0.1, title="Fixed TP Level 3 (%)")
+
+// Take Profit Percentages for Each Level
+tp_percent_atr = input.float(10.0, minval=0.1, maxval=100, title="Percentage to Exit at Each ATR TP Level")
+tp_percent_fixed = input.float(10.0, minval=0.1, maxval=100, title="Percentage to Exit at Each Fixed TP Level")
+
+
+// —————————————
+// Helper Functions
+// —————————————
+
+// Function to calculate True Range with enhanced volatility detection
+calculate_true_range() =>
+    prev_close = close[1]
+    tr1 = high - low
+    tr2 = math.abs(high - prev_close)
+    tr3 = math.abs(low - prev_close)
+    true_range = math.max(tr1, tr2, tr3)
+    true_range
+
+// ———————————————
+// Indicator Calculations
+// ———————————————
+
+// Calculate True Range
+true_range = calculate_true_range()
+
+// Calculate Momentum Factor
+momentum = close - close[momentum_period]
+stdev_close = ta.stdev(close, momentum_period)
+normalized_momentum = stdev_close != 0 ? (momentum / stdev_close) : 0
+momentum_factor = math.abs(normalized_momentum)
+
+// Calculate Short and Long ATRs
+short_atr = ta.sma(true_range, short_period)
+long_atr = ta.sma(true_range, long_period)
+
+// Calculate Adaptive ATR
+adaptive_atr = (short_atr * momentum_factor + long_atr) / (1 + momentum_factor)
+
+// Calculate Trend Strength
+price_change = close - close[momentum_period]
+atr_multiple = adaptive_atr != 0 ? (price_change / adaptive_atr) : 0
+trend_strength = ta.sma(atr_multiple, momentum_period)
+
+// Calculate Moving Averages
+short_ma = ta.sma(close, short_period)
+long_ma = ta.sma(close, long_period)
+
+// Determine Trend Signal
+trend_signal = (short_ma > long_ma and trend_strength > trend_strength_threshold) ? 1 :
+               (short_ma < long_ma and trend_strength < -trend_strength_threshold) ? -1 : 0
+
+// Calculate Adaptive ATR SMA for Confirmation
+adaptive_atr_sma = ta.sma(adaptive_atr, atr_sma_period)
+
+// Determine if Trend is Confirmed with Price Action
+trend_confirmed = (trend_signal == 1 and close > short_ma and adaptive_atr > adaptive_atr_sma) or (trend_signal == -1 and close < short_ma and adaptive_atr > adaptive_atr_sma)
+
+// —————————————
+// Trading Logic
+// —————————————
+
+// Entry Conditions
+long_entry = trend_confirmed and trend_signal == 1
+short_entry = trend_confirmed and trend_signal == -1
+
+// Exit Conditions
+long_exit = strategy.position_size > 0 and short_entry
+short_exit = strategy.position_size < 0 and long_entry
+
+
+
+// Execute Long Trades
+if long_entry
+    strategy.entry("Long Entry", strategy.long)
+if long_exit
+    strategy.close("Long Entry")
+
+// Execute Short Trades
+if short_entry
+    strategy.entry("Short Entry", strategy.short)
+if short_exit
+    strategy.close("Short Entry")
+
+// ————————————————
+// Multi-Step Take Profit Logic
+// ————————————————
+
+if useMultiStepTP
+    // Calculate ATR for Take Profit Levels
+    atrValueTP = ta.atr(atrLengthTP)
+
+    // Long Position Take Profit Levels
+    if strategy.position_size > 0
+        // ATR-based Take Profit Prices
+        tp_priceATR1_long = strategy.position_avg_price + atrMultiplierTP1 * atrValueTP
+        tp_priceATR2_long = strategy.position_avg_price + atrMultiplierTP2 * atrValueTP
+        tp_priceATR3_long = strategy.position_avg_price + atrMultiplierTP3 * atrValueTP
+        tp_priceATR4_long = strategy.position_avg_price + atrMultiplierTP4 * atrValueTP
+
+        // Fixed Percentage Take Profit Prices
+        tp_pricePercent1_long = strategy.position_avg_price * (1 + tp_level_percent1 / 100)
+        tp_pricePercent2_long = strategy.position_avg_price * (1 + tp_level_percent2 / 100)
+        tp_pricePercent3_long = strategy.position_avg_price * (1 + tp_level_percent3 / 100)
+
+        // Set ATR-based Take Profit Exits
+        strategy.exit("TP ATR 1 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_priceATR1_long)
+        strategy.exit("TP ATR 2 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_priceATR2_long)
+        strategy.exit("TP ATR 3 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_priceATR3_long)
+        strategy.exit("TP ATR 4 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_priceATR4_long)
+
+        // Set Fixed Percentage Take Profit Exits
+        strategy.exit("TP Percent 1 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent1_long)
+        strategy.exit("TP Percent 2 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent2_long)
+        strategy.exit("TP Percent 3 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent3_long)
+
+    // Short Position Take Profit Levels
+    if strategy.position_size < 0
+        // ATR-based Take Profit Prices
+        tp_priceATR1_short = strategy.position_avg_price - atrMultiplierTP1 * atrValueTP
+        tp_priceATR2_short = strategy.position_avg_price - atrMultiplierTP2 * atrValueTP
+        tp_priceATR3_short = strategy.position_avg_price - atrMultiplierTP3 * atrValueTP
+        tp_priceATR4_short = strategy.position_avg_price - atrMultiplierTP4 * atrValueTP
+
+        // Fixed Percentage Take Profit Prices
+        tp_pricePercent1_short = strategy.position_avg_price * (1 - tp_level_percent1 / 100)
+        tp_pricePercent2_short = strategy.position_avg_price * (1 - tp_level_percent2 / 100)
+        tp_pricePercent3_short = strategy.position_avg_price * (1 - tp_level_percent3 / 100)
+
+        // Set ATR-based Take Profit Exits
+        strategy.exit("TP ATR 1 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_priceATR1_short)
+        strategy.exit("TP ATR 2 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_priceATR2_short)
+        strategy.exit("TP ATR 3 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_priceATR3_short)
+        strategy.exit("TP ATR 4 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_priceATR4_short)
+
+        // Set Fixed Percentage Take Profit Exits
+        strategy.exit("TP Percent 1 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent1_short)
+        strategy.exit("TP Percent 2 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent2_short)
+        strategy.exit("TP Percent 3 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pricePercent3_short)
+
+
+// ——————————
+// Plotting
+// ——————————
+
+plot(short_ma, color=color.blue, title="Short MA")
+plot(long_ma, color=color.orange, title="Long MA")
+
+// Plot Buy and Sell Signals
+//plotshape(long_entry, title="Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="Buy")
+//plotshape(short_entry, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="Sell")
+
+// Optional: Plot Trend Strength for analysis
+// Uncomment the lines below to display Trend Strength on a separate chart pane
+// plot(trend_strength, title="Trend Strength", color=color.gray)
+// hline(trend_strength_threshold, title="Trend Strength Threshold", color=color.gray, linestyle=hline.style_dashed)
+// hline(-trend_strength_threshold, title="Trend Strength Threshold", color=color.gray, linestyle=hline.style_dashed)
+
+View in Pine Editor・192 lines
+Use on chart
+7
+2
+1
+7
+12 319
+Long time no see!
+
+█ Introduction and How It Is Different
+
+The SuperATR 7-Step Profit Strategy is a multi-layered trading approach that integrates adaptive Average True Range (ATR) calculations with momentum-based trend detection. What sets this strategy apart is its sophisticated 7-step take-profit mechanism, which combines four ATR-based exit levels and three fixed percentage levels. This hybrid approach allows traders to dynamically adjust to market volatility while systematically capturing profits in both long and short market positions.
+
+Traditional trading strategies often rely on static indicators or single-layered exit strategies, which may not adapt well to changing market conditions. The SuperATR 7-Step Profit Strategy addresses this limitation by:
+- Using Adaptive ATR: Enhances the standard ATR by making it responsive to current market momentum.
+- Incorporating Momentum-Based Trend Detection: Identifies stronger trends with higher probability of continuation.
+- Employing a Multi-Step Take-Profit System: Allows for gradual profit-taking at predetermined levels, optimizing returns while minimizing risk.
+
+BTCUSD 6hr Performance
+https://www.tradingview.com/x/strZw7Sz/
+
+█ Strategy, How It Works: Detailed Explanation
+The strategy revolves around detecting strong market trends and capitalizing on them using an adaptive ATR and momentum indicators. Below is a detailed breakdown of each component of the strategy.
+
+🔶 1. True Range Calculation with Enhanced Volatility Detection
+The True Range (TR) measures market volatility by considering the most significant price movements. The enhanced TR is calculated as:
+
+TR = Max[(High - Low), Abs(High - Previous Close), Abs(Low - Previous Close)]
+Where:
+High and Low are the current bar's high and low prices.
+Previous Close is the closing price of the previous bar.
+Abs denotes the absolute value.
+Max selects the maximum value among the three calculations.
+
+🔶 2. Momentum Factor Calculation
+To make the ATR adaptive, the strategy incorporates a Momentum Factor (MF), which adjusts the ATR based on recent price movements.
+
+Pine Script®
+Momentum = Close - Close[n]
+Stdev_Close = Standard Deviation of Close over n periods
+Normalized_Momentum = Momentum / Stdev_Close (if Stdev_Close ≠ 0)
+Momentum_Factor = Abs(Normalized_Momentum)
+
+
+Where:
+Close is the current closing price.
+n is the momentum_period, a user-defined input (default is 7).
+Standard Deviation measures the dispersion of closing prices over n periods.
+Abs ensures the momentum factor is always positive.
+
+🔶 3. Adaptive ATR Calculation
+The Adaptive ATR (AATR) adjusts the traditional ATR based on the Momentum Factor, making it more responsive during volatile periods and smoother during consolidation.
+
+
+Pine Script®
+Short_ATR = SMA(True Range, short_period)
+Long_ATR = SMA(True Range, long_period)
+Adaptive_ATR = [Short_ATR × Momentum_Factor + Long_ATR] / [1 + Momentum_Factor]
+
+
+Where:
+SMA is the Simple Moving Average.
+short_period and long_period are user-defined inputs (defaults are 3 and 7, respectively).
+
+🔶 4. Trend Strength Calculation
+The strategy quantifies the strength of the trend to filter out weak signals.
+
+
+Pine Script®
+Price_Change = Close - Close[n]
+ATR_Multiple = Price_Change / Adaptive_ATR (if Adaptive_ATR ≠ 0)
+Trend_Strength = SMA(ATR_Multiple, n)
+
+
+
+🔶 5. Trend Signal Determination
+
+Pine Script®
+If (Short_MA > Long_MA) AND (Trend_Strength > Trend_Strength_Threshold):
+    Trend_Signal = 1 (Strong Uptrend)
+Elif (Short_MA < Long_MA) AND (Trend_Strength < -Trend_Strength_Threshold):
+    Trend_Signal = -1 (Strong Downtrend)
+Else:
+    Trend_Signal = 0 (No Clear Trend)
+
+Expand 1 line
+
+
+🔶 6. Trend Confirmation with Price Action
+
+Pine Script®
+Adaptive_ATR_SMA = SMA(Adaptive_ATR, atr_sma_period)
+
+If (Trend_Signal == 1) AND (Close > Short_MA) AND (Adaptive_ATR > Adaptive_ATR_SMA):
+    Trend_Confirmed = True
+Elif (Trend_Signal == -1) AND (Close < Short_MA) AND (Adaptive_ATR > Adaptive_ATR_SMA):
+    Trend_Confirmed = True
+Else:
+    Trend_Confirmed = False
+
+Expand 3 lines
+
+
+Local Performance
+
+
+
+🔶 7. Multi-Step Take-Profit Mechanism
+The strategy employs a 7-step take-profit system
+
+█ Trade Direction
+The SuperATR 7-Step Profit Strategy is designed to work in both long and short market conditions. By identifying strong uptrends and downtrends, it allows traders to capitalize on price movements in either direction.
+
+Long Trades: Initiated when the market shows strong upward momentum and the trend is confirmed.
+Short Trades: Initiated when the market exhibits strong downward momentum and the trend is confirmed.
+
+█ Usage
+To implement the SuperATR 7-Step Profit Strategy:
+1. Configure the Strategy Parameters:
+- Adjust the short_period, long_period, and momentum_period to match the desired sensitivity.
+- Set the trend_strength_threshold to control how strong a trend must be before acting.
+2. Set Up the Multi-Step Take-Profit Levels:
+- Define ATR multipliers and fixed percentage levels according to risk tolerance and profit goals.
+- Specify the percentage of the position to close at each level.
+3. Apply the Strategy to a Chart:
+- Use the strategy on instruments and timeframes where it has been tested and optimized.
+- Monitor the positions and adjust parameters as needed based on performance.
+4. Backtest and Optimize:
+- Utilize TradingView's backtesting features to evaluate historical performance.
+- Adjust the default settings to optimize for different market conditions.
+
+█ Default Settings
+Understanding default settings is crucial for optimal performance.
+
+
+Short Period (3): Affects the responsiveness of the short-term MA.
+
+Effect: Lower values increase sensitivity but may produce more false signals.
+
+Long Period (7): Determines the trend baseline.
+
+Effect: Higher values reduce noise but may delay signals.
+
+Momentum Period (7): Influences adaptive ATR and trend strength.
+
+Effect: Shorter periods react quicker to price changes.
+
+Trend Strength Threshold (0.5): Filters out weaker trends.
+
+Effect: Higher thresholds yield fewer but stronger signals.
+
+ATR Multipliers: Set distances for ATR-based exits.
+
+Effect: Larger multipliers aim for bigger moves but may reduce hit rate.
+
+Fixed TP Levels (%): Control profit-taking on smaller moves.
+
+Effect: Adjusting these levels affects how quickly profits are realized.
+
+Exit Percentages: Determine how much of the position is closed at each TP level.
+
+Effect: Higher percentages reduce exposure faster, affecting risk and reward.
+
+Adjusting these variables allows you to tailor the strategy to different market conditions and personal risk preferences.
+
+
+
+By integrating adaptive indicators and a multi-tiered exit strategy, the SuperATR 7-Step Profit Strategy offers a versatile tool for traders seeking to navigate varying market conditions effectively. Understanding and adjusting the key parameters enables traders to harness the full potential of this strategy.
+
+

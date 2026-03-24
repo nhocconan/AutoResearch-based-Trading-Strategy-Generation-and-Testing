@@ -1,0 +1,79 @@
+//@version=5
+strategy("SETUP DAVYD DLUCAS LIRA BRITO", overlay=true, margin_long=100, margin_short=100)
+
+// ----------------------
+// Heikin Ashi calculado (correção: declarar haOpen como var para usar haOpen[1])
+// ----------------------
+haClose = (open + high + low + close) / 4
+
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow  = math.min(low,  math.min(haOpen, haClose))
+
+// ----------------------
+// Bandas de Bollinger com OFFSET 8
+// ----------------------
+length = 20
+mult = 2.0
+
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// offset 8 (8 barras atrás)
+upper_off = upper[8]
+lower_off = lower[8]
+
+// ----------------------
+// Volume
+// ----------------------
+volOK = volume > ta.sma(volume, 20)
+
+// ----------------------
+// Regras de Tendência
+// ----------------------
+longTrend  = close > upper_off and volOK and haClose > haOpen
+shortTrend = close < lower_off and volOK and haClose < haOpen
+
+// ----------------------
+// Regras de Reversão (Heikin Ashi)
+// ----------------------
+bullRev = haClose > haOpen and haClose > haHigh[1]
+bearRev = haClose < haOpen and haClose < haLow[1]
+
+// ----------------------
+// Entradas
+// ----------------------
+if (longTrend or bullRev)
+    strategy.entry("Long", strategy.long)
+
+if (shortTrend or bearRev)
+    strategy.entry("Short", strategy.short)
+
+// ----------------------
+// Stop (exemplo simples usando último topo/fundo - ajuste conforme preferir)
+// ----------------------
+stopLong = ta.lowest(low, 10)   // exemplo: menor low das últimas 10 barras
+stopShort = ta.highest(high, 10)
+
+strategy.exit("Exit Long", "Long", stop=stopLong)
+strategy.exit("Exit Short", "Short", stop=stopShort)
+
+// ----------------------
+// Plots visuais
+// ----------------------
+plot(upper_off, "Upper Offset", color=color.red)
+plot(lower_off, "Lower Offset", color=color.green)
+plotshape(longTrend,  title="Tendência Alta", style=shape.triangleup,   color=color.green,  size=size.small, location=location.belowbar)
+plotshape(shortTrend, title="Tendência Baixa", style=shape.triangledown, color=color.red,    size=size.small, location=location.abovebar)
+plotshape(bullRev,    title="Reversão Alta",   style=shape.circle,     color=color.new(color.green, 0), size=size.tiny, location=location.belowbar)
+plotshape(bearRev,    title="Reversão Baixa",  style=shape.circle,     color=color.new(color.red, 0),   size=size.tiny, location=location.abovebar)
+
+View in Pine Editor・73 lines
+Use on chart
+4
+502
+Setup DSavyd Dlucas sobre o padrão Heikin Ashin de fluxo

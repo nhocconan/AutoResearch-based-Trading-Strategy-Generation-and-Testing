@@ -1,0 +1,112 @@
+//@version=6
+strategy("MTF Scalper - alemicihan", overlay=true, 
+     initial_capital=10000, default_qty_value=10, 
+     default_qty_type=strategy.percent_of_equity, currency=currency.USD)
+
+// --- 1. Girdi Parametreleri ---
+htf1_res = input.string(defval="60", title="HTF 1 (Saatlik)") 
+htf2_res = input.string(defval="240", title="HTF 2 (4 Saatlik)") 
+htf3_res = input.string(defval="D", title="HTF 3 (Günlük)") 
+ema_length = input.int(defval=20, title="EMA Periyodu (HTF)", minval=1)
+
+// Giriş Göstergesi (Stokastik RSI) Ayarları
+rsi_length = input.int(defval=14, title="RSI Uzunluğu", minval=1) 
+stoch_k_length = input.int(defval=3, title="K Uzunluğu (Smoothing)", minval=1) 
+stoch_d_length = input.int(defval=3, title="D Uzunluğu (Signal Line)", minval=1) 
+stoch_fast_k_length = input.int(defval=14, title="Stoch K Hesaplama Periyodu", minval=1) 
+
+// Risk Yönetimi 
+atr_period = input.int(defval=14, title="SL/TP için ATR Periyodu", minval=1)
+sl_multiplier = input.float(defval=1.5, title="Stop Loss ATR Çarpanı", minval=0.1)
+tp_multiplier = input.float(defval=3.0, title="Take Profit ATR Çarpanı", minval=0.1)
+
+// --- 2. Yüksek Zaman Dilimi (HTF) Hesaplamaları ---
+f_get_ema(res) => 
+    request.security(syminfo.tickerid, res, ta.ema(close, ema_length)[1])
+
+htf1_ema = f_get_ema(htf1_res)
+htf2_ema = f_get_ema(htf2_res)
+htf3_ema = f_get_ema(htf3_res)
+
+trend_long = close > htf1_ema and close > htf2_ema and close > htf3_ema
+trend_short = close < htf1_ema and close < htf2_ema and close < htf3_ema
+
+// --- 3. Giriş Sinyali Hesaplamaları (LTF) ---
+// Stokastik RSI hesaplaması
+rsi_value = ta.rsi(close, rsi_length)
+stoch_k = ta.sma(ta.stoch(rsi_value, rsi_value, rsi_value, stoch_fast_k_length), stoch_k_length)
+stoch_d = ta.sma(stoch_k, stoch_d_length)
+
+// --- KRİTİK DÜZELTME: Crossover/Crossunder sinyallerini global değişkenlere atama ---
+k_cross_d_up = ta.crossover(stoch_k, stoch_d)
+k_cross_d_down = ta.crossunder(stoch_k, stoch_d)
+
+// Scalp Giriş Koşulları
+long_signal = trend_long and k_cross_d_up
+short_signal = trend_short and k_cross_d_down
+
+// --- 4. Risk Yönetimi Hesaplamaları (ATR Tabanlı Dinamik SL/TP) ---
+current_atr = ta.atr(atr_period)
+
+long_sl_points = current_atr * sl_multiplier
+long_tp_points = current_atr * tp_multiplier
+short_sl_points = current_atr * sl_multiplier
+short_tp_points = current_atr * tp_multiplier
+
+// --- 5. Strateji Emirlerinin Gerçekleştirilmesi ---
+// Long Pozisyon Yönetimi
+if long_signal and strategy.position_size == 0
+    long_sl_level = close - long_sl_points
+    long_tp_level = close + long_tp_points
+    
+    strategy.entry("L_Entry", strategy.long)
+    strategy.exit("L_Exit", from_entry="L_Entry", stop=long_sl_level, limit=long_tp_level)
+
+// Short Pozisyon Yönetimi
+if short_signal and strategy.position_size == 0
+    short_sl_level = close + short_sl_points
+    short_tp_level = close - short_tp_points
+    
+    strategy.entry("S_Entry", strategy.short)
+    strategy.exit("S_Exit", from_entry="S_Entry", stop=short_sl_level, limit=short_tp_level)
+
+// --- 6. Grafiksel Çizimler ---
+bgcolor(trend_long ? color.new(color.green, 90) : trend_short ? color.new(color.red, 90) : na)
+
+View in Pine Editor・74 lines
+Use on chart
+1
+8
+756
+Multi-Timeframe Scalper Strategy: Aligning the Big Picture for Quick Gains
+
+This article presents a robust futures trading strategy designed for high-frequency scalping in the crypto market. It’s built on the principle of minimizing risk by ensuring that short-term entries are always aligned with the dominant, higher-timeframe trend.
+
+The Core Concept: Alignment is Key
+
+A Balanced Trend Follower approach, now refined for rapid scalping, uses a Multi-Timeframe (MTF) confirmation system to filter out market noise and increase the probability of a successful trade.
+
+The strategy operates on a Low Timeframe (LTF) chart (e.g., 3m, 5m, or 15m) but only executes trades if the direction is validated by three Higher Timeframes (HTF).
+
+ComponentPurposeFunctionHTF (D, 4h, 1h) EMA => Trend Confirmation =>Checks if the current price is above/below all three Exponential Moving Averages (EMA 20). This provides a strong directional bias.
+LTF (5m) Stochastic RSI => Momentum Entry => Generates the actual buy/sell signal by spotting a swift crossover, indicating fresh momentum in the direction of the confirmed HTF trend.
+
+How The Signal Is Generated
+
+Trend Alignment: The system first confirms the trend. If the price is trading above the Daily, 4-Hour, and 1-Hour EMAs, the market is deemed to be in a Strong LONG Trend. Only LONG signals are permitted.
+
+Momentum Trigger: Once the trend is confirmed, a Long Signal is generated only when the Stochastic K-Line crosses above the D-Line, indicating a momentum shift (a pullback ending) towards the main trend direction.
+
+Short Signal: The inverse logic applies to the Short Trend confirmation and entry signal.
+
+Mandatory Risk Management: ATR-Based Exit
+
+Given the high leverage nature of futures and scalping, static Stop-Loss (SL) and Take-Profit (TP) levels are inefficient. This strategy uses the Average True Range (ATR) indicator to dynamically set profit and loss targets based on current market volatility.
+
+Stop Loss (SL): Set dynamically at 1.5 x ATR below (for long) or above (for short) the entry price. This gives the trade enough room to breathe without risking excessive capital.
+
+Take Profit (TP): Set dynamically at 3.0 x ATR, establishing a robust Risk-to-Reward Ratio of 1:2.
+
+Final Thoughts on Testing
+
+This sophisticated approach combines the reliability of MTF analysis with the speed of momentum indicators. However, data analysis is key. Backtesting these parameters (EMA, ATR Multipliers, RSI/Stochastic lengths) on your chosen asset (like BTC/USDT or ETH/USDT) and timeframe is crucial to achieving optimal performance.

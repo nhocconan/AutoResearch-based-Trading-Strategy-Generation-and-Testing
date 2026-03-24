@@ -1,0 +1,7 @@
+//@version=4
+brokencol=##input(defval=#2196F3,type='INPUT_COLOR',##id='in_6')
+upcol=##input(defval=#00E676,type='INPUT_COLOR',##id='in_7')
+dncol=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_8')
+##root(root_metainfo,rm_ic_0,brokencol,input__color)
+##root(root_metainfo,rm_ic_1,upcol,input__color)
+##root(root_metainfo,rm_ic_2,dncol,input__color)

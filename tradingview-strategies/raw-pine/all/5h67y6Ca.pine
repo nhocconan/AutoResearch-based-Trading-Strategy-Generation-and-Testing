@@ -1,0 +1,92 @@
+//@version=5
+strategy("XAUUSD Elliott Trend Follower", overlay=true, 
+     initial_capital=1000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1, 
+     commission_type=strategy.commission.cash_per_order, 
+     commission_value=0.15)
+
+// --- [INPUTS] Session and Parameters ---
+start_time = input.session("0900-2300", "Trading Session", group="Time Settings")
+timezone   = input.string("Asia/Seoul", "Timezone", group="Time Settings")
+
+lookback   = input.int(25, "Wave Detection Lookback", minval=5, group="Strategy Parameters")
+ema_len    = input.int(100, "Main Trend Filter (EMA)", group="Strategy Parameters")
+
+sl_val     = input.float(2.5, "Stop Loss (USD)", step=0.1, group="Risk Management")
+tp_val     = input.float(8.0, "Take Profit (USD)", step=0.1, group="Risk Management")
+be_level   = input.float(2.0, "Break-even Trigger (USD)", step=0.1, group="Risk Management")
+
+// --- [LOGIC] Market Analysis ---
+is_in_session = not na(time(timeframe.period, start_time, timezone))
+
+// Channel Breakout (Donchian)
+upper_ch = ta.highest(high, lookback)[1]
+lower_ch = ta.lowest(low, lookback)[1]
+ema_filter = ta.ema(close, ema_len)
+
+// Entry Conditions
+long_cond  = is_in_session and close > ema_filter and ta.crossover(close, upper_ch)
+short_cond = is_in_session and close < ema_filter and ta.crossunder(close, lower_ch)
+
+// --- [EXECUTION] Trade Management ---
+if (long_cond and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long, comment="L_In")
+
+if (short_cond and strategy.position_size == 0)
+    strategy.entry("Short", strategy.short, comment="S_In")
+
+// Position Monitoring & Exit
+if (strategy.position_size != 0)
+    float entry_p = strategy.position_avg_price
+    
+    // Dynamic Exit Calculation (Break-even & Fixed SL/TP)
+    float long_sl  = (high - entry_p >= be_level) ? entry_p : entry_p - sl_val
+    float short_sl = (entry_p - low >= be_level) ? entry_p : entry_p + sl_val
+    
+    if (strategy.position_size > 0)
+        strategy.exit("ExitLong", "Long", stop=long_sl, limit=entry_p + tp_val, comment_loss="SL", comment_profit="TP")
+    
+    if (strategy.position_size < 0)
+        strategy.exit("ExitShort", "Short", stop=short_sl, limit=entry_p - tp_val, comment_loss="SL", comment_profit="TP")
+
+// Time-based Exit (Max 96 bars for 15m = 24 hours)
+if (strategy.position_size != 0 and ta.barssince(strategy.opentrades.entry_bar_index(0)) > 96)
+    strategy.close_all(comment="T_Out")
+
+// --- [VISUALS] Chart Elements ---
+plot(ema_filter, color=color.new(color.white, 50), title="Trend EMA")
+plot(upper_ch, color=color.new(color.green, 80), style=plot.style_stepline, title="Upper Channel")
+plot(lower_ch, color=color.new(color.red, 80), style=plot.style_stepline, title="Lower Channel")
+bgcolor(is_in_session ? color.new(color.green, 98) : color.new(color.red, 98), title="Session Background")
+
+View in Pine Editor・61 lines
+Use on chart
+1
+8
+843
+Overview
+This strategy is designed for Gold (XAUUSD) on the 15-minute timeframe, focusing on capturing the "Third Wave" of Elliott Wave theory through high-probability breakout patterns. It combines trend-filtering with strict risk management to ensure a positive expectancy even in volatile market conditions.
+
+Key Features
+Trend Filtering: Uses a 100-period EMA to ensure trades are only taken in the direction of the primary trend.
+
+Donchian Channel Breakouts: Entry signals are triggered by multi-candle high/low breakouts, filtering out minor price fluctuations.
+
+Customizable Trading Sessions: Fully adjustable session inputs allow users to focus on high-liquidity periods (e.g., London/New York overlap).
+
+Built-in Risk Management: * Automated Stop-Loss & Take-Profit: Pre-set ratios to maintain a healthy Profit Factor.
+
+Break-even Logic: Automatically moves the stop-loss to the entry price once a certain profit threshold is met to protect capital.
+
+Time-based Exit: Prevents "dead capital" by closing stagnant positions after a specific number of bars.
+
+Best Used On
+Symbol: XAUUSD (Gold)
+
+Timeframe: 15-Minute (Recommended)
+
+Settings: Default parameters are optimized for Gold, but SL/TP can be adjusted via the "Inputs" tab to match your risk appetite.
+
+Disclaimer
+Past performance does not guarantee future results. This strategy is an automated tool to assist in decision-making and should be used as part of a comprehensive trading plan. Always test in a paper trading environment before going live.

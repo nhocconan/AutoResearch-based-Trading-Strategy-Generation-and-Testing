@@ -1,0 +1,276 @@
+//@version=6
+strategy('Golden Cross 50/200 EMA', 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10,
+     margin_long=0,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.1)
+
+// EMA Parameters
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// Detect crosses
+bullCross = ta.crossover(ema50, ema200)
+bearCross = ta.crossunder(ema50, ema200)
+
+// Calculate recent swing low
+swingLow = ta.lowest(low, 15)
+
+// Variable to store swing low at crossover moment
+var float entryStopLoss = na
+
+// IMPROVED ENTRY CONDITION
+if bullCross
+    entryStopLoss := swingLow
+    strategy.entry('Long', strategy.long, comment='EMA Cross Entry')
+
+// EXIT CONDITIONS
+if bearCross
+    strategy.close('Long', comment='Exit Bear Cross')
+
+if strategy.position_size > 0 and low < entryStopLoss
+    strategy.close('Long', comment='SL Hit')
+
+// VISUALIZATION
+plot(ema50, color=color.new(#0a477c, 0), title='EMA 50', linewidth=2)
+plot(ema200, color=color.new(#a91a1a, 0), title='EMA 200', linewidth=2)
+
+plotshape(bullCross, style=shape.triangleup, location=location.belowbar, 
+          color=color.new(color.green, 0), size=size.normal, title='Buy Signal')
+plotshape(bearCross, style=shape.triangledown, location=location.abovebar, 
+          color=color.new(color.red, 0), size=size.normal, title='Sell Signal')
+
+// Stop Loss Line
+plot(strategy.position_size > 0 ? entryStopLoss : na, 
+     color=color.new(#c88212, 0), style=plot.style_linebr, 
+     linewidth=2, title='Stop Loss Level')
+
+// Alerts
+alertcondition(bullCross, title='Long Entry', 
+               message='EMA Cross - Long entry with 10% capital')
+alertcondition(bearCross, title='Bearish Cross Exit', 
+               message='Bearish cross - Position close')
+alertcondition(strategy.position_size > 0 and low < entryStopLoss, 
+               title='Stop Loss Triggered', 
+               message='Stop Loss reached')
+
+View in Pine Editor・61 lines
+Use on chart
+3
+6
+6
+1 106
+Trend-following systems are characterized by having a low win rate, yet in the right circumstances (trending markets and higher timeframes) they can deliver returns that even surpass those of systems with a high win rate.
+
+Below, I show you a simple bullish trend-following system with clear execution rules:
+
+System Rules
+
+-Long entries when the 50-period EMA crosses above the 200-period EMA.
+
+-Stop Loss (SL) placed at the lowest low of the 15 candles prior to the entry candle.
+
+-Take Profit (TP) triggered when the 50-period EMA crosses below the 200-period EMA.
+
+
+Risk Management
+
+-Initial capital: $10,000
+
+-Position size: 10% of capital per trade
+
+-Commissions: 0.1% per trade
+
+Important Note:
+
+In the code, the stop loss is defined using the swing low (15 candles), but the position size is not adjusted based on the distance to the stop loss. In other words, 10% of the equity is risked on each trade, but the actual loss on the trade is not controlled by a maximum fixed percentage of the account — it depends entirely on the stop loss level. This means the loss on a single trade could be significantly higher or lower than 10% of the account equity, depending on volatility.
+
+Implementing leverage or reducing position size based on volatility is something I haven’t been able to include in the code, but it would dramatically improve the system’s performance. It would fix a consistent percentage loss per trade, preventing losses from fluctuating wildly with changes in volatility.
+
+For example, we can maintain a fixed loss percentage when volatility is low by using the following formula:
+Leverage = % of SL you’re willing to risk / % volatility from entry point to stop loss
+
+And when volatility is high and would exceed the fixed percentage we want to expose per trade (if the SL is hit), we could reduce the position size accordingly.
+
+Practical example:
+
+Imagine we only want to risk 15% of the position value if the stop loss is triggered on Tesla (which has high volatility), but the distance to the SL represents a potential 23.57% drop. In this case, we subtract the desired risk (15%) from the actual volatility-based loss (23.57%):
+
+23.57% − 15% = 8.57%
+
+Now suppose we normally use $200 per trade.
+
+To calculate 8.57% of $200:
+
+200 × (8.57 / 100) = $17.14
+
+Then subtract that amount from the original position size:
+
+$200 − $17.14 = $182.86
+
+In summary:
+
+If we reduce the position size to $182.86 (instead of the usual $200), even if Tesla moves 23.57% against us and hits the stop loss, we would still only lose approximately 15% of the original $200 position — exactly the risk level we defined. This way, we strictly respect our risk management rules regardless of volatility swings.
+
+I hope this clearly explains the importance of capping losses at a fixed percentage per trade. This keeps risk under control while maintaining a consistent percentage of capital invested per trade — preventing both statistical distortion of the system and the potential destruction of the account.
+
+About the code:
+
+Strategy declaration:
+
+The strategy is named 'Golden Cross 50/200 EMA'.
+
+overlay=true means it will be drawn directly on the price chart.
+
+initial_capital=10000 sets the initial capital to $10,000.
+
+default_qty_type=strategy.percent_of_equity and default_qty_value=10 means each trade uses 10% of available equity.
+
+margin_long=0 indicates no margin is used for long positions (this is likely for simulation purposes only; in real trading, margin would be required).
+
+commission_type=strategy.commission.percent and commission_value=0.1 sets a 0.1% commission per trade.
+
+Indicators:
+
+Calculates two EMAs: a 50-period EMA (ema50) and a 200-period EMA (ema200).
+
+Crossover detection:
+
+bullCross is triggered when the 50-period EMA crosses above the 200-period EMA (Golden Cross).
+
+bearCross is triggered when the 50-period EMA crosses below the 200-period EMA (Death Cross).
+
+Recent swing:
+
+swingLow calculates the lowest low of the previous 15 periods.
+
+Stop Loss:
+
+entryStopLoss is a variable initialized as na (not available) and is updated to the current swingLow value whenever a bullCross occurs.
+
+Entry and exit conditions:
+
+Entry: When a bullCross occurs, the initial stop loss is set to the current swingLow and a long position is opened.
+
+Exit on opposite signal: When a bearCross occurs, the long position is closed.
+
+Exit on stop loss: If the price falls below entryStopLoss while a position is open, the position is closed.
+
+Visualization:
+
+Both EMAs are plotted (50-period in blue, 200-period in red).
+
+Green triangles are plotted below the bar on a bullCross, and red triangles above the bar on a bearCross.
+
+A horizontal orange line is drawn that shows the stop loss level whenever a position is open.
+
+Alerts:
+
+Alerts are created for:Long entry
+
+Exit on bearish crossover (Death Cross)
+
+Exit triggered by stop loss
+
+
+Favorable Conditions:
+
+Tesla (45-minute timeframe)
+June 29, 2010 – November 17, 2025
+Total net profit: $12,458.73 or +124.59%
+Maximum drawdown: $1,210.40 or 8.29%
+Total trades: 107
+Winning trades: 27.10% (29/107)
+Profit factor: 3.141
+
+Tesla (1-hour timeframe)
+June 29, 2010 – November 17, 2025
+Total net profit: $7,681.83 or +76.82%
+Maximum drawdown: $993.36 or 7.30%
+Total trades: 75
+Winning trades: 29.33% (22/75)
+Profit factor: 3.157
+
+Netflix (45-minute timeframe)
+May 23, 2002 – November 17, 2025
+Total net profit: $11,380.73 or +113.81%
+Maximum drawdown: $699.45 or 5.98%
+Total trades: 134
+Winning trades: 36.57% (49/134)
+Profit factor: 2.885
+
+Netflix (1-hour timeframe)
+May 23, 2002 – November 17, 2025
+Total net profit: $11,689.05 or +116.89%
+Maximum drawdown: $844.55 or 7.24%
+Total trades: 107
+Winning trades: 37.38% (40/107)
+Profit factor: 2.915
+
+Netflix (2-hour timeframe)
+May 23, 2002 – November 17, 2025
+Total net profit: $12,807.71 or +128.10%
+Maximum drawdown: $866.52 or 6.03%
+Total trades: 56
+Winning trades: 41.07% (23/56)
+Profit factor: 3.891
+
+Meta (45-minute timeframe)
+May 18, 2012 – November 17, 2025
+Total net profit: $2,370.02 or +23.70%
+Maximum drawdown: $365.27 or 3.50%
+Total trades: 83
+Winning trades: 31.33% (26/83)
+Profit factor: 2.419
+
+Apple (45-minute timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $8,232.55 or +80.59%
+Maximum drawdown: $581.11 or 3.16%
+Total trades: 140
+Winning trades: 34.29% (48/140)
+Profit factor: 3.009
+
+Apple (1-hour timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $9,685.89 or +94.93%
+Maximum drawdown: $374.69 or 2.26%
+Total trades: 118
+Winning trades: 35.59% (42/118)
+Profit factor: 3.463
+
+Apple (2-hour timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $8,001.28 or +77.99%
+Maximum drawdown: $755.84 or 7.56%
+Total trades: 67
+Winning trades: 41.79% (28/67)
+Profit factor: 3.825
+
+NVDA (15-minute timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $11,828.56 or +118.29%
+Maximum drawdown: $1,275.43 or 8.06%
+Total trades: 466
+Winning trades: 28.11% (131/466)
+Profit factor: 2.033
+
+NVDA (30-minute timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $12,203.21 or +122.03%
+Maximum drawdown: $1,661.86 or 10.35%
+Total trades: 245
+Winning trades: 28.98% (71/245)
+Profit factor: 2.291
+
+NVDA (45-minute timeframe)
+January 3, 2000 – November 17, 2025
+Total net profit: $16,793.48 or +167.93%
+Maximum drawdown: $1,458.81 or 8.40%
+Total trades: 172
+Winning trades: 33.14% (57/172)
+Profit factor: 2.927
+

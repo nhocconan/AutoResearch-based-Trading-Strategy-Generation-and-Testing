@@ -1,0 +1,517 @@
+//@version=6
+strategy("Fibonacci Trend Reversals", overlay=true, process_orders_on_close = true, commission_value = 0.055, initial_capital = 1000)
+
+// =========================================
+// Input Groups
+// =========================================
+string rsi_group = "RSI"
+string main_group = "Fib Sensitivity"
+string atr_sl_finder_group = "ATR SL Finder"
+string trade_execution_group = "Strategy Execution"
+
+// =========================================
+// Fibonacci Retracement Trend Reversal (AKA [IMBA]Algo by @IMBA_TRADER)
+// =========================================
+sensitivity_input = input.float(title = 'Sensitive', step = 1, defval = 18, group = main_group)
+var bool is_long_trend_started = false
+var bool is_short_trend_started = false
+var bool is_trend_change = false
+var bool is_long_trend = false
+var bool is_short_trend = false
+var bool can_long = false
+var bool can_short = false
+
+sensitivity = sensitivity_input
+sensitivity *= 10
+
+high_line = ta.highest(high, int(sensitivity))
+low_line = ta.lowest(low, int(sensitivity))
+channel_range = high_line - low_line
+fib_236 = high_line - channel_range * (0.236)
+fib_5 = high_line - channel_range * 0.5
+fib_786 = high_line - channel_range * (0.786)
+imba_trend_line = fib_5
+
+// =========================================
+// TSOT | Trend Strength Over Time © federalTacos5392b
+// =========================================
+
+// Calculate 75th percentile of price for each length
+percentile_13H = ta.percentile_nearest_rank(high, 13, 75) 
+percentile_21H = ta.percentile_nearest_rank(high, 21, 75) 
+percentile_34H = ta.percentile_nearest_rank(high, 34, 75) 
+percentile_55H = ta.percentile_nearest_rank(high, 55, 75) 
+percentile_89H = ta.percentile_nearest_rank(high, 89, 75)
+
+// Calculate 25th percentile of  price for each length
+percentile_13L =  ta.percentile_nearest_rank(low, 13, 25) 
+percentile_21L =  ta.percentile_nearest_rank(low, 21, 25) 
+percentile_34L =  ta.percentile_nearest_rank(low, 34, 25) 
+percentile_55L = ta.percentile_nearest_rank(low, 55, 25) 
+percentile_89L = ta.percentile_nearest_rank(low, 89, 25)
+
+// Calculate 75th and 25th for length 144 (longest length)
+highest_high = ta.percentile_nearest_rank(high, 144, 75) 
+lowest_low = ta.percentile_nearest_rank(low, 144, 25) 
+
+// Calculate trend strength conditions
+trendBull1 = percentile_13H > highest_high
+trendBull2 = percentile_21H > highest_high
+trendBull3 = percentile_34H > highest_high
+trendBull4 = percentile_55H > highest_high
+trendBull5 = percentile_89H > highest_high
+trendBull6 = percentile_13L > highest_high
+trendBull7 = percentile_21L > highest_high
+trendBull8 = percentile_34L > highest_high
+trendBull9 = percentile_55L > highest_high
+trendBull10 = percentile_89L > highest_high
+
+trendBear1 = percentile_13H < lowest_low
+trendBear2 = percentile_21H < lowest_low
+trendBear3 = percentile_34H < lowest_low
+trendBear4 = percentile_55H < lowest_low
+trendBear5 = percentile_89H < lowest_low
+trendBear6 = percentile_13L < lowest_low
+trendBear7 = percentile_21L < lowest_low
+trendBear8 = percentile_34L < lowest_low
+trendBear9 = percentile_55L < lowest_low
+trendBear10 = percentile_89L < lowest_low
+
+countBull =
+     (trendBull1 ? 1 : 0) +
+     (trendBull2 ? 1 : 0) +
+     (trendBull3 ? 1 : 0) +
+     (trendBull4 ? 1 : 0) +
+     (trendBull5 ? 1 : 0) +
+     (trendBull6 ? 1 : 0) +
+     (trendBull7 ? 1 : 0) +
+     (trendBull8 ? 1 : 0) +
+     (trendBull9 ? 1 : 0) +
+     (trendBull10 ? 1 : 0)
+
+countBear =
+     (trendBear1 ? 1 : 0) +
+     (trendBear2 ? 1 : 0) +
+     (trendBear3 ? 1 : 0) +
+     (trendBear4 ? 1 : 0) +
+     (trendBear5 ? 1 : 0) +
+     (trendBear6 ? 1 : 0) +
+     (trendBear7 ? 1 : 0) +
+     (trendBear8 ? 1 : 0) +
+     (trendBear9 ? 1 : 0) +
+     (trendBear10 ? 1 : 0)
+
+// Calculate weak bull count
+weakBullCount = 
+     (percentile_13L < highest_high and percentile_13L > lowest_low ? 1 : 0) +
+     (percentile_21L < highest_high and percentile_21L > lowest_low ? 1 : 0) +
+     (percentile_34L < highest_high and percentile_34L > lowest_low ? 1 : 0) +
+     (percentile_55L < highest_high and percentile_55L > lowest_low ? 1 : 0) +
+     (percentile_89L < highest_high and percentile_89L > lowest_low ? 1 : 0)
+
+// Calculate weak bear count
+weakBearCount = 
+     (percentile_13H > lowest_low and percentile_13H < highest_high ? 1 : 0) +
+     (percentile_21H > lowest_low and percentile_21H < highest_high ? 1 : 0) +
+     (percentile_34H > lowest_low and percentile_34H < highest_high ? 1 : 0) +
+     (percentile_55H > lowest_low and percentile_55H < highest_high ? 1 : 0) +
+     (percentile_89H > lowest_low and percentile_89H < highest_high ? 1 : 0)
+
+// Calculate bull strength and bear strength
+bullStrength = 10 * (countBull + 0.5*weakBullCount - 0.5*weakBearCount - countBear)
+bearStrength = 10 * (countBear + 0.5*weakBearCount - 0.5*weakBullCount - countBull)
+
+// Calculate the current trend
+currentTrendValue = bullStrength - bearStrength
+
+tsot_bullish = currentTrendValue > 0
+tsot_bearish = currentTrendValue < 0
+
+// CAN LONG/SHORT
+can_long := close >= imba_trend_line and open < imba_trend_line and not is_long_trend and tsot_bullish
+can_short := close <= imba_trend_line and open > imba_trend_line and not is_short_trend and tsot_bearish
+
+if can_long
+    is_long_trend := true
+    is_short_trend := false
+    is_long_trend_started := is_long_trend_started ? false : true
+else if can_short
+    is_short_trend := true
+    is_long_trend := false
+    is_short_trend_started := is_short_trend_started ? false : true
+else
+    is_trend_change := false
+    can_long := false
+    can_short := false
+    is_short_trend_started := false
+    is_long_trend_started := false
+
+is_trend_change := is_short_trend_started or is_long_trend_started
+plotshape(is_long_trend and is_long_trend_started ? imba_trend_line : na, title="Long", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small)
+plotshape(is_short_trend and is_short_trend_started ? imba_trend_line : na, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plot(imba_trend_line, color = is_long_trend[1] ? color.blue : color.red, linewidth = 1)
+
+// =========================================
+// ATR SL Finder © Veryfid
+// =========================================
+atrlength = input.int(title='Length', defval=14, minval=1, group = atr_sl_finder_group)
+smoothing = input.string(title='Smoothing', defval='RMA', options=['RMA', 'SMA', 'EMA', 'WMA'], group = atr_sl_finder_group)
+m = input(3.5, 'Multiplier', group = atr_sl_finder_group)
+src1 = high
+src2 = low
+ma_function(source, length) =>
+    if smoothing == 'RMA'
+        ta.rma(source, length)
+    else
+        if smoothing == 'SMA'
+            ta.sma(source, length)
+        else
+            if smoothing == 'EMA'
+                ta.ema(source, length)
+            else
+                ta.wma(source, length)
+
+x = ma_function(ta.tr(true), atrlength) * m + src1 // SHORT SL
+x2 = src2 - ma_function(ta.tr(true), atrlength) * m // LONG SL
+
+p1 = plot(x, title="ATR Short Stop Loss", color=#ffffff18)
+p2 = plot(x2, title="ATR Long Stop Loss", color=#ffffff18)
+
+// =========================================
+// Strategy Execution © nioboi (yours truly)
+// =========================================
+
+// This allows flexibility so we can allow and set what direction we want our strategy to only execute upon.
+tradeDirection = input.string("Both", "Trade Direction", ["Long Only", "Short Only", "Both"], group = trade_execution_group, tooltip = "Select if you want this strategy to run only Long or Only Short positions, or Both")
+exitStrategy = input.string("ATR", "Stoploss Strategy", ["ATR", "Fixed Percent", "Trend Switch"], group = trade_execution_group, tooltip = "Choose what type of SL setting you want, ATR for dynamic or Fixed Percent for uniform SLs or Trend Switch for following and existing on Fibonacci Trend Reversal")
+SLPercent = input.float(1, "Stoploss Percent (%)", group = trade_execution_group, tooltip = "This will only be used if you selected 'Fixed Percent' as your Stoploss Strategy, if not, disregard")
+risk_reward_ratio = input.float(2, "Risk Reward Ratio", group = trade_execution_group)
+partialTp = input.bool(true, "Use Partial Take Profit", tooltip = "Enable this if you want to exit 50% of your position when half point of your Risk Reward is reached.", group = trade_execution_group)
+// allowReversePosition = input.bool(false, "Allow Reversing of Position", tooltip = "Enable this if you want to reverse position when new opposite signal occurs", group = trade_execution_group)
+allowReversePosition = true // strictly setting revsering logic for now due to bug automatically making our strategy reverse, regardless of setting.
+
+// Long or Short Conditions
+enterLong = can_long and (tradeDirection == "Long Only" or tradeDirection == "Both")
+enterShort = can_short and (tradeDirection == "Short Only" or tradeDirection == "Both")
+
+// Long Entry Variables
+var bool plotMarkers_long = false
+var bool firstTPHit_long = false
+var float sl_long = na
+var float breakEven_long = na
+var float tp1_long = na
+var float tp2_long = na
+var float entryPrice_long = na
+var bool inLongPosition = false
+
+// Short Entry Variables
+var bool plotMarkers_short = false
+var bool firstTPHit_short = false
+var float sl_short = na
+var float breakEven_short = na
+var float tp1_short = na
+var float tp2_short = na
+var float entryPrice_short = na
+var bool inShortPosition = false
+
+
+// // Reversal Logic
+if exitStrategy != "Trend Switch"
+    if inLongPosition and can_short and allowReversePosition                                // in a long position and signal to enter short and havent yet hit first tp
+        strategy.close("Long", "Reversing Long to Short")                                   // close Long in preparation to enter short in the next few lines
+        inLongPosition := false
+    else if inShortPosition and can_long and allowReversePosition                           // in a short position and signal to enter long and havent yet hit first tp
+        strategy.close("Short", "Reversing Short to Long")                                  // close Short in preparation to enter long in the next few lines 
+        inShortPosition := false
+
+if exitStrategy == "ATR"
+    // Long Entries -----------------------------------------------------------------------------------------------------------------------------------------
+    if enterLong
+        entryPrice_long := close                                                            // set entry price for exit calculation
+        sl_long := x2                                                                       // set SL from the ATR
+        risk = entryPrice_long - sl_long                                                    // Calculate the Risk
+        tp1_long := entryPrice_long + ((risk_reward_ratio * risk) / 2)                      // set the first TP by dividing the entire TP to 2 using risk_reward_ratio
+        tp2_long := entryPrice_long + (risk_reward_ratio * risk)                            // set the 2nd TP
+        breakEven_long := entryPrice_long + (entryPrice_long * 0.0005)                       // set the break even to be few pips or 0.20% above the entry to compensate for market fees and still result positive
+        strategy.entry("Long", strategy.long)                                               // create the entry
+        if not partialTp                                                                    // partial TP Management enabled?
+            strategy.exit("Exit Long", "Long", limit = tp2_long, stop = sl_long)            // if not enabled then we create exit triggers as usual in one order
+        else
+            strategy.exit("TP 1 Long", "Long", limit = tp1_long, qty_percent = 50)          // else, we set 1 exit order to be the first TP and closing half of our position
+            strategy.exit("TP 2 Long", "Long", limit = tp2_long, qty_percent = 50)          // we also set the 2nd TP to close the other remaining half
+        firstTPHit_long := false                                                            // ensure global variable flag for first TP Hit is set to false
+        inLongPosition := true                                                              // engage flag to notify below code we are in long position
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    // Short Entries ---------------------------------------------------------------------------------------------------------------------------------------
+    if enterShort 
+        entryPrice_short := close                                                           // set entry price for exit calculation
+        sl_short := x                                                                       // set SL from the ATR
+        risk = sl_short - entryPrice_short                                                  // Calculate the Risk
+        tp1_short := entryPrice_short - ((risk_reward_ratio * risk)/2)                      // set the first TP by dividing the entire TP to 2 using risk_reward_ratio
+        tp2_short := entryPrice_short - (risk_reward_ratio * risk)                          // set the 2nd TP
+        breakEven_short := entryPrice_short - (entryPrice_short * 0.0005)                    // set the break even to be few pips or 0.20% above the entry to compensate for market fees and still result positive
+        strategy.entry("Short", strategy.short)                                             // create the entry
+        if not partialTp                                                                    // partial TP Management enabled?
+            strategy.exit("Exit Short", "Short", limit = tp2_short, stop = sl_short)        // if not enabled then we create exit triggers as usual in one order
+        else
+            strategy.exit("TP 1 Short", "Short", limit = tp1_short, qty_percent = 50)       // else, we set 1 exit order to be the first TP and closing half of our position
+            strategy.exit("TP 2 Short", "Short", limit = tp2_short, qty_percent = 50)       // we also set the 2nd TP to close the other remaining half
+        firstTPHit_short := false                                                           // ensure global variable flag for first TP Hit is set to false
+        inShortPosition := true                                                             // engage flag to notify below code we are in long position
+    // ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+if exitStrategy == "Trend Switch"
+    // Long Entries -----------------------------------------------------------------------------------------------------------------------------------------
+    if enterLong and not inLongPosition
+        strategy.close("Short", "Switching Trend, Closing any Short Position")                  // if in short position, close it so we can enter a new trade for the new trend
+        strategy.entry("Long", strategy.long)                                               // open long position
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    // Short Entries ---------------------------------------------------------------------------------------------------------------------------------------
+    if enterShort and not inShortPosition
+        strategy.close("Long", "Switching Trend, Closing any Long Position")                   // if in long position, close it so we can enter a new trade for the new trend
+        strategy.entry("Short", strategy.short)                                             // open short position
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+if exitStrategy == "Fixed Percent"
+    // Long Entries -----------------------------------------------------------------------------------------------------------------------------------------
+    if enterLong and not inLongPosition
+        entryPrice_long := close                                                            // set entry price for exit calculation
+        sl_long := close * (1 - SLPercent / 100)                                            // set SL from the ATR
+        risk = entryPrice_long - sl_long                                                    // Calculate the Risk
+        tp1_long := entryPrice_long + ((risk_reward_ratio * risk) / 2)                      // set the first TP by dividing the entire TP to 2 using risk_reward_ratio
+        tp2_long := entryPrice_long + (risk_reward_ratio * risk)                            // set the 2nd TP
+        breakEven_long := entryPrice_long + (entryPrice_long * 0.0005)                       // set the break even to be few pips or 0.20% above the entry to compensate for market fees and still result positive
+        strategy.entry("Long", strategy.long)                                               // create the entry
+        if not partialTp                                                                    // partial TP Management enabled?
+            strategy.exit("Exit Long", "Long", limit = tp2_long, stop = sl_long)            // if not enabled then we create exit triggers as usual in one order
+        else
+            strategy.exit("TP 1 Long", "Long", limit = tp1_long, qty_percent = 50)          // else, we set 1 exit order to be the first TP and closing half of our position
+            strategy.exit("TP 2 Long", "Long", limit = tp2_long, qty_percent = 50)          // we also set the 2nd TP to close the other remaining half
+        firstTPHit_long := false                                                            // ensure global variable flag for first TP Hit is set to false
+        inLongPosition := true                                                              // engage flag to notify below code we are in long position
+    // -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    // Short Entries ---------------------------------------------------------------------------------------------------------------------------------------
+    if enterShort and not inShortPosition 
+        entryPrice_short := close                                                           // set entry price for exit calculation
+        sl_short := close * (1 + SLPercent / 100)                                           // set SL from the ATR
+        risk = sl_short - entryPrice_short                                                  // Calculate the Risk
+        tp1_short := entryPrice_short - ((risk_reward_ratio * risk)/2)                      // set the first TP by dividing the entire TP to 2 using risk_reward_ratio
+        tp2_short := entryPrice_short - (risk_reward_ratio * risk)                          // set the 2nd TP
+        breakEven_short := entryPrice_short - (entryPrice_short * 0.0005)                    // set the break even to be few pips or 0.20% above the entry to compensate for market fees and still result positive
+        strategy.entry("Short", strategy.short)                                             // create the entry
+        if not partialTp                                                                    // partial TP Management enabled?
+            strategy.exit("Exit Short", "Short", limit = tp2_short, stop = sl_short)        // if not enabled then we create exit triggers as usual in one order
+        else
+            strategy.exit("TP 1 Short", "Short", limit = tp1_short, qty_percent = 50)       // else, we set 1 exit order to be the first TP and closing half of our position
+            strategy.exit("TP 2 Short", "Short", limit = tp2_short, qty_percent = 50)       // we also set the 2nd TP to close the other remaining half
+        firstTPHit_short := false                                                           // ensure global variable flag for first TP Hit is set to false
+        inShortPosition := true                                                             // engage flag to notify below code we are in long position
+    // ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+// Dynamic TP and exit strategy for Longs -------------------------------------------------------------------------------------------------------------
+if inLongPosition and partialTp                                                         // in long position and partial TP for exit strategy is enabled
+    if high >= tp1_long and not firstTPHit_long                                         // price hit the first TP
+        sl_long := breakEven_long                                                       // adjust stoploss to breakeven
+    else if low <= sl_long and not firstTPHit_long                                      // not yet hit first TP but hit our SL
+        strategy.close("Long", "SL long")                                               // close the entire long position
+        inLongPosition := false                                                         // not in long position anymore
+    else if low <= breakEven_long and firstTPHit_long                                   // already hit first TP and retraced back to breakEven
+        strategy.close("Long", "BE Long")                                               // close the remaining short position
+        inLongPosition := false                                                         // not in long position anymore
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+// Dynamic TP and exit strategy for Shorts -------------------------------------------------------------------------------------------------------------
+if inShortPosition and partialTp                                                        // in short position and partial TP for exit strategy is enabled
+    if low <= tp1_short and not firstTPHit_short                                        // price hit the first TP
+        firstTPHit_short := true                                                        // set the first TP checker flag to true
+        sl_short := breakEven_short                                                     // adjust stoploss to breakeven
+    else if high >= sl_short and not firstTPHit_short                                   // not yet hit first TP but hit our SL
+        strategy.close("Short", "SL Short")                                             // close the entire short position
+        inShortPosition := false                                                        // not in short position anymore
+    else if high >= breakEven_short and firstTPHit_short                                // already hit first TP and retraced back to breakEven
+        strategy.close("Short", "BE Short")                                             // close the remaining short position
+        inShortPosition := false                                                        // not in short position anymore
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+// =========================================
+// Entry Visuals © nioboi (yours truly)
+// =========================================
+
+// Entry Visual Flags
+if strategy.position_size == 0
+    plotMarkers_long := false
+    plotMarkers_short := false
+if strategy.position_size > 0
+    plotMarkers_long := true
+    plotMarkers_short := false
+else if strategy.position_size < 0
+    plotMarkers_long := false
+    plotMarkers_short := true
+
+// SL and TP Lines
+longEntryMarker = plot(plotMarkers_long ? entryPrice_long : na, "Entry Marker L", color = na)
+longSLMarker = plot(plotMarkers_long ? sl_long : na, "SL Marker L", color = #ff000050, linewidth = 1, style = plot.style_linebr)
+longTP1Marker = plot(plotMarkers_long ? tp1_long : na, "TP1 Marker L", color = #00ff0850, linewidth = 1, style = plot.style_linebr)
+longTP2Marker = plot(plotMarkers_long ? tp2_long : na, "TP2 Marker L", color = #1100ff50, linewidth = 1, style = plot.style_linebr)
+
+shortEntryMarker = plot(plotMarkers_short ? entryPrice_short : na, "Entry Marker S", color = na)
+shortSLMarker = plot(plotMarkers_short ? sl_short : na, "SL Marker S", color = #ff000050, linewidth = 1, style = plot.style_linebr)
+shortTP1Marker = plot(plotMarkers_short ? tp1_short : na, "TP1 Marker S", color = #00ff0850, linewidth = 1, style = plot.style_linebr)
+shortTP2Marker = plot(plotMarkers_short ? tp2_short : na, "TP2 Marker S", color = #1100ff50, linewidth = 1, style = plot.style_linebr)
+
+// SL and TP Fills
+fill(plot1 = longEntryMarker, plot2 = longSLMarker, title = "Long SL BG Fill", color = #b2283320)
+fill(plot1 = longEntryMarker, plot2 = longTP2Marker, title = "Long TP BG Fill", color = #08998120)
+fill(plot1 = shortEntryMarker, plot2 = shortSLMarker, title = "Short SL BG Fill", color = #b2283320)
+fill(plot1 = shortEntryMarker, plot2 = shortTP2Marker, title = "Short TP BG Fill", color = #08998120)
+
+View in Pine Editor・374 lines
+Use on chart
+1 K
+15
+26 327
+Apr 22, 2024
+Introduction
+This publication introduces the "Fibonacci Retracement Trend Reversal Strategy," tailored for traders aiming to leverage shifts in market momentum through advanced trend analysis and risk management techniques. This strategy is designed to pinpoint potential reversal points, optimizing trading opportunities.
+
+Overview
+The strategy leverages Fibonacci retracement levels derived from IMBA_TRADER's [Imba]lance Algo to identify potential trend reversals. It's further enhanced by a method called "Trend Strength Over Time" (TSOT) (by federalTacos5392b), which utilizes percentile rankings of price action to measure trend strength. This also has implemented Dynamic SL finder by utilizing veryfid's ATR Stoploss Finder which works pretty well
+
+Indicators:
+
+Fibonacci Retracement Levels: Identifies critical reversal zones at 23.6%, 50%, and 78.6% levels.
+
+TSOT (Trend Strength Over Time): Employs percentile rankings across various timeframes to gauge the strength and direction of trends, aiding in the confirmation of Fibonacci-based signals.
+
+ATR (Average True Range): Implements dynamic stop-loss settings for both long and short positions, enhancing trade security.
+
+
+
+Strategy Settings:
+- Sensitivity: Set default at 18, adjustable for more frequent or sparse signals based on market volatility.
+- ATR Stop Loss Finder: Multiplier set at 3.5, applying the ATR value to determine stop losses dynamically.
+- ATR Length: Default set to 14 with RMA smoothing.
+- TSOT Settings: Hard-coded to identify percentile ranks, with no user-adjustable inputs due to its intrinsic calculation method.
+
+Trade Direction Options: Configurable to support long, short, or both directions, adaptable to the trader's market assessment.
+
+Entry Conditions:
+- Long Entry: Triggered when the price surpasses the mid Fibonacci level (50%) with a bullish TSOT signal.
+- Short Entry: Activated when the price falls below the mid Fibonacci level with a bearish TSOT indication.
+
+Exit Conditions:
+- Employs ATR-based dynamic stop losses, calibrated according to current market volatility, ensuring effective risk management.
+
+Strategy Execution:
+- Risk Management: Features adjustable risk-reward settings and enables partial take profits by default to systematically secure gains.
+- Position Reversal: Includes an option to reverse positions based on new TSOT signals, improving the strategy's responsiveness to evolving market conditions.
+
+The strategy is optimized for the 
+WIFUSDT.P
+ market on a scalping (5-minute) timeframe, using the default settings outlined above.
+
+I spent a lot of time creating the dynamic exit strategies for partially taking profits and reversing positions so please make use of those and feel free to adjust the settings, tool tips are also provided.
+
+For Developers: this is published as open-sourced code so that developers can learn something especially on dynamic exits and partial take profits!
+
+Good Luck!
+
+Disclaimer
+This strategy is shared for educational purposes and must be thoroughly tested under diverse market conditions. Past performance does not guarantee future results. Traders are advised to integrate this strategy with other analytical tools and tailor it to specific market scenarios. I was only sharing what I've crafted while strategizing over a Solana Meme Coin.
+
+Apr 25, 2024
+Release Notes
+Change Notes:
+
+Added credits to the open source code
+
+
+
+Added pretty visual fills for the dynamic strategy on SLs and TPs so it can easily be tracked
+
+
+
+Note you can allways turn the visuals on or off from the style tab/section of the indicator
+
+For a clean chart, I recommend turning the ATR Long stop Loss and ATR Short Stop Loss to OFF since it's already plotted by the entry visuals, but for refrence you can always turn it back on.
+
+Also, feel free to customize the colors, lines, background, to your preference.
+Apr 27, 2024
+Release Notes
+Updates:
+
+Enhanced default ATR SL colors
+
+
+
+Fixed BG and Plots of Entries
+
+Apr 29, 2024
+Release Notes
+Update Notes:
+
+It now does execute TP 1 and TP 2 for partial take profits
+
+
+
+Unfortunately, Pinescript is a still bit buggy and limited when handling stoploss and adjusting stoploss for it to b executed at market order and we will still keep the closing of SL and Break Evens with our current method, (at least our TPs are now securely exiting exacly)
+Sep 25, 2024
+Release Notes
+Some enhancements.
+
+Steps to link this to bybit via webhook to automate execution of orders.
+
+Prerequisites:
+1. Bybit Unified Trading Account funds
+2. Paid Tradingview plan (for webhook enabling)
+3. Pair is both available in Derivatives/Futures on bybit and Tradingview
+
+Bybit Setup:
+1. Go to Derivatives > USDT Perpetual > Select your pair (eg. SOL/USDT) > Set your preferred Leverage
+2. Tools > Strategy Trading > Webhook Signal Trading > Create Now
+3. Click Confirm > Verify your pair > Create a name (anything would do) > Next > Create
+4. Bybit will show you your message template and webhook url, keep this for later use.
+Stay on this page for now, since we will proceed setup in Tradingview and copy over the values given to us by ByBit
+
+Tradingview Setup:
+1. Add this indicator strategy > adjust it's values to your preference
+2. Set the strategy settings > Properties > Ordersize > Input the desired number of contracts you want the bot to execute per trade (taking into account the leverage)
+
+Connecting the triggers with bybit:
+1. Create an alert on tradingview > Set Condition to be this strategy > set a name and expiration
+2. Copy and paste the message from ByBit to this alert (replace everything and dont change anything)
+3. Select Notifications Tab > Enable Webhook URL > Paste Webhook URL given by ByBit
+4. click Create
+5. Go to Bybit > Click Run Webhook
+
+Monitor and adjust! Some failing order may occur, you can monitor this under tools tab in Bybit.
+
+
+
+Dec 12, 2024
+Release Notes
+Change logs:
+
+
+Updated to v6 pinescript
+
+fixed reversal position due to pinescript limitation
+
+added option to entry and exit on following the fib trend
+
+Dec 12, 2024
+Release Notes
+Change logs:
+
+
+Updated to v6 pinescript
+
+fixed reversal position due to pinescript limitation
+
+added option to entry and exit on following the fib trend
+

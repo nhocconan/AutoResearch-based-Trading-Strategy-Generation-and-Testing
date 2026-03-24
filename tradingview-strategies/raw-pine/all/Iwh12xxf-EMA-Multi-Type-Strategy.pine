@@ -1,0 +1,106 @@
+//@version=5
+strategy("EMA Multi-Type Strategy", overlay=true, pyramiding=0)
+
+//━━━━━━━━━━ INPUTS ━━━━━━━━━━
+emaLen = input.int(21, "EMA Length")
+
+strategyType = input.string("TYPE 1", "Strategy Type", options=["TYPE 1", "TYPE 2", "TYPE 3", "ALL COMBINED"])
+
+useATR = input.bool(false, "Enable ATR Trailing Stop")
+atrLen = input.int(14, "ATR Length")
+atrMult = input.float(1.5, "ATR Multiplier")
+
+useFixedRR = input.bool(true, "Enable Fixed SL/TP")
+rrMult = input.float(2.0, "Risk Reward Multiplier")
+
+blockOpposite = input.bool(true, "Disable Opposite Trades Until Exit")
+
+//━━━━━━━━━━ INDICATORS ━━━━━━━━━━
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrLen)
+
+plot(ema, color=color.orange, linewidth=2)
+
+//━━━━━━━━━━ CANDLE REFERENCES ━━━━━━━━━━
+h1 = high[1] , l1 = low[1] , c1 = close[1]
+h2 = high[2] , l2 = low[2]
+h3 = high[3] , l3 = low[3]
+
+//━━━━━━━━━━ TYPE 1 CONDITIONS ━━━━━━━━━━
+longT1 = h3 < ema[3] and h2 < ema[2] and l2 > l3 and h1 < ema[1] and close[1] >= h2 and close > ema
+shortT1 = l3 > ema[3] and l2 > ema[2] and h2 < h3 and l1 > ema[1] and close[1] <= l2 and close < ema
+
+slLongT1 = l3
+slShortT1 = h3
+
+//━━━━━━━━━━ TYPE 2 CONDITIONS ━━━━━━━━━━
+longT2 = h2 < ema[2] and h1 < ema[1] and l1 > l2 and close > ema
+shortT2 = l2 > ema[2] and l1 > ema[1] and h1 < h2 and close < ema
+
+slLongT2 = l2
+slShortT2 = h2
+
+//━━━━━━━━━━ TYPE 3 CONDITIONS ━━━━━━━━━━
+longT3 = h1 < ema[1] and close > ema
+shortT3 = l1 > ema[1] and close < ema
+
+slLongT3 = l1
+slShortT3 = h1
+
+//━━━━━━━━━━ COMBINED LOGIC (FIXED) ━━━━━━━━━━
+allowLong = strategyType == "TYPE 1" ? longT1 : strategyType == "TYPE 2" ? longT2 : strategyType == "TYPE 3" ? longT3 : (longT1 or longT2 or longT3)
+allowShort = strategyType == "TYPE 1" ? shortT1 : strategyType == "TYPE 2" ? shortT2 : strategyType == "TYPE 3" ? shortT3 : (shortT1 or shortT2 or shortT3)
+
+slLong = strategyType == "TYPE 1" ? slLongT1 : strategyType == "TYPE 2" ? slLongT2 : strategyType == "TYPE 3" ? slLongT3 : na
+slShort = strategyType == "TYPE 1" ? slShortT1 : strategyType == "TYPE 2" ? slShortT2 : strategyType == "TYPE 3" ? slShortT3 : na
+
+//━━━━━━━━━━ TRADE FILTER ━━━━━━━━━━
+canLong = blockOpposite ? strategy.position_size <= 0 : true
+canShort = blockOpposite ? strategy.position_size >= 0 : true
+
+//━━━━━━━━━━ ENTRIES ━━━━━━━━━━
+if allowLong and canLong
+    strategy.entry("LONG", strategy.long)
+
+if allowShort and canShort
+    strategy.entry("SHORT", strategy.short)
+
+//━━━━━━━━━━ EXITS ━━━━━━━━━━
+if strategy.position_size > 0
+    stopL = useATR ? close - atr * atrMult : slLong
+    limitL = useFixedRR and not useATR ? close + (close - slLong) * rrMult : na
+    strategy.exit("LONG EXIT", "LONG", stop=stopL, limit=limitL)
+
+if strategy.position_size < 0
+    stopS = useATR ? close + atr * atrMult : slShort
+    limitS = useFixedRR and not useATR ? close - (slShort - close) * rrMult : na
+    strategy.exit("SHORT EXIT", "SHORT", stop=stopS, limit=limitS)
+
+//━━━━━━━━━━ DASHBOARD ━━━━━━━━━━
+var table dash = table.new(position.top_right, 1, 1)
+if barstate.islast
+    table.cell(dash, 0, 0, "ACTIVE TYPE: " + strategyType, text_color=color.white, bgcolor=color.black)
+
+View in Pine Editor・82 lines
+Use on chart
+6
+473
+This is a price-action + EMA trend strategy that:
+
+Uses EMA as trend filter
+
+Looks for pullbacks and structure shifts near the EMA
+
+Trades 3 different entry patterns (TYPE 1 / 2 / 3)
+
+Allows:
+
+Fixed SL–TP (RR based)
+
+OR ATR trailing stop
+
+Optionally blocks opposite trades until the current trade exits
+
+Think of it as:
+
+“Trade continuation after pullback in EMA trend, with multiple confirmation strengths.”

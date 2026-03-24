@@ -1,0 +1,72 @@
+//@version=3
+strategy("Up Down", "Up Down", precision = 6, pyramiding = 1, default_qty_type = strategy.percent_of_equity, default_qty_value = 99, commission_type = strategy.commission.percent, commission_value = 0.0, initial_capital = 1000, overlay = true)
+
+buy = close > open and open > close[1]
+sell = close < open and open < close[1]
+
+longma = input(77,"Long MA Input", integer)
+shortma = input(7,"Short MA Input", integer)
+long = sma(close,longma)
+short = sma(close, shortma)
+mabuy = crossover(short,long) or buy and short > long
+masell = crossunder(short,long) or sell //and short > long
+
+num_bars_buy = barssince(mabuy)
+num_bars_sell = barssince(masell)
+//plot(num_bars_buy, color = teal)
+//plot(num_bars_sell, color = orange)
+
+xbuy = crossover(num_bars_sell, num_bars_buy)
+xsell = crossunder(num_bars_sell, num_bars_buy)
+plotshape(xbuy,"Buy Up Arrow", shape.triangleup, location.belowbar, white, size = size.tiny)
+plotshape(xsell,"Sell Down Arrow", shape.triangledown, location.abovebar, white, size = size.tiny)
+plot(long,"Long MA", fuchsia, 2)
+
+// Component Code Start
+// Example usage:
+// if testPeriod()
+//   strategy.entry("LE", strategy.long)
+testStartYear = input(2017, "Backtest Start Year")
+testStartMonth = input(01, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(7, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+// Component Code Stop
+
+//strategy options
+use_ma = input(true,"use ma as stop?")
+
+if testPeriod() and use_ma
+    strategy.entry("buy", true, 1000, when = xbuy, limit = close)
+    strategy.close("buy", when = xsell)
+
+if testPeriod() and use_ma == false
+    strategy.entry("buy", true, 1000, when = buy, limit = close)
+    strategy.close("buy", when = sell)
+
+View in Pine Editor・57 lines
+Use on chart
+2
+4
+9
+3
+12 222
+Nov 26, 2018
+a simple up down candle strategy with a built in MA control
+
+alerts script:
+Dec 13, 2018
+Release Notes
+added an input option to backtest on the alerts which ignore the ma

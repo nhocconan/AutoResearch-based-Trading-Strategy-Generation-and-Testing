@@ -1,0 +1,109 @@
+//@version=5
+strategy("Enhanced Bollinger Bands Strategy with SL/TP", overlay=true,
+  slippage=2)
+
+// 入力パラメータの改善
+length = input.int(20, "SMA Length", minval=1)
+mult = input.float(2.0, "Standard Deviation Multiplier", minval=0.001, maxval=50)
+enableLong = input.bool(true, "Enable Long Positions")
+enableShort = input.bool(true, "Enable Short Positions")
+pipValue = input.float(0.0001, "Pip Value", step=0.00001)
+slPips = input.float(10, "Stop Loss (Pips)", minval=0)
+tpPips = input.float(20, "Take Profit (Pips)", minval=0)
+showBands = input.bool(true, "Show Bollinger Bands")
+showSignals = input.bool(true, "Show Entry Signals")
+
+// ボリンジャーバンド計算
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// 可視化
+plot(showBands ? basis : na, "Basis", color=color.blue)
+u = plot(showBands ? upper : na, "Upper", color=color.red)
+l = plot(showBands ? lower : na, "Lower", color=color.green)
+fill(u, l, color=color.new(color.purple, 90))
+
+// エントリー条件の改善
+longCondition = ta.crossover(close, lower) and close > lower and enableLong
+shortCondition = ta.crossunder(close, upper) and close < upper and enableShort
+
+// ポジション管理
+calcSlPrice(price, isLong) => isLong ? price - slPips * pipValue : price + slPips * pipValue
+calcTpPrice(price, isLong) => isLong ? price + tpPips * pipValue : price - tpPips * pipValue
+
+// エントリー＆エグジットロジック
+if longCondition
+    strategy.entry("Long", strategy.long, limit=lower)
+    strategy.exit("Long Exit", "Long",
+         stop=calcSlPrice(lower, true),
+         limit=calcTpPrice(lower, true))
+
+if shortCondition
+    strategy.entry("Short", strategy.short, limit=upper)
+    strategy.exit("Short Exit", "Short",
+         stop=calcSlPrice(upper, false),
+         limit=calcTpPrice(upper, false))
+
+// シグナル可視化
+plotshape(showSignals and longCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(showSignals and shortCondition, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+View in Pine Editor・51 lines
+Use on chart
+3
+8
+1 749
+// Title: Enhanced Bollinger Bands Strategy with SL/TP
+
+// Description:
+
+// This strategy is based on the classic Bollinger Bands indicator and incorporates Stop Loss (SL) and Take Profit (TP) levels for automated trading. It identifies potential long and short entry points based on price crossing the lower and upper Bollinger Bands, respectively. The strategy allows users to customize several parameters to suit different market conditions and risk tolerances.
+
+// Key Features:
+
+// * **Bollinger Bands:** Uses Simple Moving Average (SMA) as the basis and calculates upper and lower bands based on a user-defined standard deviation multiplier.
+// * **Customizable Parameters:** Offers extensive customization, including SMA length, standard deviation multiplier, Stop Loss (SL) in pips, and Take Profit (TP) in pips.
+// * **Long/Short Position Control:** Allows users to independently enable or disable long and short positions.
+// * **Stop Loss and Take Profit:** Implements Stop Loss and Take Profit levels based on pip values to manage risk and secure profits. Entry prices are set to the band levels on signals.
+// * **Visualizations:** Provides options to display Bollinger Bands and entry signals on the chart for easy analysis.
+
+// Strategy Logic:
+
+// 1. **Bollinger Bands Calculation:** The strategy calculates the Bollinger Bands using the specified SMA length and standard deviation multiplier.
+// 2. **Entry Conditions:**
+// * **Long Entry:** Enters a long position when the closing price crosses above the lower Bollinger Band and the `Enable Long Positions` setting is enabled.
+// * **Short Entry:** Enters a short position when the closing price crosses below the upper Bollinger Band and the `Enable Short Positions` setting is enabled.
+// 3. **Exit Conditions:**
+// * **Stop Loss:** Exits the position if the price reaches the Stop Loss level, calculated based on the input `Stop Loss (Pips)`.
+// * **Take Profit:** Exits the position if the price reaches the Take Profit level, calculated based on the input `Take Profit (Pips)`.
+
+// Input Parameters:
+
+// * **SMA Length (length):** The length of the Simple Moving Average used to calculate the Bollinger Bands (default: 20).
+// * **Standard Deviation Multiplier (mult):** The multiplier applied to the standard deviation to determine the width of the Bollinger Bands (default: 2.0).
+// * **Enable Long Positions (enableLong):** A boolean value to enable or disable long positions (default: true).
+// * **Enable Short Positions (enableShort):** A boolean value to enable or disable short positions (default: true).
+// * **Pip Value (pipValue):** The value of a pip for the traded instrument. This is crucial for accurate Stop Loss and Take Profit calculations (default: 0.0001 for most currency pairs). **Important: Adjust this value to match the specific instrument you are trading.**
+// * **Stop Loss (Pips) (slPips):** The Stop Loss level in pips (default: 10).
+// * **Take Profit (Pips) (tpPips):** The Take Profit level in pips (default: 20).
+// * **Show Bollinger Bands (showBands):** A boolean value to show or hide the Bollinger Bands on the chart (default: true).
+// * **Show Entry Signals (showSignals):** A boolean value to show or hide entry signals on the chart (default: true).
+
+// How to Use:
+
+// 1. Add the strategy to your TradingView chart.
+// 2. Adjust the input parameters to optimize the strategy for your chosen instrument and timeframe. Pay close attention to the `Pip Value`.
+// 3. Backtest the strategy over different periods to evaluate its performance.
+// 4. Use the `Enable Long Positions` and `Enable Short Positions` settings to customize the strategy for specific market conditions (e.g., only long positions in an uptrend).
+
+// Important Notes and Disclaimers:
+
+// * **Backtesting Results:** Past performance is not indicative of future results. Backtesting results can be affected by various factors, including market volatility, slippage, and transaction costs.
+// * **Risk Management:** This strategy is provided for informational and educational purposes only and should not be considered financial advice. Always use proper risk management techniques when trading. Adjust Stop Loss and Take Profit levels according to your risk tolerance.
+// * **Slippage:** The strategy takes into account slippage by specifying a slippage parameter on the `strategy` declaration. However, real-world slippage may vary.
+// * **Market Conditions:** The performance of this strategy can vary significantly depending on market conditions. It may perform well in trending markets but poorly in ranging or choppy markets.
+// * **Pip Value Accuracy:** **Ensure the `Pip Value` is correctly set for the specific instrument you are trading. Incorrect pip value will result in incorrect stop loss and take profit placement.** This is critical.
+// * **Broker Compatibility:** The strategy's performance may vary depending on your broker's execution policies and fees.
+// * **Disclaimer:** I am not a financial advisor, and this script is not financial advice. Use this strategy at your own risk. I am not responsible for any losses incurred while using this strategy.

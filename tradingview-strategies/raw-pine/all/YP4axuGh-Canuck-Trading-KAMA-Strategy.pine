@@ -1,0 +1,658 @@
+//@version=6
+strategy("Canuck Trading KAMA Strategy", shorttitle="CT_KAMA", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0.1, slippage=1, process_orders_on_close=true, calc_on_every_tick=true, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CT KAMA v7.0 — Color-Only Mode
+//
+// STATE (price + KAMA integrated)
+//   Green = KAMA rising with acceleration AND close above KAMA
+//   Red   = KAMA falling with deceleration AND close below KAMA
+//   Gray  = anything else — transition or disagreement
+//
+// RULES
+//   Long:  enter gray→green, hold green, exit when not green
+//   Short: enter gray→red,   hold red,   exit when not red
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ─── Inputs ───────────────────────────────────────────────────────────────
+
+string input_direction  = input.string("Long", "Trade Direction", options=["Long", "Short", "Both"], group="Strategy", tooltip="Long = longs only. Short = shorts only. Both = full reversal.")
+string input_gray_mode  = input.string("Hold", "Gray Behaviour", options=["Hold", "Exit", "Partial"], group="Strategy", tooltip="Hold = hold through gray, exit only on opposite color. Exit = close position when color turns gray. Partial = take partial profit on gray, close remainder on opposite color.")
+float  input_gray_tp_pct = input.float(50.0, "Partial Close % on Gray", minval=1.0, maxval=99.0, step=5.0, group="Strategy", tooltip="When Gray Behaviour = Partial: percentage of position to close when color turns gray. Remainder holds until opposite color. Default 50%.")
+bool   input_use_dev_gate = input.bool(true, "Band Deviation Gate", group="Strategy", tooltip="When enabled, entries and re-entries are blocked if price is more than the specified σ distance from fair value. Prevents chasing extended moves.")
+float  input_max_dev      = input.float(1.5, "Max Entry Deviation (σ)", minval=0.1, maxval=5.0, step=0.1, group="Strategy", tooltip="Maximum normalized distance from fair value (in σ) to allow new entries or re-entries. Default 1.5σ.")
+
+color  input_col_bull    = input.color(#00e676, "Trending Up",   group="Style")
+color  input_col_bear    = input.color(#ff1744, "Trending Down", group="Style")
+color  input_col_neutral = input.color(#787b86, "Coiling",       group="Style")
+color  input_col_band    = input.color(#2962ff, "Bands",         group="Style")
+int    input_kama_width  = input.int(3, "Fair Value Line Width", minval=1, maxval=5, group="Style")
+
+bool   input_show_dash = input.bool(true, "Show Dashboard", group="Display")
+string input_dash_pos  = input.string("Top Right", "Position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right","Middle Left"], group="Display")
+string input_dash_size = input.string("Small", "Text Size", options=["Tiny","Small","Normal"], group="Display")
+bool   input_show_bands = input.bool(true, "Show Bands",   group="Display")
+bool   input_show_sigs  = input.bool(true, "Show Signals", group="Display")
+
+color  input_th_accent = input.color(#ff9800, "Accent",            group="Theme")
+color  input_th_label  = input.color(#787b86, "Labels",            group="Theme")
+color  input_th_hdr_bg = input.color(#0d1117, "Header Background", group="Theme")
+color  input_th_bg1    = input.color(#131722, "Row Background",    group="Theme")
+color  input_th_bg2    = input.color(#1e222d, "Alt Background",    group="Theme")
+color  input_th_border = input.color(#363a45, "Border",            group="Theme")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1: KAMA ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+int   ER_LEN      = 10
+int   FAST_PERIOD = 2
+int   SLOW_PERIOD = 30
+int   DEV_LEN     = 20
+float BAND_MULT   = 2.0
+
+float net_move   = math.abs(close - close[ER_LEN])
+float total_path = math.sum(math.abs(close - close[1]), ER_LEN)
+float er         = total_path != 0.0 ? net_move / total_path : 0.0
+
+float fast_sc = 2.0 / (FAST_PERIOD + 1)
+float slow_sc = 2.0 / (SLOW_PERIOD + 1)
+float sc      = math.pow(er * (fast_sc - slow_sc) + slow_sc, 2)
+
+var float kama = na
+kama          := na(kama[1]) ? close : kama[1] + sc * (close - kama[1])
+
+float kama_dev   = math.sqrt(ta.sma(math.pow(close - kama, 2), DEV_LEN))
+float band_upper = kama + BAND_MULT * kama_dev
+float band_lower = kama - BAND_MULT * kama_dev
+float band_width = band_upper - band_lower
+float band_pos   = band_width > 0.0 ? (close - band_lower) / band_width : 0.5
+bool  in_lower_z = band_pos <= 0.33
+bool  in_upper_z = band_pos >= 0.67
+bool  in_mid_z   = not in_lower_z and not in_upper_z
+
+float bw_pct      = kama > 0.0 ? band_width / kama * 100.0 : 0.0
+float bw_avg      = ta.sma(bw_pct, DEV_LEN)
+float bw_ratio    = nz(bw_avg) > 0.0 ? bw_pct / bw_avg : 1.0
+float bwr_long_avg = ta.ema(bw_ratio, DEV_LEN * 2)
+float bwr_dev      = ta.ema(math.abs(bw_ratio - bwr_long_avg), DEV_LEN)
+bool  volatile_mkt = bw_ratio > bwr_long_avg + bwr_dev
+bool  tight_coil   = bw_ratio < bwr_long_avg - bwr_dev
+
+float dist_from_fv_norm = kama_dev > 0.0 ? (close - kama) / kama_dev : 0.0
+
+float sc_threshold = math.sqrt(math.pow(slow_sc, 2) * math.pow(fast_sc, 2))
+bool  is_choppy    = sc < sc_threshold
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2: MARKET STATE
+// Price must agree with KAMA direction — both required simultaneously.
+// ═══════════════════════════════════════════════════════════════════════════
+
+float kama_slope_raw = kama - kama[1]
+float kama_slope     = ta.ema(kama_slope_raw, 3)
+bool  slope_accel    = kama_slope > kama_slope[1]
+
+bool is_green = not is_choppy and kama_slope > 0.0 and (slope_accel or slope_accel[1]) and close > kama
+bool is_red   = not is_choppy and kama_slope < 0.0 and not slope_accel and not slope_accel[1] and close < kama
+bool is_gray  = not is_green and not is_red
+
+// ER for dashboard display only
+float er_avg          = ta.ema(er, DEV_LEN)
+float er_change_rate  = ta.ema(math.abs(er - er[1]), 5)
+float er_noise_floor  = math.max(er_avg * 0.6, 0.1)
+float er_strong_thresh = math.min(er_avg + er_change_rate * 4.0, 0.85)
+bool  er_rising        = er > er[1]
+float er_slope         = ta.ema(er - er[3], 3)
+bool  er_building      = er_slope > 0.0 and er > er_noise_floor
+float coil_ratio       = math.sum(is_gray ? 1 : 0, ER_LEN) / ER_LEN
+bool  mostly_coiling   = coil_ratio > 0.5
+float bw_pct_display   = kama > 0.0 ? band_width / kama * 100.0 : 0.0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3: POSITION STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool in_long  = strategy.position_size > 0
+bool in_short = strategy.position_size < 0
+bool in_trade = in_long or in_short
+bool flat     = not in_trade
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4: ENTRIES AND EXITS
+//
+// Exits run first on every bar — ensures position is flat before
+// any entry logic evaluates, preventing same-bar reversals.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Gray transition detection ─────────────────────────────────────────────
+bool long_goes_gray   = in_long  and is_gray and not is_gray[1]
+bool short_goes_gray  = in_short and is_gray and not is_gray[1]
+bool long_goes_red    = in_long  and is_red
+bool short_goes_green = in_short and is_green
+
+// Track whether a partial close has been taken and top-up is pending
+var bool partial_long_taken  = false
+var bool partial_short_taken = false
+
+// Reset flags when position fully closes or a fresh entry starts
+bool new_position = (in_long and not in_long[1]) or (in_short and not in_short[1])
+if new_position or flat
+    partial_long_taken  := false
+    partial_short_taken := false
+
+// Capture the full entry size so partial re-entry restores it exactly
+var float original_qty = na
+if new_position
+    original_qty := math.abs(strategy.position_size)
+
+// ── HOLD mode ─────────────────────────────────────────────────────────────
+if input_gray_mode == "Hold"
+    if long_goes_red
+        strategy.close("Long", comment="Color Ended")
+    if short_goes_green
+        strategy.close("Short", comment="Color Ended")
+
+// ── EXIT mode ─────────────────────────────────────────────────────────────
+if input_gray_mode == "Exit"
+    if in_long and not is_green
+        strategy.close("Long", comment="Color Ended")
+    if in_short and not is_red
+        strategy.close("Short", comment="Color Ended")
+
+// ── PARTIAL mode ──────────────────────────────────────────────────────────
+if input_gray_mode == "Partial"
+    // Partial close on first gray bar — set flag so top-up fires next color bar
+    if long_goes_gray and not partial_long_taken
+        strategy.close("Long", qty_percent=input_gray_tp_pct, comment="Partial Gray")
+        partial_long_taken := true
+    if short_goes_gray and not partial_short_taken
+        strategy.close("Short", qty_percent=input_gray_tp_pct, comment="Partial Gray")
+        partial_short_taken := true
+    // Full close on opposite color
+    if long_goes_red
+        strategy.close("Long", comment="Color Ended")
+        partial_long_taken := false
+    if short_goes_green
+        strategy.close("Short", comment="Color Ended")
+        partial_short_taken := false
+
+// ── Band deviation gate (entries / re-entries only) ───────────────────────
+bool dev_ok = not input_use_dev_gate or math.abs(dist_from_fv_norm) <= input_max_dev
+
+// ── Entries ───────────────────────────────────────────────────────────────
+bool color_long  = flat and is_green and dev_ok and input_direction != "Short"
+bool color_short = flat and is_red   and dev_ok and input_direction != "Long"
+
+// Partial top-up: only fires when partial flag is set AND color has returned
+// Flag ensures this fires exactly once per partial cycle — not every green bar
+bool partial_reenter_long  = input_gray_mode == "Partial" and partial_long_taken  and in_long  and is_green and not is_gray and dev_ok and input_direction != "Short"
+bool partial_reenter_short = input_gray_mode == "Partial" and partial_short_taken and in_short and is_red   and not is_gray and dev_ok and input_direction != "Long"
+
+if color_long
+    strategy.entry("Long",  strategy.long,  comment="Trend Long")
+if color_short
+    strategy.entry("Short", strategy.short, comment="Trend Short")
+
+// Top up to original size — no rounding, TradingView handles lot sizing internally
+if partial_reenter_long
+    float _add = original_qty - strategy.position_size
+    if _add > 0
+        strategy.order("Long", strategy.long, qty=_add, comment="Resume Long")
+        partial_long_taken := false
+if partial_reenter_short
+    float _add = original_qty - math.abs(strategy.position_size)
+    if _add > 0
+        strategy.order("Short", strategy.short, qty=_add, comment="Resume Short")
+        partial_short_taken := false
+
+bool any_long_entry  = color_long  or partial_reenter_long
+bool any_short_entry = color_short or partial_reenter_short
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5: POSITION TRACKING (for dashboard P&L display)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entry_close = na
+if new_position
+    entry_close := close[1]
+
+float sigma_moved = in_long ? (close - entry_close) / math.max(kama_dev, 1e-10) : in_short ? (entry_close - close) / math.max(kama_dev, 1e-10) : 0.0
+
+var int pos_age = 0
+if new_position
+    pos_age := 1
+else if in_trade
+    pos_age += 1
+else
+    pos_age := 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6: CHART VISUALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+color state_color = is_green ? input_col_bull : is_red ? input_col_bear : input_col_neutral
+p_kama = plot(kama, "Fair Value", state_color, linewidth=input_kama_width)
+
+color band_color = input_show_bands ? color.new(input_col_band, 65) : na
+p_up = plot(band_upper, "Upper Band", band_color, linewidth=1)
+p_dn = plot(band_lower, "Lower Band", band_color, linewidth=1)
+fill(p_kama, p_up, color=na, title="Upper Zone")
+fill(p_kama, p_dn, color=na, title="Lower Zone")
+
+plotshape(any_long_entry  and input_show_sigs, "Buy",  shape.triangleup,   location.belowbar, input_col_bull, size=size.tiny)
+plotshape(any_short_entry and input_show_sigs, "Sell", shape.triangledown, location.abovebar, input_col_bear, size=size.tiny)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7: DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+string _dash_pos = switch input_dash_pos
+    "Top Right"    => position.top_right
+    "Top Left"     => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left"  => position.bottom_left
+    "Middle Right" => position.middle_right
+    "Middle Left"  => position.middle_left
+    => position.top_right
+
+string _sz = switch input_dash_size
+    "Tiny"   => size.tiny
+    "Normal" => size.normal
+    => size.small
+
+string _hdr_sz = switch input_dash_size
+    "Tiny"   => size.tiny
+    "Normal" => size.small
+    => size.small
+
+var table dash = na
+if input_show_dash
+    if na(dash)
+        dash := table.new(_dash_pos, columns=2, rows=10, bgcolor=color.new(input_th_bg1, 0), border_width=1, border_color=color.new(input_th_border, 30), frame_width=2, frame_color=color.new(input_th_border, 0))
+
+    color _bg0 = color.new(input_th_hdr_bg, 0)
+    color _bg1 = color.new(input_th_bg1,    0)
+    color _bg2 = color.new(input_th_bg2,    0)
+    color _lbl = input_th_label
+    color _acc = input_th_accent
+
+    bool  _live    = strategy.position_size != 0
+    float _pnl     = strategy.openprofit
+    float _avg     = strategy.position_avg_price
+    float _pnl_pct = _avg > 0.0 and _live ? (close / _avg - 1.0) * 100.0 * (in_long ? 1.0 : -1.0) : 0.0
+
+    // Row 0: Header
+    table.cell(dash, 0, 0, "CT KAMA", text_color=_acc, text_size=_hdr_sz, text_halign=text.align_left, bgcolor=_bg0)
+    table.cell(dash, 1, 0, "v7.0",    text_color=_lbl, text_size=_hdr_sz, text_halign=text.align_right, bgcolor=_bg0)
+
+    // Row 1: Price
+    table.cell(dash, 0, 1, "Price", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg1)
+    table.cell(dash, 1, 1, str.tostring(close, format.mintick), text_color=color.white, text_size=_sz, text_halign=text.align_right, bgcolor=_bg1)
+
+    // Row 2: Fair Value
+    table.cell(dash, 0, 2, "Fair Value", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg2)
+    table.cell(dash, 1, 2, str.tostring(kama, format.mintick), text_color=state_color, text_size=_sz, text_halign=text.align_right, bgcolor=_bg2)
+
+    // Row 3: Market State
+    string _state_t = is_green ? "▲ TRENDING UP" : is_red ? "▼ TRENDING DOWN" : tight_coil ? "◈ COILING TIGHT" : "◈ COILING"
+    color  _state_c = is_green ? input_col_bull  : is_red ? input_col_bear    : tight_coil ? input_col_band   : input_col_neutral
+    table.cell(dash, 0, 3, "Market", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg1)
+    table.cell(dash, 1, 3, _state_t,  text_color=_state_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg1)
+
+    // Row 4: Signal
+    bool   _h_in  = in_long or in_short
+    string _gray_mode_s = input_gray_mode == "Partial" ? "  [" + str.tostring(input_gray_tp_pct, "#") + "% OUT]" : ""
+    string _sig_t = long_goes_red ? "✕ COLOR ENDED" : short_goes_green ? "✕ COLOR ENDED" : long_goes_gray and input_gray_mode == "Exit" ? "✕ COLOR ENDED" : short_goes_gray and input_gray_mode == "Exit" ? "✕ COLOR ENDED" : long_goes_gray and input_gray_mode == "Partial" ? "◑ PARTIAL CLOSE" + _gray_mode_s : short_goes_gray and input_gray_mode == "Partial" ? "◑ PARTIAL CLOSE" + _gray_mode_s : partial_reenter_long ? "▲ RESUME LONG" : partial_reenter_short ? "▼ RESUME SHORT" : color_long ? "▲ TREND LONG" : color_short ? "▼ TREND SHORT" : is_green ? "● GREEN — WATCHING" : is_red ? "● RED — WATCHING" : _h_in and is_gray ? "◈ GRAY — HOLDING" : "◈ GRAY"
+    color  _sig_c = long_goes_red ? input_col_bear : short_goes_green ? input_col_bear : (long_goes_gray or short_goes_gray) and input_gray_mode == "Exit" ? input_col_bear : (long_goes_gray or short_goes_gray) and input_gray_mode == "Partial" ? _acc : partial_reenter_long ? input_col_bull : partial_reenter_short ? input_col_bear : color_long ? input_col_bull : color_short ? input_col_bear : is_green ? input_col_bull : is_red ? input_col_bear : _h_in and is_gray ? _acc : _lbl
+    table.cell(dash, 0, 4, "Signal", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg2)
+    table.cell(dash, 1, 4, _sig_t,   text_color=_sig_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg2)
+
+    // Row 5: Position + Size + Value
+    float _pos_val = math.abs(strategy.position_size) * close
+    float _pos_pct = strategy.equity > 0 ? _pos_val / strategy.equity * 100.0 : 0.0
+    string _pos_t = in_long ? "● LONG  " + str.tostring(strategy.position_size, "#.##") + "  $" + str.tostring(_pos_val, "#,###.##") + " (" + str.tostring(_pos_pct, "#.#") + "%)" : in_short ? "● SHORT  " + str.tostring(math.abs(strategy.position_size), "#.##") + "  $" + str.tostring(_pos_val, "#,###.##") + " (" + str.tostring(_pos_pct, "#.#") + "%)" : "─"
+    color  _pos_c = in_long ? input_col_bull : in_short ? input_col_bear : _lbl
+    table.cell(dash, 0, 5, "Position", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg1)
+    table.cell(dash, 1, 5, _pos_t,     text_color=_pos_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg1)
+
+    // Row 6: P&L
+    string _pnl_pfx = _pnl >= 0.0 ? "+" : ""
+    string _pnl_t   = _live ? _pnl_pfx + str.tostring(_pnl, "#.##") + "  (" + str.tostring(_pnl_pct, "#.##") + "%)" : "─"
+    color  _pnl_c   = _pnl > 0.0 ? input_col_bull : _pnl < 0.0 ? input_col_bear : _lbl
+    table.cell(dash, 0, 6, "P&L", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg2)
+    table.cell(dash, 1, 6, _pnl_t, text_color=_live ? _pnl_c : _lbl, text_size=_sz, text_halign=text.align_right, bgcolor=_bg2)
+
+    // Row 7: Efficiency Ratio
+    color  _er_c = er >= er_strong_thresh ? input_col_bull : er >= er_noise_floor ? _acc : input_col_bear
+    string _er_l = er >= er_strong_thresh ? "TRENDING" : er >= er_noise_floor ? "BUILDING" : "COILING"
+    string _cr_t = mostly_coiling ? "  COIL " + str.tostring(coil_ratio * 100.0, "#") + "%" : ""
+    table.cell(dash, 0, 7, "ER", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg1)
+    table.cell(dash, 1, 7, str.tostring(er, "#.###") + (er_rising ? " ◆ " : " ◇ ") + _er_l + _cr_t, text_color=_er_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg1)
+
+    // Row 8: Band Position
+    string _zone_t = in_lower_z ? "LOWER" : in_upper_z ? "UPPER" : "MID"
+    string _vol_t  = volatile_mkt ? "VOLATILE" : tight_coil ? "TIGHT COIL" : ""
+    string _bnd_t  = str.tostring(band_pos, "#.##") + " " + _zone_t + (_vol_t != "" ? "  " + _vol_t : "")
+    color  _bnd_c  = volatile_mkt ? input_col_bear : tight_coil ? input_col_band : in_mid_z ? _acc : input_col_band
+    table.cell(dash, 0, 8, "Band", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg2)
+    table.cell(dash, 1, 8, _bnd_t, text_color=_bnd_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg2)
+
+    // Row 9: Development (σ moved from entry, age)
+    string _dev_t = _h_in ? str.tostring(sigma_moved, "#.##") + "σ  age:" + str.tostring(pos_age) + "  dist:" + str.tostring(dist_from_fv_norm, "#.##") + "σ" : "─"
+    float  _dev_thresh = input_use_dev_gate ? input_max_dev : 1.5
+    color  _dev_c = not _h_in ? _lbl : math.abs(dist_from_fv_norm) > _dev_thresh ? _acc : _lbl
+    table.cell(dash, 0, 9, "Dev", text_color=_lbl, text_size=_sz, text_halign=text.align_left, bgcolor=_bg1)
+    table.cell(dash, 1, 9, _dev_t,     text_color=_dev_c, text_size=_sz, text_halign=text.align_right, bgcolor=_bg1)
+
+View in Pine Editor・354 lines
+Use on chart
+6
+445
+Mar 14
+Canuck Trading KAMA Strategy
+
+OVERVIEW
+
+Canuck Trading KAMA is a strategy around one core idea: trade the color, manage the exit. Kaufman's Adaptive Moving Average (KAMA) determines trend direction. A dual health system handles all exit decisions.
+
+Two user inputs control the strategy: Trade Direction and Max Entry Distance.
+Everything else auto-calibrates from price action.
+
+CORE CONCEPTS
+
+KAMA (Kaufman Adaptive Moving Average)
+KAMA adjusts its speed using the Efficiency Ratio (ER). ER measures how
+much of the price path is directional versus noise. Trending markets
+produce a fast KAMA that tracks price closely. Choppy markets produce a
+slow KAMA that barely moves. This is the foundation of all signals.
+
+Fair Value Band (FVB)
+The colored line on the chart. Green means KAMA is rising (bullish),
+red means KAMA is falling (bearish), gray means choppy (neutral).
+Entries follow the color. Exits are managed by the health system.
+
+Deviation Bands
+Upper and lower bands are calculated from the standard deviation of
+price around KAMA over 20 bars, scaled by 2.0 standard deviations.
+Bands tighten in trends and widen in chop. This replaces the old
+fixed ATR bands and adapts automatically to any instrument.
+
+ENTRY SIGNALS
+
+Color Trend Entry
+When KAMA turns green, a long entry fires if price is within the max
+entry distance from KAMA (the proximity gate). When KAMA turns red,
+a short entry fires under the same proximity rule. A color settle gate
+blocks entries on the first bar of a direct red-to-green or green-to-red
+flip. Two consecutive bars of the new color are required to confirm the
+trend is real and not a one-bar chop spike.
+
+In squeeze conditions (bands tight relative to their own average),
+the proximity gate is bypassed entirely since price is naturally close
+to KAMA during squeezes.
+
+Gray Zone Entry
+When KAMA is gray (neutral), entries can still fire if structural
+confirmation is present. Gray longs require 2 or more gray bars,
+a higher low (buyers defending), and price above KAMA. Gray shorts
+require 2 or more gray bars, a lower high (sellers capping), and
+price below KAMA. No proximity gate is applied to gray entries.
+The health system and follow-through exit manage risk.
+
+EXIT CHAIN
+
+Exits are evaluated every bar in priority order. The first matching
+condition triggers the exit.
+
+1. Follow-Through
+On the bar after entry, if price closes below the entry close (for
+longs) or above the entry close (for shorts), the position is closed
+immediately. This catches entries that fail to confirm on the next bar.
+
+2. Health Exit
+The dual health system scores the position from 0 to 6. If either
+sub-score drops to 0, or the combined score falls to 1 or below,
+the position is closed. A minimum holding period of 2 bars (3 in
+high volatility) prevents premature exits on entry noise.
+
+3. Gray Fade
+During gray periods, if 2 or more consecutive bars show structural
+deterioration (lower highs while long, higher lows while short),
+the position is closed. The pullback is deepening, not stabilizing.
+
+4. Gray Timeout
+If a position remains in gray for longer than twice the average
+color run length (minimum 6 bars), the position is closed. The
+trend that justified the entry is likely over.
+
+5. Direction Exit
+A full color reversal closes the position. Green to red exits longs.
+Red to green exits shorts. Gray pauses do not trigger this exit.
+
+DUAL HEALTH SYSTEM
+
+Two independent scores evaluate position quality from different angles.
+
+KAMA Health (0-3)
+C - Color: bar color supports the position direction
+K - Slope: KAMA is still moving in the position's favor
+D - Duration: the color run has not exceeded the average run length
+
+Price Health (0-3)
+S - Structure: higher lows for longs, lower highs for shorts
+M - Momentum: efficiency ratio is rising (directional energy building)
+V - Value: price on the favorable side of KAMA
+
+The dashboard shows both scores with their individual factors. For example,
+K2 CK. P1 ..V means KAMA health is 2 (Color and Slope passing, Duration
+failing) and Price health is 1 (only Value passing).
+
+VOLATILITY ADAPTATION
+
+The strategy adapts to volatility regimes automatically.
+
+Squeeze Detection
+When bands are tight relative to their 20-bar average (ratio below 0.7),
+the dashboard shows SQUEEZE. The proximity gate is bypassed for color
+entries since sigma-normalization inflates distances unreliably in
+tight-band conditions.
+
+High Volatility
+When bands are wide relative to their average (ratio above 1.3), the
+dashboard shows HIGH-VOL. The minimum holding period extends from 2 to
+3 bars to give trades more room in volatile conditions.
+
+Chop Detection
+When the smoothing constant falls below the geometric mean of its range,
+KAMA enters gray (choppy). A rolling chop ratio tracks how many of the
+last 10 bars were gray. Above 50 percent triggers the CHOP indicator
+on the dashboard.
+
+USER INPUTS
+
+Trade Direction
+Long, Short, or Both. Default: Long.
+Controls which side of the market the strategy trades.
+
+Max Entry Distance (sigma)
+Default: 1.0. Range: 0.1 and up, step 0.1.
+Maximum sigma-distance from KAMA for color trend entries. Lower values
+require price to be closer to KAMA before entering. Higher values allow
+entries further from fair value. Gray entries bypass this setting.
+The effective distance is scaled inversely by band width ratio, so it
+automatically tightens in volatile conditions and loosens in squeezes.
+
+DASHBOARD
+
+The dashboard displays 10 rows of live information.
+
+Row 0 Canuck Trading KAMA v5.0 header
+Row 1 Price - current close
+Row 2 KAMA - fair value level, colored by trend
+Row 3 Trend - BULLISH, BEARISH, or NEUTRAL
+Row 4 Signal - current entry or exit signal with health score
+Row 5 Position - LONG, SHORT, or FLAT
+Row 6 P&L - open profit/loss with percentage
+Row 7 ER - efficiency ratio with trend strength label
+Row 8 Band - position within bands and volatility regime
+Row 9 Health - dual health scores with factor breakdown
+
+STRATEGY SETTINGS
+
+Initial Capital: 100,000
+Position Size: 10 percent of equity
+Pyramiding: disabled (one position at a time)
+Commission: 0.1 percent per trade
+Slippage: 1 tick
+Order Execution: process orders on close
+Calculation: on bar close only
+
+INTERNAL PARAMETERS
+
+These values are fixed and proven through extensive testing. They are not
+exposed as inputs to prevent over-optimization.
+
+ER Length: 10 (Kaufman standard)
+Fast Period: 2 (fastest smoothing in strong trends)
+Slow Period: 30 (slowest smoothing in pure chop)
+Deviation Length: 20 (band width lookback)
+Band Multiplier: 2.0 (standard deviations for band width)
+
+CHANGES FROM v3.2
+
+- ATR bands replaced with self-tuning KAMA deviation bands
+- Quality scoring system removed entirely
+- Candle pattern detection removed entirely
+- Gray zone intelligence replaced with structural confirmation entries
+- Smart hold/verdict system replaced with dual health scoring
+- Band profit-taking removed
+- KAMA smoothing option removed (raw Kaufman behavior only)
+- Sharp flip protection retained and enhanced with color settle gate
+- Follow-through exit added (entry close confirmation)
+- Gray fade exit added (structural deterioration detection)
+- Gray timeout exit added (adaptive based on average run length)
+- Dashboard reduced from 13 rows to 10
+- Max Entry Distance added as configurable input
+- Codebase reduced from 900+ lines to approximately 540 lines
+
+DISCLAIMER
+
+This strategy is provided for educational and informational purposes only.
+It is not financial advice, and it does not constitute a recommendation to
+buy, sell, or hold any security or financial instrument.
+
+Past performance in backtesting does not guarantee future results. All
+trading involves risk, including the potential loss of principal. You are
+solely responsible for your own trading decisions.
+
+The author makes no warranties regarding the accuracy, completeness, or
+reliability of this strategy. Use it at your own risk. Always do your own
+research and consult a qualified financial advisor before making investment
+decisions.
+
+This strategy uses simulated order execution with process_orders_on_close
+enabled, which means backtest results assume fills at the closing price of
+the signal bar. Live trading conditions including slippage, liquidity, and
+execution delays may produce different results.
+
+Release Notes
+OVERVIEW
+
+CT KAMA v7.0 focuses on three areas: fixing partial re-entry position sizing,
+adding a band deviation gate for entries, and improving dashboard responsiveness
+and clarity. No changes to the core KAMA engine or market state logic.
+
+
+CHANGES
+
+1. Partial Re-Entry Fix
+Previous versions calculated the top-up quantity from equity using
+math.floor (later math.round), which produced integer share counts.
+On higher-priced instruments or fractional-qty markets (crypto, forex),
+this consistently underestimated the target and produced a zero or
+negative add quantity. The signal triangle appeared on the chart but
+no order was placed.
+
+The re-entry now captures the original filled position size on initial
+entry and uses exact subtraction to compute the add quantity. No rounding
+is involved. TradingView handles any lot-size constraints internally.
+
+Additionally, the partial_long_taken / partial_short_taken flags now
+only reset when the top-up order actually fires. Previously the flag
+cleared unconditionally, meaning a failed top-up was never retried.
+The flag now persists until a successful order, allowing the strategy
+to retry on subsequent bars if the first attempt is blocked.
+
+2. Band Deviation Gate
+New configurable entry filter that prevents chasing extended moves.
+When enabled, entries and partial re-entries are blocked if price is
+more than the specified sigma distance from fair value (KAMA).
+
+Two new inputs in the Strategy group:
+- Band Deviation Gate (bool, default: on)
+- Max Entry Deviation (float, default: 1.5 sigma)
+
+The gate uses the existing dist_from_fv_norm calculation (normalized
+distance from KAMA in units of kama_dev). It applies to all four
+entry conditions: color_long, color_short, partial_reenter_long,
+and partial_reenter_short.
+
+Exits are not affected. Gray behaviour and color-flip exits operate
+exactly as before regardless of the deviation gate setting.
+
+3. Dashboard Responsiveness
+Changed calc_on_every_tick from false to true. The dashboard now
+updates on every tick as the candle forms rather than waiting for
+bar close. Order execution is unaffected because process_orders_on_close
+remains true.
+
+4. Position Sizing in Dashboard
+Row 5 (Position) now shows the full position breakdown when in a trade:
+direction, quantity, dollar value, and percentage of equity.
+
+Example: LONG 21 $10,080.00 (10.1%)
+
+All values update live with the forming candle.
+
+5. Dashboard Nomenclature Cleanup
+Standardized all text across the dashboard:
+- All signal text is now ALL CAPS for consistency
+- All flat/no-data states use a single dash character
+- Fixed Row 9 label from duplicate "Position" to "Dev"
+- Row 9 distance highlight now uses the configured Max Entry Deviation
+threshold instead of a hardcoded 1.5
+
+Before: mixed casing (Color Ended, Resume Long, Partial Close, TREND LONG)
+After: consistent caps (COLOR ENDED, RESUME LONG, PARTIAL CLOSE, TREND LONG)
+
+Before: flat states varied (FLAT, dash, dash with text)
+After: all flat states show a single dash
+
+
+INPUTS
+
+Strategy group:
+Trade Direction Long / Short / Both (default: Long)
+Gray Behaviour Hold / Exit / Partial (default: Hold)
+Partial Close % on Gray 1-99% (default: 50%)
+Band Deviation Gate on / off (default: on)
+Max Entry Deviation 0.1-5.0 sigma (default: 1.5)
+
+Style, Display, and Theme groups are unchanged from v6.x.
+
+
+BEHAVIOUR SUMMARY
+
+Entry: Color signal + deviation gate + direction filter
+Re-entry: Partial flag + color return + deviation gate
+Exit: Gray behaviour or color flip (deviation gate not involved)
+Dashboard: Updates every tick, shows live position sizing

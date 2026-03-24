@@ -1,0 +1,154 @@
+//@version=5
+strategy("Pitchfork Trading Friends", 
+     overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100) // We will calculate size manually
+
+// === 1. INPUTS ===
+leftBars  = input.int(10, "Pivot Left Bars", minval=1)
+rightBars = input.int(10, "Pivot Right Bars", minval=1)
+riskPercent = input.float(1.0, "Risk Per Trade %", minval=0.1, step=0.1)
+
+// === 2. PIVOT DETECTION & STORAGE ===
+// Find pivot points
+float ph = ta.pivothigh(high, leftBars, rightBars)
+float pl = ta.pivotlow(low, leftBars, rightBars)
+
+// Store the last 3 pivots (P1, P2, P3)
+var float p1_price = na
+var int   p1_bar   = na
+var float p2_price = na
+var int   p2_bar   = na
+var float p3_price = na
+var int   p3_bar   = na
+var int   lastPivotType = 0 // 0=none, 1=high, -1=low
+
+// Update pivots when a new one is found, ensuring they alternate
+if not na(ph) and lastPivotType != 1
+    p1_price := p2_price
+    p1_bar   := p2_bar
+    p2_price := p3_price
+    p2_bar   := p3_bar
+    p3_price := ph
+    p3_bar   := bar_index[rightBars]
+    lastPivotType := 1
+
+if not na(pl) and lastPivotType != -1
+    p1_price := p2_price
+    p1_bar   := p2_bar
+    p2_price := p3_price
+    p2_bar   := p3_bar
+    p3_price := pl
+    p3_bar   := bar_index[rightBars]
+    lastPivotType := -1
+
+// === 3. PITCHFORK CALCULATION & DRAWING ===
+// We need 3 valid points to draw
+bool has3Pivots = not na(p1_bar) and not na(p2_bar) and not na(p3_bar)
+
+// Declare lines
+var line medianLine = na
+var line upperLine = na
+var line lowerLine = na
+
+// Declare line prices for strategy logic
+var float ml_price = na
+var float ul_price = na
+var float ll_price = na
+
+if (has3Pivots)
+    // P1, P2, P3 coordinates
+    p1_y = p1_price
+    p1_x = p1_bar
+    p2_y = p2_price
+    p2_x = p2_bar
+    p3_y = p3_price
+    p3_x = p3_bar
+
+    // Calculate midpoint of P2-P3
+    mid_y = (p2_y + p3_y) / 2.0
+    mid_x = (p2_x + p3_x) / 2.0
+    
+    // Calculate Median Line (ML) slope
+    float ml_slope = (mid_y - p1_y) / (mid_x - p1_x)
+    
+    // Calculate price on current bar for each line
+    // y = m*(x - x_n) + y_n
+    ml_price := ml_slope * (bar_index - p1_x) + p1_y
+    
+    // Identify which pivot is high (P2 or P3)
+    float highPivot_y = p2_y > p3_y ? p2_y : p3_y
+    int   highPivot_x = p2_y > p3_y ? p2_x : p3_x
+    float lowPivot_y  = p2_y < p3_y ? p2_y : p3_y
+    int   lowPivot_x  = p2_y < p3_y ? p2_x : p3_x
+
+    // Upper/Lower line prices
+    ul_price := ml_slope * (bar_index - highPivot_x) + highPivot_y
+    ll_price := ml_slope * (bar_index - lowPivot_x) + lowPivot_y
+
+    // Draw/Update lines
+    if (na(medianLine))
+        medianLine := line.new(p1_x, p1_y, bar_index, ml_price, color=color.new(color.blue, 20), style=line.style_dashed, width=2)
+        upperLine  := line.new(highPivot_x, highPivot_y, bar_index, ul_price, color=color.new(color.green, 20), width=2)
+        lowerLine  := line.new(lowPivot_x, lowPivot_y, bar_index, ll_price, color=color.new(color.red, 20), width=2)
+    else
+        line.set_xy1(medianLine, p1_x, p1_y)
+        line.set_xy2(medianLine, bar_index, ml_price)
+        line.set_xy1(upperLine, highPivot_x, highPivot_y)
+        line.set_xy2(upperLine, bar_index, ul_price)
+        line.set_xy1(lowerLine, lowPivot_x, lowPivot_y)
+        line.set_xy2(lowerLine, bar_index, ll_price)
+
+    // === 4. STRATEGY LOGIC ===
+    
+    // Define trend by pitchfork slope
+    bool trendUp = ml_slope > 0
+    bool trendDown = ml_slope < 0
+    
+    // Entry Conditions
+    bool longEntry  = ta.crossover(close, ul_price)  // Breakout
+    bool shortEntry = ta.crossunder(close, ll_price) // Breakdown
+    
+    // Risk Calculation
+    float capital = strategy.equity
+    float riskAmount = (capital * riskPercent) / 100
+    
+    // --- LONG TRADE ---
+    if (longEntry and trendUp)
+        float sl_price = ml_price // SL at median line
+        float stop_loss_pips = close - sl_price
+        float tp_price = close + stop_loss_pips // 1:1 TP
+        
+        // Calculate position size
+        float positionSize = riskAmount / (stop_loss_pips * syminfo.pointvalue)
+        
+        if (positionSize > 0)
+            strategy.entry("Long", strategy.long, qty=positionSize)
+            strategy.exit("SL/TP Long", from_entry="Long", stop=sl_price, limit=tp_price)
+            
+    // --- SHORT TRADE ---
+    if (shortEntry and trendDown)
+        float sl_price = ml_price // SL at median line
+        float stop_loss_pips = sl_price - close
+        float tp_price = close - stop_loss_pips // 1:1 TP
+        
+        // Calculate position size
+        float positionSize = riskAmount / (stop_loss_pips * syminfo.pointvalue)
+        
+        if (positionSize > 0)
+            strategy.entry("Short", strategy.short, qty=positionSize)
+            strategy.exit("SL/TP Short", from_entry="Short", stop=sl_price, limit=tp_price)
+
+// Clean up old lines when new pivots form
+if (not na(ph) and lastPivotType != 1) or (not na(pl) and lastPivotType != -1)
+    line.delete(medianLine[1])
+    line.delete(upperLine[1])
+    line.delete(lowerLine[1])
+
+View in Pine Editor・146 lines
+Use on chart
+4
+6
+1
+1 434
+uses the pitchfork to give entry and exit zones, and gives a net overall summary for a beginner trader to enter into.

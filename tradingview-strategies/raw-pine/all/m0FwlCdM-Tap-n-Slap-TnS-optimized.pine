@@ -1,0 +1,537 @@
+//@version=6
+// ============================================================
+// Tap'n'Slap (TnS) Strategy — v22
+//
+// Matches the real TnS indicator exactly:
+//   Entry : market order bar after tap candle detected
+//   SL    : fixed 25pts below fill price
+//   TP    : nearest swing HIGH/LOW left of tap candle (OG TP)
+//   BE    : once +15pts profit → SL moves to fill+3pts (one time, no trail)
+//   EOD   : close position at session end to prevent gap risk
+// ============================================================
+strategy("Tap'n'Slap (TnS) v22", shorttitle="TnS v22",
+     overlay=true, max_boxes_count=200, max_lines_count=200,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.62,
+     slippage=2)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+grp_s = "Settings"
+preset    = input.bool(true,  "1m Preset (25pt SL + V2 mode)",     group=grp_s)
+slPts     = input.float(35.0, "Stop Loss (Points)",                 group=grp_s, minval=5.0)
+fvgOff    = input.float(3.0,  "FVG Edge Offset (Points)",          group=grp_s)
+v2        = input.bool(true,  "V2 Entry Mode",                     group=grp_s)
+fvgAge    = input.int(30,     "FVG max age (bars)",                 group=grp_s, minval=5, maxval=200)
+
+grp_f = "Filters"
+filterWk  = input.bool(true,  "Filter weak SL (SL inside FVG)",   group=grp_f)
+minRR     = input.float(1.5,  "Min R:R (0 = off)",                 group=grp_f, minval=0.0)
+maxDay    = input.int(3,      "Max trades per day",                 group=grp_f, minval=1, maxval=10)
+
+grp_sess = "Session"
+useSess   = input.bool(true,  "Session Filter",                    group=grp_sess)
+sessStr   = input.session("0930-1600", "Session (ET)",             group=grp_sess)
+eodClose  = input.bool(true,  "Close at session end (no gap risk)",group=grp_sess)
+noLate    = input.bool(true,  "No new entries after 15:30 ET",     group=grp_sess)
+
+grp_be = "Breakeven"
+beOn      = input.bool(true,  "Enable Breakeven",                  group=grp_be)
+beTrig    = input.float(20.0, "Trigger (pts in profit)",           group=grp_be)
+beOff     = input.float(5.0,  "Lock-in (pts above entry)",         group=grp_be)
+
+grp_tbl = "Table"
+showTbl   = input.bool(true,  "Show table",                        group=grp_tbl)
+ptVal     = input.float(20.0, "$/pt/contract (NQ=20, MNQ=2)",      group=grp_tbl)
+
+// ─── DERIVED ─────────────────────────────────────────────────────────────────
+effSL  = preset ? 25.0 : slPts
+effV2  = preset ? true  : v2
+
+inSess     = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
+lateSess   = not na(time(timeframe.period, "1530-1600", "America/New_York"))
+entryOk    = inSess and (not noLate or not lateSess)
+prevInSess = not useSess or not na(time(timeframe.period, sessStr, "America/New_York")[1])
+sessEnd    = prevInSess and not inSess
+
+// ─── DAILY COUNTER ───────────────────────────────────────────────────────────
+var int dayTrades  = 0
+var int tradeCount = 0
+if dayofmonth != dayofmonth[1]
+    dayTrades := 0
+
+// ─── PIVOT CACHE (OG TP) ─────────────────────────────────────────────────────
+swLB = 8
+ph   = ta.pivothigh(high, swLB, swLB)
+pl   = ta.pivotlow (low,  swLB, swLB)
+
+var int[]   ph_bi = array.new_int()
+var float[] ph_px = array.new_float()
+var int[]   pl_bi = array.new_int()
+var float[] pl_px = array.new_float()
+
+if not na(ph)
+    array.push(ph_bi, bar_index - swLB)
+    array.push(ph_px, ph)
+    if array.size(ph_bi) > 500
+        array.shift(ph_bi)
+        array.shift(ph_px)
+if not na(pl)
+    array.push(pl_bi, bar_index - swLB)
+    array.push(pl_px, pl)
+    if array.size(pl_bi) > 500
+        array.shift(pl_bi)
+        array.shift(pl_px)
+
+f_pH(absBar) =>
+    res = float(na)
+    best = int(na)
+    n = array.size(ph_bi)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < n
+                b = array.get(ph_bi, k)
+                if b < absBar
+                    d = absBar - b
+                    if na(best) or d < best
+                        best := d
+                        res  := array.get(ph_px, k)
+    res
+
+f_pL(absBar) =>
+    res = float(na)
+    best = int(na)
+    n = array.size(pl_bi)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < n
+                b = array.get(pl_bi, k)
+                if b < absBar
+                    d = absBar - b
+                    if na(best) or d < best
+                        best := d
+                        res  := array.get(pl_px, k)
+    res
+
+// ─── FVG DETECTION ───────────────────────────────────────────────────────────
+var int[]   fbi   = array.new_int()
+var float[] ftop  = array.new_float()
+var float[] fbot  = array.new_float()
+var bool[]  fbull = array.new_bool()
+var bool[]  fdone = array.new_bool()
+
+if barstate.isconfirmed and inSess
+    if low > high[2]
+        array.push(fbi,  bar_index)
+        array.push(ftop, low)
+        array.push(fbot, high[2])
+        array.push(fbull, true)
+        array.push(fdone, false)
+    if high < low[2]
+        array.push(fbi,  bar_index)
+        array.push(ftop, low[2])
+        array.push(fbot, high)
+        array.push(fbull, false)
+        array.push(fdone, false)
+    nf = array.size(fbi)
+    if nf > 0
+        for k = 0 to nf - 1
+            if k >= 0 and k < array.size(fbi) and not array.get(fdone, k)
+                if (bar_index - array.get(fbi, k)) > fvgAge
+                    array.set(fdone, k, true)
+
+// ─── PENDING SETUP ───────────────────────────────────────────────────────────
+var bool  pendActive = false
+var bool  pendBull   = true
+var float pendEntry  = na   // tap candle HIGH (long) or LOW (short)
+var float pendTP     = na
+var int   pendBar    = -1
+
+// ─── SCAN: FIND TAP CANDLE ON BAR CLOSE ──────────────────────────────────────
+if barstate.isconfirmed and entryOk and not pendActive and strategy.position_size == 0
+    nf = array.size(fbi)
+    if nf > 0
+        for k = 0 to nf - 1
+            if k >= 0 and k < array.size(fbi) and not array.get(fdone, k)
+                ft   = array.get(ftop,  k)
+                fb   = array.get(fbot,  k)
+                bull = array.get(fbull, k)
+                fmBI = array.get(fbi,   k)
+                age  = bar_index - fmBI
+                if age < 3
+                    continue
+
+                if bull
+                    // Bull FVG: bearish tap candle (V2), HIGH inside FVG
+                    colorOk = effV2 ? (close < open) : true
+                    inFVG   = high > (fb + fvgOff) and high < (ft - fvgOff)
+                    if colorOk and inFVG
+                        entryPx = high
+                        slPx    = entryPx - effSL
+                        if not filterWk or slPx < fb
+                            // OG TP: nearest confirmed swing HIGH left of tap candle
+                            tpPx = f_pH(bar_index)
+                            if na(tpPx) or tpPx <= entryPx
+                                tpPx := ft + effSL   // fallback
+                            if tpPx > entryPx
+                                rr = (tpPx - entryPx) / effSL
+                                if minRR <= 0 or rr >= minRR
+                                    pendActive := true
+                                    pendBull   := true
+                                    pendEntry  := entryPx
+                                    pendTP     := tpPx
+                                    pendBar    := bar_index
+                                    array.set(fdone, k, true)
+                                    break
+                else
+                    // Bear FVG: bullish tap candle (V2), LOW inside FVG
+                    colorOk = effV2 ? (close > open) : true
+                    inFVG   = low > (fb + fvgOff) and low < (ft - fvgOff)
+                    if colorOk and inFVG
+                        entryPx = low
+                        slPx    = entryPx + effSL
+                        if not filterWk or slPx > ft
+                            // OG TP: nearest confirmed swing LOW left of tap candle
+                            tpPx = f_pL(bar_index)
+                            if na(tpPx) or tpPx >= entryPx
+                                tpPx := fb - effSL   // fallback
+                            if tpPx < entryPx
+                                rr = (entryPx - tpPx) / effSL
+                                if minRR <= 0 or rr >= minRR
+                                    pendActive := true
+                                    pendBull   := false
+                                    pendEntry  := entryPx
+                                    pendTP     := tpPx
+                                    pendBar    := bar_index
+                                    array.set(fdone, k, true)
+                                    break
+
+// ─── EXECUTE: MARKET ORDER NEXT BAR ──────────────────────────────────────────
+if pendActive and bar_index > pendBar and strategy.position_size == 0
+    if dayTrades < maxDay and entryOk
+        tradeCount := tradeCount + 1
+        tid = "TnS_" + str.tostring(tradeCount)
+        if pendBull
+            strategy.entry(tid, strategy.long,  qty=1, comment="TnS L")
+        else
+            strategy.entry(tid, strategy.short, qty=1, comment="TnS S")
+    pendActive := false
+
+if sessEnd
+    pendActive := false
+
+// ─── TRADE STATE ─────────────────────────────────────────────────────────────
+var float pFill  = na
+var float pSL    = na   // current stop (moves once to BE level)
+var float pTP    = na
+var bool  pBull  = true
+var bool  pBE    = false  // has BE triggered?
+var string pTID  = ""
+
+if strategy.position_size == 0
+    pFill := na
+    pSL   := na
+    pTP   := na
+    pBull := true
+    pBE   := false
+    pTID  := ""
+
+// On fill: set state from actual fill price
+if strategy.position_size != 0 and na(pFill)
+    pFill     := strategy.position_avg_price
+    pBull     := strategy.position_size > 0
+    pSL       := pBull ? (pFill - effSL) : (pFill + effSL)
+    pTP       := pendTP
+    pTID      := "TnS_" + str.tostring(tradeCount)
+    dayTrades := dayTrades + 1
+
+// ─── BREAKEVEN (one-time SL move, no trail) ───────────────────────────────────
+// Once price reaches fill+15pts → move SL to fill+3pts. Never moves again.
+if barstate.isconfirmed and strategy.position_size != 0 and not na(pFill) and beOn and not pBE
+    if pBull and (high - pFill) >= beTrig
+        pSL := pFill + beOff
+        pBE := true
+    if not pBull and (pFill - low) >= beTrig
+        pSL := pFill - beOff
+        pBE := true
+
+// ─── EXIT: re-issued every bar so SL is always live ──────────────────────────
+if eodClose and sessEnd and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+if strategy.position_size != 0 and not na(pFill) and pTID != "" and not na(pSL) and not na(pTP)
+    strategy.exit(pTID + "_X", from_entry=pTID, qty=1,
+         stop=pSL, limit=pTP,
+         comment_loss=pBE ? "BE" : "SL", comment_profit="TP")
+
+// ─── VISUALS ─────────────────────────────────────────────────────────────────
+plot(strategy.position_size != 0 ? pFill : na, "Entry", color=color.blue,  style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? pSL   : na, "SL",    color=color.red,   style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? pTP   : na, "TP",    color=color.lime,  style=plot.style_linebr, linewidth=2)
+plot(pendActive ? pendEntry : na, "Pending", color=color.new(color.blue,60), style=plot.style_linebr, linewidth=1)
+
+// ─── TABLE ───────────────────────────────────────────────────────────────────
+var table tbl = table.new(position.bottom_right, 2, 9,
+     border_color=color.gray, border_width=1, bgcolor=color.new(color.black,70))
+
+if showTbl and strategy.position_size != 0 and not na(pFill)
+    slP  = math.abs(pFill - pSL)
+    tpP  = math.abs(pTP   - pFill)
+    rr   = slP > 0 ? tpP / slP : float(na)
+    dir  = pBull ? "▲ LONG" : "▼ SHORT"
+    dCol = pBull ? color.new(color.green,20) : color.new(color.red,20)
+    bg   = color.new(color.black,80)
+    beStr = pBE ? " ✓ BE active" : ""
+    table.cell(tbl,0,0,"TnS v22",   text_color=color.white,               bgcolor=dCol, text_size=size.small)
+    table.cell(tbl,1,0,dir,         text_color=color.white,               bgcolor=dCol, text_size=size.small)
+    table.cell(tbl,0,1,"Fill",      text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,1,str.tostring(pFill,"#.##"),          text_color=color.blue,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,2,"Stop",      text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,2,str.tostring(pSL,"#.##")+"  ("+str.tostring(slP,"#.#")+"pts)"+beStr,
+         text_color=pBE?color.orange:color.red, bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,3,"Target",    text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,3,str.tostring(pTP,"#.##")+"  (+"+str.tostring(tpP,"#.#")+"pts  +$"+str.tostring(tpP*ptVal,"#")+")",
+         text_color=color.lime, bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,4,"R:R",       text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,4,str.tostring(rr,"#.##")+" : 1",
+         text_color=rr>=1.5?color.green:color.orange, bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,5,"BE",        text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,5,"@+"+str.tostring(beTrig,"#")+"pts → lock +"+str.tostring(beOff,"#")+"pts",
+         text_color=color.new(color.yellow,10), bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,6,"Max Risk",  text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,6,"$"+str.tostring(effSL*ptVal,"#")+"  ("+str.tostring(effSL,"#")+"pt SL)",
+         text_color=color.new(color.orange,10), bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,7,"Size",      text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,7,"1 NQ  ($"+str.tostring(ptVal,"#")+"/pt)", text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(tbl,0,8,"Session",   text_color=color.gray,  bgcolor=bg,   text_size=size.small)
+    table.cell(tbl,1,8,useSess?sessStr+" ET":"All hours",
+         text_color=inSess?color.green:color.red, bgcolor=bg, text_size=size.small)
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+alertcondition(strategy.position_size > strategy.position_size[1] and strategy.position_size > 0,
+     "TnS Long",  "TnS ▲ LONG | Fill:{{plot_0}} SL:{{plot_1}} TP:{{plot_2}}")
+alertcondition(strategy.position_size < strategy.position_size[1] and strategy.position_size < 0,
+     "TnS Short", "TnS ▼ SHORT | Fill:{{plot_0}} SL:{{plot_1}} TP:{{plot_2}}")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0,
+     "TnS Closed", "TnS: Closed at {{close}}")
+
+View in Pine Editor・317 lines
+Use on chart
+4
+191
+█ OVERVIEW
+
+Tap'n'Slap (TnS) is a price-action strategy designed for Micro E-mini Nasdaq (MNQ) futures. It identifies Fair Value Gaps (FVGs) — imbalances left by aggressive price movement — and enters when price "taps" back into these zones, aiming to capture the continuation move as price "slaps" toward the next swing pivot.
+
+
+█ HOW IT WORKS
+
+1. FVG Detection
+The strategy scans for bullish and bearish Fair Value Gaps based on a configurable lookback period. FVGs represent institutional footprints where price moved too quickly to fill orders efficiently.
+
+2. Entry Logic
+• Long: Price taps into a bullish FVG from above
+• Short: Price taps into a bearish FVG from below
+Entries are taken with market orders when conditions align.
+
+3. Take Profit Targeting
+Profits are targeted at recent swing highs (for longs) or swing lows (for shorts) identified via pivot detection. This provides logical, structure-based exits.
+
+4. Risk Management
+• Trailing Stop: Locks in profits as price moves favorably
+• Breakeven Protection: Moves stop to entry + offset after initial profit threshold
+• Max Stop Cap: Limits worst-case loss per trade (default: 75 points / \$450 on 3 contracts)
+
+
+█ KEY FEATURES
+
+✓ Pure price action — no lagging indicators
+✓ Institutional concept (FVG) for high-probability entries
+✓ Dynamic profit targets based on market structure
+✓ Built-in risk controls with capped max loss
+✓ Optimized for MNQ 5-minute charts
+
+
+█ SETTINGS
+
+Trade Management
+• Trail Points: Distance for trailing stop activation
+• BE Profit Points: Profit threshold to move stop to breakeven
+• BE Offset Points: Buffer above breakeven for stop placement
+• Max Stop Loss: Hard cap on stop distance (protects against gap risk)
+
+FVG Settings
+• Lookback Period: How far back to scan for valid FVGs
+• Pivot Length: Sensitivity for swing high/low detection
+
+
+█ USAGE NOTES
+
+• Designed for MNQ (Micro Nasdaq futures) but adaptable to other instruments
+• Best performance observed on 5-minute timeframe
+• Recommended to backtest on your preferred session times
+• Default settings use 3 contracts — adjust position sizing to your risk tolerance
+
+
+█ DISCLAIMER
+
+This strategy is for educational purposes. Past backtest performance does not guarantee future results. Always use proper risk management and never risk more than you can afford to lose. Paper trade before going live.
+Release Notes
+This is a backtestable strategy built by reverse-engineering the logic of the **Plyo Tap'n'Slap (TnS)** indicator. It identifies Fair Value Gap (FVG) setups on the 1-minute chart and enters trades when a qualifying tap candle forms within an active FVG zone.
+
+Designed and tested on **1-minute MNQ/NQ futures** (CME Micro E-mini Nasdaq-100).
+
+---
+
+## Backtest Results (Dec 2025 – Mar 2026)
+
+| Metric | Value |
+|---|---|
+| Period | Dec 12, 2025 – Mar 17, 2026 |
+| Total Trades | 166 |
+| Win Rate | 41% |
+| Profit Factor | **1.32** |
+| Net P&L | **+$16,049** |
+| Avg Win | $984 |
+| Avg Loss | $519 |
+| Max Loss (single trade) | $1,216 |
+| Trades/Day | ~2.6 |
+
+**Properties used:** Commission $0.62/side, Slippage 2 ticks, Recalculate: OFF
+
+---
+
+## How It Works
+
+### 1. Fair Value Gap (FVG) Detection
+An FVG forms when three consecutive candles create a price gap — a zone where no trading occurred.
+
+- **Bullish FVG:** `low > high[2]` — price gapped upward, leaving a support zone
+- **Bearish FVG:** `high < low[2]` — price gapped downward, leaving a resistance zone
+
+FVGs remain active for up to 30 bars (configurable).
+
+### 2. Tap Candle (V2 Mode)
+The strategy looks for a candle that "taps" back into the FVG zone:
+
+- **Bullish FVG → Long setup:** A **bearish candle** (close < open) whose HIGH is inside the FVG, at least 3 bars after the FVG formed, with a 3-point clearance from each FVG edge
+- **Bearish FVG → Short setup:** A **bullish candle** (close > open) whose LOW is inside the FVG, same conditions
+
+The tap candle HIGH (long) or LOW (short) becomes the entry price reference.
+
+### 3. Entry
+A **market order** is placed on the bar immediately following tap candle detection. Only one setup is tracked at a time. Entry is blocked if:
+- Already in a position
+- Daily trade limit reached (default: 3)
+- After 15:30 ET (late session filter)
+
+### 4. Stop Loss
+Fixed at **25 points** from the actual fill price:
+- Long: `fill − 25pts`
+- Short: `fill + 25pts`
+
+Calculated from the actual fill (not the setup price) so it is always exactly 25pts regardless of slippage.
+
+### 5. Take Profit (OG TP)
+The "Original TP" from the TnS model: the **nearest confirmed swing high/low to the left of the tap candle**, found using an 8-bar pivot lookback.
+
+- Long: nearest pivot HIGH above entry to the left → target for the upside move
+- Short: nearest pivot LOW below entry to the left → target for the downside move
+
+A minimum R:R of 1.5 is required — if the TP doesn't offer at least 1.5× the SL distance, the setup is skipped.
+
+### 6. Breakeven
+Once the trade moves **20 points in profit**, the stop loss is moved to **fill + 5 points** (long) or **fill − 5 points** (short). This happens exactly once — there is no trailing stop.
+
+- BE trigger: +20 points
+- BE lock-in: +5 points above/below fill
+
+### 7. End-of-Day Close
+All open positions are closed at session end (16:00 ET) to prevent overnight and weekend gap risk. No trades are entered after 15:30 ET.
+
+---
+
+## Settings Reference
+
+### Settings
+| Input | Default | Description |
+|---|---|---|
+| 1m Preset | ON | Activates 25pt SL and V2 mode |
+| Stop Loss | 35pts | Used only when preset is OFF |
+| FVG Edge Offset | 3pts | Clearance from FVG edges for tap candle |
+| V2 Entry Mode | ON | Requires opposite-color tap candle |
+| FVG Max Age | 30 bars | FVGs expire after this many bars |
+
+### Filters
+| Input | Default | Description |
+|---|---|---|
+| Filter Weak SL | ON | Rejects setups where the SL lands inside the FVG |
+| Min R:R | 1.5 | Skip setups where TP/SL ratio is below this |
+| Max Trades/Day | 3 | Hard cap on daily trade count |
+
+### Session
+| Input | Default | Description |
+|---|---|---|
+| Session Filter | ON | Only trade during 09:30–16:00 ET |
+| Close at Session End | ON | Force-close position at 16:00 ET |
+| No Entries After 15:30 | ON | Blocks late entries prone to EOD gap risk |
+
+### Breakeven
+| Input | Default | Description |
+|---|---|---|
+| Enable Breakeven | ON | Toggle BE entirely |
+| Trigger | 20pts | Profit required to activate BE |
+| Lock-in | 5pts | Points above/below fill to place BE stop |
+
+---
+
+## Recommended Properties (TradingView Strategy Tester)
+
+| Property | Value |
+|---|---|
+| Initial Capital | $1,000,000 |
+| Order Size | 1 (Quantity) |
+| Commission | $0.62 per contract |
+| Slippage | **2 ticks** |
+| Recalculate After Order Filled | OFF |
+| Recalculate On Every Tick | **OFF** |
+
+> ⚠️ Using 8-tick slippage or "On every tick" recalculation will significantly distort backtest results. The correct setting is 2 ticks with both recalculate options unchecked.
+
+---
+
+## Visual Elements
+
+When a trade is active, the chart displays:
+- **Blue line** — fill price
+- **Red line** — current stop loss (turns orange when BE is active)
+- **Green line** — take profit target
+- **Faded blue line** — pending setup (detected but not yet entered)
+- **Info table** (bottom right) — fill, stop, target, R:R, BE status, session
+
+---
+
+## Alerts
+
+Three alert conditions are available:
+- **TnS Long** — fires when a long position opens
+- **TnS Short** — fires when a short position opens
+- **TnS Closed** — fires when any position closes
+
+Alert messages include fill price, stop, and target.
+
+---
+
+## Important Notes
+
+1. **This is a strategy, not the original indicator.** The original TnS indicator by Plyo is a separate protected script. This strategy approximates its entry logic for backtesting purposes.
+
+2. **Market orders vs limit orders.** The real TnS indicator uses limit orders at the tap candle high/low. This strategy uses a market order on the next bar as a practical approximation for backtesting — real execution may differ slightly.
+
+3. **January 2026 performance was negative** (−$1,804) during a strong NQ uptrend. FVG retracement strategies naturally underperform in strongly trending, one-directional markets.
+
+4. **Forward test results will vary.** The backtest covers ~3 months of data. This is not financial advice.
+
+5. **Designed for 1-minute MNQ/NQ.** Results on other instruments or timeframes have not been tested.
+

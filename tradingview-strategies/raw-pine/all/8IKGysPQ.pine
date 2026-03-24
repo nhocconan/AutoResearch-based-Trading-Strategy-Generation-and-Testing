@@ -1,0 +1,188 @@
+//@version=6
+strategy("KZ One — Scalping Training Strategy v.1.0.0",
+     overlay = true,
+     initial_capital = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.00,
+     calc_on_every_tick = true,
+     pyramiding = 0,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 0.01,
+     margin_long = 0.0,
+     margin_short = 0.0)
+
+//==================== Risk & TP ====================
+riskUsd = input.float(10.0, "Risk USD", minval=0.01)
+tpR     = input.float(1.0,  "TP (R)",   minval=0.1)
+
+//==================== TF & Session (TH) ====================
+tfSec         = timeframe.in_seconds()
+allowedTF     = (tfSec == 60 or tfSec == 300)
+inThaiSession = not na(time(timeframe.period, "1300-2300", "Asia/Bangkok"))
+
+//==================== Keyzones ====================
+slow_lkz  = ta.lowest(21)[1]
+slow_ukz  = ta.highest(21)[1]
+uslow_lkz = ta.lowest(89)[1]
+uslow_ukz = ta.highest(89)[1]
+
+plot(allowedTF ? slow_lkz  : na, title='Slow Lower Keyzone (21)', color=color.orange, style=plot.style_stepline)
+plot(allowedTF ? slow_ukz  : na, title='Slow Upper Keyzone (21)', color=color.orange, style=plot.style_stepline)
+plot(allowedTF ? uslow_lkz : na, title='Slow Lower Keyzone (89)', color=color.red,    style=plot.style_stepline)
+plot(allowedTF ? uslow_ukz : na, title='Slow Upper Keyzone (89)', color=color.red,    style=plot.style_stepline)
+
+//==================== Raw signals ====================
+buy_signal_raw  = low < slow_lkz and close > open
+sell_signal_raw = high > slow_ukz and close < open
+
+//==================== ATR Filter (min) ====================
+atrLen       = 14
+useMinPct    = true
+atrMinPct    = input(0.01)
+useMinTicks  = true
+atrMinTicks  = 20
+
+atrValue     = ta.atr(atrLen)
+minFromPct   = useMinPct   ? close * (atrMinPct/100.0)     : na
+minFromTicks = useMinTicks ? atrMinTicks * syminfo.mintick : na
+
+atrPassPct   = not useMinPct   or (atrValue >= nz(minFromPct))
+atrPassTicks = not useMinTicks or (atrValue >= nz(minFromTicks))
+atrPass      = atrPassPct and atrPassTicks
+
+//==================== Compose conditions ====================
+buy_signal  = allowedTF and inThaiSession and buy_signal_raw  and atrPass
+sell_signal = allowedTF and inThaiSession and sell_signal_raw and atrPass
+
+//==================== Trend by EMA89 slope ====================
+emaLen     = 89
+slopeBars  = 8
+thrPctBar  = 0.001
+
+ema                     = ta.ema(close, emaLen)
+slope_abs_per_bar       = (ema - ema[slopeBars]) / slopeBars
+norm_slope_pct_per_bar  = 100.0 * slope_abs_per_bar / close
+
+var int TREND_UP =  1
+var int TREND_DN = -1
+var int TREND_SD =  0
+
+trend =
+     norm_slope_pct_per_bar >  thrPctBar ? TREND_UP :
+     norm_slope_pct_per_bar < -thrPctBar ? TREND_DN :
+     TREND_SD
+
+//==================== Cooldown (same-side) ====================
+cooldownMin  = 60
+cooldownMs   = cooldownMin * 60 * 1000
+
+wantBuy   = buy_signal  and (trend==TREND_UP or trend==TREND_SD)
+wantSell  = sell_signal and (trend==TREND_DN or trend==TREND_SD)
+
+var int lastBuyTime  = na
+var int lastSellTime = na
+
+canBuy  = wantBuy  and (na(lastBuyTime)  or (time - lastBuyTime  >= cooldownMs))
+canSell = wantSell and (na(lastSellTime) or (time - lastSellTime >= cooldownMs))
+
+if barstate.isconfirmed
+    if canBuy
+        lastBuyTime  := time
+    if canSell
+        lastSellTime := time
+
+//==================== Final signal states ====================
+buy_up   = canBuy  and trend==TREND_UP
+sell_dn  = canSell and trend==TREND_DN
+buy_sd   = canBuy  and trend==TREND_SD
+sell_sd  = canSell and trend==TREND_SD
+
+f_buy_final() =>
+    (buy_up or buy_sd)
+
+f_sell_final() =>
+    (sell_dn or sell_sd)
+
+//==================== Entry + Fixed SL/TP (KZ89 snap) ====================
+var float longSL  = na
+var float shortSL = na
+
+// ป้องกัน SL ผิดฝั่ง
+long_sl_valid  = uslow_lkz < close
+short_sl_valid = uslow_ukz > close
+
+//==================== Helpers ====================
+// ปัดลงขั้น 0.01 (ล็อต)
+f_floor01(x) => math.floor(x * 100.0) / 100.0
+// ฟอร์แมตราคา 2 ทศนิยมแบบบังคับ 0 นำหน้า (เช่น 0.04)
+f_fmt2(x) => str.format("{0,number,0.00}", x)
+
+//==================== Entries ====================
+// เข้า Long (คุมระยะห่างไม่เกิน 1%)
+if f_buy_final() and strategy.position_size == 0 and long_sl_valid and (close - uslow_lkz) / close < 0.01
+    longSL := uslow_lkz
+    longStopDist   = close - longSL
+    riskPerUnit    = longStopDist * syminfo.pointvalue
+    longQtyRaw     = riskPerUnit > 0 ? (riskUsd / riskPerUnit) : 0.0
+    longQty        = f_floor01(longQtyRaw)
+    if longQty >= 0.01
+        tpLong   = close + tpR * (close - longSL)
+        // コメントตามฟอร์แมต
+        entryCmt = "BUY @"  + f_fmt2(close)   + " tp=" + f_fmt2(tpLong)  + " sl=" + f_fmt2(longSL)
+        exitCmt  = "Close @" + f_fmt2(tpLong) // ตั้งค่า TP/SL ล่วงหน้า (ราคาปิดจริงขึ้นกับเงื่อนไขที่โดนก่อน)
+        strategy.entry(id="LONG", direction=strategy.long, qty=longQty, comment=entryCmt)
+        strategy.exit("L-EXIT", from_entry="LONG", stop = longSL, limit = tpLong, comment=exitCmt)
+
+// เข้า Short (คุมระยะห่างไม่เกิน 1%)
+if f_sell_final() and strategy.position_size == 0 and short_sl_valid and (uslow_ukz - close) / close < 0.01
+    shortSL := uslow_ukz
+    shortStopDist  = shortSL - close
+    riskPerUnit    = shortStopDist * syminfo.pointvalue
+    shortQtyRaw    = riskPerUnit > 0 ? (riskUsd / riskPerUnit) : 0.0
+    shortQty       = f_floor01(shortQtyRaw)
+    if shortQty >= 0.01
+        tpShort = close - tpR * (shortSL - close)
+        // コメントตามฟอร์แมต (SHORT ใช้ SELL @@)
+        entryCmt = "SELL @@" + f_fmt2(close) + " tp=" + f_fmt2(tpShort) + " sl=" + f_fmt2(shortSL)
+        exitCmt  = "Close @" + f_fmt2(tpShort)
+        strategy.entry(id="SHORT", direction=strategy.short, qty=shortQty, comment=entryCmt)
+        strategy.exit("S-EXIT", from_entry="SHORT", stop = shortSL, limit = tpShort, comment=exitCmt)
+
+//==================== Pre-Alert (lead 2–3 bars before final signal) ====================
+preLead = input.int(2, "Pre-Alert lead (bars)", minval=1, maxval=5)
+preBuy  = wantBuy
+preSell = wantSell
+
+plotshape(preBuy,  title="PRE BUY",  style=shape.triangleup,   location=location.belowbar,
+          size=size.tiny, color=color.new(color.green, 0), offset = -preLead)
+plotshape(preSell, title="PRE SELL", style=shape.triangledown, location=location.abovebar,
+          size=size.tiny, color=color.new(color.red,   0), offset = -preLead)
+
+//==================== Warnings ====================
+var label warn = na
+if barstate.islast
+    label.delete(warn)
+    warnTxt = not allowedTF ? 'Use only on 1m / 5m' :
+              not inThaiSession ? 'Signals active only 13:00–23:00 (Asia/Bangkok)' : ''
+    if warnTxt != ''
+        warn := label.new(bar_index, high, warnTxt, style=label.style_label_right, textcolor=color.white, color=color.red)
+
+View in Pine Editor・168 lines
+Use on chart
+2
+0
+5
+3 709
+Nov 3, 2025
+KZ One is a scalping strategy developed for M1 and M5 timeframes. It is designed to help traders study and practice short-term market behavior by using structured zones to highlight potential entry and exit areas. The strategy allows customization of Risk (USD) and Take Profit (R multiple) parameters for flexible trade management. Additional tools include ATR-based filters to skip low-volatility conditions and a Pre-Alert Lead (bars) option that notifies users ahead of possible setups. KZ One is intended for educational and analytical purposes, promoting disciplined and consistent trading practice.
+Nov 3, 2025
+Release Notes
+Added on-chart trade display comments for better visualization.
+Now each trade shows detailed information directly on the chart:
+
+BUY trades: BUY @<price> tp=<price> sl=<price>
+
+SELL trades: SELL @@<price> tp=<price> sl=<price>
+
+Exit trades: Close @<price>
+This update improves clarity for visual training, backtesting review, and educational use inside the KZ One Scalping Training Strategy.

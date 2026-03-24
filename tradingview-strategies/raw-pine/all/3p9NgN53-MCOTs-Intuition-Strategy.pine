@@ -1,0 +1,81 @@
+//@version=5
+strategy("MCOTs Intuition Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=50000, calc_on_every_tick=true)
+
+// Input for RSI period
+rsiPeriod = input(14, title="RSI Period")
+// Input for standard deviation multiplier
+stdDevMultiplier = input(1.0, title="Standard Deviation Multiplier")
+// Input for exhaustion detection
+exhaustionMultiplier = input(1, title="Exhaustion Multiplier")
+// Input for profit target and stop loss in ticks
+profitTargetTicks = input(40, title="Profit Target (ticks)")
+stopLossTicks = input(160, title="Stop Loss (ticks)")
+
+// Calculate RSI
+rsiValue = ta.rsi(close, rsiPeriod)
+// Calculate standard deviation of RSI changes
+rsiStdDev = ta.stdev(ta.change(rsiValue), rsiPeriod)
+// Calculate momentum
+momentum = ta.change(rsiValue)
+
+// Conditions for entering a long position
+longCondition = momentum > rsiStdDev * stdDevMultiplier and momentum < momentum[1] * exhaustionMultiplier
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("CLOSE Long", limit=close + profitTargetTicks * syminfo.mintick,stop=close - stopLossTicks * syminfo.mintick)
+
+// Conditions for entering a short position
+shortCondition = momentum < -rsiStdDev * stdDevMultiplier and momentum > momentum[1] * exhaustionMultiplier
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("CLOSE Short", limit=close - profitTargetTicks * syminfo.mintick,stop=close + stopLossTicks * syminfo.mintick)
+
+// Plotting RSI value for reference
+plot(rsiValue, title="RSI", color=color.blue)
+
+View in Pine Editor・34 lines
+Use on chart
+5
+3
+2 406
+Apr 9, 2024
+Initial Capital: The strategy starts with an initial capital of $50,000.
+Execution: Trades are executed on every price tick to capture all potential movements.
+Contract Size: The default position size is one contract per trade.
+Timeframe: Although not explicitly mentioned, this strategy is intended for a one-minute timeframe.
+RSI Calculation: The Relative Strength Index (RSI) is calculated over a user-defined period (default is 14 periods).
+Standard Deviation: The script calculates the standard deviation of the change in RSI values to determine the threshold for entering trades.
+Exhaustion Detection: Before entering a long or short position, the script checks for exhaustion in the RSI’s momentum. This is to avoid entering trades during extreme conditions where a reversal is likely.
+Entry Conditions: A long position is entered when the current RSI momentum exceeds the standard deviation threshold and is less than the previous momentum multiplied by an exhaustion factor. A short position is entered under the opposite conditions.
+Limit Orders for Exit: Instead of traditional stop loss and take profit orders, the strategy uses limit orders to exit positions. This means the strategy sets a desired price level to close the position and waits for the market to reach this price.
+Profit Target and Stop Loss: The script allows setting a profit target and stop loss in terms of ticks, which are the smallest measurable increments in price movement for the traded asset.
+
+blah blah whatever
+Apr 9, 2024
+Release Notes
+Initial Capital: The strategy starts with an initial capital of $50,000.
+Execution: Trades are executed on every price tick to capture all potential movements.
+Contract Size: The default position size is one contract per trade.
+Timeframe: Although not explicitly mentioned, this strategy is intended for a one-minute timeframe.
+RSI Calculation: The Relative Strength Index (RSI) is calculated over a user-defined period (default is 14 periods).
+Standard Deviation: The script calculates the standard deviation of the change in RSI values to determine the threshold for entering trades.
+Exhaustion Detection: Before entering a long or short position, the script checks for exhaustion in the RSI’s momentum. This is to avoid entering trades during extreme conditions where a reversal is likely.
+Entry Conditions: A long position is entered when the current RSI momentum exceeds the standard deviation threshold and is less than the previous momentum multiplied by an exhaustion factor. A short position is entered under the opposite conditions.
+Limit Orders for Exit: Instead of traditional stop loss and take profit orders, the strategy uses limit orders to exit positions. This means the strategy sets a desired price level to close the position and waits for the market to reach this price.
+Profit Target and Stop Loss: The script allows setting a profit target and stop loss in terms of ticks, which are the smallest measurable increments in price movement for the traded asset.
+
+blah blah whatever
+Apr 9, 2024
+Release Notes
+Initial Capital: The strategy starts with an initial capital of $50,000.
+Execution: Trades are executed on every price tick to capture all potential movements.
+Contract Size: The default position size is one contract per trade.
+Timeframe: Although not explicitly mentioned, this strategy is intended for a one-minute timeframe.
+RSI Calculation: The Relative Strength Index (RSI) is calculated over a user-defined period (default is 14 periods).
+Standard Deviation: The script calculates the standard deviation of the change in RSI values to determine the threshold for entering trades.
+Exhaustion Detection: Before entering a long or short position, the script checks for exhaustion in the RSI’s momentum. This is to avoid entering trades during extreme conditions where a reversal is likely.
+Entry Conditions: A long position is entered when the current RSI momentum exceeds the standard deviation threshold and is less than the previous momentum multiplied by an exhaustion factor. A short position is entered under the opposite conditions.
+Limit Orders for Exit: Instead of traditional stop loss and take profit orders, the strategy uses limit orders to exit positions. This means the strategy sets a desired price level to close the position and waits for the market to reach this price.
+Profit Target and Stop Loss: The script allows setting a profit target and stop loss in terms of ticks, which are the smallest measurable increments in price movement for the traded asset.
+
+blah blah whatever

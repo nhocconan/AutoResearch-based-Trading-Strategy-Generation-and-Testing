@@ -1,0 +1,93 @@
+{
+  "started_at": "2026-03-22T06:31:54.972563+00:00",
+  "items": {
+    "https://www.tradingview.com/script/DPBeZbMP-BTC-bot/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:32:12.717317+00:00",
+      "last_stage": "extract_ok",
+      "raw_file": "raw-pine/bulk/DPBeZbMP-BTC-bot.pine",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/0mCr8Nfv-Automated-Bitcoin-BTC-Investment-Strategy-from-Wunderbit/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T06:32:29.842586+00:00",
+      "last_stage": "extract_ok",
+      "last_error": null,
+      "extract_attempts": 1,
+      "raw_file": "raw-pine/bulk/0mCr8Nfv-Automated-Bitcoin-BTC-Investment-Strategy-from-Wunderbit.pine"
+    },
+    "https://www.tradingview.com/script/2vgZW5T0-Crypto-BTC-Correlation-Scalper-Gaps-Strategy/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:17:24.825984+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:19:52.978687+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/79Tn4cQY-Momentum-Strategy-BTC-USDT-30m-STOCH-RSI-with-source-code/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T08:19:54.228685+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/Q5bofawj-BTC-strategy-for-margin-trading/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:20:03.012873+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:23:00.052055+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/ultimate-stochastics-nhbprod.py",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/Jb4W43od-Schaff-Trend-Cycle-Strategy-for-ETHUSD-15m-Backtest/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:23:10.407235+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/Gyy3Q3tl-BTC-Daily-Strategy-BF/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:26:40.289187+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/btc-daily-strategy-bf.py",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/eH0FxdMp/": {
+      "backtest_attempts": 1,
+      "updated_at": "2026-03-22T08:26:40.358428+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/LLnfx90C/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:31:05.255898+00:00",
+      "last_stage": "backtest_ok",
+      "raw_file": "raw-pine/bulk/LLnfx90C.pine",
+      "last_error": null,
+      "classify_attempts": 1,
+      "python_file": "python-strategies/bulk/rsi-spx-btc-correlation.py",
+      "backtest_attempts": 1
+    }
+  },
+  "last_seen_model": "qwen3.5-plus",
+  "summary": {
+    "queue_supported_timeframes": 602,
+    "extracted_ok": 3,
+    "extracted_error": 3,
+    "classified": 44,
+    "unsupported": 6,
+    "converted_import_ok": 38,
+    "backtested_strategy_files": 4,
+    "backtest_result_rows": 8,
+    "last_updated_at": "2026-03-22T08:31:05.259090+00:00"
+  }
+}

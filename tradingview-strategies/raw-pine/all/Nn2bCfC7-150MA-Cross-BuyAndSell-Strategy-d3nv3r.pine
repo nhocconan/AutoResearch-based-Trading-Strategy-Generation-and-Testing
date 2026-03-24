@@ -1,0 +1,22 @@
+//@version=4
+strategy(shorttitle = "150MA X B/S", title="150MA Cross BuyAndSell Strategy [d3nv3r]", overlay=true)
+
+longCondition = crossover(close,sma(close, 150))
+shortCondition = crossunder(close, sma(close, 150))
+
+if year >= 2012
+    if (longCondition)
+        strategy.entry("Long", strategy.long)
+    if (shortCondition)
+        strategy.entry("short", strategy.short)
+
+View in Pine Editor・16 lines
+Use on chart
+1
+2
+9
+5 107
+This is a Buy And Sell Strategy I haven't seen anywhere so i share mine.
+
+Used on Bitcoin - daily chart - the strategy generate sell and buy indicator on crossover and crossunder the 150 simple moving average.
+

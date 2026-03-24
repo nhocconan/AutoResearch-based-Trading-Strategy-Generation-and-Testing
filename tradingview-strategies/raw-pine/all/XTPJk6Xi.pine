@@ -1,0 +1,83 @@
+//@version=5
+strategy("BTC 多空双向趋势系统_修复版", overlay=true, initial_capital=10000, default_qty_type=strategy.cash, default_qty_value=10000, commission_type=strategy.commission.percent, commission_value=0.04)
+
+// ==========================================
+// 1. 指标参数设置
+// ==========================================
+emaLength = input.int(200, title="EMA 200 (大趋势过滤)")
+atrPeriod = input.int(10, title="SuperTrend ATR 周期")
+factor = input.float(3.0, title="SuperTrend 倍数")
+
+// 追踪止盈参数
+enableTrail = input.bool(true, title="开启追踪止盈")
+trailActivationPct = input.float(3.0, title="激活阈值 (%)", step=0.1)
+trailOffsetPct = input.float(1.5, title="回撤平仓 (%)", step=0.1)
+
+// ==========================================
+// 2. 逻辑计算
+// ==========================================
+ema200 = ta.ema(close, emaLength)
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// 绘图显示
+plot(ema200, color=color.new(color.gray, 50), linewidth=2, title="EMA 200")
+plot(direction < 0 ? supertrend : na, "上涨支撑线", color=color.green, style=plot.style_linebr)
+plot(direction > 0 ? supertrend : na, "下跌阻力线", color=color.red, style=plot.style_linebr)
+
+// ==========================================
+// 3. 交易执行逻辑
+// ==========================================
+
+// 定义多空入场条件
+longCondition = close > ema200 and direction < 0 and direction[1] > 0
+shortCondition = close < ema200 and direction > 0 and direction[1] < 0
+
+// 入场执行
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="多单进场")
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short, comment="空单进场")
+
+// ==========================================
+// 4. 离场逻辑 (核心修复：使用 Ticks 进行追踪)
+// ==========================================
+
+// 将百分比换算为具体的跳动点数 (Ticks)
+// 只有在持仓时才计算，避免计算资源浪费
+if (strategy.position_size != 0)
+    // 计算激活点数和偏移点数
+    // math.round 确保结果是整数，这是 strategy.exit 的硬性要求
+    actTicks = math.round((strategy.position_avg_price * trailActivationPct / 100) / syminfo.mintick)
+    offsetTicks = math.round((strategy.position_avg_price * trailOffsetPct / 100) / syminfo.mintick)
+
+    if (strategy.position_size > 0)
+        strategy.exit("Exit Long", "Long", trail_points = actTicks, trail_offset = offsetTicks, comment_loss="止损", comment_profit="追踪中")
+    
+    if (strategy.position_size < 0)
+        strategy.exit("Exit Short", "Short", trail_points = actTicks, trail_offset = offsetTicks, comment_loss="止损", comment_profit="追踪中")
+
+// 基础信号反转平仓 (兜底逻辑)
+if (strategy.position_size > 0 and direction > 0)
+    strategy.close("Long", comment="趋势反转")
+
+if (strategy.position_size < 0 and direction < 0)
+    strategy.close("Short", comment="趋势反转")
+
+// ==========================================
+// 5. 视觉增强
+// ==========================================
+bgcolor(direction < 0 and close > ema200 ? color.new(color.green, 90) : na)
+bgcolor(direction > 0 and close < ema200 ? color.new(color.red, 90) : na)
+
+View in Pine Editor・74 lines
+Use on chart
+1
+6
+539
+BTC Two-Way Trend System - Fixed Version
+BTC Two-Way Trend System - Fixed Version
+BTC Two-Way Trend System - Fixed Version
+BTC Two-Way Trend System - Fixed Version
+BTC Two-Way Trend System - Fixed Version
+BTC Two-Way Trend System - Fixed Version

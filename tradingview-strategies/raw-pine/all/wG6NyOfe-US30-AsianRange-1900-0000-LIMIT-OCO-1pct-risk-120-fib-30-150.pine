@@ -1,0 +1,118 @@
+//@version=5
+strategy("US30 AsianRange 1900-0000 LIMIT OCO (1pct risk)", overlay=true, pyramiding=0, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.0, slippage=0)
+
+// ─────────────────────────────────────────────────────────────
+// Inputs (match indicator)
+// ─────────────────────────────────────────────────────────────
+useExchangeTZ = input.bool(true, "Use exchange timezone")
+tzInput       = input.string("Europe/London", "Timezone (if not exchange)")
+tz            = useExchangeTZ ? syminfo.timezone : tzInput
+
+// Your indicator session: 19:00–00:00
+asianSess  = input.session("1900-0000", "Asian Range Session")
+tradeSess  = input.session("0000-1200", "Trade Window (place limits)")
+
+fibLevel   = input.float(1.15, "Fib Level (120%=1.20)", step=0.01, minval=1.0)
+
+// Define “pips” for US30
+pipSize    = input.float(1.0, "Pip Size (points per pip)", step=0.1, minval=0.0001)
+
+// Risk & exits
+riskPct    = input.float(1.0, "Risk % per trade", step=0.1, minval=0.0)
+slPips     = input.int(30,  "Stop Loss (pips)", minval=1)
+tpPips     = input.int(150, "Take Profit (pips)", minval=1)
+
+placeBuyLimit  = input.bool(true, "Place Buy Limit")
+placeSellLimit = input.bool(true, "Place Sell Limit")
+
+cancelUnfilledAtEnd = input.bool(true, "Cancel unfilled limits after Trade Window")
+
+// ─────────────────────────────────────────────────────────────
+// Session detection (timezone-safe)
+// ─────────────────────────────────────────────────────────────
+inAsian = not na(time(timeframe.period, asianSess, tz))
+inTrade = not na(time(timeframe.period, tradeSess, tz))
+newDay  = ta.change(time("D"))
+
+// ─────────────────────────────────────────────────────────────
+// Track Asian range daily
+// ─────────────────────────────────────────────────────────────
+var float aHigh = na
+var float aLow  = na
+var bool  rangeLocked = false
+var bool  ordersPlacedToday = false
+
+if newDay
+    aHigh := na
+    aLow := na
+    rangeLocked := false
+    ordersPlacedToday := false
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// Build range during 19:00–00:00
+if inAsian
+    aHigh := na(aHigh) ? high : math.max(aHigh, high)
+    aLow  := na(aLow)  ? low  : math.min(aLow, low)
+
+// Lock range right after session ends (first bar outside session)
+if (not inAsian) and (not rangeLocked) and (not na(aHigh)) and (not na(aLow))
+    rangeLocked := true
+
+rng = rangeLocked ? (aHigh - aLow) : na
+
+// 115% levels (LIMIT fade entries)
+sellLimit = (rangeLocked and not na(rng)) ? (aHigh + (fibLevel - 1.0) * rng) : na
+buyLimit  = (rangeLocked and not na(rng)) ? (aLow  - (fibLevel - 1.0) * rng) : na
+
+plot(aHigh, "Asian High", linewidth=2)
+plot(aLow,  "Asian Low",  linewidth=2)
+plot(sellLimit, "Sell Limit 115%", linewidth=2)
+plot(buyLimit,  "Buy Limit 115%", linewidth=2)
+
+// ─────────────────────────────────────────────────────────────
+// 1% risk sizing with 50 pip SL
+// qty = (equity * risk%) / stopDistance
+// ─────────────────────────────────────────────────────────────
+slDistance = slPips * pipSize
+tpDistance = tpPips * pipSize
+
+riskCash = strategy.equity * (riskPct / 100.0)
+qtyRaw   = slDistance > 0 ? (riskCash / slDistance) : na
+qty      = (not na(qtyRaw) and qtyRaw > 0) ? qtyRaw : 0.0
+
+// ─────────────────────────────────────────────────────────────
+// Place BOTH limits once per day (OCO setup)
+// ─────────────────────────────────────────────────────────────
+canPlace = inTrade and rangeLocked and (not na(rng)) and rng > 0 and qty > 0 and strategy.position_size == 0
+
+if canPlace and not ordersPlacedToday
+    if placeBuyLimit and not na(buyLimit)
+        strategy.order("Long", strategy.long, qty=qty, limit=buyLimit)
+    if placeSellLimit and not na(sellLimit)
+        strategy.order("Short", strategy.short, qty=qty, limit=sellLimit)
+    ordersPlacedToday := true
+
+// OCO: once one fills, cancel the other immediately
+if strategy.position_size > 0
+    strategy.cancel("Short")
+if strategy.position_size < 0
+    strategy.cancel("Long")
+
+// Optional: cancel unfilled limits when trade window ends
+if cancelUnfilledAtEnd and ordersPlacedToday and (not inTrade) and strategy.position_size == 0
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// Exits
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=strategy.position_avg_price - slDistance, limit=strategy.position_avg_price + tpDistance)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=strategy.position_avg_price + slDistance, limit=strategy.position_avg_price - tpDistance)
+
+View in Pine Editor・111 lines
+Use on chart
+1
+9
+681
+asian sweep at the 120 fib, aiming for 150 pips long and short buy limits set, once one is hit for the day cancel the opposite limit straight away

@@ -1,0 +1,108 @@
+//@version=6
+
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org
+// © YourUsername (Open Source)
+//
+// ---Adaptive Volatility Trend Breakout (4H+ Strategy) ---
+// Dit script is Open Source. Je mag het vrij gebruiken, aanpassen en delen.
+// Ontworpen voor Trend Trading op de 4H chart en hoger.
+//
+// DISCLAIMER:
+// Trading brengt aanzienlijke risico's met zich mee. Resultaten uit het verleden bieden geen garantie 
+// voor de toekomst. Gebruik dit script op eigen risico en doe altijd je eigen onderzoek (DYOR).
+
+
+strategy("Adaptive Volatility Trend Breakout (4H+ Strategy)", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// --- Inputs ---
+maLength   = input.int(30, "MA Lengte", minval=1)
+lookback   = input.int(100, "Historische Data (Bars)", minval=10)
+multiplier = input.float(3.3, "Gevoeligheid (StdDev)", step=0.1)
+
+// --- Berekening Moving Average ---
+baseMA = ta.ema(close, maLength)
+
+// --- Het Echte Percentage Berekenen ---
+priceChangePct = math.abs(close - close[1]) / close[1] 
+stdDevPct      = ta.stdev(priceChangePct, lookback)
+dynamicPct     = stdDevPct * multiplier
+
+upperBand = baseMA * (1 + dynamicPct)
+lowerBand = baseMA * (1 - dynamicPct)
+
+// --- Geheugen Logica (Filtering) ---
+// We gebruiken een variabele die onthoudt in welke trend we zitten
+// 0 = neutraal, 1 = long, -1 = short
+var int trendState = 0
+
+longCondition  = ta.crossover(close, upperBand) and trendState <= 0
+shortCondition = ta.crossunder(close, lowerBand) and trendState >= 0
+
+if longCondition
+    trendState := 1
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    trendState := -1
+    strategy.entry("Short", strategy.short)
+
+// --- Visualisatie ---
+p_ma    = plot(baseMA, "Basis MA", color.new(color.blue, 50))
+p_upper = plot(upperBand, "Bovengrens", color.new(color.red, 40))
+p_lower = plot(lowerBand, "Ondergrens", color.new(color.green, 40))
+
+fill(p_upper, p_lower, color=color.new(color.gray, 90), title="Neutrale Zone")
+
+// Kleur de bars op basis van de actieve trendState
+barcolor(trendState == 1 ? color.green : trendState == -1 ? color.red : color.gray)
+
+// Dashboard
+var table dash = table.new(position.top_right, 1, 1)
+if barstate.islast
+    table.cell(dash, 0, 0, "Berekende Zone: " + str.tostring(dynamicPct * 100, "#.##") + "%", bgcolor=color.new(color.black, 0), text_color=color.white)
+
+View in Pine Editor・62 lines
+Use on chart
+5
+475
+Adaptive Volatility Trend Breakout (4H+ Strategy)
+
+Overview
+This strategy is a robust, trend-following system specifically engineered for higher timeframes (4H, Daily, and Weekly). It aims to capture significant market moves by using dynamic, self-adjusting volatility bands based on Standard Deviation rather than fixed percentages.
+
+The strategy is designed to identify and ride major trends while remaining "neutral" during choppy, sideways price action.
+
+Core Logic
+The system revolves around three main components:
+
+
+Baseline (MA): Uses a Moving Average to define the core value area of the asset.
+
+Dynamic Volatility Bands: The script calculates the real-time percentage change of price over a historical lookback period. It then applies a Standard Deviation Multiplier to create a "Neutral Zone."
+
+Trend State Memory: A built-in filtering logic ensures the strategy only enters a trade when a definitive breakout occurs and stays in that trend until a reversal is confirmed by the opposite band.
+
+
+
+Key Features
+
+Optimized for 4H & Higher: Specifically tuned to ignore "intra-day noise," making it ideal for swing traders and trend followers.
+
+Minimal Parameter Risk: With only three main inputs (MA Length, Lookback, and Multiplier), the strategy is built to be simple and robust, reducing the risk of over-optimization.
+
+Volatility-Aware: The bands automatically expand during high-volatility events and contract during consolidation, helping to protect capital from premature entries during market "noise."
+
+Set-and-Forget Design: Built for long-term consistency, this strategy requires minimal manual intervention once the parameters are set for a specific asset.
+
+
+
+How to Use
+
+Timeframe: Apply the strategy to 4H charts or higher.
+
+Calibration: Adjust the Multiplier (StdDev) to fit the specific volatility of the asset you are trading.
+
+Execution: Entry occurs on a candle close outside the band. Exit occurs when the price crosses and closes beyond the opposite boundary.
+
+
+

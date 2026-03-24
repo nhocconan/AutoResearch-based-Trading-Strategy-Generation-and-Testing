@@ -1,0 +1,42 @@
+//@version=3
+strategy("BTC Short/Long Change Indicator Weighted Calls [BY]", initial_capital=10000)
+res=period
+//len1=input(defval=4, title="FAST PERIOD", type=integer,minval=2)
+len2=input(defval=125, title="Slow Period", type=integer,minval=2)
+
+mult1=input(defval=0.9, title="long_multiplier1", type=float,minval=0)
+mult2=input(defval=0.6, title="short_multiplier2", type=float,minval=0)
+mult3=input(defval=1.5, title="total_multiplier", type=float,minval=0)
+
+line1=security("btcusdshorts",res,close)
+line2=security("btcusdlongs",res,close)
+
+hist=-line1+line2+mult3*((line2-line2[1]+mult1*abs(line2-line2[1]))- (line1-line1[1]+mult2*abs(line1-line1[1])))
+mahist=wma(hist,len2)
+
+
+//val=(wma(hist,len1)-wma(hist,len2))
+val=(hist-mahist)
+
+//plot(line1,title="SHORTS",color=red,linewidth=2)
+//plot(line2,title="LONG",color=green, linewidth=2)
+
+bcolor = iff( val >= 0, iff( val > nz(val[1]), lime, green),iff( val < nz(val[1]), red, maroon)) 
+plot(val,title="SMA",style=histogram,color=bcolor, linewidth=4)
+
+plot(hist,color=red)
+plot(mahist,color=blue)
+
+longCondition = crossover(hist,mahist)
+shortCondition = crossunder(hist,mahist)
+strategy.entry("LONG",true,qty=1,when=longCondition)
+//strategy.close("LONG",when=shortCondition)
+strategy.entry("SHORT",false,qty=1,when=shortCondition)
+
+View in Pine Editor・34 lines
+Use on chart
+1
+4
+0
+4 120
+BTC Short/Long Change Indicator Weighted Calls [BY]

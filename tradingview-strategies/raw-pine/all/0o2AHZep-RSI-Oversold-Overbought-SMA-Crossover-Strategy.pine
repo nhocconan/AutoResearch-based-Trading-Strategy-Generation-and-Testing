@@ -1,0 +1,57 @@
+//@version=5
+strategy(title="RSI Oversold/Overbought + SMA Crossover Strategy", shorttitle="RSI-SMA Buy/Sell", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Inputs
+rsiLength = input.int(14, title="RSI Length", minval=1)
+rsiOversold = input.int(31, title="RSI Oversold Threshold", minval=1, maxval=100)
+rsiOverbought = input.int(69, title="RSI Overbought Threshold", minval=1, maxval=100)
+smaLength = input.int(120, title="SMA Length", minval=1)
+source = input.source(close, title="Source")
+
+// Calculations
+rsi = ta.rsi(source, rsiLength)
+sma = ta.sma(source, smaLength)
+
+// Plots
+plot(sma, color=color.blue, title="120 SMA", linewidth=2)
+// Note: RSI lines below are for reference; consider adding a separate RSI indicator in a new pane for better visualization
+
+// Buy Conditions
+rsiCrossBelowOversold = ta.crossunder(rsi, rsiOversold)
+priceCrossAboveSma = ta.crossover(source, sma)
+var bool inOversoldWait = false
+
+if rsiCrossBelowOversold
+    inOversoldWait := true
+
+buyCondition = inOversoldWait and priceCrossAboveSma
+if buyCondition
+    strategy.entry("Buy", strategy.long)
+    inOversoldWait := false
+
+// Sell Conditions
+rsiCrossAboveOverbought = ta.crossover(rsi, rsiOverbought)
+priceCrossBelowSma = ta.crossunder(source, sma)
+var bool inOverboughtWait = false
+
+if rsiCrossAboveOverbought
+    inOverboughtWait := true
+
+sellCondition = inOverboughtWait and priceCrossBelowSma and strategy.position_size > 0
+if sellCondition
+    strategy.close("Buy", comment="Sell")
+    inOverboughtWait := false
+
+// Visualizations
+plotshape(buyCondition, style=shape.arrowup, location=location.belowbar, color=color.green, text="BUY", size=size.normal, title="Buy Trigger")
+bgcolor(buyCondition ? color.new(color.green, 85) : na, title="Buy Bar Highlight")
+
+plotshape(sellCondition, style=shape.arrowdown, location=location.abovebar, color=color.red, text="SELL", size=size.normal, title="Sell Trigger")
+bgcolor(sellCondition ? color.new(color.red, 85) : na, title="Sell Bar Highlight")
+
+View in Pine Editor・50 lines
+Use on chart
+2
+3
+888
+my first strat, to share with my friends, hope you all enjoy

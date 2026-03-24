@@ -1,0 +1,134 @@
+//@version=5
+strategy("Range Breaker", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.07, pyramiding=0)
+
+// Backtest Time Period
+
+useDateFilter = input.bool(true, title="Begin Backtest at Start Date",
+     group="Backtest Time Period")
+backtestStartDate = input.time(timestamp("1 Jan 2020"), 
+     title="Start Date", group="Backtest Time Period",
+     tooltip="This start date is in the time zone of the exchange " + 
+     "where the chart's instrument trades. It doesn't use the time " + 
+     "zone of the chart or of your computer.")
+
+inTradeWindow = not useDateFilter or time >= backtestStartDate
+
+swingLookback = input.int(20, title="Swing Lookback", minval=3)
+stopTargetPercent = input.float(5, title="Stop Target Percentage", step=0.1)
+
+// Calculate lockback swings
+swings(len) =>
+    var highIndex = bar_index
+    var lowIndex = bar_index
+    var swingHigh = float(na)
+    var swingLow = float(na)
+    
+    upper = ta.highest(len)
+    lower = ta.lowest(len)
+    
+    if high[len] > upper
+        highIndex := bar_index[len]
+        swingHigh := high[len]
+
+    if low[len] < lower
+        lowIndex := bar_index[len]
+        swingLow := low[len]
+
+    [swingHigh, swingLow, highIndex, lowIndex]
+
+
+// Strategy logic
+[swingHigh, swingLow, highIndex, lowIndex] = swings(swingLookback)
+longCondition = inTradeWindow and (ta.crossover(close, swingHigh))
+shortCondition = inTradeWindow and (ta.crossunder(close, swingLow))
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+longStopTarget = close * (1 + stopTargetPercent / 100)
+shortStopTarget = close * (1 - stopTargetPercent / 100)
+
+strategy.exit("Long Stop Target", "Long", limit=longStopTarget)
+strategy.exit("Short Stop Target", "Short", limit=shortStopTarget)
+
+// Plot break lines
+line.new(x1=highIndex, y1=swingHigh, x2=bar_index, y2=swingHigh, color=color.rgb(255, 82, 82, 48), width=3, xloc=xloc.bar_index, extend=extend.right)
+line.new(x1=lowIndex, y1=swingLow, x2=bar_index, y2=swingLow, color=color.rgb(76, 175, 79, 47), width=3, xloc=xloc.bar_index, extend=extend.right)
+
+
+// Alert conditions for entry and exit
+longEntryCondition = inTradeWindow and (ta.crossover(close, swingHigh))
+shortEntryCondition = inTradeWindow and (ta.crossunder(close, swingLow))
+
+longExitCondition = close >= longStopTarget
+shortExitCondition = close <= shortStopTarget
+
+alertcondition(longEntryCondition, title="Long Entry Alert", message="Enter Long Position")
+alertcondition(shortEntryCondition, title="Short Entry Alert", message="Enter Short Position")
+alertcondition(longExitCondition, title="Long Exit Alert", message="Exit Long Position")
+alertcondition(shortExitCondition, title="Short Exit Alert", message="Exit Short Position")
+
+View in Pine Editor・74 lines
+Use on chart
+3
+2
+1
+2
+12 267
+Strategy Description: Range Breaker
+
+The Range Breaker strategy is a breakout trading strategy that aims to capture profits when the price of a financial instrument moves out of a defined range. The strategy identifies swing highs and swing lows over a specified lookback period and enters long or short positions when the price breaks above the swing high or below the swing low, respectively. It also employs stop targets based on a percentage to manage risk and protect profits.
+
+Beginner's Guide:
+
+Understand the concepts:
+a. Swing High: A swing high is a local peak in price where the price is higher than the surrounding prices.
+b. Swing Low: A swing low is a local trough in price where the price is lower than the surrounding prices.
+c. Lookback Period: The number of bars or periods the strategy analyzes to determine swing highs and swing lows.
+d. Stop Target: A predetermined price level at which the strategy will exit the position to manage risk and protect profits.
+
+Configure the strategy:
+a. Set the initial capital, order size, commission, and pyramiding as needed for your specific trading account.
+b. Choose the desired lookback period to identify the swing highs and lows.
+c. Set the stop target multiplier and stop target percentage as desired to manage risk and protect profits.
+
+Backtest the strategy:
+a. Set the backtest start date to analyze the strategy's historical performance.
+b. Observe the backtesting results to evaluate the strategy's effectiveness and adjust the parameters if necessary.
+
+Implement the strategy:
+a. Apply the strategy to your preferred financial instrument on the TradingView platform.
+b. Monitor the strategy's performance and adjust the parameters as needed to optimize its effectiveness.
+
+Risk management:
+a. Always use a stop target to protect your trading capital and manage risk.
+b. Don't risk more than a small percentage of your trading capital on a single trade.
+c. Be prepared to adjust the strategy or stop trading it if the market conditions change significantly.
+
+Adjusting the Lookback Period and Timeframes for Optimal Strategy Performance
+
+The Range Breaker strategy uses a lookback period to identify swing highs and lows, which serve as the basis for determining entry and exit points for long and short positions. By adjusting the lookback period and analyzing different timeframes, you can potentially find the best strategy configuration for each specific asset.
+
+Adjusting the lookback period:
+The lookback period is a critical parameter that affects the sensitivity of the strategy to price movements. A shorter lookback period will make the strategy more sensitive to smaller price fluctuations, resulting in more frequent trading signals. On the other hand, a longer lookback period will make the strategy less sensitive, generating fewer signals but potentially capturing larger price movements.
+
+To optimize the lookback period for a specific asset, you can test different lookback values and compare their performance in terms of risk-adjusted returns, win rate, and other relevant metrics. Keep in mind that using an overly short lookback period may lead to overtrading and increased transaction costs, while an overly long lookback period may cause the strategy to miss profitable trading opportunities.
+
+Analyzing different timeframes:
+Timeframes refer to the duration of each bar or candlestick on the chart. Shorter timeframes (e.g., 5-minute, 15-minute, or 30-minute) focus on intraday price movements, while longer timeframes (e.g., daily, weekly, or monthly) capture longer-term trends. The choice of timeframe affects the number of trading signals generated by the strategy and the length of time each position is held.
+
+To find the best strategy for each asset, you can test the Range Breaker strategy on different timeframes and analyze its performance. Keep in mind that shorter timeframes may require more active monitoring and management due to the increased frequency of trading signals. Longer timeframes, on the other hand, may require more patience as positions are held for extended periods.
+
+Finding the best strategy for each asset:
+Every asset has unique price characteristics that may affect the performance of a trading strategy. To find the best strategy for each asset, you should:
+
+a. Test various lookback periods and timeframes, observing the strategy's performance in terms of profitability, risk-adjusted returns, and win rate.
+b. Consider the asset's historical price behavior, such as its volatility, liquidity, and trend-following or mean-reverting tendencies.
+c. Evaluate the strategy's performance during different market conditions, such as bullish, bearish, or sideways markets, to ensure its robustness.
+d. Keep in mind that each asset may require a unique set of strategy parameters for optimal performance, and there may be no one-size-fits-all solution.
+
+By experimenting with different lookback periods and timeframes, you can fine-tune the Range Breaker strategy for each specific asset, potentially improving its overall performance and adaptability to changing market conditions. Always practice proper risk management and be prepared to make adjustments as needed.
+
+Remember that trading strategies carry inherent risk, and past performance is not indicative of future results. Always practice proper risk management and consider your own risk tolerance before trading with real money.

@@ -1,0 +1,299 @@
+//@version=5
+// Trend Signals with TP/SL [UAlgo] + Liquidation Filter (No-Repaint, Synced Entries)
+// Keeps original TP/SL behavior, adds liquidation filter (filter-only), synced entries/exits and alerts.
+
+strategy("Trend Signals with TP/SL + Liquidation Filter (Synced v3)", shorttitle="Trend+LiqFilterSyncV3", overlay=true)
+
+// === Inputs ===
+src = input.source(hl2, title="Source")
+Multiplier = input.float(title="Sensitivity", defval=2.0, step=0.1, minval=0.5, maxval=5)
+atrPeriods = input.int(title="ATR Length", defval=10)
+atrCalcMethod = input.string(title="ATR Method", defval="Method 1", options=["Method 1", "Method 2"])
+cloud_val = input.int(title="Cloud MA Length", defval=10, minval=5, maxval=500)
+tp_sl_method = input.string(title="TP & SL Type", defval="ATR", options=["ATR", "Percent"])
+atr_tp_multiplier = input.float(title="ATR TP Multiplier", defval=2.0)
+atr_sl_multiplier = input.float(title="ATR SL Multiplier", defval=1.0)
+percent_tp = input.float(title="Percent TP", defval=2.0, minval=0)
+percent_sl = input.float(title="Percent SL", defval=1.0, minval=0)
+prevent_multiple_positions = input.bool(title="Prevent Multiple Positions", defval=true)
+
+// === Liquidation Filter Inputs ===
+useLiquidFilter = input.bool(title="Use Liquidation Filter", defval=true)
+liq_source = input.source(title="Liquidation Source", defval=close)
+liq_len = input.int(title="SMA Length", defval=15, minval=2)
+liq_len2 = input.int(title="EMA Length", defval=30, minval=2)
+liq_pctWindow = input.int(title="Extremes Lookback", defval=89, minval=2)
+liq_require_cluster = input.bool(title="Require Cluster", defval=false)
+liq_cluster_lookback = input.int(title="Cluster Bars", defval=3, minval=1)
+
+// === Base Signal (UAlgo) ===
+percent(nom, div) => 100 * nom / div
+src1 = ta.hma(open, 5)[1]
+src2 = ta.hma(close, 12)
+momm1 = ta.change(src1)
+momm2 = ta.change(src2)
+f1(m, n) => m >= n ? m : 0.0
+f2(m, n) => m >= n ? 0.0 : -m
+m1 = f1(momm1, momm2)
+m2 = f2(momm1, momm2)
+sm1 = math.sum(m1, 1)
+sm2 = math.sum(m2, 1)
+cmoCalc = percent(sm1 - sm2, sm1 + sm2)
+rsiCalc = ta.rsi(close, 9)
+atr2 = ta.sma(ta.tr, atrPeriods)
+atr = atrCalcMethod == "Method 1" ? ta.atr(atrPeriods) : atr2
+up = src - (Multiplier * atr)
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + (Multiplier * atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+buySignal = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+/// === Adaptive Liquidation Filter Logic (FINAL replacement) ===
+useAdaptiveFilter = input.bool(title="Use Adaptive Filter", defval=true)
+adaptStrength = 0.3  // medium = ±30%
+
+// helper clamp
+clamp_val(x, lo, hi) =>
+    x < lo ? lo : x > hi ? hi : x
+
+// --- Volatility ratio (smoothed ATR)
+baseATR = ta.atr(14)
+smoothATR = ta.sma(baseATR, 30)
+volRatio = baseATR / smoothATR
+volRatio := math.max(volRatio, 0.1)
+
+// --- Adaptive lengths (raw then clamped)
+raw_adj_liq_len  = useAdaptiveFilter ? int(math.round(liq_len  / math.pow(volRatio, adaptStrength)))  : liq_len
+raw_adj_liq_len2 = useAdaptiveFilter ? int(math.round(liq_len2 / math.pow(volRatio, adaptStrength))) : liq_len2
+adj_liq_len  = int(clamp_val(raw_adj_liq_len,  5, 120))
+adj_liq_len2 = int(clamp_val(raw_adj_liq_len2, 10, 200))
+
+// --- Ensure safe ints for sma/ema usage (no NaN/0 at early bars)
+safe_adj_liq_len  = nz(adj_liq_len, liq_len)
+safe_adj_liq_len2 = nz(adj_liq_len2, liq_len2)
+safe_adj_liq_len  := safe_adj_liq_len  < 1 ? 1 : safe_adj_liq_len
+safe_adj_liq_len2 := safe_adj_liq_len2 < 1 ? 1 : safe_adj_liq_len2
+int_liq_len  = int(math.round(safe_adj_liq_len))
+int_liq_len2 = int(math.round(safe_adj_liq_len2))
+
+// === Hybrid Liquidation Filter with Adaptive + Tolerance ===
+
+// tolerance threshold (percentage deviation)
+liq_tolerance = input.float(1.0, "Filter Tolerance (%)", step=0.1, tooltip="Adaptive filter ignores small deviations under this threshold")
+
+// simple SMA using adaptive length
+ma1 = ta.sma(liq_source, int_liq_len)
+
+// dynamic EMA simulation
+alpha = 2.0 / (int_liq_len2 + 1.0)
+var float ma2 = na
+ma2 := na(ma2[1]) ? liq_source : alpha * liq_source + (1 - alpha) * ma2[1]
+
+// averaged midline
+avgLine = (ma1 + ma2) / 2.0
+
+// distance percentage
+distVal = ((liq_source - avgLine) / avgLine) * 100.0
+
+// apply tolerance zone (ignore minor deviations)
+distAdj = math.abs(distVal) > liq_tolerance ? distVal : 0
+
+// find peaks and troughs beyond tolerance
+ph = ta.highest(distAdj, liq_pctWindow)
+pl = ta.lowest(distAdj, liq_pctWindow)
+
+// adjusted long/short logic
+longLiqRaw  = (ph == distAdj) and (distAdj > 0)
+shortLiqRaw = (pl == distAdj) and (distAdj < 0)
+
+// optional cluster check
+liqClusterLongRaw  = liq_require_cluster ? ((math.sum(longLiqRaw  ? 1.0 : 0.0, liq_cluster_lookback)  >= 1) ? true : false) : longLiqRaw
+liqClusterShortRaw = liq_require_cluster ? ((math.sum(shortLiqRaw ? 1.0 : 0.0, liq_cluster_lookback) >= 1) ? true : false) : shortLiqRaw
+
+
+// --- Confirmation on bar close (No-Repaint) ---
+var bool liqLongConfirmed  = false
+var bool liqShortConfirmed = false
+if barstate.isconfirmed
+    liqLongConfirmed  := liqClusterLongRaw ? true : false
+    liqShortConfirmed := liqClusterShortRaw ? true : false
+
+// --- Final allow flags used by entry logic ---
+liqAllowLong  = useLiquidFilter ? liqLongConfirmed  : true
+liqAllowShort = useLiquidFilter ? liqShortConfirmed : true
+
+// === Debug / Visualization for Adaptive Filter (global) ===
+showDebug = input.bool(title="Show Adaptive Filter Debug", defval=false)
+
+plot(showDebug ? int_liq_len : na, title="Adaptive SMA Length", color=color.new(color.aqua, 0), style=plot.style_line, linewidth=2)
+plot(showDebug and liqLongConfirmed  ?  1 : na, title="Long Confirmed",  style=plot.style_columns, color=color.new(color.green, 0))
+plot(showDebug and liqShortConfirmed ? -1 : na, title="Short Confirmed", style=plot.style_columns, color=color.new(color.red, 0))
+
+bgcolor(showDebug ? (liqLongConfirmed ? color.new(color.green, 90) : liqShortConfirmed ? color.new(color.red, 90) : na) : na)
+
+
+
+// === Entries & Exits ===
+longCond  = buySignal  and liqAllowLong
+shortCond = sellSignal and liqAllowShort
+longEntrySignal  = barstate.isconfirmed and longCond  and (not prevent_multiple_positions or strategy.opentrades == 0)
+shortEntrySignal = barstate.isconfirmed and shortCond and (not prevent_multiple_positions or strategy.opentrades == 0)
+
+if longEntrySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long",  "Long",  stop = close - atr_sl_multiplier * atr, limit = close + atr_tp_multiplier * atr)
+if shortEntrySignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop = close + atr_sl_multiplier * atr, limit = close - atr_tp_multiplier * atr)
+
+// === Position Sync ===
+tradePos = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+entryPriceReal = strategy.position_size != 0 ? strategy.position_avg_price : na
+
+// typed SL/TP variables to avoid NA-type assignment error
+var float sl_real = na
+var float tp_real = na
+
+if not na(entryPriceReal)
+    if tradePos == 1
+        sl_real := entryPriceReal - atr_sl_multiplier * atr
+        tp_real := entryPriceReal + atr_tp_multiplier * atr
+    else if tradePos == -1
+        sl_real := entryPriceReal + atr_sl_multiplier * atr
+        tp_real := entryPriceReal - atr_tp_multiplier * atr
+
+
+// === Alerts ===
+alertcondition(longEntrySignal,  title="Long Entry (confirmed)",  message="Long Entry confirmed by strategy + Liquidation Filter")
+alertcondition(shortEntrySignal, title="Short Entry (confirmed)", message="Short Entry confirmed by strategy + Liquidation Filter")
+
+View in Pine Editor・174 lines
+Use on chart
+3
+0
+865
+Trend Signals with TP/SL + Adaptive Liquidation Filter
+Research & Educational Framework (Synced v3)
+
+This script is based on the original Trend Signals with TP/SL concept by UAlgo.
+
+The original implementation provides an ATR-based trend detection and risk management structure.
+This version preserves the core trend logic while extending it with an adaptive volatility-based liquidation-style filter.
+
+This publication is intended strictly for research and educational purposes.
+It should not be considered a finished trading system or financial advice.
+
+🔹 Research Objective
+
+This framework explores the following structural question:
+
+Can trend reversal signals be improved by requiring statistically meaningful price displacement before allowing entries?
+
+The script combines:
+
+A state-driven ATR trend engine
+
+A volatility-adaptive deviation filter
+
+The purpose of this combination is to study whether requiring both directional confirmation and displacement confirmation can reduce entries during low-momentum ranging environments.
+
+The filter is not added for indicator aggregation, but to test interaction between trend state changes and volatility-adjusted extremes.
+
+🔹 Structural Components
+1️⃣ Trend Engine (Original Concept)
+
+• Hull-based momentum calculation
+• ATR-derived dynamic trailing bands
+• State-based trend reversal logic
+• Bar-close confirmation (no repainting)
+
+Signals occur only when a full trend flip is confirmed.
+
+2️⃣ Adaptive Deviation Filter (Extension Layer)
+
+• Hybrid SMA + EMA midline
+• Volatility-adjusted smoothing lengths via ATR ratio
+• Deviation-based extreme detection
+• Optional tolerance filtering
+• Optional clustering requirement
+• Bar-close confirmation
+
+The filter acts as a confirmation layer, not as a standalone signal generator.
+
+3️⃣ Risk & Execution Model
+
+• ATR-based Take Profit and Stop Loss (default)
+• Optional percent-based exits
+• Fixed position sizing
+• No pyramiding
+
+Orders are executed through TradingView’s native strategy engine.
+
+🔹 Reference Backtest Context
+
+To provide structural context, the following test configuration was used:
+
+• Market: XRPUSDT
+• Timeframe: 15 minutes
+• Initial Capital: 10,000 USD
+• Position Size: Fixed 100 USD per trade
+• Commission: 0.075%
+• Slippage: 0
+• Pyramiding: Disabled
+
+One-year sample produced:
+
+• 47 trades
+• Profit Factor ≈ 3.6
+• Win rate ≈ 68%
+• Max drawdown ≈ 0.13%
+• Net profit ≈ 143 USD
+
+🔹 Interpretation Notes
+
+This framework is low-frequency by design.
+
+The relatively small trade count reflects:
+
+• Selective filtering
+• Conservative position sizing
+• State-based trend participation
+
+The low drawdown observed in this configuration is primarily the result of small fixed position sizing relative to total capital.
+
+Results will vary significantly if position sizing, leverage, market, or timeframe are modified.
+
+Users are encouraged to test across:
+
+• Multiple assets
+• Extended historical periods
+• Alternative volatility conditions
+
+No performance assumptions should be made based solely on the provided sample.
+
+🔹 Intended Use
+
+This script is intended for:
+
+• Developers researching trend-filter interaction
+• Traders studying volatility-adaptive filtering
+• Educational experimentation with structured risk models
+
+It is not optimized for high-frequency scalping or aggressive leveraged trading.
+
+🔹 Open-Source Purpose
+
+This script is shared to encourage:
+
+• Experimentation
+• Methodological improvements
+• Regime detection extensions
+• Alternative risk models
+
+Constructive modifications and research iterations are welcome.

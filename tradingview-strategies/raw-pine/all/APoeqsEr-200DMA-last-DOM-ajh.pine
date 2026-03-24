@@ -1,0 +1,108 @@
+//@version=5
+strategy("200DMA - Trade based on SMA once every Month - ajh", overlay =true,default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital = 10000)
+
+// Use 100% of  equity always
+ma_long = input.int(defval=200, title="SMA (Chart Period) default: 200 days", minval=1, maxval=600)
+ma_short = input.int(defval=50, title="SMA shorter eg; 50", minval=1, maxval=600)
+offset_days = input.int(defval=0, title="Add some offset days from first trading day of month (0-31)", minval=0, maxval=31)
+
+// backtesting date range
+from_day = input.int(defval=3, title="From Day", minval=1, maxval=31)
+from_month = input.int(defval=1, title="From Month", minval=1, maxval=12)
+from_year = input.int(defval=2000, title="From Year", minval=1900)
+to_day = input.int(defval=28, title="To Day", minval=1, maxval=31)
+to_month = input.int(defval=6, title="To Month", minval=1, maxval=12)
+to_year = input.int(defval=2060, title="To Year", minval=1900)
+
+dateStart = timestamp(syminfo.timezone, from_year, from_month, from_day, 0, 0) // 2000-01-03
+dateEnd = timestamp(syminfo.timezone, to_year, to_month, to_day, 0, 0) //2021-06-28
+
+inDateRange = time >= dateStart and time <= dateEnd
+
+// 200 day ma 
+dma200 = ta.sma(close, ma_long)
+plot(dma200, color=color.red, linewidth = 2)
+dma50 = ta.sma(close, ma_short)
+plot(dma50, color=color.yellow, linewidth = 1)
+
+// Set trade entry conditions -
+enterLong  = close > dma200
+enterSale = close < dma200
+
+// Detect the first trading day of a new month
+isFirstTradingDayOfMonth = ta.change(time('1M'))[offset_days] !=0 
+bgcolor(isFirstTradingDayOfMonth and inDateRange ? color.new(color.green, 80) : na) // colour the FirstTradingDay of Month
+
+xLong = isFirstTradingDayOfMonth and inDateRange and enterLong
+xSell = isFirstTradingDayOfMonth and inDateRange and enterSale
+
+plotchar(xLong, "long","L", color=color.green, location=location.abovebar, size=size.tiny)   
+plotchar(xSell, "Sell","S", color=color.red, location = location.abovebar, size = size.tiny)   
+
+if xLong
+    strategy.entry("long", strategy.long)
+if xSell
+    strategy.close("long")
+// Exit open market position when date range ends
+if (not inDateRange)
+    strategy.close_all()
+
+View in Pine Editor・66 lines
+Use on chart
+7
+3
+17
+5 599
+Jan 5, 2022
+Implements and backtests a simple 200 day moving average trend following rules based on last day of month to limits trades to 12 per year.
+From the book : 5 BEST Moving Average Strategies (That beat buy and hold) by Steve Burns and Holly Burns
+
+Click on the cog to set the input date range eg; 2000-01-01 to 2016-12-31
+
+The book back tested SP500 returns from 2000-2016 317% using this method vs 125% buy and hold only with less drawdown.
+
+Simple 200 day moving average test and trading on last day of month.
+(you may find it trades on next available day close to end of month as not all dates can be traded weekends etc..)
+Rules are ;
+1. if last day of month and stock over 200 day moving average, then go long 100%
+2. if last day of month and stock under 200 day moving average, then close long 100% and goto cash.
+
+Aims to miss market declines and keep you long for upside.
+
+Note: Have found doesn't work well in choppy markets moving sideways like the FTSE100 for same period 2000-2016 and causes losses. Also for many stocks.
+Nov 2, 2022
+Release Notes
+SPY
+Nov 2, 2022
+Release Notes
+Please use the ADJ swtich on the chart to get a TOTAL RETURN chart. TOTAL RETURN works better with this as the chart is biased upwards so keeps above the 200 DMA longer and get you out on larger swings down. The original 200 DMA method by Steve Burns used a TOTAL RETURN graph of SPX
+Nov 2, 2022
+Release Notes
+Cleaned up the code, very easy to read now, but Major longstanding problem is trading at end of month. For some reason it skips whole months!
+Mar 4, 2024
+Release Notes
+A simple but powerful trading stratergy based on the 200 day moving average.
+A stratergy that is astonishingly simple but powerful, and outperforms the market most of the time.
+The stratergy is for strongly trending indices like the SP500 index. Please use SPY plus ADJ (at bottom right of screen to get a Total Return chart)
+This script should be used on the daily timeframe.
+The Rules are simple:
+1. Trade once per month, by default on first trading day of month based on the 200 day moving average.
+2. If under 200 day moving average - Sell
+3. If over 200 day moving average - Buy.
+
+HOW AND WHY IT WORKS SO WELL:
+The 200 day moving average is used to detect the market trend.
+A single trade per month is used to stop whipsaw losses.
+
+This will help keep you out of down trends but help keep you in rising trends.
+You will find this stratergy tested against the SP500 total return chart going back 20 years generally outperforms the market, reducing capital lost to drawdowns (down trends) and getting you fully in on uptrends.
+Note: Doesn't work well for non-trending volitile sideways markets where chop creates losses.
+
+Please use the SPY with ADJ on the daily chart to get a TOTAL RETURN chart. It's essential to use a total return chart (meaning dividends and distributions are included) because the steeper trend keeps you in the market upswings longer, detects downtrends below the moving average faster to get you out. That's because the moving averages reflect reality better!
+
+You can test for what works best over a long backtest.
+You can change the moving average from 200 to 150 days or whatever you want.
+You can change the dates to backtest, and add an offset in days.
+
+This Script owes a lot to Steve and Holly Burns published and backtested stratergy based on the 200 day moving average - see the script code header for more details
+

@@ -1,0 +1,92 @@
+//@version=5
+strategy("Volatility Pulse with Dynamic Exit", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=25, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1, max_bars_back=300)
+
+// === FIXED INPUTS ===
+atrLen        = 14  // ATR Length
+momentumLen   = 20  // Momentum Lookback
+volThreshold  = 0.5 // Volatility Expansion Multiplier
+minVolatility = 1.0 // Minimum ATR Threshold (Low Volatility Filter)
+exitBars      = 42  // Maximum Holding Bars
+riskReward    = 2.0 // Risk-Reward Ratio
+
+// === CALCULATIONS ===
+atrNow  = ta.atr(atrLen)
+atrBase = ta.sma(atrNow, 20)
+volExpansion = atrNow > atrBase * volThreshold
+lowVolatility = atrNow < atrBase * minVolatility
+
+momentumUp   = close > close[momentumLen]
+momentumDown = close < close[momentumLen]
+
+// === CONDITIONS ===
+longCondition  = volExpansion and momentumUp and not lowVolatility
+shortCondition = volExpansion and momentumDown and not lowVolatility
+
+// === ENTRY LOGIC ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// === STOP LOSS & TAKE PROFIT ===
+longSL  = strategy.position_avg_price - atrNow
+longTP  = strategy.position_avg_price + atrNow * riskReward
+
+shortSL = strategy.position_avg_price + atrNow
+shortTP = strategy.position_avg_price - atrNow * riskReward
+
+if (strategy.position_size > 0)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP, when=bar_index - strategy.opentrades.entry_bar_index(0) >= exitBars)
+
+if (strategy.position_size < 0)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP, when=bar_index - strategy.opentrades.entry_bar_index(0) >= exitBars)
+
+View in Pine Editor・43 lines
+Use on chart
+3
+3
+1 551
+Volatility Pulse with Dynamic Exit
+Overview
+This strategy, Volatility Pulse with Dynamic Exit, is designed to capture impulsive price moves following volatility expansions, while ensuring risk is managed dynamically. It avoids trades during low-volatility periods and uses momentum confirmation to enter positions. Additionally, it features a time-based forced exit system to limit overexposure.
+
+How It Works
+
+A position is opened when the current ATR (Average True Range) significantly exceeds its 20-period average, signaling a volatility expansion.
+
+To confirm the move is directional and not random noise, the strategy checks for momentum: the close must be above/below the close of 20 bars ago.
+
+Low volatility zones are filtered out to avoid chop and poor trade entries.
+
+Upon entry, a dynamic stop-loss is set at 1x ATR, while take-profit is set at 2x ATR, offering a 2:1 reward-to-risk ratio.
+
+If the position remains open for more than 42 bars, it is forcefully closed, even if targets are not hit. This prevents long-lasting, stagnant trades.
+
+Key Features
+✅ Volatility-based breakout detection
+✅ Momentum confirmation filter
+✅ Dynamic stop-loss and take-profit based on real-time ATR
+✅ Time-based forced exit (42 bars max holding)
+✅ Low-volatility environment filter
+✅ Realistic settings with 0.05% commission and slippage included
+
+Parameters Explanation
+
+ATR Length (14): Captures recent volatility over ~2 weeks (14 candles).
+
+Momentum Lookback (20): Ensures meaningful price move confirmation.
+
+Volatility Expansion Threshold (0.5x): Strategy activates only when ATR is at least 50% above its average.
+
+Minimum ATR Filter (1.0x): Avoids entries in tight, compressed market ranges.
+
+Max Holding (42 bars): Trades are closed after 42 bars if no exit signal is triggered.
+
+Risk-Reward (2.0x): Aiming for 2x ATR as profit for every 1x ATR risk.
+
+Originality Note
+While volatility and momentum have been used separately in many strategies, this script combines both with a time-based dynamic exit system. This exit rule, combined with an ATR-based filter to exclude low-activity periods, gives the system a practical edge in real-world use. It avoids classic rehashes and integrates real trading constraints for better applicability.
+
+Disclaimer
+This is a research-focused trading strategy meant for backtesting and educational purposes. Always use proper risk management and perform due diligence before applying to real funds.

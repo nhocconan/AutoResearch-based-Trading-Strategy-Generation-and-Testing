@@ -1,0 +1,59 @@
+//@version=5
+strategy("NSE Index Strategy with Entry/Exit Markers", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// User Inputs
+smaPeriod      = input.int(200, title="Trend SMA Period", minval=1)
+rsiPeriod      = input.int(14, title="RSI Period", minval=1)
+rsiOversold    = input.int(40, title="RSI Oversold Level", minval=1)
+atrPeriod      = input.int(14, title="ATR Period", minval=1)
+atrMultiplier  = input.float(1.5, title="ATR Multiplier for Stop Loss and Take Profit", step=0.1)
+
+// Indicator Calculations
+trendSMA = ta.sma(close, smaPeriod)       // 200-period SMA for trend filtering
+rsiValue = ta.rsi(close, rsiPeriod)         // RSI for timing entries
+atrValue = ta.atr(atrPeriod)                // ATR for dynamic exit levels
+
+// Trend Condition: Trade long only when price is above the SMA (bullish context)
+inUptrend = close > trendSMA
+
+// Entry Condition: In an uptrend, wait for RSI to cross upward past the oversold level
+longCondition = inUptrend and ta.crossover(rsiValue, rsiOversold)
+
+// Execute a long entry when the condition is met, with ATR-based exit levels
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    stopLossPrice   = close - atrMultiplier * atrValue
+    takeProfitPrice = close + atrMultiplier * atrValue
+    strategy.exit("Exit", from_entry="Long", stop=stopLossPrice, limit=takeProfitPrice)
+
+// Plot the trend filter and RSI for visual reference
+plot(trendSMA, title="200 SMA", color=color.orange)
+plot(rsiValue, title="RSI", color=color.blue)
+
+// Add markers for entries and exits:
+// A green triangle below the bar marks the entry signal.
+plotshape(longCondition, title="Long Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.large, text="Entry")
+
+// Exit marker: When the position goes from open to closed.
+exitCondition = (strategy.position_size[1] > 0 and strategy.position_size == 0)
+plotshape(exitCondition, title="Exit", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.large, text="Exit")
+
+View in Pine Editor・39 lines
+Use on chart
+5
+1 426
+Explanation of the Code
+Trend Filter (200 SMA):
+The line trendSMA = ta.sma(close, smaPeriod) calculates the 200‑period simple moving average. By trading only when the current price is above this SMA (inUptrend = close > trendSMA), we aim to trade in the direction of the dominant trend.
+
+RSI Entry Signal:
+The RSI is calculated with rsiValue = ta.rsi(close, rsiPeriod). The script checks for an RSI crossover above the oversold threshold using ta.crossover(rsiValue, rsiOversold). This helps capture a potential reversal from a minor pullback in an uptrend.
+
+ATR-Based Exits:
+ATR is computed by atrValue = ta.atr(atrPeriod) and is used to set the stop loss and take profit levels:
+
+Stop Loss: stopLossPrice = close - atrMultiplier * atrValue
+Take Profit: takeProfitPrice = close + atrMultiplier * atrValue
+This dynamic approach allows the exit levels to adjust according to the current market volatility.
+Risk and Money Management:
+The strategy uses a fixed percentage of equity (10% by default) for each trade. The built‑in commission parameter helps simulate real-world trading costs.

@@ -1,0 +1,5 @@
+//@version=4
+bull_color=##input(defval=#6aeb81,type='INPUT_COLOR',##id='in_4')
+bear_color=##input(defval=#f07575,type='INPUT_COLOR',##id='in_5')
+##root(root_metainfo,bgcolor_0_0,bear_color,input__color)
+##root(root_metainfo,bgcolor_1_0,bull_color,input__color)

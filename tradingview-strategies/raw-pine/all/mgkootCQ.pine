@@ -1,0 +1,46 @@
+//@version=5
+strategy("Multi-TF Trendstrategie", overlay=true, margin_long=100, margin_short=100)
+
+// Parameter
+slPips = input.int(50, "Stop Loss (Pips)")
+tpPips = input.int(100, "Take Profit (Pips)")
+
+// Funktion: bullish/bearish Kerze?
+isBullish(tf) => request.security(syminfo.tickerid, tf, close > open)
+isBearish(tf) => request.security(syminfo.tickerid, tf, close < open)
+
+// 1h Trendwechsel Logik
+h1Bullish = request.security(syminfo.tickerid, "60", close > close[1])
+h1Bearish = request.security(syminfo.tickerid, "60", close < close[1])
+
+// Kleinere TFs
+bull1m  = isBullish("1")
+bull3m  = isBullish("3")
+bull5m  = isBullish("5")
+bull15m = isBullish("15")
+
+bear1m  = isBearish("1")
+bear3m  = isBearish("3")
+bear5m  = isBearish("5")
+bear15m = isBearish("15")
+
+// Bedingungen für Long
+longCondition = h1Bullish and bull15m and bull5m and bull3m and bull1m
+// Bedingungen für Short
+shortCondition = h1Bearish and bear15m and bear5m and bear3m and bear1m
+
+// Entry mit SL/TP
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=strategy.position_avg_price - slPips*syminfo.mintick*10, limit=strategy.position_avg_price + tpPips*syminfo.mintick*10)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=strategy.position_avg_price + slPips*syminfo.mintick*10, limit=strategy.position_avg_price - tpPips*syminfo.mintick*10)
+
+View in Pine Editor・39 lines
+Use on chart
+9
+1
+651
+The strategy is probably to go short or long with the trend depending on the case, but if all time units 1 minute then 3 minutes then 5 minutes then 15 minutes then 1 hour all show the same direction, but first the 1 hour must be bullish in which the 1 hour candle closes above the previous one, for example if the trend is bearish then the market wants to change direction, then a 1 hour bullish close must then be followed by a 1 hour bearish close below the bullish candle, then another bullish candle must shoot above the previous bullish candle, then 15 minutes also shoot above the previous 15 bullish candles, then 1 and 2...3.5. Then I can rise with the market by only covering the last 15 bullish candles with my stop loss, if my SL is 50 pips then I want 100 pips and then I'm out.

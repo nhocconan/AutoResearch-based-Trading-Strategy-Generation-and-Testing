@@ -1,0 +1,89 @@
+//@version=6
+strategy("Improved MA Crossover Strategy", overlay=true)
+
+// Input for Moving Averages
+fastLength = input(9, title="Fast MA Length")
+slowLength = input(21, title="Slow MA Length")
+
+// ATR-based Stop Loss and Take Profit
+atrMultiplier = input(2, title="ATR Multiplier for Stop Loss")
+atr = ta.atr(14)
+stopLoss = atr * atrMultiplier
+takeProfit = atr * atrMultiplier * 2  // Risk-Reward Ratio of 1:2
+
+// Calculate Moving Averages
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// Trend Filter - 200 MA
+trendMA = ta.sma(close, 200)
+isBullishTrend = close > trendMA
+isBearishTrend = close < trendMA
+
+// Entry Conditions with Trend Filter
+longCondition = ta.crossover(fastMA, slowMA) and isBullishTrend
+shortCondition = ta.crossunder(fastMA, slowMA) and isBearishTrend
+
+// Execute Trades with Stop Loss & Take Profit
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", stop=close - stopLoss, limit=close + takeProfit)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry="Short", stop=close + stopLoss, limit=close - takeProfit)
+
+// Plot MAs on Chart
+plot(fastMA, color=color.blue, title="Fast MA")
+plot(slowMA, color=color.red, title="Slow MA")
+plot(trendMA, color=color.green, title="Trend MA")
+
+View in Pine Editor・39 lines
+Use on chart
+6
+1
+1
+2 351
+Smart MA Crossover Backtester - Strategy Overview
+Strategy Name: Smart MA Crossover Backtester
+Published on: TradingView
+Applicable Markets: Works well on crypto (tested profitably on ETH)
+
+Strategy Concept
+The Smart MA Crossover Backtester is an improved Moving Average (MA) crossover strategy that incorporates a trend filter and an ATR-based stop loss & take profit mechanism for better risk management. It aims to capture trends efficiently while reducing false signals by only trading in the direction of the long-term trend.
+
+Core Components & Logic
+Moving Averages (MA) for Entry Signals
+
+Fast Moving Average (9-period SMA)
+Slow Moving Average (21-period SMA)
+A trade signal is generated when the fast MA crosses the slow MA.
+Trend Filter (200-period SMA)
+
+Only enters long positions if price is above the 200-period SMA (bullish trend).
+Only enters short positions if price is below the 200-period SMA (bearish trend).
+This helps in avoiding counter-trend trades, reducing whipsaws.
+ATR-Based Stop Loss & Take Profit
+
+Uses the Average True Range (ATR) with a multiplier of 2 to calculate stop loss.
+Risk-Reward Ratio = 1:2 (Take profit is set at 2x ATR).
+This ensures dynamic stop loss and take profit levels based on market volatility.
+Trading Rules
+✅ Long Entry (Buy Signal):
+
+Fast MA (9) crosses above Slow MA (21)
+Price is above the 200 MA (bullish trend filter active)
+Stop Loss: Below entry price by 2× ATR
+Take Profit: Above entry price by 4× ATR
+✅ Short Entry (Sell Signal):
+
+Fast MA (9) crosses below Slow MA (21)
+Price is below the 200 MA (bearish trend filter active)
+Stop Loss: Above entry price by 2× ATR
+Take Profit: Below entry price by 4× ATR
+Why This Strategy Works Well for Crypto (ETH)?
+🔹 Crypto markets are highly volatile – ATR-based stop loss adapts dynamically to market conditions.
+🔹 Long-term trend filter (200 MA) ensures trading in the dominant direction, reducing false signals.
+🔹 Risk-reward ratio of 1:2 allows for profitable trades even with a lower win rate.
+
+This strategy has been tested on Ethereum (ETH) and has shown profitable performance, making it a strong choice for crypto traders looking for trend-following setups with solid risk management. 🚀

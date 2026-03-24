@@ -1,0 +1,100 @@
+//@version=5
+strategy("Scalping 15min: EMA + MACD + RSI + ATR-based SL/TP", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTURI ===
+emaLength      = input.int(50, title="EMA Length")
+macdFast       = input.int(12, title="MACD Fast Length")
+macdSlow       = input.int(26, title="MACD Slow Length")
+macdSignal     = input.int(9, title="MACD Signal Smoothing")
+rsiLength      = input.int(14, title="RSI Length")
+rsiOB          = input.int(70, title="RSI Overbought")
+rsiOS          = input.int(30, title="RSI Oversold")
+atrLength      = input.int(14, title="ATR Length")
+slATRmult      = input.float(1.0, title="SL Multiplier (ATR)")
+tpATRmult      = input.float(2.0, title="TP Multiplier (ATR)")
+
+// === CALCULE ===
+ema = ta.ema(close, emaLength)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdHist = macdLine - signalLine
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+
+// === CONDIȚII DE INTRARE ===
+longCond  = close > ema and macdHist > 0 and rsi > 50 and rsi < rsiOB
+shortCond = close < ema and macdHist < 0 and rsi < 50 and rsi > rsiOS
+
+// === EXECUTARE TRADE ===
+if (longCond)
+    strategy.entry("Long", strategy.long)
+if (shortCond)
+    strategy.entry("Short", strategy.short)
+
+// === TP & SL DINAMIC PRIN ATR ===
+float stopLevel = na
+float takeLevel = na
+
+if (strategy.position_size > 0)
+    stopLevel := close - slATRmult * atr
+    takeLevel := close + tpATRmult * atr
+if (strategy.position_size < 0)
+    stopLevel := close + slATRmult * atr
+    takeLevel := close - tpATRmult * atr
+
+strategy.exit("Exit", from_entry="", stop=stopLevel, limit=takeLevel)
+
+// === DESENARE ===
+plot(ema, color=color.orange, title="EMA 50")
+plotshape(longCond, location=location.belowbar, color=color.green, style=shape.triangleup, title="Long Signal", size=size.small)
+plotshape(shortCond, location=location.abovebar, color=color.red, style=shape.triangledown, title="Short Signal", size=size.small)
+
+View in Pine Editor・49 lines
+Use on chart
+3
+2
+0
+8 888
+📈 Strategy: 15-Minute Scalping — EMA + MACD + RSI + ATR-based SL/TP
+This scalping strategy is designed for 15-minute charts and combines trend-following and momentum confirmation with dynamic stop loss and take profit levels based on volatility.
+
+🔧 Indicators Used:
+EMA 50 — identifies the main trend
+
+MACD Histogram — confirms momentum direction
+
+RSI (14) — filters overbought/oversold conditions
+
+ATR (14) — dynamically sets SL and TP based on market volatility
+
+📊 Entry Conditions:
+Long Entry:
+
+Price is above EMA 50
+
+MACD histogram is positive
+
+RSI is above 50 but below 70
+
+Short Entry:
+
+Price is below EMA 50
+
+MACD histogram is negative
+
+RSI is below 50 but above 30
+
+🛑 Risk Management:
+Stop Loss: 1×ATR (user-configurable)
+
+Take Profit: 2×ATR (user-configurable)
+
+These values can be adjusted in the script inputs depending on your risk/reward preference or market conditions.
+
+⚠️ Notes:
+Strategy is optimized for scalping fast-moving pairs (e.g. crypto, forex).
+
+Works best in trending markets.
+
+Use backtesting and forward testing before live trading.
+
+

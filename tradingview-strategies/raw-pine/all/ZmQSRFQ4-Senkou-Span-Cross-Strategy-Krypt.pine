@@ -1,0 +1,103 @@
+//@version=2
+strategy(title="Ichimoku Kumo Twist Strategy", shorttitle="Kumo Twist Strategy", overlay=true)
+
+xlowest_(src, len) =>
+    x = src
+    for i = 1 to len - 1
+        v = src[i]
+        if (na(v))
+            break
+        x := min(x, v)
+    x
+
+xlowest(src, len) =>
+    na(src[len]) ? xlowest_(src, len) : lowest(src, len)
+
+xhighest_(src, len) =>
+    x = src
+    for i = 1 to len - 1
+        v = src[i]
+        if (na(v))
+            break
+        x := max(x, v)
+    x
+
+xhighest(src, len) =>
+    na(src[len]) ? xhighest_(src, len) : highest(src, len)
+
+dropn(src, n) =>
+    na(src[n]) ? na : src
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(26, minval=1, title="Displacement")
+dropCandles = input(1, minval=0, title="Drop first N candles")
+logScaling = input(false, "Log Scaling")
+showClouds = input(false, "Show Clouds")
+stoploss = input(true, title="Stop Loss")
+
+lows = dropn(low, dropCandles)
+highs = dropn(high, dropCandles)
+
+lowsp = logScaling ? log(lows) : lows
+highsp = logScaling ? log(highs) : highs
+
+donchian(len) =>
+    avg(xlowest(lowsp, len), xhighest(highsp, len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+golong = crossover(leadLine1, leadLine2)
+goshort = crossunder(leadLine1, leadLine2)
+
+strategy.entry("Buy", strategy.long, when=golong, stop=(stoploss ? high+syminfo.mintick : na))
+strategy.entry("Sell", strategy.short, when=goshort, stop=(stoploss ? low-syminfo.mintick : na))
+
+conversionLinep = logScaling ? exp(conversionLine) : conversionLine
+baseLinep = logScaling ? exp(baseLine) : baseLine
+leadLine1p = logScaling ? exp(leadLine1) : leadLine1
+leadLine2p = logScaling ? exp(leadLine2) : leadLine2
+
+plot(showClouds ? conversionLinep : na, color=#0496ff, title="Conversion Line")
+plot(showClouds ? baseLinep : na, color=#991515, title="Base Line")
+
+p1 = plot(showClouds ? leadLine1p : na, offset = displacement, color=green, title="Lead 1")
+p2 = plot(showClouds ? leadLine2p : na, offset = displacement, color=red, title="Lead 2")
+fill(p1, p2, color = showClouds ? (leadLine1p > leadLine2p ? green : red) : na)
+
+View in Pine Editor・70 lines
+Use on chart
+7
+2
+9
+1
+17 738
+Dec 9, 2017
+A simple trading strategy oriented towards cryptocurrencies that uses log-space Ichimoku clouds
+
+Long position: when Senkou Span A crosses over Senkou Span B
+Short position: when Senkou Span A crosses under Senkou Span B
+
+The indicator used in this strategy is available as a standalone script:
+Dec 11, 2017
+Release Notes
+add optional stop loss
+Dec 14, 2017
+Release Notes
+strategy now starts earlier in price history
+Dec 14, 2017
+Release Notes
+Update title and use BTC-JPY chart
+Dec 28, 2017
+Release Notes
+Change title
+Dec 28, 2017
+Release Notes
+update labels
+Dec 30, 2017
+Release Notes
+make log scaling optional (conflicts with stop loss?) and allow user to specify how many candles should be dropped from the beginning of price history

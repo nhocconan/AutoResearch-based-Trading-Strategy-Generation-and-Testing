@@ -1,0 +1,209 @@
+//@version=5
+strategy("Supertrend EMA Strategy _V29", overlay=true, format=format.price, precision=2, initial_capital=1000)
+// Inputs
+tf_preset = input.string("Manual", title="Timeframe Preset", options=["Manual", "Auto-1H/4H", "Auto-1D", "Auto-1W"])
+atr_period = input.int(10, title="ATR Period")
+src = hl2
+atr_multiplier = input.float(3.0, title="ATR Multiplier", step=0.1)
+change_atr = input.bool(true, title="Change ATR Calculation Method?")
+show_signals = input.bool(true, title="Show Buy/Sell Signals?")
+highlighting = input.bool(true, title="Highlighter On/Off?")
+ema_length = input.int(21, title="EMA Length")
+dema_length = input.int(200, title="DEMA Length")
+tp_multiplier = input.float(3.0, title="Take Profit Multiplier (ATR, 0=off)", step=0.5)
+start_time = input.time(1704067200000, title="Strategy Start Date")  // Jan 1, 2024
+allow_long = input.bool(true, title="Allow Long Trades")
+allow_short = input.bool(false, title="Allow Short Trades")
+sl_multiplier = input.float(1.0, title="Stop Loss Multiplier (ATR, 0=off)", step=0.5)
+use_vol_filter = input.bool(true, title="Use Volume Filter?")
+vol_ema_length = input.int(20, title="Volume EMA Length", minval=1)
+use_rsi_filter = input.bool(true, title="Use RSI Filter?")
+rsi_length = input.int(14, title="RSI Length")
+rsi_threshold = input.int(50, title="RSI Buy Threshold")
+// Auto-adjust
+int atr_period_final = atr_period
+float atr_mult_final = atr_multiplier
+string preset_label = tf_preset
+if tf_preset == "Auto-1H/4H"
+    atr_period_final := 10
+    atr_mult_final := 3.0
+    preset_label := "1H/4H"
+else if tf_preset == "Auto-1D"
+    atr_period_final := 14
+    atr_mult_final := 3.0
+    preset_label := "Daily"
+else if tf_preset == "Auto-1W"
+    atr_period_final := 20
+    atr_mult_final := 4.0
+    preset_label := "Weekly"
+// Show settings
+if barstate.islast
+    label.new(x=bar_index[barstate.isrealtime ? 0 : 50], y=high, text="Preset: " + preset_label + "\nATR: " + str.tostring(atr_period_final) + "\nMult: " + str.tostring(atr_mult_final), color=color.white, style=label.style_label_left, textcolor=color.black, size=size.small, yloc=yloc.abovebar)
+// Calculations
+atr2 = ta.sma(ta.tr, atr_period_final)
+atr = change_atr ? ta.atr(atr_period_final) : atr2
+up = src - (atr_mult_final * atr)
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + (atr_mult_final * atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+buy_signal = trend == 1 and trend[1] == -1
+sell_signal = trend == -1 and trend[1] == 1
+ema = ta.ema(close, ema_length)
+ema1 = ta.ema(close, dema_length)
+dema = 2 * ema1 - ta.ema(ema1, dema_length)
+vol_ema = ta.ema(volume, vol_ema_length)
+rsi = ta.rsi(close, rsi_length)
+// Plots (global)
+up_plot = plot(trend == 1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=color.green)
+dn_plot = plot(trend == -1 ? dn : na, title="Down Trend", style=plot.style_linebr, linewidth=2, color=color.red)
+plot(dema, title="DEMA 200", color=color.blue, style=plot.style_linebr, linewidth=2)
+plotshape(buy_signal ? up : na, title="UpTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.green)
+plotshape(buy_signal and show_signals ? up : na, title="Buy", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white)
+plotshape(sell_signal ? dn : na, title="DownTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.red)
+plotshape(sell_signal and show_signals ? dn : na, title="Sell", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white)
+m_plot = plot(ohlc4, title="", style=plot.style_circles, linewidth=1)
+long_fill_color = highlighting ? (trend == 1 ? color.new(color.green, 90) : color.white) : color.white
+short_fill_color = highlighting ? (trend == -1 ? color.new(color.red, 90) : color.white) : color.white
+fill(m_plot, up_plot, title="UpTrend Highlighter", color=long_fill_color)
+fill(m_plot, dn_plot, title="DownTrend Highlighter", color=short_fill_color)
+plot(ema, title="EMA", color=color.blue, linewidth=2)
+// Strategy Logic with Re-Entry (in if for skip)
+if time >= start_time
+    var float entry_price = na
+    vol_condition = not use_vol_filter or volume > vol_ema
+    rsi_condition = not use_rsi_filter or rsi > rsi_threshold
+    buy_cond_met = buy_signal and close > ema and close > dema and allow_long and vol_condition and rsi_condition
+    re_entry_cond = trend == 1 and strategy.position_size == 0 and close[1] < ema and close > ema and close > dema and vol_condition and rsi_condition
+    sell_cond_met = sell_signal and strategy.position_size > 0 and (close < dema or true)
+    if buy_cond_met or re_entry_cond
+        strategy.entry("Long", strategy.long)
+        entry_price := close
+    if sell_cond_met
+        strategy.close("Long")
+        entry_price := na
+    if sell_signal and close < ema and close < dema and allow_short and vol_condition
+        strategy.entry("Short", strategy.short)
+        entry_price := close
+    if buy_signal and strategy.position_size < 0
+        strategy.close("Short")
+        entry_price := na
+    // SL & TP with Trailing
+    if strategy.position_size != 0 and not na(entry_price)
+        if sl_multiplier > 0
+            sl_price = strategy.position_size > 0 ? entry_price - (sl_multiplier * atr) : entry_price + (sl_multiplier * atr)
+            trail_condition = strategy.position_size > 0 ? (close - entry_price > atr) : (entry_price - close > atr)
+            trail_sl = strategy.position_size > 0 ? up : dn
+            final_sl = trail_condition ? trail_sl : sl_price
+            strategy.exit("SL Exit", stop=final_sl)
+        if tp_multiplier > 0
+            tp_price = strategy.position_size > 0 ? entry_price + (tp_multiplier * atr) : entry_price - (tp_multiplier * atr)
+            strategy.exit("TP Exit", limit=tp_price)
+// Alerts
+alertcondition(buy_signal, title="SuperTrend Buy", message="SuperTrend Buy!")
+alertcondition(sell_signal, title="SuperTrend Sell", message="SuperTrend Sell!")
+change_cond = trend != trend[1]
+alertcondition(change_cond, title="SuperTrend Direction Change", message="SuperTrend has changed direction!")
+
+View in Pine Editor・110 lines
+Use on chart
+1
+6
+1
+2
+4 040
+Aug 11, 2025
+### Supertrend EMA Strategy V5
+
+**Overview**
+This is a trend-following strategy designed for cryptocurrency markets like BTC/USD on daily timeframes, combining the Supertrend indicator for dynamic trailing stops with an EMA filter for trend confirmation. It aims to capture strong uptrends while avoiding counter-trend trades, with optional volume filtering for high-conviction entries and ATR-based stop-loss to manage risk. Ideal for long-only setups in bullish assets, it visually highlights trends with green/red bands and fills for easy interpretation. Backtested on BTC from 2024-2025, it shows potential for outperforming buy-and-hold in trending markets, but always use with proper risk management—past performance isn't indicative of future results.
+
+**Key Features**
+- **Supertrend Core**: Uses ATR to plot adaptive uptrend (green) and downtrend (red) lines, flipping on closes beyond prior bands for buy/sell signals.
+- **EMA Trend Filter**: Entries require price above the EMA (default 21-period) for longs, ensuring alignment with the broader trend.
+- **Volume Confirmation**: Optional filter only allows entries when volume exceeds its EMA (default 20-period), reducing false signals in low-activity periods.
+- **Risk Controls**: Built-in ATR-multiplier stop-loss (default 2x) to cap losses; exits on Supertrend flips for trailing profits.
+- **Visuals**: Green/red lines and highlighter fills for up/down trends, plus buy/sell labels and circles for signals.
+- **Customizable Inputs**: Tweak ATR period (default 10), multiplier (default 3), EMA length, start date, long/short toggles, SL, and volume filter.
+- **Alerts**: Built-in for buy/sell and direction changes.
+
+**How to Use**
+1. Add to your TradingView chart (e.g., BTC/USD 1D).
+2. Adjust inputs: Start with defaults for trend-following; increase multiplier for fewer trades/higher win rate. Enable volume filter for volatile assets.
+3. Monitor signals: Green "Buy" for long entries (if close > EMA and conditions met); red "Sell" for exits.
+4. Backtest in Strategy Tester: Focus on equity curve, win rate (~50-60% in tests), and drawdown (<15% with SL).
+5. Live Trading: Use small position sizes (1-2% risk per trade); combine with your analysis. Shorts disabled by default for bull-biased markets.
+
+
+Aug 14, 2025
+Release Notes
+<h1>Supertrend EMA Strategy V29 - Trend-Following with Momentum Filters</h1>
+
+<p>This strategy combines the Supertrend indicator for trend detection with EMA and DEMA for momentum filtering, RSI and volume for entry conviction. It's designed for trend-following trades, with built-in risk management via ATR-based stop-loss (SL) and take-profit (TP) levels, plus trailing stops. Long and short trades are optional, but the default is long-only for bullish bias.</p>
+
+<h2>Key Features:</h2>
+<ul>
+<li><strong>Supertrend as Core Signal</strong>: Uses ATR to create dynamic trend bands. Buy on up-flip (close above lower band), sell on down-flip (close below upper band). Multiplier and ATR period adjustable for sensitivity.</li>
+<li><strong>Momentum Filters</strong>: Entries require close above EMA (short-term, default 21) and DEMA (long-term, default 200) to avoid counter-trend trades.</li>
+<li><strong>Conviction Checks</strong>: RSI (&gt; default 50) for momentum, volume &gt; EMA (default 20) for high-conviction.</li>
+<li><strong>Re-Entry Logic</strong>: During uptrends, re-enter on pullbacks crossing above EMA if conditions met, to capture continuation rallies (e.g., Nov/Dec 2024 BTC pump).</li>
+<li><strong>Risk Management</strong>: SL at 1 ATR below entry (default), TP at 3 ATR above (optional), trailing to Supertrend band after 1 ATR profit for locking gains.</li>
+<li><strong>Timeframe Presets</strong>: Auto-adjusts for TF:
+<ul>
+<li>"Auto-1H/4H": ATR 10, multi 3 (swing trades).</li>
+<li>"Auto-1D": ATR 14, multi 3 (daily trends, best for BTC).</li>
+<li>"Auto-1W": ATR 20, multi 4 (long-term).</li>
+<li>"Manual": Custom inputs.</li>
+</ul>
+</li>
+<li><strong>Start Date Filter</strong>: User-selectable (default Jan 1, 2024) to focus backtests on recent data.</li>
+</ul>
+
+<h2>Backtesting Notes:</h2>
+<p>Primarily backtested on BTCUSD (BITSTAMP or BINANCE), showing strong performance on daily TF with ~60% win rate, profit factor &gt;4, but high DD on full sizing (use fractional in real trading). Less tested on other coins – adapt multi for volatility (e.g., higher for altcoins). Example: On BTC daily (2024-2025), ~+40% net (normalized), but DD ~100%+ on $1k full positions; aim 1-2% risk per trade.</p>
+<p>Works best on trending assets like BTC in bull markets; choppy periods increase SL hits.</p>
+
+<h2>Usage Tips:</h2>
+<ul>
+<li>For automation/bots: Integrate with alerts on buy/sell signals.</li>
+<li>Customize: Disable RSI/vol for more trades, but test DD.</li>
+<li>Risk: Always use proper sizing; backtest your TF/asset. Not financial advice – consult a professional.</li>
+</ul>
+Aug 14, 2025
+Release Notes
+<h1>Supertrend EMA Strategy V29 - Trend-Following with Momentum Filters</h1>
+
+<p>This strategy combines the Supertrend indicator for trend detection with EMA and DEMA for momentum filtering, RSI and volume for entry conviction. It's designed for trend-following trades, with built-in risk management via ATR-based stop-loss (SL) and take-profit (TP) levels, plus trailing stops. Long and short trades are optional, but the default is long-only for bullish bias.</p>
+
+<h2>Key Features:</h2>
+<ul>
+<li><strong>Supertrend as Core Signal</strong>: Uses ATR to create dynamic trend bands. Buy on up-flip (close above lower band), sell on down-flip (close below upper band). Multiplier and ATR period adjustable for sensitivity.</li>
+<li><strong>Momentum Filters</strong>: Entries require close above EMA (short-term, default 21) and DEMA (long-term, default 200) to avoid counter-trend trades.</li>
+<li><strong>Conviction Checks</strong>: RSI (&gt; default 50) for momentum, volume &gt; EMA (default 20) for high-conviction.</li>
+<li><strong>Re-Entry Logic</strong>: During uptrends, re-enter on pullbacks crossing above EMA if conditions met, to capture continuation rallies (e.g., Nov/Dec 2024 BTC pump).</li>
+<li><strong>Risk Management</strong>: SL at 1 ATR below entry (default), TP at 3 ATR above (optional), trailing to Supertrend band after 1 ATR profit for locking gains.</li>
+<li><strong>Timeframe Presets</strong>: Auto-adjusts for TF:
+<ul>
+<li>"Auto-1H/4H": ATR 10, multi 3 (swing trades).</li>
+<li>"Auto-1D": ATR 14, multi 3 (daily trends, best for BTC).</li>
+<li>"Auto-1W": ATR 20, multi 4 (long-term).</li>
+<li>"Manual": Custom inputs.</li>
+</ul>
+</li>
+<li><strong>Start Date Filter</strong>: User-selectable (default Jan 1, 2024) to focus backtests on recent data.</li>
+</ul>
+
+<h2>Backtesting Notes:</h2>
+<p>Primarily backtested on BTCUSD (BITSTAMP or BINANCE), showing strong performance on daily TF with ~60% win rate, profit factor &gt;4, but high DD on full sizing (use fractional in real trading). Less tested on other coins – adapt multi for volatility (e.g., higher for altcoins). Example: On BTC daily (2024-2025), ~+40% net (normalized), but DD ~100%+ on $1k full positions; aim 1-2% risk per trade.</p>
+<p>Works best on trending assets like BTC in bull markets; choppy periods increase SL hits.</p>
+
+<h2>Usage Tips:</h2>
+<ul>
+<li>For automation/bots: Integrate with alerts on buy/sell signals.</li>
+<li>Customize: Disable RSI/vol for more trades, but test DD.</li>
+<li>Risk: Always use proper sizing; backtest your TF/asset. Not financial advice – consult a professional.</li>
+</ul>

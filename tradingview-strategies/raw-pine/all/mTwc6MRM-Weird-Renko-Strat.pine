@@ -1,0 +1,145 @@
+//@version=5
+strategy("Weird Renko Strat", overlay=true, initial_capital=10)
+margin_x = input.float(1, "Margin(x)")
+compound = input.bool(true, "Compound Yield")
+counter = input.bool(false, "Anti Strategy")
+param = input.float(10, "Param")
+renko_tickerid = ticker.renko(syminfo.tickerid, 'Traditional', param)
+renko_c = request.security(renko_tickerid, timeframe.period, close)
+renko_o = request.security(renko_tickerid, timeframe.period, open)
+renko_h = request.security(renko_tickerid, timeframe.period, high)
+renko_l = request.security(renko_tickerid, timeframe.period, low)
+color = renko_o < renko_c ? color.green : color.red
+down = input.float(1, "Drawdown (%)")
+drawdown = down/margin_x
+
+
+//Date
+fromMonth = input.int(defval = 1,    title = "From Month",  minval = 1, maxval = 12)
+fromDay   = input.int(defval = 1,    title = "From Day",    minval = 1, maxval = 31)
+fromYear  = input.int(defval = 2021, title = "From Year",   minval = 1970)
+thruMonth = input.int(defval = 1,    title = "Thru Month",  minval = 1, maxval = 12)
+thruDay   = input.int(defval = 1,    title = "Thru Day",    minval = 1, maxval = 31)
+thruYear  = input.int(defval = 2112, title = "Thru Year",   minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range")
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)            // backtest start  window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)            // backtest finish window
+button    = input(defval = true, title = "Max Backtest Timeframe")     // use to deactivate window
+window()  => time >= start and time <= finish ? true : false           // create function "within window of time"
+windowOn  = if window()
+    true
+else
+    button
+
+//Turn on counter
+if counter
+    //Turn on compound
+    if compound
+        //Open Long
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Short", strategy.short, qty=((strategy.equity/open) * margin_x))
+
+        //Open Short
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Long", strategy.long, qty=((strategy.equity/open) * margin_x))
+
+        //Close Long
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Short")    
+
+        //Close Short
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Long")
+
+    else
+        //Open Long
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Short", strategy.short, qty=strategy.initial_capital/open)
+        //Open Short
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Long", strategy.long, qty=strategy.initial_capital/open)
+
+        //Close Long
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Short")    
+
+        //Close Short
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Long")
+else
+    if compound
+        //Open Long
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Long", strategy.long, qty=((strategy.equity/open) * margin_x))
+
+        //Open Short
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Short", strategy.short, qty=((strategy.equity/open) * margin_x))
+
+        //Close Long
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Long")    
+
+        //Close Short
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Short")
+
+    else
+        //Open Long
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Long", strategy.long, qty=strategy.initial_capital/open)
+        //Open Short
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000) and windowOn)
+            strategy.entry("Short", strategy.short, qty=strategy.initial_capital/open)
+
+        //Close Long
+        if ((renko_c[1] > renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Long")    
+
+        //Close Short
+        if ((renko_c[1] < renko_c) and (strategy.equity > 0) and (strategy.equity <= 1000000000000))
+            strategy.close("Short")
+
+main = plot(strategy.position_avg_price, style=plot.style_stepline, linewidth=2, color=color.black, trackprice=true)
+sub = plot(strategy.position_entry_name=="Short" ? strategy.position_avg_price*(1+drawdown/100) : strategy.position_avg_price*(1-drawdown/100), style=plot.style_stepline, linewidth=1, color=color.navy, trackprice=true, display=display.none)
+fill(plot1=main, plot2=sub,color=color.new(color.red, 90),title="Unrealized Loss Area", display=display.none)
+
+View in Pine Editor・107 lines
+Use on chart
+1
+8
+5
+7
+5 436
+This strategy uses Renko, it generates a signal when there is a reversal in Renko. When using historical data, it provides a good entry and an okay exit. However, in a real-time environment, this strategy is subject to repaint and may produce a false signal.
+
+As a result, the backtesting result should not be used as a metric to predict future results. It is highly recommended to forward-test the strategy before using it in real trading. I forward test it from 12/18/2022 to 12/21/2022 in paper trading, using the alert feature in Tradingview. I made 60 trades trading the BTCUSDT BINANCE 3 min with 26 as the param and under the condition that I use 20x margin, compounding my yield, and having 0 trading fee, a steady loss is generated: from $10 to $3.02.
+
+This is quite interesting. As if I flip the signal from "Long" to "Short" and another way too, it will be a steady profit from $10 to $21.85. Hence, if I'm trying to anti-trade the real-time alert signal, the current "4 Days Result" will be good. Nevertheless, I still have to forward-test it for longer to see if it will fail eventually.
+
+Dive into the setting of the strategy
+- Margin is the leverage you use. 1 means 1x, 10 means 10x. It affects the backtest yield when you backtest
+- Compound Yield button is for compound calculation, disable it to go back to normal backtesting
+- Anti Strategy button is to do the opposite direction trade, when the original strat told you to "Long", you "Short" instead. Enable it to use the feature
+- Param is the block size for the Renko chart
+- Drawdown is just a visual tool for you in case you want to place a stop loss (represent by the semitransparent red area in the chart)
+- From date Thru Date is to specify the backtest range of the strategy, This feature is turned off by default. It is controlled by the Max Backtest Timeframe which will be explain below
+- Max Backtest Timeframe control the From date Thru Date function, disable it to enable the From Date Thru Date function
+
+Param is the most important input in this strategy as it directly affects performance. It is highly recommended to backtest nearly all the possible parameters before deploying it in real trading. Some factors should be considered:
+- Price of the asset (like an asset of 1 USD vs an asset of 10000 USD required different param)
+- Timeframe (1-minute param is different than 1-month param)
+I believe this is caused by the volatility of the selected timeframe since different timeframe has different volatility. Param should be fine-tuned before usage.
+
+Here is the param I'm using:
+BTCUSDT BINANCE 3min: 26
+BTCUSDT BINANCE 5min: 28
+BTCUSDT BINANCE 1day: 15
+
+Background of the strategy:
+- The strategy starts with $10 at the start of backtesting (customizable in setting)
+- The trading fee is set to 0.00% which is not common for most of the popular exchanges (customizable in setting)
+- The contract size is not a fixed amount, but it uses your balance to buy it at the open price. If you are using the compound mode, your balance will be your current total balance. If you are using the non-compound mode, it will just use the $10 you start with unless you change the amount you start with. If you are using a margin higher than 1, it will calculate the corresponding contract size properly based on your margin. (Only these options are allowed, you are not able to change them without changing the code)
+

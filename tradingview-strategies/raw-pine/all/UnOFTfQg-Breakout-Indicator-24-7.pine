@@ -1,0 +1,8 @@
+//@version=3
+transparency=##input(defval=50,type='INPUT_INTEGER',##id='in_1')
+##root(root_metainfo,rm_0,transparency)
+##root(root_metainfo,rm_1,transparency)
+##root(root_metainfo,rm_2,transparency)
+up60on=##input(defval=true,type='INPUT_BOOL',##id='in_6')
+trans60=(up60on?75:100)
+##root(root_metainfo,rm_3,trans60)

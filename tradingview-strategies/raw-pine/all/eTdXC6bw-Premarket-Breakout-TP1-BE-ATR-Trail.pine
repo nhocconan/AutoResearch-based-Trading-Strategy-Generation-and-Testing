@@ -1,0 +1,69 @@
+//@version=6
+strategy("Premarket Breakout (TP1 → BE → ATR Trail)", 
+     overlay=true, 
+     default_qty_type=strategy.cash, 
+     default_qty_value=10000)
+
+// === Inputs ===
+emaLen        = input.int(21, "EMA Length")
+lookbackHigh  = input.int(10, "Breakout Lookback")
+volMult       = input.float(1.5, "Volume × Avg Volume")
+stopPct       = input.float(1.0, "Stop %")
+atrMult       = input.float(1.5, "ATR Trail Multiplier")
+
+// === Indicators ===
+ema = ta.ema(close, emaLen)
+hh  = ta.highest(high[1], lookbackHigh)
+avgVol = ta.sma(volume, 20)
+
+volOK = volume > avgVol * volMult
+breakout = close > hh
+trendOK = close > ema
+
+enterLong = breakout and trendOK and volOK
+
+// === SL/TP1 ===
+atr = ta.atr(14)
+
+var float entryPrice = na
+var float stopPrice  = na
+var float tp1Price   = na
+var float trailStop  = na
+var bool tp1Hit      = false
+
+if enterLong and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryPrice := close
+    stopPrice := entryPrice * (1 - stopPct / 100)
+
+    risk = entryPrice - stopPrice
+    tp1Price := entryPrice + risk * 1.0
+
+    tp1Hit := false
+    trailStop := na
+
+// === TP1 HIT ===
+if strategy.position_size > 0 and not tp1Hit and high >= tp1Price
+    tp1Hit := true
+    trailStop := entryPrice   // move to breakeven
+
+// === ATR TRAIL AFTER TP1 ===
+if strategy.position_size > 0 and tp1Hit
+    newTS = close - atrMult * atr
+    trailStop := na(trailStop) ? newTS : math.max(trailStop, newTS)
+
+// === EXIT ===
+if strategy.position_size > 0
+    dynSL = tp1Hit ? trailStop : stopPrice
+    strategy.exit("Exit", from_entry="Long", stop=dynSL)
+
+// === Plots ===
+plot(ema, color=color.orange)
+plotshape(enterLong, style=shape.triangleup, color=color.lime, location=location.belowbar)
+plot(trailStop, color=color.red, style=plot.style_linebr)
+
+View in Pine Editor・63 lines
+Use on chart
+7
+704
+this is the best ever you will really like i t and it does a lot its a really good scirpt please use it to make trades

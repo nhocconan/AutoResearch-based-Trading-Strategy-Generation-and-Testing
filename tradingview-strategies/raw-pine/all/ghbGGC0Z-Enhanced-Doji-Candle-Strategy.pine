@@ -1,0 +1,66 @@
+//@version=5
+strategy("Enhanced Doji Candle Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Parameters
+riskRewardRatio = input.float(2.0, title="Risk-Reward Ratio")
+stopLossPips = input.int(5, title="Stop Loss (in pips)")  // Reduced to allow more trades
+
+defineDoji(threshold) =>
+    body = math.abs(close - open)
+    candleRange = high - low
+    body <= (candleRange * threshold)
+
+// Detect Doji candle with a higher threshold for more signals
+doji = defineDoji(0.3)  // Less strict detection
+
+// Determine Market Trend Using Shorter Moving Average
+smaPeriod = input.int(20, title="SMA Period")  // Shorter period for faster signals
+sma = ta.sma(close, smaPeriod)
+bullishTrend = close > sma
+bearishTrend = close < sma
+
+// Confirmation of Entry with Looser Requirements
+// Allow small wicks (up to 10% of the candle range)
+bullishConfirm = close > open and (low >= open * 0.99)
+bearishConfirm = close < open and (high <= open * 1.01)
+
+// Trade Entry Logic
+if doji
+    if bullishConfirm or bullishConfirm[1]  // Loosen confirmation to 1 candle
+        entryPrice = close
+        stopLossPrice = entryPrice - (stopLossPips * syminfo.mintick)
+        takeProfitPrice = entryPrice + ((entryPrice - stopLossPrice) * riskRewardRatio)
+        strategy.entry("Buy", strategy.long)
+        strategy.exit("Exit Buy", "Buy", stop=stopLossPrice, limit=takeProfitPrice)
+    
+    if bearishConfirm or bearishConfirm[1]  // Loosen confirmation to 1 candle
+        entryPrice = close
+        stopLossPrice = entryPrice + (stopLossPips * syminfo.mintick)
+        takeProfitPrice = entryPrice - ((stopLossPrice - entryPrice) * riskRewardRatio)
+        strategy.entry("Sell", strategy.short)
+        strategy.exit("Exit Sell", "Sell", stop=stopLossPrice, limit=takeProfitPrice)
+
+// Early Exit on Reversal Signal
+reversalDoji = doji
+if reversalDoji
+    strategy.close("Buy")
+    strategy.close("Sell")
+
+// Plotting
+plotshape(doji, style=shape.cross, color=color.yellow, title="Doji Candle")
+plot(sma, color=color.blue, title="SMA Trend")
+
+View in Pine Editor・52 lines
+Use on chart
+1
+5
+1 367
+Your trading strategy is a Doji Candlestick Reversal Strategy designed to identify potential market reversals using Doji candlestick patterns. These candles indicate indecision in the market, and when detected, your strategy uses a Simple Moving Average (SMA) with a short period of 20 to confirm the overall market trend. If the price is above the SMA, the trend is considered bullish; if it's below, the trend is bearish.
+
+Once a Doji is detected, the strategy waits for one or two consecutive confirmation candles that align with the market trend. For a bullish confirmation, the candles must close higher than their opening price without significant bottom wicks. Conversely, for a bearish confirmation, the candles must close lower without noticeable top wicks. When these conditions are met, a trade is entered at the market price.
+
+The risk management aspect of your strategy is clearly defined. A stop loss is automatically placed at the nearest recent swing high or low, with a tighter distance of 5 pips to allow for more trading opportunities. A take-profit level is set using a 2:1 reward-to-risk ratio, meaning the potential reward is twice the size of the risk on each trade.
+
+Additionally, the strategy incorporates an early exit mechanism. If a reversal Doji forms in the opposite direction of your trade, the position is closed immediately to minimize losses. This strategy has been optimized to increase trade frequency by loosening the strictness of Doji detection and confirmation conditions while still maintaining sound risk management principles.
+
+The strategy is coded in Pine Script for use on TradingView and uses built-in indicators like the SMA for trend detection. You also have flexible parameters to adjust risk levels, take-profit targets, and stop-loss placements, allowing you to tailor the strategy to different market conditions.

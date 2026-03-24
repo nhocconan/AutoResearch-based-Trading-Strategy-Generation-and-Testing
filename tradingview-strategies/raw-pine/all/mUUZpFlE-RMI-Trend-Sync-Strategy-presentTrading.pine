@@ -1,0 +1,13 @@
+//@version=5
+colBuy=##input(defval=#5b9cf6,type='INPUT_COLOR',##id='in_17')
+colStrongBuy=##input(defval=#2962ff,type='INPUT_COLOR',##id='in_18')
+colNeutral=##input(defval=#a8adbc,type='INPUT_COLOR',##id='in_19')
+colSell=##input(defval=#ef9a9a,type='INPUT_COLOR',##id='in_20')
+colStrongSell=##input(defval=#f44336,type='INPUT_COLOR',##id='in_21')
+tableTitleColor=##input(defval=#295b79,type='INPUT_COLOR',##id='in_22')
+##root(root_metainfo,rm_ic_0,colBuy,input__color)
+##root(root_metainfo,rm_ic_1,colStrongBuy,input__color)
+##root(root_metainfo,rm_ic_2,colNeutral,input__color)
+##root(root_metainfo,rm_ic_3,colSell,input__color)
+##root(root_metainfo,rm_ic_4,colStrongSell,input__color)
+##root(root_metainfo,rm_ic_5,tableTitleColor,input__color)

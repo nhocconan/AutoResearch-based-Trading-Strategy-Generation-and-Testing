@@ -1,0 +1,223 @@
+//@version=5
+strategy("ICT Liquidity Sweep Asia/London 1 Trade per High & Low", overlay=true, initial_capital=100000,default_qty_type=strategy.fixed,default_qty_value=1,pyramiding=0)
+
+
+// === INPUTS ===
+rrTarget = input.float(2.0, "Risk/Reward Target")
+contracts = input.int(1, "Nombre de contrats par trade", minval=1)
+
+// === SESSIONS ===
+isAsia   = time(timeframe.period, "2000-2359:1234567", "America/New_York")
+isLondon = time(timeframe.period, "0200-0500:1234567", "America/New_York")
+
+// === VARIABLES ===
+var float asiaHigh = na
+var float asiaLow = na
+var float londonHigh = na
+var float londonLow = na
+var bool asiaTradedHigh = false
+var bool asiaTradedLow = false
+var bool londonTradedHigh = false
+var bool londonTradedLow = false
+var float slPrice = na
+var float tpPrice = na
+
+// === RESET DAILY ===
+if ta.change(time("D"))
+    asiaHigh := na
+    asiaLow := na
+    londonHigh := na
+    londonLow := na
+    asiaTradedHigh := false
+    asiaTradedLow := false
+    londonTradedHigh := false
+    londonTradedLow := false
+
+// === CALCUL DES RANGES ===
+if isAsia
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow := na(asiaLow) ? low : math.min(asiaLow, low)
+
+if isLondon
+    londonHigh := na(londonHigh) ? high : math.max(londonHigh, high)
+    londonLow := na(londonLow) ? low : math.min(londonLow, low)
+
+// === TRACE LES LIGNES ===
+plot(asiaHigh, "Asia High", color=color.new(color.aqua, 0))
+plot(asiaLow, "Asia Low", color=color.new(color.aqua, 0))
+plot(londonHigh, "London High", color=color.new(color.orange, 0))
+plot(londonLow, "London Low", color=color.new(color.orange, 0))
+
+// === COLORATION DES ZONES ===
+bgcolor(isAsia ? color.new(color.aqua, 85) : na)
+bgcolor(isLondon ? color.new(color.orange, 85) : na)
+
+// === DETECTION DES SWEEPS ===
+asiaSweepLow = not asiaTradedLow and not na(asiaLow) and low < asiaLow
+asiaSweepHigh = not asiaTradedHigh and not na(asiaHigh) and high > asiaHigh
+londonSweepLow = not londonTradedLow and not na(londonLow) and low < londonLow
+londonSweepHigh = not londonTradedHigh and not na(londonHigh) and high > londonHigh
+
+// === VISUALISATION ===
+plotshape(asiaSweepHigh or londonSweepHigh, title="High Sweep", style=shape.triangleup, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(asiaSweepLow or londonSweepLow, title="Low Sweep", style=shape.triangledown, location=location.belowbar, color=color.green, size=size.tiny)
+
+// === ENTRÉE DE TRADE ===
+enterLong = false
+enterShort = false
+
+// === CONDITIONS ASIA ===
+// Sweep du low → LONG (même bougie OU bougie suivante)
+if asiaSweepLow and close > open
+    enterLong := true
+    slPrice := low
+    tpPrice := close + (close - slPrice) * rrTarget
+    asiaTradedLow := true
+else if asiaSweepLow[1] and close > open and not asiaTradedLow
+    enterLong := true
+    slPrice := low[1]
+    tpPrice := close + (close - slPrice) * rrTarget
+    asiaTradedLow := true
+
+// Sweep du high → SHORT (même bougie OU bougie suivante)
+if asiaSweepHigh and close < open
+    enterShort := true
+    slPrice := high
+    tpPrice := close - (slPrice - close) * rrTarget
+    asiaTradedHigh := true
+else if asiaSweepHigh[1] and close < open and not asiaTradedHigh
+    enterShort := true
+    slPrice := high[1]
+    tpPrice := close - (slPrice - close) * rrTarget
+    asiaTradedHigh := true
+
+// === CONDITIONS LONDON ===
+// Sweep du low → LONG
+if londonSweepLow and close > open
+    enterLong := true
+    slPrice := low
+    tpPrice := close + (close - slPrice) * rrTarget
+    londonTradedLow := true
+else if londonSweepLow[1] and close > open and not londonTradedLow
+    enterLong := true
+    slPrice := low[1]
+    tpPrice := close + (close - slPrice) * rrTarget
+    londonTradedLow := true
+
+// Sweep du high → SHORT
+if londonSweepHigh and close < open
+    enterShort := true
+    slPrice := high
+    tpPrice := close - (slPrice - close) * rrTarget
+    londonTradedHigh := true
+else if londonSweepHigh[1] and close < open and not londonTradedHigh
+    enterShort := true
+    slPrice := high[1]
+    tpPrice := close - (slPrice - close) * rrTarget
+    londonTradedHigh := true
+
+
+// === EXECUTION ===
+if barstate.isconfirmed
+    // Empêche les entrées multiples
+    if strategy.position_size == 0
+        // LONG
+        if enterLong
+            idLong = "Long_" + str.tostring(time)
+            strategy.entry(idLong, strategy.long, qty=contracts)
+            strategy.exit("TP/SL_" + idLong, from_entry=idLong, limit=tpPrice, stop=slPrice)
+            label.new(bar_index, close,"LONG\nSL: " + str.tostring(slPrice) + "\nTP: " + str.tostring(tpPrice) +"\nContrats: " + str.tostring(contracts),style=label.style_label_up, color=color.new(color.green, 0))
+
+        // SHORT
+        if enterShort
+            idShort = "Short_" + str.tostring(time)
+            strategy.entry(idShort, strategy.short, qty=contracts)
+            strategy.exit("TP/SL_" + idShort, from_entry=idShort, limit=tpPrice, stop=slPrice)
+            label.new(bar_index, close,"SHORT\nSL: " + str.tostring(slPrice) + "\nTP: " + str.tostring(tpPrice) +"\nContrats: " + str.tostring(contracts),style=label.style_label_down, color=color.new(color.red, 0))
+
+View in Pine Editor・136 lines
+Use on chart
+9
+0
+3 829
+🧠 ICT Liquidity Sweep Asia/London — 1 Trade per High & Low
+
+This strategy is inspired by the ICT (Inner Circle Trader) concepts of liquidity sweeps and market structure, focusing on the Asia and London sessions.
+
+It automatically identifies liquidity grabs (sweeps) above or below key session highs/lows and enters trades with a fixed risk/reward ratio (RR).
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+⚙️ Core Logic
+
+-Asia Session: 8:00 PM – 11:59 PM (New York time)
+
+-London Session: 2:00 AM – 5:00 AM (New York time)
+
+-The script marks the Asia High/Low and London High/Low ranges for each day.
+
+-When the market sweeps above a session high → potential Short setup
+
+-When the market sweeps below a session low → potential Long setup
+
+-A trade is triggered when the confirmation candle closes in the opposite direction of the sweep (bearish after a high sweep, bullish after a low sweep).
+
+-Only one trade per sweep type (1 per High, 1 per Low) is allowed per session.
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+📈 Risk Management
+
+-Configurable Risk/Reward Target (default = 2:1)
+
+-Configurable Position Size (number of contracts)
+
+-Each trade uses a fixed Stop Loss (beyond the wick of the sweep) and a Take Profit calculated from the RR setting.
+
+-All trades are automatically logged in the Strategy Tester with performance metrics.
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+💡 Features
+
+✅ Visual session highlighting (Asia = Aqua, London = Orange)
+✅ Automatic liquidity line plotting (session highs/lows)
+✅ Entry & exit labels (optional visual display)
+✅ Customizable RR and contract size
+✅ Works on any instrument (ideal for indices, futures, or forex)
+✅ Compatible with all timeframes (optimized for 1M–15M)
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+⚠️ Notes
+
+-Best used on New York time-based charts.
+
+-Designed for educational and backtesting purposes — not financial advice.
+
+-Use as a foundation for further optimization (e.g., SMT confirmation, FVG filter, or time-based restrictions).
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+🧩 Recommended Use
+
+Pair this with:
+
+-ICT’s concepts like CISD (Change in State of Delivery) and FVGs (Fair Value Gaps)
+
+-Higher timeframe liquidity maps
+
+-Session bias or daily narrative filters
+
+----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+
+Author: jygirouard
+Strategy Version: 1.3
+Type: ICT Liquidity Sweep Automation
+Timezone: America/New_York

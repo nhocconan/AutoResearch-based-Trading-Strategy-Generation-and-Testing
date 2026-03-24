@@ -1,0 +1,95 @@
+//@version=2
+strategy("Backtesting Period Selector | [pbergden]", shorttitle="Backtesting Period Selector", overlay=true)
+
+//////////////////////////////////////////////////////////////////////
+// Date:2016.06.01
+// Author: pbergden
+// Version: 0.1
+// Description: A 'component' which simplifies selecting backtesting period
+
+//////////////////////////////////////////////////////////////////////
+// Long description:
+// With this component code you can select between which dates 
+// you want to backtest.
+// You can also select a background color to visually show the 
+// testing period.
+
+//////////////////////////////////////////////////////////////////////
+// Todo
+// 1.   Enable color selection to that the user can choose the 
+//      background color of his own choice.
+// 2.   Improve naming of variables.
+// 3.   Test for ilogical choices, such as test period start being at
+//      a later date than test period stop.
+// 4.   Account for time zones.
+
+
+//////////////////////////////////////////////////////////////////////
+// Example usage:
+// if testPeriod()
+//   strategy.entry("LE", strategy.long)
+
+//////////////////////////////////////////////////////////////////////
+// Simply copy the code below and paste it into your own strategy
+
+//////////////////////////////////////////////////////////////////////
+// Component Code Start
+testStartYear = input(2014, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2015, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+// Component Code Stop
+//////////////////////////////////////////////////////////////////////
+
+View in Pine Editor・55 lines
+Use on chart
+5
+4
+4
+25
+21 442
+Description
+It's nice to quickly be able to set the backtesting period when writing strategies.
+To make this process faster I wrote a simple 'component'.
+So this is not a strategy but rather code you can plug-into your strategy and use
+if you need that specific functionality.
+
+Then it's just a matter of selecting which dates you want to backtest.
+You can also chose to color the background to visually show the testing period.
+Unfortunately, the background color is fixed at 'blue' for now.
+
+Ps. I like the idea of writing small components to be pluged into other strategies
+I'll try to develop this idea a bit further and see how small pieces of code can
+easily provide specific functionality to assist and make deving strategies a bit less 'Pineful'.
+
+Usage
+First copy the instructed part of the component code over to your strategy.
+Next, use the testPeriod() function to limit strategies to the specified backtesting period.
+
+Example usage:
+if testPeriod()
+strategy.entry("LE", strategy.long)
+
+Todo / Improvements
+There are many ways to improve this component and I'm not a very good coder so this is a very crude solutions.
+Anyway, here are some things which would be nice to improve:
+1. Enable color selection so that the user can choose the background color of his own liking.
+2. Improve naming of variables.
+3. Test for ilogical choices, such as test period start being at a later date, than test period stop.
+4. Account for time zones.
+
+As always, any feedback, corrections or thoughts are very much welcome!
+/pbergden

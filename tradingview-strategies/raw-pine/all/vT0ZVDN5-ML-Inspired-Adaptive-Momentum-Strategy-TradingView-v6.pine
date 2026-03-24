@@ -1,0 +1,102 @@
+//@version=6
+strategy(
+     title = "ML-Inspired Adaptive Momentum Strategy",
+     overlay = true,
+     initial_capital = 10000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     slippage = 2,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5
+)
+
+
+// -------- Utility --------
+clamp(val, minVal, maxVal) =>
+    math.min(math.max(val, minVal), maxVal)
+
+
+// -------- Inputs --------
+emaLen      = input.int(50, "EMA Length")
+atrLen      = input.int(14, "ATR Length")
+threshold   = input.float(0.3, "Signal Threshold")
+
+
+// -------- Core Logic --------
+emaValue = ta.ema(close, emaLen)
+emaSlope = emaValue - emaValue[1]
+
+
+atrValue = ta.atr(atrLen)
+
+
+// Normalize slope by volatility (ML-style feature scaling)
+rawScore = emaSlope / atrValue
+score    = clamp(rawScore, -1.0, 1.0)
+
+
+// -------- Signals --------
+longCond  = score > threshold
+shortCond = score < -threshold
+
+
+if longCond
+    strategy.entry("Long", strategy.long)
+
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+
+// -------- Plot --------
+plot(emaValue, title="EMA", linewidth=2)
+
+View in Pine Editor・52 lines
+Use on chart
+2
+1
+1 190
+This strategy demonstrates an adaptive momentum approach using volatility-normalized trend strength. It is designed for educational and analytical purposes and uses deterministic, fully transparent logic compatible with Pine Script v6.
+
+ML-Inspired Concept (Educational Context)
+
+Pine Script cannot train or execute real machine-learning models.
+Instead, this strategy demonstrates ML-style thinking by:
+
+Converting price data into features
+
+Normalizing features to account for volatility differences
+
+Producing a bounded confidence score
+
+Applying thresholds for decision making
+
+
+This is not predictive AI and does not claim forecasting capability.
+
+Strategy Logic
+
+EMA is used to measure directional bias
+
+EMA slope represents momentum change
+
+ATR normalizes the slope (feature scaling)
+
+A clamped score between −1 and +1 is generated
+
+Trades trigger only when the score exceeds defined thresholds
+
+
+
+Risk & Execution
+
+Position size capped at 5% equity
+
+Commission and slippage included for realistic testing
+
+Signals are calculated on closed bars only
+
+
+
+Purpose
+This script is intended to help traders explore adaptive momentum concepts and understand how feature normalization can be applied in systematic trading strategies.

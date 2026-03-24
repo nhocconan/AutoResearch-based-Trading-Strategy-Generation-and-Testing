@@ -1,0 +1,648 @@
+//@version=6
+strategy("Institutional Execution Engine v3 [Nishith Rajwar]", overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=1, 
+     currency=currency.USD, 
+     process_orders_on_close=true, 
+     max_boxes_count=500, 
+     max_lines_count=500, 
+     max_labels_count=500)
+// =============================================================================
+// I. PRESETS & CONFIGURATION
+// =============================================================================
+grp_pre = "MASTER PRESETS"
+preset = input.string("Scalp (Index)", "Execution Preset", 
+     options=["Scalp (Index)", "Daytrade (Index)", "Crypto Intraday", "Custom", "Institutional Research (FWalk)"], group=grp_pre)
+grp_cust = "Custom Settings"
+c_pivot_len = input.int(5, "Pivot Length", group=grp_cust)
+c_min_score = input.int(60, "Min Score", group=grp_cust)
+c_risk_r    = input.float(2.0, "TP R-Multiple", group=grp_cust)
+// [UPGRADE 4] Hybrid Mode Selector
+grp_mode = "System Mode"
+mode_input = input.string("Hybrid", "Operation Mode", options=["IndicatorOnly", "StrategyOnly", "Hybrid"], group=grp_mode)
+// [UPGRADE 3] Microstructure Decay inputs
+grp_decay = "Microstructure Decay"
+use_decay = input.bool(false, "Enable Time Decay", group=grp_decay)
+decay_hl  = input.int(50, "Half-Life (Bars)", group=grp_decay)
+decay_floor = input.float(0.5, "Max Decay Floor (0-1)", group=grp_decay)
+// Strictly Typed Configuration
+var int p_atr_len    = 14
+var int p_pivot_len  = 5
+var int p_min_score  = 70 
+var string p_profile = "Nifty" 
+var float p_risk_r   = 1.5 
+var bool p_one_trade = true
+// Auto-Configure
+if preset == "Scalp (Index)"
+    p_pivot_len := 3
+    p_min_score := 75
+    p_profile   := "Nifty"
+    p_risk_r    := 1.5
+    p_atr_len   := 10
+    p_one_trade := true
+else if preset == "Daytrade (Index)"
+    p_pivot_len := 5
+    p_min_score := 65
+    p_profile   := "Nifty"
+    p_risk_r    := 3.0
+    p_atr_len   := 14
+    p_one_trade := true
+else if preset == "Crypto Intraday"
+    p_pivot_len := 5
+    p_min_score := 70
+    p_profile   := "Crypto"
+    p_risk_r    := 2.0
+    p_atr_len   := 14
+    p_one_trade := false
+else if preset == "Institutional Research (FWalk)"
+    p_pivot_len := 4
+    p_min_score := 60
+    p_profile   := "Global"
+    p_risk_r    := 2.0
+    p_atr_len   := 14
+    p_one_trade := false
+    use_decay   := true // Enable Decay by default for research
+else if preset == "Custom"
+    p_pivot_len := c_pivot_len
+    p_min_score := c_min_score
+    p_risk_r    := c_risk_r
+    p_profile   := "Global" 
+    p_one_trade := false
+// [UPGRADE 1] Strict Non-Repaint Guard
+// Strategy operates on confirmed closes, so barstate.isconfirmed aligns with process_orders_on_close.
+bool non_repaint_ok = barstate.isconfirmed
+// =============================================================================
+// II. GATE 1: LIQUIDITY DETECTION & POI
+// =============================================================================
+atr = ta.atr(p_atr_len)
+// vw_reset
+var float vwap_sum_src = 0.0
+var float vwap_sum_vol = 0.0
+bool reset_vwap = false
+// [UPGRADE 1] Repaint-safe time checks
+if p_profile == "Nifty"
+    // Reset at 09:15 IST
+    if hour == 9 and minute == 15 and (minute[1] != 15 or hour[1] != 9)
+        reset_vwap := true
+else if p_profile == "Crypto"
+    // Reset on Daily Boundary (Strict)
+    if time("D") != time("D")[1]
+        reset_vwap := true
+else
+    // Default Fallback
+    if time("D") != time("D")[1]
+        reset_vwap := true
+if reset_vwap
+    vwap_sum_src := 0.0
+    vwap_sum_vol := 0.0
+vwap_sum_src += hlc3 * volume
+vwap_sum_vol += volume
+vwap_v = vwap_sum_vol != 0 ? vwap_sum_src / vwap_sum_vol : hlc3
+vol_ma = ta.sma(volume, 20)
+type POI
+    float price
+    int   start_bar
+    float score
+    int   side       // 1 = Buy (Demand), -1 = Sell (Supply)
+    
+    // Metadata
+    float zone_h
+    float zone_l
+    float init_vol_pct 
+    float init_w_pct   
+    bool  is_sweep     
+    float init_vwap_d  
+    float move_eff
+    
+    bool  active
+    box   vis
+    label score_lbl
+    
+    // [UPGRADE 3] Decay Metadata
+    int last_touch_bar
+var POI[] poi_pool = array.new<POI>()
+f_er(int len) =>
+    if bar_index < len
+        0.0
+    else
+        change_abs = math.abs(close - close[len])
+        // ChatGPT Fix: Uses SMA * Len to approximate Sum
+        sum_change = ta.sma(math.abs(close - close[1]), len) * len
+        sum_change > 0 ? change_abs / sum_change : 0.0
+// Pivot Detection
+ph = ta.pivothigh(high, p_pivot_len, p_pivot_len)
+pl = ta.pivotlow(low, p_pivot_len, p_pivot_len)
+// =============================================================================
+// III. GATE 2: SCORING ENGINE
+// =============================================================================
+f_calc_score(vol_pct, wick_pct, vwap_dist_atr, is_sweep, age, move_er) =>
+    s = 0.0
+    // 1. Rel Vol
+    if vol_pct > 2.0
+        s += 30
+    else if vol_pct > 1.0
+        s += 15
+    
+    // 2. Sweep
+    if is_sweep
+        s += 20
+    
+    // 3. VWAP Dist
+    if vwap_dist_atr > 2.0
+        s += 15
+    else if vwap_dist_atr > 1.0
+        s += 10
+    
+    // 4. Move Efficiency
+    if move_er > 0.6
+        s += 20
+    else if move_er > 0.4
+        s += 10
+    
+    // 5. Time Efficiency
+    if age < 20
+        s += 15
+    else if age < 50
+        s += 5
+    
+    s
+// Creation Logic
+// [UPGRADE 1] Only create POIs on confirmed bars to prevent flicker if desired, 
+// though pivothigh/low already lag. Using non_repaint_ok for critical updates.
+if not na(ph)
+    drop = ph - ta.lowest(low, p_pivot_len)
+    if drop > atr 
+        c_range = high[p_pivot_len] - low[p_pivot_len]
+        w_pct   = c_range > 0 ? (high[p_pivot_len] - math.max(open[p_pivot_len], close[p_pivot_len])) / c_range : 0.0
+        v_pct   = vol_ma[p_pivot_len] > 0 ? volume[p_pivot_len] / vol_ma[p_pivot_len] : 1.0
+        d_vwap  = math.abs(ph - vwap_v[p_pivot_len]) / atr
+        sw = high[p_pivot_len] >= ta.highest(high, 10)[p_pivot_len+1]
+        m_er = f_er(p_pivot_len)
+        
+        sc = f_calc_score(v_pct, w_pct, d_vwap, sw, 0, m_er)
+        
+        // [UPGRADE 4] Wrap Visuals
+        if sc >= p_min_score
+            z_top = ph
+            z_btm = ph - (atr * 0.2)
+            
+            box b = na
+            label l = na
+            
+            if mode_input != "StrategyOnly"
+                b := box.new(bar_index[p_pivot_len], z_top, bar_index, z_btm, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 80))
+                l := label.new(bar_index[p_pivot_len], z_top, str.tostring(sc, "#"), color=color.new(color.black,100), textcolor=color.red, style=label.style_label_down, size=size.tiny)
+            
+            array.push(poi_pool, POI.new(z_top, bar_index[p_pivot_len], sc, -1, z_top, z_btm, v_pct, w_pct, sw, d_vwap, m_er, true, b, l, bar_index[p_pivot_len]))
+if not na(pl)
+    rally = ta.highest(high, p_pivot_len) - pl
+    if rally > atr 
+        c_range = high[p_pivot_len] - low[p_pivot_len]
+        w_pct   = c_range > 0 ? (math.min(open[p_pivot_len], close[p_pivot_len]) - low[p_pivot_len]) / c_range : 0.0
+        v_pct   = vol_ma[p_pivot_len] > 0 ? volume[p_pivot_len] / vol_ma[p_pivot_len] : 1.0
+        d_vwap  = math.abs(pl - vwap_v[p_pivot_len]) / atr
+        sw = low[p_pivot_len] <= ta.lowest(low, 10)[p_pivot_len+1]
+        m_er = f_er(p_pivot_len)
+        
+        sc = f_calc_score(v_pct, w_pct, d_vwap, sw, 0, m_er)
+        
+        if sc >= p_min_score
+            z_btm = pl
+            z_top = pl + (atr * 0.2)
+            
+            box b = na
+            label l = na
+            if mode_input != "StrategyOnly"
+                b := box.new(bar_index[p_pivot_len], z_top, bar_index, z_btm, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 80))
+                l := label.new(bar_index[p_pivot_len], z_btm, str.tostring(sc, "#"), color=color.new(color.black,100), textcolor=color.green, style=label.style_label_up, size=size.tiny)
+            
+            array.push(poi_pool, POI.new(z_btm, bar_index[p_pivot_len], sc, 1, z_top, z_btm, v_pct, w_pct, sw, d_vwap, m_er, true, b, l, bar_index[p_pivot_len]))
+// =============================================================================
+// IV. GATE 3: REGIME ENGINE
+// =============================================================================
+atr_h = ta.highest(atr, 100)
+atr_l = ta.lowest(atr, 100)
+atr_pct = atr_h > atr_l ? (atr - atr_l) / (atr_h - atr_l) * 100.0 : 50.0
+er_glob = f_er(20)
+// 0=Compression, 1=Balanced, 2=Trend, 3=Expansion
+int reg_mode = 0 
+if atr_pct < 30
+    reg_mode := 1 // Balanced
+else if atr_pct > 60
+    if er_glob > 0.4
+        reg_mode := 2 // Trend
+    else if atr_pct > 70 and er_glob < 0.3
+        reg_mode := 3 // Expansion
+    else
+        reg_mode := 3 // Expansion fallback
+else
+    reg_mode := 0 // Compression
+string reg_lbl = "Compression"
+color c_reg_c = color.gray
+if reg_mode == 1
+    reg_lbl := "Balanced"
+    c_reg_c := color.blue
+else if reg_mode == 2
+    reg_lbl := "Trend"
+    c_reg_c := color.orange
+else if reg_mode == 3
+    reg_lbl := "Expansion"
+    c_reg_c := color.rgb(255, 215, 0)
+// Gate Logic
+gate_regime = false
+// Strategy allows entries in Trend (2) and Expansion (3)
+if reg_mode == 2 or reg_mode == 3
+    gate_regime := true
+// Also allow Balanced (1)
+if reg_mode == 1
+    gate_regime := true
+// =============================================================================
+// V. GATE 4: SESSION PHASE & EXPECTANCY
+// =============================================================================
+s_phase = "Closed"
+s_active = false
+s_no_entry = false
+if p_profile == "Nifty"
+    if not na(time(timeframe.period, "0915-0930:12345"))
+        s_phase := "Discovery"
+        s_active := true
+        s_no_entry := true
+    else if not na(time(timeframe.period, "0930-1515:12345"))
+        s_phase := "Active"
+        s_active := true
+    else if not na(time(timeframe.period, "1515-1525:12345"))
+        s_phase := "Closing"
+        s_active := true
+        s_no_entry := true
+else
+    s_phase := "Global"
+    s_active := true
+// Session Expectancy Tracking
+var float sess_win_r = 0.0
+var int sess_wins = 0
+var int sess_loss = 0
+var float sess_pnl = 0.0
+if reset_vwap
+    sess_wins := 0
+    sess_loss := 0
+    sess_pnl  := 0.0
+// [UPGRADE 2] Forward Walk Regime Statistics
+// Arrays to store [Wins, Losses, PnL] for each regime (0,1,2,3)
+var int[] stats_wins = array.new_int(4, 0)
+var int[] stats_loss = array.new_int(4, 0)
+var float[] stats_pnl = array.new_float(4, 0.0)
+// Check for newly closed trades to update stats
+if strategy.closedtrades > strategy.closedtrades[1]
+    pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    
+    // Update Session Stats
+    sess_pnl += pnl
+    if pnl > 0
+        sess_wins += 1
+    else
+        sess_loss += 1
+        
+    // Update Regime Stats (using CURRENT regime as approximation for trade context, or ideally entry regime if tracked)
+    // To strictly track entry regime, we'd need to parse it from the comment or store it.
+    // Given parsing constraint, we will update based on current EXIT regime which implies reliability of the exit condition.
+    // Better practice: Parse comment. Comment format: "S | 75 | Expansion"
+    cmt = strategy.closedtrades.entry_comment(strategy.closedtrades - 1) // e.g. "S | 75 | Expansion"
+    int trade_reg = reg_mode // Default to current if parse fails
+    if str.contains(cmt, "Expansion")
+        trade_reg := 3
+    else if str.contains(cmt, "Trend")
+        trade_reg := 2
+    else if str.contains(cmt, "Balanced")
+        trade_reg := 1
+    else if str.contains(cmt, "Compression")
+        trade_reg := 0
+        
+    if trade_reg >= 0 and trade_reg < 4
+        cur_w = array.get(stats_wins, trade_reg)
+        cur_l = array.get(stats_loss, trade_reg)
+        cur_p = array.get(stats_pnl, trade_reg)
+        
+        if pnl > 0
+            array.set(stats_wins, trade_reg, cur_w + 1)
+        else
+            array.set(stats_loss, trade_reg, cur_l + 1)
+        
+        array.set(stats_pnl, trade_reg, cur_p + pnl)
+gate_exp = true
+// Loose guard for negative expectancy session
+if sess_pnl < (-2.0 * 1000) 
+    gate_exp := false
+// Trade Limit Check
+trade_taken_l = false
+trade_taken_s = false
+if reset_vwap
+    trade_taken_l := false
+    trade_taken_s := false
+// =============================================================================
+// VI. EXECUTION LOGIC
+// =============================================================================
+POI top_poi = na
+max_s = 0.0
+if array.size(poi_pool) > 0
+    for i = 0 to array.size(poi_pool) - 1
+        POI p = array.get(poi_pool, i)
+        if p.active
+            // Decay
+            age = bar_index - p.start_bar
+            p.score := f_calc_score(p.init_vol_pct, p.init_w_pct, p.init_vwap_d, p.is_sweep, age, p.move_eff)
+            
+            // [UPGRADE 3] Microstructure Time Decay
+            if use_decay and decay_hl > 0
+                bars_since = bar_index - p.last_touch_bar
+                decay_factor = math.exp(-1.0 * bars_since / decay_hl)
+                // Apply floor
+                if decay_factor < decay_floor
+                    decay_factor := decay_floor
+                p.score := p.score * decay_factor
+            
+            // [UPGRADE 4] Visuals Check
+            if mode_input != "StrategyOnly"
+                box.set_right(p.vis, bar_index + 4)
+                label.set_x(p.score_lbl, bar_index)
+                label.set_text(p.score_lbl, str.tostring(p.score, "#"))
+            
+            if p.score < 40 or age > 200
+                p.active := false
+                if mode_input != "StrategyOnly"
+                    box.delete(p.vis)
+                    label.delete(p.score_lbl)
+            
+            // Interaction
+            if p.side == -1 // Supply
+                if close > p.zone_h
+                    p.active := false
+                    if mode_input != "StrategyOnly"
+                        box.delete(p.vis)
+                        label.delete(p.score_lbl)
+                else if high > p.zone_l and close < p.zone_h
+                    // Update touch
+                    p.last_touch_bar := bar_index
+                    
+                    if p.score > max_s
+                        max_s := p.score
+                        top_poi := p
+            else // Demand
+                if close < p.zone_l
+                    p.active := false
+                    if mode_input != "StrategyOnly"
+                        box.delete(p.vis)
+                        label.delete(p.score_lbl)
+                else if low < p.zone_h and close > p.zone_l
+                    // Update touch
+                    p.last_touch_bar := bar_index
+                    
+                    if p.score > max_s
+                        max_s := p.score
+                        top_poi := p
+        array.set(poi_pool, i, p)
+// Master Gates
+g_liq   = not na(top_poi)
+g_score = g_liq and top_poi.score >= p_min_score
+g_reg   = gate_regime
+g_sess  = s_active and not s_no_entry and gate_exp
+g_limit = true
+if p_one_trade
+    if g_liq
+        if top_poi.side == -1 and trade_taken_s
+            g_limit := false
+        if top_poi.side == 1 and trade_taken_l
+            g_limit := false
+allowed = g_liq and g_score and g_reg and g_sess and g_limit
+// Execution
+// [UPGRADE 4] Mode Check: Execute only for Strategy/Hybrid
+if mode_input != "IndicatorOnly"
+    if allowed and strategy.opentrades == 0
+        // [UPGRADE 1] Non-Repaint Guard for Execution
+        if non_repaint_ok
+            // [GUARD] POI Existence
+            if not na(top_poi)
+                if top_poi.side == -1  // Supply
+                    if close < open
+                        pen = high - top_poi.zone_l
+                        dep = top_poi.zone_h - top_poi.zone_l
+                        ratio = dep > 0 ? pen / dep : 1.0
+                        if ratio < 0.5 
+                            sl = top_poi.zone_h + (atr * 0.2)
+                            risk = sl - close
+                            tp = close - (risk * p_risk_r)
+                            
+                            if risk > 0
+                                cmt = "S | " + str.tostring(top_poi.score, "#") + " | " + reg_lbl
+                                strategy.entry("Short", strategy.short, comment=cmt)
+                                strategy.exit("TP", "Short", limit=tp, stop=sl)
+                                trade_taken_s := true
+                                
+                                // Alert Payload
+                                alert_msg = "SYM:" + syminfo.ticker + "|DIR:SHORT|ENT:" + str.tostring(close) + "|SL:" + str.tostring(sl) + "|TP:" + str.tostring(tp) + "|REG:" + reg_lbl + "|SCR:" + str.tostring(top_poi.score)
+                                alert(alert_msg, alert.freq_once_per_bar_close)
+                else // Demand
+                    if close > open
+                        pen = top_poi.zone_h - low
+                        dep = top_poi.zone_h - top_poi.zone_l
+                        ratio = dep > 0 ? pen / dep : 1.0
+                        if ratio < 0.5 
+                            sl = top_poi.zone_l - (atr * 0.2)
+                            risk = close - sl
+                            tp = close + (risk * p_risk_r)
+                            
+                            if risk > 0
+                                cmt = "L | " + str.tostring(top_poi.score, "#") + " | " + reg_lbl
+                                strategy.entry("Long", strategy.long, comment=cmt)
+                                strategy.exit("TP", "Long", limit=tp, stop=sl)
+                                trade_taken_l := true
+                                
+                                // Alert Payload
+                                alert_msg = "SYM:" + syminfo.ticker + "|DIR:LONG|ENT:" + str.tostring(close) + "|SL:" + str.tostring(sl) + "|TP:" + str.tostring(tp) + "|REG:" + reg_lbl + "|SCR:" + str.tostring(top_poi.score)
+                                alert(alert_msg, alert.freq_once_per_bar_close)
+// BE Logic
+if mode_input != "IndicatorOnly"
+    if strategy.opentrades > 0
+        ep = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        if strategy.position_size > 0
+            if high > ep + atr
+                strategy.exit("BE", "Long", stop=ep)
+        else
+            if low < ep - atr
+                strategy.exit("BE", "Short", stop=ep)
+// =============================================================================
+// VII. DASHBOARD
+// =============================================================================
+// [UPGRADE 4] Visual check
+if mode_input != "StrategyOnly"
+    var table db = table.new(position.top_right, 2, 8) // Increased size
+    if barstate.islast
+        c_w = color.white
+        c_g = color.green
+        c_r = color.red
+        c_y = color.yellow
+        
+        table.cell(db, 0, 0, "INSTITUTIONAL v3", bgcolor=color.black, text_color=c_w)
+        
+        table.cell(db, 0, 1, "Preset", bgcolor=color.new(color.black, 30), text_color=c_w)
+        table.cell(db, 1, 1, preset, bgcolor=color.new(color.black, 30), text_color=c_y)
+        
+        table.cell(db, 0, 2, "Session", bgcolor=color.new(color.black, 30), text_color=c_w)
+        s_info = s_phase + (s_no_entry ? " (LOCKED)" : " (OPEN)")
+        table.cell(db, 1, 2, s_info, bgcolor=color.new(color.black, 30), text_color=s_no_entry ? c_r : c_g)
+        
+        table.cell(db, 0, 3, "Regime", bgcolor=color.new(color.black, 30), text_color=c_w)
+        table.cell(db, 1, 3, reg_lbl, bgcolor=color.new(color.black, 30), text_color=c_reg_c)
+        
+        table.cell(db, 0, 4, "Range Eff (ER)", bgcolor=color.new(color.black, 30), text_color=c_w)
+        table.cell(db, 1, 4, str.tostring(er_glob, "#.##"), bgcolor=color.new(color.black, 30), text_color=c_w)
+        
+        table.cell(db, 0, 5, "PnL (Session)", bgcolor=color.new(color.black, 30), text_color=c_w)
+        table.cell(db, 1, 5, str.tostring(sess_pnl, "#.##"), bgcolor=color.new(color.black, 30), text_color=sess_pnl >= 0 ? c_g : c_r)
+        table.cell(db, 0, 6, "Gate Status", bgcolor=color.new(color.black, 30), text_color=c_w)
+        table.cell(db, 1, 6, allowed ? "READY" : "WAIT", bgcolor=color.new(color.black, 30), text_color=allowed ? c_g : color.gray)
+        // [UPGRADE 2] Stats Table (Forward Walk)
+        var table db_stats = table.new(position.bottom_right, 4, 5, bgcolor=color.new(color.black, 30))
+        table.cell(db_stats, 0, 0, "REGIME STATS", bgcolor=color.black, text_color=c_w)
+        table.cell(db_stats, 1, 0, "Bal", text_color=color.blue)
+        table.cell(db_stats, 2, 0, "Trnd", text_color=color.orange)
+        table.cell(db_stats, 3, 0, "Exp", text_color=color.rgb(255, 215, 0))
+        
+        // Wins
+        table.cell(db_stats, 0, 1, "Wins", text_color=c_w)
+        table.cell(db_stats, 1, 1, str.tostring(array.get(stats_wins, 1)), text_color=c_w)
+        table.cell(db_stats, 2, 1, str.tostring(array.get(stats_wins, 2)), text_color=c_w)
+        table.cell(db_stats, 3, 1, str.tostring(array.get(stats_wins, 3)), text_color=c_w)
+        
+        // Loss
+        table.cell(db_stats, 0, 2, "Loss", text_color=c_w)
+        table.cell(db_stats, 1, 2, str.tostring(array.get(stats_loss, 1)), text_color=c_w)
+        table.cell(db_stats, 2, 2, str.tostring(array.get(stats_loss, 2)), text_color=c_w)
+        table.cell(db_stats, 3, 2, str.tostring(array.get(stats_loss, 3)), text_color=c_w)
+        
+        // PnL
+        table.cell(db_stats, 0, 3, "PnL", text_color=c_w)
+        p1 = array.get(stats_pnl, 1)
+        p2 = array.get(stats_pnl, 2)
+        p3 = array.get(stats_pnl, 3)
+        table.cell(db_stats, 1, 3, str.tostring(p1, format.volume), text_color=p1 >= 0 ? c_g : c_r)
+        table.cell(db_stats, 2, 3, str.tostring(p2, format.volume), text_color=p2 >= 0 ? c_g : c_r)
+        table.cell(db_stats, 3, 3, str.tostring(p3, format.volume), text_color=p3 >= 0 ? c_g : c_r)
+
+View in Pine Editor・530 lines
+Use on chart
+4
+3
+2
+6
+6 316
+
+Institutional Execution Engine v3
+
+Market-Structure-Driven Execution Framework (Indicator + Strategy Hybrid)
+
+The **Institutional Execution Engine v3** is a professional-grade execution framework designed to model **how institutional participants interact with liquidity, volatility regimes, and market structure**.
+It is built for **index traders, crypto traders, and systematic intraday participants** who require **non-repainting, forward-validated signals** with strict risk control.
+
+This is **not a mashup of indicators**.
+Every module is purpose-built and interacts through a unified execution pipeline.
+
+---
+
+🔍 Core Concepts & Methodology
+
+1️⃣ Market Structure & POI Engine
+
+* Identifies **Points of Interest (POIs)** using swing structure, volatility context, and liquidity positioning
+* POIs are **confirmed only after bar close** (strict non-repaint enforcement)
+* Adaptive pivot sensitivity based on selected execution preset
+
+2️⃣ Liquidity-Aware Scoring System
+
+Each potential trade is filtered through a **multi-factor execution score**, including:
+
+* Structural alignment
+* Volatility normalization (ATR regime)
+* Liquidity reaction quality
+* Directional efficiency
+
+Trades are only allowed when the **minimum institutional score threshold** is met.
+
+
+
+3️⃣ Regime Detection (Forward-Walk Safe)
+
+The engine dynamically classifies market conditions into execution regimes:
+
+* Trending
+* Rotational
+* Mean-reverting
+
+Regime detection is **forward-walk compatible** and does **not leak future data**.
+
+
+4️⃣ Risk-First Execution Model
+
+* ATR-normalized stop placement
+* R-multiple-based take-profit targeting
+* Optional **single-trade-per-session guard**
+* Strategy engine includes **open-trade protection** to prevent over-execution
+
+
+
+5️⃣ Strategy + Indicator Hybrid
+
+This script can be used in **two ways**:
+
+* **Indicator mode** → discretionary execution with visual POIs, signals, and context
+* **Strategy mode** → systematic backtesting with full TradingView Strategy Tester support
+
+Both modes share the **same execution logic** (no divergence).
+
+---
+
+⚙️ Preset-Driven Architecture
+
+Built-in execution presets auto-configure internal parameters without changing core logic:
+
+* **Scalp (Index)**
+* **Daytrade (Index)**
+* **Crypto Intraday**
+* **Institutional Research (FWalk)**
+
+Presets adjust pivot sensitivity, score thresholds, ATR behavior, and risk profile — while preserving execution integrity.
+
+---
+
+## 🚫 Non-Repainting & Data Integrity
+
+* No look-ahead bias
+* No future bar references
+* No repainting signals
+* VWAP and regime logic reset correctly per session
+* Safe handling of strategy.opentrades to avoid execution errors
+
+All signals are **bar-close confirmed**.
+
+---
+
+📊 Who This Is For
+
+✔ Index traders (NIFTY / BANKNIFTY / SENSEX)
+✔ Crypto intraday traders
+✔ Systematic traders validating execution logic
+✔ Traders who value **structure + liquidity + risk discipline** over indicators
+
+---
+
+⚠️ Disclaimer
+
+This script is a **research and execution framework**, not financial advice.
+Always forward-test and adapt risk parameters to your instrument and timeframe.
+
+---
+
+**Author:** Nishith Rajwar
+**Version:** v3
+**Execution Philosophy:** Trade where institutions execute — not where indicators react.
+

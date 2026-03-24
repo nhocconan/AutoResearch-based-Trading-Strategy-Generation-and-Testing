@@ -1,0 +1,219 @@
+//@version=5
+strategy("Non-Repainting Renko Emulation Strategy [PineIndicators]", overlay=true, calc_on_every_tick=false, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, commission_value = 0.01, slippage = 2)
+
+// Parameter: Brick-Größe (z.B. 10 Punkte)
+brickSize = input.float(3.0, "Brick Size", step=0.1)
+
+// Persistente Variablen
+var float renkoPrice     = na    // Aktueller Renko-Level (Schlusswert des letzten Bricks)
+var float prevRenkoPrice = na    // Vorheriger Renko-Level (für Box-Berechnung)
+var int   brickDir       = 0     // 1 = Aufwärts, -1 = Abwärts
+var bool  newBrick       = false // Signalisiert, dass ein neuer Brick abgeschlossen wurde
+var int   brickStart     = bar_index  // Beginn des aktuellen Bricks (x-Achse)
+
+// Berechnungen nur auf abgeschlossenen Candles
+if barstate.isconfirmed
+    newBrick := false
+    // Initialisierung: Beim ersten Candle setzen wir den Renko-Level
+    if na(renkoPrice)
+        renkoPrice := close
+        brickStart := bar_index
+    // Berechne die Differenz zum letzten Renko-Level
+    diff = close - renkoPrice
+    // Prüfen, ob der Unterschied mindestens der Brick-Größe entspricht
+    if math.abs(diff) >= brickSize
+        // Anzahl kompletter Bricks (kann > 1 sein)
+        numBricks = math.floor(math.abs(diff) / brickSize)
+        prevRenkoPrice := renkoPrice
+        // Aktualisieren des Renko-Levels
+        renkoPrice := renkoPrice + numBricks * brickSize * math.sign(diff)
+        // Brick-Richtung (konvertiere math.sign-Ergebnis in int)
+        brickDir := int(math.sign(diff))
+        newBrick := true
+
+        // Bestimme die obere und untere Grenze des abgeschlossenen Bricks:
+        lowLevel  = brickDir == 1 ? prevRenkoPrice : renkoPrice
+        highLevel = brickDir == 1 ? renkoPrice     : prevRenkoPrice
+
+        // Zeichne einen farbigen Kasten (Box) für den Brick:
+        // Parameter: left, top, right, bottom
+        box.new(brickStart, highLevel, bar_index, lowLevel,border_width = 1, border_color = brickDir == 1 ? color.green : color.red, bgcolor = brickDir == 1 ? color.new(color.green, 70) : color.new(color.red, 70))
+            
+        // Setze den Start für den nächsten Brick
+        brickStart := bar_index
+
+
+// Handelslogik: Einstieg/Ausstieg nur, wenn ein neuer Brick abgeschlossen wurde
+if barstate.isconfirmed and newBrick
+    // Bei Aufwärts-Brick: Long-Signal
+    if brickDir[brickSize] < brickDir and renkoPrice[brickSize] < renkoPrice[brickSize*2] and renkoPrice < renkoPrice[brickSize] and renkoPrice[brickSize*2] < renkoPrice[brickSize*3] and strategy.position_size <= 0
+        // Bestehende Short-Position schließen, falls vorhanden
+        strategy.entry("Long", strategy.long)
+
+    // Bei Abwärts-Brick: Short-Signal
+    else if brickDir[brickSize] > brickDir and renkoPrice[brickSize] > renkoPrice[brickSize*2] and renkoPrice > renkoPrice[brickSize] and renkoPrice[brickSize*2] > renkoPrice[brickSize*3] and strategy.position_size >= 0
+        // Bestehende Long-Position schließen, falls vorhanden
+        strategy.entry("Short", strategy.short)
+
+if barstate.isconfirmed and newBrick
+    if brickDir[brickSize] < brickDir
+        strategy.close("Short")
+
+    else if brickDir[brickSize] > brickDir
+        strategy.close("Long")
+
+View in Pine Editor・63 lines
+Use on chart
+8
+3
+2
+9
+18 284
+Introduction: The Repainting Problem in Renko Strategies
+Renko charts are widely used in technical analysis for their ability to filter out market noise and emphasize price trends. Unlike traditional candlestick charts, which are based on fixed time intervals, Renko charts construct bricks only when price moves by a predefined amount. This makes them useful for trend identification while reducing small fluctuations.
+
+However, Renko-based trading strategies often fail in live trading due to a fundamental issue: repainting.
+
+Why Do Renko Strategies Repaint?
+Most trading platforms, including TradingView, generate Renko charts retrospectively based on historical price data. This leads to the following issues:
+
+
+Renko bricks can change or disappear when new data arrives.
+
+Backtesting results do not reflect real market conditions. Strategies may appear highly profitable in backtests because historical data is recalculated with hindsight.
+
+Live trading produces different results than backtesting. Traders cannot know in advance whether a new Renko brick will form until price moves far enough.
+
+
+
+Objective of the Renko Emulator
+This script simulates Renko behavior on a standard time-based chart without repainting. Instead of using TradingView’s built-in Renko charting, which recalculates past bricks, this approach ensures that once a Renko brick is formed, it remains unchanged.
+
+Key benefits:
+
+No past bricks are recalculated or removed.
+
+Trading strategies can execute reliably without false signals.
+
+Renko-based logic can be applied on a time-based chart.
+
+
+
+How the Renko Emulator Works
+1. Parameter Configuration & Initialization
+The script defines key user inputs and variables:
+
+
+brickSize: Defines the Renko brick size in price points, adjustable by the user.
+
+renkoPrice: Stores the closing price of the last completed Renko brick.
+
+prevRenkoPrice: Stores the price level of the previous Renko brick.
+
+brickDir: Tracks the direction of Renko bricks (1 = up, -1 = down).
+
+newBrick: A boolean flag that indicates whether a new Renko brick has been formed.
+
+brickStart: Stores the bar index at which the current Renko brick started.
+
+
+
+2. Identifying Renko Brick Formation Without Repainting
+To ensure that the strategy does not repaint, Renko calculations are performed only on confirmed bars.
+
+
+The script calculates the difference between the current price and the last Renko brick level.
+
+If the absolute price difference meets or exceeds the brick size, a new Renko brick is formed.
+
+The new Renko price level is updated based on the number of bricks that would fit within the price movement.
+
+The direction (brickDir) is updated, and a flag (newBrick) is set to indicate that a new brick has been formed.
+
+
+
+3. Visualizing Renko Bricks on a Time-Based Chart
+Since TradingView does not support live Renko charts without repainting, the script uses graphical elements to draw Renko-style bricks on a standard chart.
+
+Each time a new Renko brick forms, a colored rectangle (box) is drawn:
+
+
+Green boxes → Represent bullish Renko bricks.
+
+Red boxes → Represent bearish Renko bricks.
+
+
+
+This allows traders to see Renko-like formations on a time-based chart, while ensuring that past bricks do not change.
+
+Trading Strategy Implementation
+Since the Renko emulator provides a stable price structure, it is possible to apply a consistent trading strategy that would otherwise fail on a traditional Renko chart.
+
+1. Entry Conditions
+A long trade is entered when:
+
+The previous Renko brick was bearish.
+
+The new Renko brick confirms an upward trend.
+
+There is no existing long position.
+
+
+
+A short trade is entered when:
+
+The previous Renko brick was bullish.
+
+The new Renko brick confirms a downward trend.
+
+There is no existing short position.
+
+
+
+2. Exit Conditions
+Trades are closed when a trend reversal is detected:
+
+
+Long trades are closed when a new bearish brick forms.
+
+Short trades are closed when a new bullish brick forms.
+
+
+
+Key Characteristics of This Approach
+1. No Historical Recalculation
+
+Once a Renko brick forms, it remains fixed and does not change.
+
+Past price action does not shift based on future data.
+
+
+
+2. Trading Strategies Operate Consistently
+
+Since the Renko structure is stable, strategies can execute without unexpected changes in signals.
+
+Live trading results align more closely with backtesting performance.
+
+
+
+3. Allows Renko Analysis Without Switching Chart Types
+
+Traders can apply Renko logic without leaving a standard time-based chart.
+
+This enables integration with indicators that normally cannot be used on traditional Renko charts.
+
+
+
+Considerations When Using This Strategy
+
+Trade execution may be delayed compared to standard Renko charts. Since new bricks are only confirmed on closed bars, entries may occur slightly later.
+
+Brick size selection is important. A smaller brickSize results in more frequent trades, while a larger brickSize reduces signals.
+
+
+
+Conclusion
+This Renko Emulation Strategy provides a method for using Renko-based trading strategies on a time-based chart without repainting. By ensuring that bricks do not change once formed, it allows traders to use stable Renko logic while avoiding the issues associated with traditional Renko charts.
+
+This approach enables accurate backtesting and reliable live execution, making it suitable for trend-following and swing trading strategies that rely on Renko price action.

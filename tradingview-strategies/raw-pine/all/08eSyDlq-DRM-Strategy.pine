@@ -1,0 +1,5 @@
+//@version=5
+upLvl=##input(defval=70.0,type='INPUT_FLOAT',##id='in_4')
+dnLvl=##input(defval=30.0,type='INPUT_FLOAT',##id='in_5')
+##root(root_metainfo,rm_0,upLvl,input__float)
+##root(root_metainfo,rm_1,dnLvl,input__float)

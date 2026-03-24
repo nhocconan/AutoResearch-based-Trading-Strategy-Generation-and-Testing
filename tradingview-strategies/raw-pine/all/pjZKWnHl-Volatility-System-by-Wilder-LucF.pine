@@ -1,0 +1,135 @@
+//@version=3
+//@author=LucF
+
+// Volatility System by Wilder [LucF]
+// v1.1, 2019.04.15
+
+// The Volatility System was created by Welles Wilder.
+// It first appeared in his seminal masterpiece "New Concepts in Technical Trading Systems" (1978).
+// He describes it on pp.23-26, in the chapter discussing the first presentation ever of the "Volatility Index",
+// which later became known as ATR.
+// Performance of the strategy usually increases with the time frame.
+// Tuning of ATR length and, especially, the ARC factor, is key.
+
+// This code runs as a strategy, which cannot generate alerts.
+// If you want to use the alerts it must be converted to an indicator.
+// To do so:
+//      1. Swap the following 2 lines by commenting the first and uncommenting the second.
+//      2. Comment out the last 4 lines containing the strategy() calls.
+//      3. Save and voilà.
+strategy(title="Volatility System by Wilder [LucF]", shorttitle="Volatility System [Strat]", overlay=true, precision=8, pyramiding=0, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+// study("Volatility System by Wilder [LucF]", shorttitle="Volatility System", precision=8, overlay=true)
+
+// -------------- Colors
+MyGreenRaw = color(#00FF00,0),  MyGreenMedium = color(#00FF00,50),  MyGreenDark = color(#00FF00,75),    MyGreenDarkDark = color(#00FF00,92)
+MyRedRaw = color(#FF0000,0),    MyRedMedium = color(#FF0000,30),    MyRedDark = color(#FF0000,75),      MyRedDarkDark = color(#FF0000,90)
+
+// -------------- Inputs
+LongsOnly = input(false,"Longs only")
+ShortsOnly = input(false,"Shorts only")
+AtrLength = input(9, "ATR length", minval=2)
+ArcFactor = input(1.8, "ARC factor", minval=0, type=float,step=0.1)
+ShowSAR = input(false, "Show all SARs (Stop & Reverse)")
+HideSAR = input(false, "Hide all SARs")
+ShowTriggers = input(false, "Show Entry/Exit triggers")
+ShowTradedBackground = input(false, "Show Traded Background")
+
+// -------------- Date range filtering
+FromYear = input(2000, "From Year", minval=1900),   FromMonth = input(1, "From Month", minval=1, maxval=12),    FromDay = input(1, "From Day", minval=1, maxval=31)
+ToYear = input(9999, "To Year", minval=1900),       ToMonth = input(1, "To Month", minval=1, maxval=12),        ToDay = input(1, "To Day", minval=1, maxval=31)
+FromDate = timestamp(FromYear, FromMonth, FromDay, 00, 00),     ToDate = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+TradeDateIsAllowed() => time >= FromDate and time <= ToDate
+
+// -------------- Calculate Stop & Reverse (SAR) points using Average Range Constant (ARC)
+Arc   = atr(AtrLength)*ArcFactor
+SarLo = highest(close, AtrLength)-Arc
+SarHi = lowest(close, AtrLength)+Arc
+
+// -------------- Entries/Exits
+InLong = false
+InShort = false
+EnterLong = TradeDateIsAllowed() and not InLong[1] and crossover(close, SarHi[1])
+EnterShort = TradeDateIsAllowed() and not InShort[1] and crossunder(close, SarLo[1])
+InLong := (InLong[1] and not EnterShort[1]) or (EnterLong[1] and not ShortsOnly)
+InShort := (InShort[1] and not EnterLong[1]) or (EnterShort[1] and not LongsOnly)
+
+// -------------- Plots
+// SAR points
+plot( not HideSAR and ((InShort or EnterLong) or ShowSAR)? SarHi:na, color=MyRedMedium, style=circles, linewidth=2, title="SAR High")
+plot( not HideSAR and ((InLong or EnterShort) or ShowSAR)? SarLo:na, color=MyGreenMedium, style=circles, linewidth=2, title="SAR Low")
+// Entry/Exit markers
+plotshape( ShowTriggers and not ShortsOnly and EnterLong, style=shape.triangleup, location=location.belowbar, color=MyGreenRaw, size=size.small)
+plotshape( ShowTriggers and not LongsOnly and EnterShort, style=shape.triangledown, location=location.abovebar, color=MyRedRaw, size=size.small)
+// Exits when printing only longs or shorts
+plotshape( ShowTriggers and ShortsOnly and InShort[1] and EnterLong, style=shape.triangleup, location=location.belowbar, color=MyRedMedium, transp=70, size=size.small)
+plotshape( ShowTriggers and LongsOnly and InLong[1] and EnterShort, style=shape.triangledown, location=location.abovebar, color=MyGreenMedium, transp=70, size=size.small)
+// Background
+bgcolor( color=ShowTradedBackground? InLong and not ShortsOnly?MyGreenDarkDark: InShort and not LongsOnly? MyRedDarkDark:na:na)
+
+// ---------- Alerts
+alertcondition( EnterLong or EnterShort, title="1. Reverse", message="Reverse")
+alertcondition( EnterLong, title="2. Long", message="Long")
+alertcondition( EnterShort, title="3. Short", message="Short")
+
+// ---------- Strategy reversals
+strategy.entry("Long", strategy.long, when=EnterLong and not ShortsOnly)
+strategy.entry("Short", strategy.short, when=EnterShort  and not LongsOnly)
+strategy.close("Short", when=EnterLong and ShortsOnly)
+strategy.close("Long", when=EnterShort and LongsOnly)
+
+View in Pine Editor・78 lines
+Use on chart
+8
+9
+4
+7
+30 770
+Apr 15, 2019
+The Volatility System was created by J. Welles Wilder, Jr. It first appeared in his seminal masterpiece, "New Concepts in Technical Trading Systems" (1978). He describes the system on pp.23-26, in the chapter discussing the first presentation ever of the "Volatility Index", built using a novel way of calculating a value representing volatility that he named Average True Range (ATR). The latter stuck.
+
+The system is a pure reversal system (it is always either long or short). One of its characteristics is that its stop strategy moves up and down during a trade, widening the gap from price when volatility (ATR) increases. Because of this, this strategy can suffer large drawdowns and is not for the faint of heart.
+
+The strategy uses a length (n) to calculate an ATR. ATR(n) is then multiplied by a factor to calculate the Average Range Constant (ARC). The ARC is then added to the lowest close n bars back to form the high Stop and Reverse points (SAR), and subtracted from the highest close n bars back to calculate the low SAR. Reversals occur when price closes above the high SAR or below the low SAR.
+
+The system is best suited to higher time frames: 12H and above. Its performance depends heavily on calibration of the length and ARC factor. Wilder proposes a length of 7 and a factor between 2.8 to 3.1. My summary tests at 12H, 1D and 3D on stocks and cryptos yield better results with values of approximately 9-10/1.8-2.5 for cryptos and 9-10/3.0-4.0 for stocks. Small changes in the values will sometimes yield large variations in results, which I don’t particularly like because it tends to imply fragility, whereas I’d expect more robustness from a system with such simple rules. Additionally, backtests at 1D on cryptos provide so little data that no solid conclusions can be drawn from them.
+
+All in all, the system is not very useful in my opinion; I publish it more for completeness, since as far as I can tell, it did not exist on this platform before. I also publish it out of respect for Wilder’s work. His book laid the foundation for many of the building blocks used by system designers, even today. In less than a hundred pages he presented RSI, ATR, DMI, ADXR and the Parabolic SAR indicators, some of which have become built-in functions in programming languages. This is a colossal feat and has not been repeated. Wilder is a monument.
+
+Some lesser-known facts about his book:
+
+It sells for the exact same price it cost in 1978: 65$,
+
+The book has always been published by Wilder himself,
+
+The layout hasn’t changed in 40 years,
+
+He sells >35K copies/year.
+
+Gotta love the guy.
+
+The strategy is shown here on BTC /USD with settings of 12/1.8 (the defaults are 9/1.8). It shows the system under its best light. Other markets will most not reproduce such results. Also, the drawdown is as scary as the results are impressive.
+
+Features
+
+The code is written as a strategy but can easily be converted to an indicator if you want to use the alerts it can produce. Instructions are in the code.
+
+You can change the length and ARC factor.
+
+You can choose to trade only long or short positions.
+
+You can choose to display the SARs (the stops) in multiple ways.
+
+You can show trigger markers.
+
+A date range can be defined.
+
+3 alerts: reversals (both long and short), longs, shorts. Remember that for the moment, strategies cannot generate alerts in TradingView, so the strategy must be converted to an indicator in order to make the alerts available.
+
+
+
+Apr 15, 2019
+Release Notes
+Tidied up the code.
+Apr 15, 2019
+Release Notes
+Same.

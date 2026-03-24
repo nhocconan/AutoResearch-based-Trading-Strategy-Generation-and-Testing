@@ -1,0 +1,158 @@
+//@version=4
+strategy("Grover Llorens Activator")
+length = input(480),mult = input(14),src = input(close)
+//----
+ts = 0.
+diff = src - nz(ts[1],src[1])
+atr = atr(length)
+//----
+up = crossover(diff,0)
+dn = crossunder(diff,0)
+val = valuewhen(up or dn,atr/length,0)
+bars = barssince(up or dn)
+ts := up ? nz(ts[1],src) - atr*mult : dn ? nz(ts[1],src) + atr*mult : nz(ts[1],src) + sign(diff)*val*bars
+//----
+if up
+    strategy.entry("Buy", strategy.long)
+if dn
+    strategy.entry("Sell", strategy.short)
+//----
+cap = strategy.initial_capital
+eq = strategy.equity
+rmax = 0.
+rmax := max(eq,nz(rmax[1]))
+//----
+css = eq > cap ? #0cb51a : #e65100
+a = plot(eq,"Equity",#2196f3,2,transp=0)
+b = plot(rmax,"Maximum",css,2,transp=0)
+fill(a,b,css,80)
+
+View in Pine Editor・31 lines
+Use on chart
+1 K
+20
+24 811
+The Grover Llorens Activator is a trailing stop indicator deeply inspired by the parabolic SAR indicator, and aim to provide early exit points and reversal detection. The indicator was posted not so long ago, you can find it here :
+
+
+
+
+Today a strategy using the indicator is proposed, and its profitability is analyzed on 3 different markets with the main time frame being 1 hour, remember that lower time frames involve lower absolute price changes, therefore we are way more affected by the spread, and we can require a larger position sizing depending on our investment target, trading higher time-frames is always a good practice and this is why 1 hour is selected. Based on the result we might make various conclusions regarding the indicator accuracy and might have ideas on future improvements of the indicator.
+
+I'am not great when it comes to strategy design, i still hope to share correct and useful information in this post, let me know your thoughts on the post format and if i should make more of these.
+
+Setup And Rules
+
+The analysis is solely based on the indicator signals, money management isn't taken into account, this allow us to have an idea on the indicator robustness and resilience, particularly on extremely volatile markets and ones exhibiting a chaotic structure, altho it is normally good practice to close any position before a market closure in order to avoid any potential major gaps.
+
+The settings used are 480 for length and 14 for mult, this create relatively mid term signals that are suited for a trend indicator such as the Grover Llorens Activator, unfortunately we can't infer the indicator optimal settings, thats how it is with any technical indicator anyway.
+
+Here are the rules of our strategy :
+
+
+long : closing price cross over the indicator
+
+short : closing price cross under the indicator
+
+
+
+We use constant position sizing, once a signal is triggered all the previous positions are closed.
+
+Description Of The Statistics Used
+
+Various statistics are presented in this post, here is a brief description of the main ones :
+
+
+Percent Profitability (higher = better): Percentage of winning trades, that is : winning trades/total number of trades × 100
+Maximum Drawdown (lower = better) : The highest difference between a peak and a valley in the balance, that is : peak - valley, in percentage : (peak - valley)/peak × 100
+Profit Factor (higher = better) : Gross profit divided by gross loss, values under 1 represent gross losses superior to the gross profits
+
+
+
+Remember that more volatility = more risk, since higher absolute price changes can logically cause larger losses.
+
+EURUSD
+
+The first market analyzed is the Forex market with the EURUSD major pair with a position sizing of 1000 units (1 micro lot). Since October EURUSD is not showing any particular strong trend but posses a discrete rising motion, fortunately cycles can be observed.
+
+
+
+
+The equity was rising until two trades appeared causing a decline in the equity. Before October a bearish market could be observed.
+
+
+
+
+We can see that the equity is rising, the trend still posses various retracements that affect our indicator, however we can see that the indicator totally nail the end of the trend, thats the power of converging toward the price.
+
+In short :
+
+$ 86.63 net profit
+
+340 closed trades
+
+37.65 % profitable (thats a lot of loosing trades)
+
+1.19 profit factor
+
+$ 76.67 max drawdown
+
+Applying a spread would create negative results (in general the average spread is used), not a great start...
+
+BTCUSD
+
+
+
+
+The cryptocurrency market is relatively more volatile than others, which also mean potentially higher returns, we test the indicator using certainly the most traded cryptocurrency, BTCUSD. We will use a position sizing of 1 unit.
+
+In the case of BTCUSD the strategy balance is relatively stationary around the initial capital, with of course high dispersion.
+
+
+
+
+from september to december the market is bearish with various ranging periods, no apparent cycles can be observed, except maybe in the ranging period of october, this ranging period is followed by a non linear trend (relatively parabolic) that the indicator failed to capture in its integrity (this is a recurrent problem and it is starting to piss me off xD).
+
+In short :
+
+$ 2010.64 net profit (aka how i bet the crypto market)
+
+395 closed trades
+
+38.23 % profitable
+
+1.036 profit factor
+
+$ 5738.01 max drawdown (aka how i lost to the crypto market)
+
+AMD
+
+
+
+
+AMD stand for Advanced Micro Devices and is a company focused on the development of computer technology, i love the microprocessor market and i really like AMD who start this year in a pretty great way with a net bullish trend.
+
+The performance of the indicator on AMD is decent (at last !) with the equity producing many new higher highs. The indicator performance still drop in the middle end of 2019 with a large equity drawdown of 17$ caused by the gap of august 8. Unfortunately AMD, like lot of well behaving stocks can only tells us that the indicator has good performances on heavily trending markets with no excess of noise or chaotic structures.
+
+In short :
+
+$ 17.86 net profit (Enough for a consistent lunch)
+
+295 closed trades
+
+36.27 % profitable
+
+1.414 profit factor
+
+$ 10.37 max drawdown.
+
+Conclusion
+
+A strategy using the recently proposed Grover Llorens activator has been presented. We can easily conclude that the indicator can't possibly generate long term returns under chaotic and volatile markets, and could even produce unnecessary trades in trending markets without much parasitic fluctuations such as noise and retracements (think about a simple linear trend) since the indicator converge toward the price and would therefore automatically cross over/under the trend, thus guaranteeing a false signal.
+
+However we have seen its ability to provide accurate early reversal detection shine from time to time, thus over performing lagging indicators in this aspect, however the duration of price fluctuations isn't fixed at a certain period, the rate of convergence should be way faster during volatile fluctuations, of moderate speed during more cyclic fluctuations, and really slow with apparent long term trends, this could be achieved by making the indicator adaptive, but it won't really make it necessarily perform better.
+
+That said i still believe that converging trend indicators are really interesting and aim to capture the non lasting behavior of price fluctuations, they shouldn't receive so much hate (think about the poor p-sar).
+
+Thanks for reading !
+

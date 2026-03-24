@@ -1,0 +1,608 @@
+//@version=6
+strategy("ES Ultra A++ SAFE v9.5 STRATEGY",
+     overlay=true,
+     max_labels_count=300,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_every_tick=false)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SESSION (Chicago / MN)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+sessionStr = input.session("0900-1100", "Trading Session (America/Chicago)")
+mnSession  = not na(time(timeframe.period, sessionStr, "America/Chicago"))
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// DAYS FILTER (Tue–Thu) — Chicago-aligned
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+tradeTue = input.bool(true, "Trade Tuesday")
+tradeWed = input.bool(true, "Trade Wednesday")
+tradeThu = input.bool(true, "Trade Thursday")
+
+chiTime = time(timeframe.period, "0000-2359", "America/Chicago")
+chiDOW  = dayofweek(chiTime)
+
+isTue = chiDOW == dayofweek.tuesday
+isWed = chiDOW == dayofweek.wednesday
+isThu = chiDOW == dayofweek.thursday
+dayOK = (tradeTue and isTue) or (tradeWed and isWed) or (tradeThu and isThu)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaLen    = input.int(21, "EMA Length")
+atrLen    = input.int(14, "ATR Length")
+maxTrades = input.int(2,  "Max Trades per Session")
+blockSameDirReEntry = input.bool(true, "Block: Re-enter same direction in session (no double-trend)")
+useBrackets = input.bool(true, "Use Brackets (TP/SL)")
+slTicks     = input.int(14, "Stop Loss (ticks)", minval=1)
+tpTicks     = input.int(32, "Take Profit (ticks)", minval=1)
+
+// SIGNAL TOGGLES
+enableAplus   = input.bool(true,  "Enable A++ Pullback Entries")
+enableMomo    = input.bool(true,  "Enable MOMO Entries")
+enableReclaim = input.bool(true,  "Enable RECLAIM Entries")
+enableRev     = input.bool(true,  "Enable REV Entries")
+
+showAplusLbl   = input.bool(true, "Show A++ Labels")
+showMomoLbl    = input.bool(true, "Show MOMO Labels")
+showReclaimLbl = input.bool(true, "Show RECLAIM Labels")
+showRevLbl     = input.bool(true, "Show REV Labels")
+
+showStatsPanel = input.bool(true, "Show Win/Loss Stats Panel")
+
+// CLEAN/DEBUG CONTROLS
+showDebug           = input.bool(false, "Show Debug Labels (internal)")
+showStatus          = input.bool(false, "Show STATUS Box (single label)")
+statusOnlyInSession = input.bool(true,  "STATUS Only During Session")
+statusAnchorRight   = input.bool(true,  "STATUS Anchor Right (future bars)")
+
+// LOOSER FILTERS
+useStopHuntFilter   = input.bool(true,  "Stop-Hunt Wick Filter")
+maxWickBeyondEmaATR = input.float(0.65, "Max Wick Beyond EMA (ATR mult)", step=0.05)
+
+useChaseFilter      = input.bool(true,  "No-Chase Filter")
+maxConfirmDistATR   = input.float(1.10, "Max Confirm Distance from EMA (ATR mult)", step=0.05)
+
+maxPullbackBars     = input.int(9, "Max Bars Between Pullback → Confirm", minval=1, maxval=10)
+
+useBigBarFilter     = input.bool(true,  "Skip Huge Bars")
+maxBarRangeATR      = input.float(3.20, "Max Bar Range (ATR mult)", step=0.05)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ONE-LEG / STRONGEST-ONLY FILTER
+// - keeps only strongest signal in same trend leg
+// - allows 2 if second is truly stronger
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useLegFilter             = input.bool(true,  "Use One-Leg Strongest Filter")
+legResetBars             = input.int(12,     "Leg Reset Bars", minval=3, maxval=50)
+allowSecondStrongSignal  = input.bool(true,  "Allow 2nd Signal If Much Stronger")
+secondSignalMinImprove   = input.float(0.35, "2nd Signal Min Score Improve", step=0.05)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MOMENTUM ADD-ON (Breakout continuation)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useMomentumAddon     = input.bool(true, "Momentum Add-on (catch breakout continuation)")
+momoLookback         = input.int(10,   "Momentum Breakout Lookback", minval=3, maxval=50)
+momoMinRangeATR      = input.float(1.80, "Min Momentum Bar Range (ATR mult)", step=0.05)
+momoMinBodyRatio     = input.float(0.60, "Min Momentum Body Ratio", step=0.05)
+momoMaxRangeATR      = input.float(5.00, "Max Momentum Bar Range (ATR mult)", step=0.10)
+momoCooldownBars     = input.int(3,    "Momentum Cooldown Bars", minval=0, maxval=20)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RECLAIM ENTRY
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useReclaimEntry      = input.bool(true,  "Reclaim Entry (strong close back above EMA)")
+reclaimLookback      = input.int(5,     "Reclaim: Must be below EMA within last N bars", minval=1, maxval=20)
+reclaimMinBodyPct    = input.float(0.60,"Reclaim: Min Body % of Candle", step=0.05)
+reclaimMinStrengthAT = input.float(0.20,"Reclaim: Min Close Above EMA (ATR mult)", step=0.05)
+reclaimHoldTolTicks  = input.int(2,     "Reclaim: Hold EMA Tolerance (ticks)", minval=0, maxval=10)
+reclaimRequireSlope  = input.bool(true, "Reclaim: Require EMA Slope Up")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// REV MOMENTUM — wick sweep + snapback
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useRevMomentum       = input.bool(true, "REV Momentum (catch sweep + snapback)")
+revLookback          = input.int(6,     "REV Sweep Lookback", minval=3, maxval=20)
+revMinRangeATR       = input.float(1.30, "REV Min Range (ATR mult)", step=0.05)
+revMaxBodyRatio      = input.float(0.50, "REV Max Body Ratio (wicky ok)", step=0.05)
+revCloseFromExtreme  = input.float(0.30, "REV Close Away From Extreme (0-1)", step=0.05)
+revRequireReclaim    = input.bool(true,  "REV: Require EMA Reclaim (cleaner)")
+revSlopeGuard        = input.bool(true,  "REV: Guard vs strong EMA down-slope")
+revMaxDownSlopeATR   = input.float(0.30, "REV: Max EMA Down Slope (ATR mult per bar)", step=0.05)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INDICATORS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrLen)
+plot(ema, "EMA", color=color.yellow)
+
+tick = syminfo.mintick
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TREND LOGIC
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bullTrend    = close > ema
+bearTrend    = close < ema
+emaSlopeUp   = ema > ema[1]
+emaSlopeDown = ema < ema[1]
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TRADE COUNTER + DIRECTION LOCK (Per Session)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int tradesToday = 0
+var bool didLongThisSession  = false
+var bool didShortThisSession = false
+
+newSession = (mnSession and dayOK) and not (mnSession[1] and dayOK[1])
+if newSession
+    tradesToday := 0
+    didLongThisSession  := false
+    didShortThisSession := false
+
+tradeAllowed = mnSession and dayOK and tradesToday < maxTrades
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CONFIRMATION QUALITY
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bodySize  = math.abs(close - open)
+rangeSize = high - low
+bodyRatio = rangeSize > 0 ? bodySize / rangeSize : 0.0
+
+strongBody  = bodyRatio >= 0.50
+normalRange = rangeSize <= atr * 1.25
+
+bullCommit = close > open and close >= high - (rangeSize * 0.25)
+bearCommit = close < open and close <= low  + (rangeSize * 0.25)
+
+validConfirm = strongBody and normalRange
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PROTECTION FILTERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+barRange   = high - low
+isHugeBar  = barRange > atr * maxBarRangeATR
+
+wickTooDeepLong  = (ema - low)  > atr * maxWickBeyondEmaATR
+wickTooDeepShort = (high - ema) > atr * maxWickBeyondEmaATR
+
+confirmTooFarLong  = (close - ema) > atr * maxConfirmDistATR
+confirmTooFarShort = (ema - close) > atr * maxConfirmDistATR
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MOMENTUM CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int lastMomoBar = na
+momoCooldownOK = na(lastMomoBar) or (bar_index - lastMomoBar) > momoCooldownBars
+
+momoBarOK = (barRange >= atr * momoMinRangeATR) and (barRange <= atr * momoMaxRangeATR) and (bodyRatio >= momoMinBodyRatio)
+
+momoBreakLong  = close > ta.highest(high, momoLookback)[1]
+momoBreakShort = close < ta.lowest(low,  momoLookback)[1]
+
+baseLong  = tradeAllowed and bullTrend and emaSlopeUp
+baseShort = tradeAllowed and bearTrend and emaSlopeDown
+
+momentumLongRaw  = useMomentumAddon and momoCooldownOK and baseLong  and momoBarOK and bullCommit and momoBreakLong
+momentumShortRaw = useMomentumAddon and momoCooldownOK and baseShort and momoBarOK and bearCommit and momoBreakShort
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RECLAIM ENTRY CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+cRange   = high - low
+cBody    = math.abs(close - open)
+cBodyPct = cRange > 0 ? (cBody / cRange) : 0.0
+
+wasBelowEmaRecently = ta.lowest(close - ema, reclaimLookback) < 0
+reclaimStrength     = atr * reclaimMinStrengthAT
+
+reclaimBar = useReclaimEntry and tradeAllowed and wasBelowEmaRecently and close > ema + reclaimStrength and cBodyPct >= reclaimMinBodyPct and close > open
+reclaimSlopeOK = (not reclaimRequireSlope) or emaSlopeUp
+
+followThrough = close > close[1] and close[1] > ema
+holdEmaTol = reclaimHoldTolTicks * tick
+holdEma = low > (ema - holdEmaTol)
+
+reclaimLongRaw = reclaimBar and reclaimSlopeOK and (followThrough or holdEma)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// REV MOMENTUM CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+revBarOK = (barRange >= atr * revMinRangeATR) and (bodyRatio <= revMaxBodyRatio)
+
+sweptLow  = low  < ta.lowest(low,  revLookback)[1]
+sweptHigh = high > ta.highest(high, revLookback)[1]
+
+closeAwayFromLow  = close >= (low  + barRange * revCloseFromExtreme)
+closeAwayFromHigh = close <= (high - barRange * revCloseFromExtreme)
+
+revSlopeOK = (not revSlopeGuard) or ((ema - ema[1]) > -(atr * revMaxDownSlopeATR))
+
+revLongCore  = useRevMomentum and tradeAllowed and revBarOK and sweptLow  and close > open and closeAwayFromLow and revSlopeOK
+revShortCore = useRevMomentum and tradeAllowed and revBarOK and sweptHigh and close < open and closeAwayFromHigh and revSlopeOK
+
+revLongRaw  = revLongCore  and (not revRequireReclaim or close > ema)
+revShortRaw = revShortCore and (not revRequireReclaim or close < ema)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STATE MACHINE (A++ Pullback → Confirm)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int longState  = 0
+var int shortState = 0
+var int longPBBar  = na
+var int shortPBBar = na
+
+pullbackLong_raw  = close < open and low  <= ema
+pullbackShort_raw = close > open and high >= ema
+
+pullbackLong  = pullbackLong_raw  and (not useStopHuntFilter or not wickTooDeepLong)  and (not useBigBarFilter or not isHugeBar)
+pullbackShort = pullbackShort_raw and (not useStopHuntFilter or not wickTooDeepShort) and (not useBigBarFilter or not isHugeBar)
+
+confirmLong_raw  = bullCommit and validConfirm
+confirmShort_raw = bearCommit and validConfirm
+
+confirmLong  = confirmLong_raw  and (not useChaseFilter or not confirmTooFarLong)  and (not useBigBarFilter or not isHugeBar)
+confirmShort = confirmShort_raw and (not useChaseFilter or not confirmTooFarShort) and (not useBigBarFilter or not isHugeBar)
+
+aplusLongRaw  = false
+aplusShortRaw = false
+
+if longState == 0
+    if baseLong
+        longState := 1
+else if longState == 1
+    if not baseLong
+        longState := 0
+    else if pullbackLong
+        longState := 2
+        longPBBar := bar_index
+else if longState == 2
+    if na(longPBBar) or (bar_index - longPBBar) > maxPullbackBars
+        longState := 0
+        longPBBar := na
+    else if not baseLong
+        longState := 0
+        longPBBar := na
+    else if confirmLong
+        aplusLongRaw := true
+        longState := 0
+        longPBBar := na
+
+if shortState == 0
+    if baseShort
+        shortState := 1
+else if shortState == 1
+    if not baseShort
+        shortState := 0
+    else if pullbackShort
+        shortState := 2
+        shortPBBar := bar_index
+else if shortState == 2
+    if na(shortPBBar) or (bar_index - shortPBBar) > maxPullbackBars
+        shortState := 0
+        shortPBBar := na
+    else if not baseShort
+        shortState := 0
+        shortPBBar := na
+    else if confirmShort
+        aplusShortRaw := true
+        shortState := 0
+        shortPBBar := na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SIGNAL SCORING
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaDistAtr = atr > 0 ? math.abs(close - ema) / atr : 0.0
+rangeAtr   = atr > 0 ? barRange / atr : 0.0
+
+scoreAplusLong  = (bullCommit ? 0.55 : 0.0) + bodyRatio + (emaSlopeUp ? 0.30 : 0.0) + math.min(emaDistAtr, 1.5) * 0.30
+scoreAplusShort = (bearCommit ? 0.55 : 0.0) + bodyRatio + (emaSlopeDown ? 0.30 : 0.0) + math.min(emaDistAtr, 1.5) * 0.30
+
+scoreMomoLong   = (bullCommit ? 0.60 : 0.0) + bodyRatio + math.min(rangeAtr, 2.5) * 0.35 + (momoBreakLong ? 0.40 : 0.0)
+scoreMomoShort  = (bearCommit ? 0.60 : 0.0) + bodyRatio + math.min(rangeAtr, 2.5) * 0.35 + (momoBreakShort ? 0.40 : 0.0)
+
+scoreReclLong   = (close > ema ? 0.55 : 0.0) + cBodyPct + math.min(emaDistAtr, 1.5) * 0.45 + (followThrough ? 0.25 : 0.0)
+scoreRevLong    = (closeAwayFromLow ? 0.40 : 0.0) + (1.0 - bodyRatio) * 0.45 + math.min(rangeAtr, 2.5) * 0.30 + (close > ema ? 0.20 : 0.0)
+scoreRevShort   = (closeAwayFromHigh ? 0.40 : 0.0) + (1.0 - bodyRatio) * 0.45 + math.min(rangeAtr, 2.5) * 0.30 + (close < ema ? 0.20 : 0.0)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ONE-LEG STRONGEST FILTER
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float bestLongLegScore = na
+var float bestShortLegScore = na
+var int   longLegSignalCount = 0
+var int   shortLegSignalCount = 0
+var int   lastLongLegBar = na
+var int   lastShortLegBar = na
+
+resetLongLeg  = not bullTrend or not emaSlopeUp or (not na(lastLongLegBar)  and (bar_index - lastLongLegBar)  > legResetBars)
+resetShortLeg = not bearTrend or not emaSlopeDown or (not na(lastShortLegBar) and (bar_index - lastShortLegBar) > legResetBars)
+
+if resetLongLeg
+    bestLongLegScore := na
+    longLegSignalCount := 0
+
+if resetShortLeg
+    bestShortLegScore := na
+    shortLegSignalCount := 0
+
+allowLongByLeg(_raw, _score) =>
+    bool pass = _raw
+    if _raw and useLegFilter
+        firstInLeg = na(bestLongLegScore)
+        muchStronger = allowSecondStrongSignal and longLegSignalCount < 2 and not na(bestLongLegScore) and _score >= (bestLongLegScore + secondSignalMinImprove)
+        pass := firstInLeg or muchStronger
+    pass
+
+allowShortByLeg(_raw, _score) =>
+    bool pass = _raw
+    if _raw and useLegFilter
+        firstInLeg = na(bestShortLegScore)
+        muchStronger = allowSecondStrongSignal and shortLegSignalCount < 2 and not na(bestShortLegScore) and _score >= (bestShortLegScore + secondSignalMinImprove)
+        pass := firstInLeg or muchStronger
+    pass
+
+sigAplusLong_pre   = enableAplus   and allowLongByLeg(aplusLongRaw,      scoreAplusLong)
+sigAplusShort_pre  = enableAplus   and allowShortByLeg(aplusShortRaw,    scoreAplusShort)
+sigMomoLong_pre    = enableMomo    and allowLongByLeg(momentumLongRaw,   scoreMomoLong)
+sigMomoShort_pre   = enableMomo    and allowShortByLeg(momentumShortRaw, scoreMomoShort)
+sigReclaimLong_pre = enableReclaim and allowLongByLeg(reclaimLongRaw,    scoreReclLong)
+sigRevLong_pre     = enableRev     and allowLongByLeg(revLongRaw,        scoreRevLong)
+sigRevShort_pre    = enableRev     and allowShortByLeg(revShortRaw,      scoreRevShort)
+
+// only strongest type per bar
+float barLongScore = na
+float barShortScore = na
+string barLongType = ""
+string barShortType = ""
+
+if sigRevLong_pre
+    barLongScore := scoreRevLong
+    barLongType  := "REVL"
+if sigAplusLong_pre and (na(barLongScore) or scoreAplusLong > barLongScore)
+    barLongScore := scoreAplusLong
+    barLongType  := "A++L"
+if sigMomoLong_pre and (na(barLongScore) or scoreMomoLong > barLongScore)
+    barLongScore := scoreMomoLong
+    barLongType  := "MOMOL"
+if sigReclaimLong_pre and (na(barLongScore) or scoreReclLong > barLongScore)
+    barLongScore := scoreReclLong
+    barLongType  := "RECL"
+
+if sigRevShort_pre
+    barShortScore := scoreRevShort
+    barShortType  := "REVS"
+if sigAplusShort_pre and (na(barShortScore) or scoreAplusShort > barShortScore)
+    barShortScore := scoreAplusShort
+    barShortType  := "A++S"
+if sigMomoShort_pre and (na(barShortScore) or scoreMomoShort > barShortScore)
+    barShortScore := scoreMomoShort
+    barShortType  := "MOMOS"
+
+sigAplusLong   = barLongType == "A++L"
+sigAplusShort  = barShortType == "A++S"
+sigMomoLong    = barLongType == "MOMOL"
+sigMomoShort   = barShortType == "MOMOS"
+sigReclaimLong = barLongType == "RECL"
+sigRevLong     = barLongType == "REVL"
+sigRevShort    = barShortType == "REVS"
+
+if not na(barLongScore)
+    bestLongLegScore := na(bestLongLegScore) ? barLongScore : math.max(bestLongLegScore, barLongScore)
+    longLegSignalCount += 1
+    lastLongLegBar := bar_index
+
+if not na(barShortScore)
+    bestShortLegScore := na(bestShortLegScore) ? barShortScore : math.max(bestShortLegScore, barShortScore)
+    shortLegSignalCount += 1
+    lastShortLegBar := bar_index
+
+if momentumLongRaw or momentumShortRaw
+    lastMomoBar := bar_index
+
+longSignal  = sigAplusLong or sigMomoLong or sigReclaimLong or sigRevLong
+shortSignal = sigAplusShort or sigMomoShort or sigRevShort
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ALERTS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+alertcondition(longSignal,      "A++ LONG",       "LONG | strongest long signal fired")
+alertcondition(shortSignal,     "A++ SHORT",      "SHORT | strongest short signal fired")
+alertcondition(sigReclaimLong,  "RECLAIM LONG",   "RECLAIM LONG | strongest reclaim long fired")
+alertcondition(sigRevLong,      "REV MOMO LONG",  "REV MOMO LONG | strongest rev long fired")
+alertcondition(sigRevShort,     "REV MOMO SHORT", "REV MOMO SHORT | strongest rev short fired")
+alertcondition(sigMomoLong,     "MOMO LONG",      "MOMO LONG | strongest momo long fired")
+alertcondition(sigMomoShort,    "MOMO SHORT",     "MOMO SHORT | strongest momo short fired")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STRATEGY ORDERS
+// Priority Long: REV > RECLAIM > MOMO > A++ if same bar after scoring
+// Priority Short: REV > MOMO > A++
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+slPts = slTicks * tick
+tpPts = tpTicks * tick
+
+string longId  = na
+string shortId = na
+
+if sigRevLong
+    longId := "REVL"
+else if sigReclaimLong
+    longId := "RECL"
+else if sigMomoLong
+    longId := "MOMOL"
+else if sigAplusLong
+    longId := "A++L"
+
+if sigRevShort
+    shortId := "REVS"
+else if sigMomoShort
+    shortId := "MOMOS"
+else if sigAplusShort
+    shortId := "A++S"
+
+canLong  = (not blockSameDirReEntry) or (not didLongThisSession)
+canShort = (not blockSameDirReEntry) or (not didShortThisSession)
+
+entryPlaced = false
+
+if not na(longId) and strategy.position_size == 0 and canLong
+    strategy.entry(longId, strategy.long)
+    didLongThisSession := true
+    entryPlaced := true
+
+if not na(shortId) and strategy.position_size == 0 and canShort
+    strategy.entry(shortId, strategy.short)
+    didShortThisSession := true
+    entryPlaced := true
+
+if useBrackets
+    strategy.exit("A++L-Exit", from_entry="A++L", stop=strategy.position_avg_price - slPts, limit=strategy.position_avg_price + tpPts)
+    strategy.exit("MOMOL-Exit", from_entry="MOMOL", stop=strategy.position_avg_price - slPts, limit=strategy.position_avg_price + tpPts)
+    strategy.exit("RECL-Exit",  from_entry="RECL",  stop=strategy.position_avg_price - slPts, limit=strategy.position_avg_price + tpPts)
+    strategy.exit("REVL-Exit",  from_entry="REVL",  stop=strategy.position_avg_price - slPts, limit=strategy.position_avg_price + tpPts)
+
+    strategy.exit("A++S-Exit", from_entry="A++S", stop=strategy.position_avg_price + slPts, limit=strategy.position_avg_price - tpPts)
+    strategy.exit("MOMOS-Exit", from_entry="MOMOS", stop=strategy.position_avg_price + slPts, limit=strategy.position_avg_price - tpPts)
+    strategy.exit("REVS-Exit",  from_entry="REVS",  stop=strategy.position_avg_price + slPts, limit=strategy.position_avg_price - tpPts)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TRADE COUNTER
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if entryPlaced
+    tradesToday += 1
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// LABELS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if sigRevLong and showRevLbl
+    label.new(bar_index, low, "REV MOMO LONG", style=label.style_label_up, color=color.aqua, textcolor=color.black, size=size.large)
+
+if sigRevShort and showRevLbl
+    label.new(bar_index, high, "REV MOMO SHORT", style=label.style_label_down, color=color.purple, textcolor=color.white, size=size.large)
+
+if sigReclaimLong and showReclaimLbl
+    label.new(bar_index, low, "A++ RECLAIM LONG", style=label.style_label_up, color=color.teal, textcolor=color.white, size=size.huge)
+
+if sigMomoLong and showMomoLbl
+    label.new(bar_index, low, "MOMO LONG", style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.large)
+
+if sigMomoShort and showMomoLbl
+    label.new(bar_index, high, "MOMO SHORT", style=label.style_label_down, color=color.orange, textcolor=color.black, size=size.large)
+
+if sigAplusLong and showAplusLbl
+    label.new(bar_index, low, "A++ LONG", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.large)
+
+if sigAplusShort and showAplusLbl
+    label.new(bar_index, high, "A++ SHORT", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.large)
+
+if showDebug and barstate.isconfirmed
+    if aplusLongRaw or momentumLongRaw or reclaimLongRaw or revLongRaw
+        label.new(bar_index, low, "Lscore=" + str.tostring(barLongScore, "#.00") + "\ncount=" + str.tostring(longLegSignalCount), style=label.style_label_up, color=color.new(color.blue, 70), textcolor=color.white, size=size.small)
+    if aplusShortRaw or momentumShortRaw or revShortRaw
+        label.new(bar_index, high, "Sscore=" + str.tostring(barShortScore, "#.00") + "\ncount=" + str.tostring(shortLegSignalCount), style=label.style_label_down, color=color.new(color.red, 70), textcolor=color.white, size=size.small)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PER-TYPE WIN/LOSS STATS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int prevClosed = 0
+
+var int aplusWins = 0
+var int aplusLoss = 0
+var int momoWins  = 0
+var int momoLoss  = 0
+var int reclWins  = 0
+var int reclLoss  = 0
+var int revWins   = 0
+var int revLoss   = 0
+
+closedNow = strategy.closedtrades
+if closedNow > prevClosed
+    for i = prevClosed to (closedNow - 1)
+        eid = strategy.closedtrades.entry_id(i)
+        pnl = strategy.closedtrades.profit(i)
+        isWin = pnl > 0
+
+        if eid == "A++L" or eid == "A++S"
+            if isWin
+                aplusWins += 1
+            else
+                aplusLoss += 1
+
+        if eid == "MOMOL" or eid == "MOMOS"
+            if isWin
+                momoWins += 1
+            else
+                momoLoss += 1
+
+        if eid == "RECL"
+            if isWin
+                reclWins += 1
+            else
+                reclLoss += 1
+
+        if eid == "REVL" or eid == "REVS"
+            if isWin
+                revWins += 1
+            else
+                revLoss += 1
+
+    prevClosed := closedNow
+
+f_wr(w, l) =>
+    t = w + l
+    t > 0 ? (100.0 * w / t) : na
+
+apWR = f_wr(aplusWins, aplusLoss)
+moWR = f_wr(momoWins,  momoLoss)
+rcWR = f_wr(reclWins,  reclLoss)
+rvWR = f_wr(revWins,   revLoss)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STATUS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var label statusLbl = na
+statusShouldShow = showStatus and (not statusOnlyInSession or (mnSession and dayOK))
+
+if barstate.islast
+    if not statusShouldShow
+        if not na(statusLbl)
+            label.delete(statusLbl)
+            statusLbl := na
+    else
+        statsTxt = showStatsPanel ?
+          "\n\nSTATS (Closed Trades)\n" +
+          "A++  W/L: " + str.tostring(aplusWins) + "/" + str.tostring(aplusLoss) + "  WR=" + str.tostring(apWR, "#.0") + "%\n" +
+          "MOMO W/L: " + str.tostring(momoWins)  + "/" + str.tostring(momoLoss)  + "  WR=" + str.tostring(moWR, "#.0") + "%\n" +
+          "RECL W/L: " + str.tostring(reclWins)  + "/" + str.tostring(reclLoss)  + "  WR=" + str.tostring(rcWR, "#.0") + "%\n" +
+          "REV  W/L: " + str.tostring(revWins)   + "/" + str.tostring(revLoss)   + "  WR=" + str.tostring(rvWR, "#.0") + "%"
+          : ""
+
+        txt =
+          "A++ STATUS\n" +
+          "mnSession=" + str.tostring(mnSession) + "\n" +
+          "dayOK=" + str.tostring(dayOK) + "\n" +
+          "allowed=" + str.tostring(tradeAllowed) + "\n" +
+          "bullTrend=" + str.tostring(bullTrend) + " slopeUp=" + str.tostring(emaSlopeUp) + "\n" +
+          "bearTrend=" + str.tostring(bearTrend) + " slopeDn=" + str.tostring(emaSlopeDown) + "\n" +
+          "Long Leg Count=" + str.tostring(longLegSignalCount) + " Best=" + str.tostring(bestLongLegScore, "#.00") + "\n" +
+          "Short Leg Count=" + str.tostring(shortLegSignalCount) + " Best=" + str.tostring(bestShortLegScore, "#.00") + "\n" +
+          "Trades: " + str.tostring(tradesToday) + "/" + str.tostring(maxTrades) +
+          statsTxt
+
+        anchorX = statusAnchorRight ? (bar_index + 6) : bar_index
+        anchorY = high
+
+        if na(statusLbl)
+            statusLbl := label.new(anchorX, anchorY, txt, style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 20))
+        else
+            label.set_xy(statusLbl, anchorX, anchorY)
+            label.set_text(statusLbl, txt)
+
+View in Pine Editor・600 lines
+Use on chart
+2
+7
+2
+2 437
+hahahaha man I wanna see some tits man like nice ones

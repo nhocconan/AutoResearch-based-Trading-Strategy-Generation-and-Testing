@@ -1,0 +1,77 @@
+//@version=5
+strategy(title="Kertnel + RSI Net Long Strategy V3", overlay=false, pyramiding=10)
+
+// Strategy Inputs
+lotSize = input.int(1, title="Lot Size per Order")
+lengthMiddle = input.int(14,  title="MiddleEMA")
+// Adjustment 1: Narrower Channel
+channelATR = input.int(7, title="Channel wall ATR")
+channelWidth = input.float(0.15, title = "Channel Width")
+showBarColor = input.bool(true, title="Highlight Bear/Bull reversals?")
+rsiOversoldLevel = input.float(23.6, title="RSI Oversold Level")
+rsiOverboughtLevel = input.float(78.6, title="RSI Overbought Level")
+
+// rsi manual
+change = ta.change(close)
+gain = change >= 0 ? change : 0.0
+loss = change < 0 ? (-1) * change : 0.0
+avgGain = ta.rma(gain, lengthMiddle)
+avgLoss = ta.rma(loss, lengthMiddle)
+rs = avgGain / avgLoss
+rsi_14 = 100 - (100 / (1 + rs))
+
+// keltner channel calculation
+rsi_seven = ta.rsi(close,7)
+rsi_keltner = ta.ema(rsi_14,lengthMiddle)
+rsi_keltner_previous = ta.rsi(close[1],lengthMiddle)
+current_period = ta.rsi(close,lengthMiddle)
+abs_current_period_high = math.abs(rsi_keltner - rsi_keltner_previous)
+
+true_range = math.max(current_period, abs_current_period_high)
+
+absolute_true_range = ta.rma(true_range, channelATR)
+upperVal = rsi_keltner + channelWidth * absolute_true_range
+lowerVal = rsi_keltner - channelWidth * absolute_true_range
+
+// Strategy Logic
+// --- BUY/LONG LOGIC ---
+// Long at the bottom of the channel on reversal
+// Removed the rsiOversoldLevel filter for more trades
+longCondition = rsi_seven[1] < lowerVal and rsi_seven > rsi_seven[1]
+if longCondition
+    strategy.order("Buy", strategy.long, qty=lotSize)
+
+// --- SELL/SHORT LOGIC ---
+// Short at the top of the channel on reversal
+// Removed the rsiOverboughtLevel filter for more trades
+shortCondition = rsi_seven[1] > upperVal and rsi_seven < rsi_seven[1]
+if shortCondition
+    strategy.order("Sell", strategy.short, qty=lotSize)
+
+// Close shorts at the bottom of the channel
+if ta.crossunder(rsi_seven, lowerVal) and strategy.position_size < 0
+    strategy.close("Sell", qty=math.abs(strategy.position_size))
+
+// Plotting (optional)
+rsi_line = plot(rsi_seven, style=plot.style_line, linewidth=3, color = color.aqua)
+middle_line = plot(rsi_keltner, style=plot.style_line, linewidth=3, color=color.white)
+upper_line = plot(upperVal, color=color.green)
+lower_line = plot(lowerVal, color = color.red)
+fill(upper_line, lower_line, color=color.white, transp=90)
+band1 = hline(rsiOverboughtLevel, color=color.orange,linestyle=hline.style_dotted)
+band0 = hline(rsiOversoldLevel, color=color.purple,linestyle=hline.style_dotted)
+hline(61.8, color=color.purple,linestyle=hline.style_dotted)
+hline(38.2, color=color.orange,linestyle=hline.style_dotted)
+hline(50, color=color.green,linestyle=hline.style_solid)
+
+View in Pine Editor・65 lines
+Use on chart
+2
+9
+1
+896
+Aug 22, 2025
+Long bottom of the keltner channel, and short the top with RSI confirmation.
+Aug 22, 2025
+Release Notes
+Long the bottom of the channel, short the top, with confirmation from the RSI.

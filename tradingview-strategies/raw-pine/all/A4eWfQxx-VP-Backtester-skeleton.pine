@@ -1,0 +1,87 @@
+//@version=3
+strategy(title = "VP Backtester", overlay=true,currency=currency.USD,default_qty_type=strategy.percent_of_equity, default_qty_value =2)
+
+// Create General Strategy Inputs
+riskPerTrade= input(defval=2.0, title='Risk / trade')
+startYear = input(defval=2017, title='Backtest Start Year', type=integer)
+startMonth = input(defval=01, title='Backtest Start Month', type=integer)
+startDay = input(defval=01, title='Backtest Start Day', type=integer)
+endYear = input(defval=2025, title='Backtest End Year', type=integer)
+endMonth = input(defval=01, title='Backtest End Month', type=integer)
+endDay = input(defval=01, title='Backtest End Day', type=integer)
+ 
+// Default Stop Types
+atrPeriod       = input(defval=14, title='ATR Length for stop')
+atrMultiplierSL = input(defval=1.5, title='ATR Multiplier for stoploss')
+atrMultiplierTP = input(defval=1.0, title='ATR Multiplier for profit')
+ 
+strategy.risk.allow_entry_in(strategy.direction.all)
+ 
+// Set start and end dates for backtest
+start = timestamp(startYear, startMonth, startDay,00,00)
+end = timestamp(endYear, endMonth, endDay,00,00)
+window()  => time >= start and time <= end ? true : false 
+
+// atr calc for stop and profit
+atr = atr(atrPeriod)
+atr_stoploss = atr * atrMultiplierSL
+atr_profit = atr * atrMultiplierTP
+
+//*************************************************************************************
+// Put your strategy/indicator code below
+// and make sure to set long_condition=1 for opening a buy trade
+// and short_condition for opening a sell trade
+//*************************************************************************************
+fastInput = input(21)
+slowInput = input(55)
+
+fast = ema(close, fastInput)
+slow = ema(close, slowInput)
+
+plot(fast, color = red)
+plot(slow, color = blue)
+
+long_condition = crossover(fast, slow)
+short_condition = crossunder(fast, slow)
+
+
+//*************************************************************************************
+// Trade management
+//*************************************************************************************
+// if a strategy has an account equity of 24,372 
+// and the instrument trades at 93.32, 
+// the order size will be 26 contracts (24,372 * 10% = 2437.20 and then 2437.20 / 93.32 = 26.12 ≈ 26).
+amountToRisk = (strategy.equity * riskPerTrade / 100.0) 
+contracts = 100*(amountToRisk / open)
+
+if (long_condition and window() )
+    strategy.entry("Long Entry",  strategy.long, qty=contracts)
+    if strategy.position_size <= 0 
+        atr_stop_price  =  open - atr_stoploss
+        atr_profit_price = open + atr_profit
+        strategy.exit('ATR Long Exit', "Long Entry", stop=atr_stop_price, limit = atr_profit_price)
+        
+if (short_condition and window() )
+    strategy.entry("Short Entry",strategy.short, qty=contracts)
+    if strategy.position_size >= 0
+        atr_stop_price  =  open + atr_stoploss
+        atr_profit_price = open - atr_profit
+        strategy.exit('ATR Short Exit', "Short Entry", stop=atr_stop_price, limit = atr_profit_price)
+
+View in Pine Editor・69 lines
+Use on chart
+2
+3
+9
+3
+8 757
+Mar 21, 2019
+Simple backtesting skeleton script which uses ATR based stop & profit targets based on the no-nonsense forex way of trading
+Mar 21, 2019
+Release Notes
+Cleaned up code
+Added option to specify the risk / trade
+
+Mar 21, 2019
+Release Notes
+fixed risk percentage/trade

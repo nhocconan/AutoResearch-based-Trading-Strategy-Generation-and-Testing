@@ -1,0 +1,51 @@
+//@version=3
+//Moun1r basic lrc idea :)
+strategy("LREGGSXC2", overlay=true)
+sar = vwma(close, 8)
+//Renko Zone
+renko_tickerid = renko(tickerid, "open", "ATR", 100)
+renko_close = security(renko_tickerid, period, close)
+renkoTrend = close > renko_close ? true : false
+plot(renko_close,color=close < renko_close ? red:green,linewidth=4,style=circles)
+bgcolor(close < renko_close ? red:green,transp=80)
+
+//HL Zone 
+length = input(title="Length", type=integer, defval=35)
+offset = input(title="Offset", type=integer, defval=0)
+leftBars = input(2)
+rightBars=input(2)
+ph = pivothigh(leftBars, rightBars)
+plot(ph, style=line, linewidth=3, color= red, offset=-rightBars,title="Price High")
+pl = pivotlow(close, leftBars, rightBars)
+plot(pl, style=line, linewidth=3, color= blue, offset=-rightBars,title="Price Low")
+
+//LRC Zone
+src = input(close, title="Source")
+lsma = linreg(src, length, offset)
+slope = ((lsma - lsma[1]) / interval)
+rise = rising(slope,3)
+RenkoChange = roc(renko_close,5)
+//plot(rsofslpe,title="ROC Slope",trackprice=true)
+
+//Plotter
+plotshape(crossunder(vwap,lsma), style=shape.square,size='large',color=red)
+plotshape(crossunder(lsma,pl), style=shape.square,size='large',color=green,location=location.belowbar)
+plot(lsma,linewidth=3,title="LREG")
+plot(sar,linewidth=3,color=white,title="VWAP")
+
+//Decide
+corresline = cross(lsma,close)
+longCondition =   crossunder(lsma,pl) and close > sar and RenkoChange < 0
+strategy.entry("buy", true, when = longCondition)
+shortCondition = crossunder(vwap,lsma)  or cross(lsma,pl)  or close < sar 
+strategy.close("buy", when = shortCondition)
+
+View in Pine Editor・41 lines
+Use on chart
+9
+3
+1
+4 448
+Basic idea of how to untrend and calculate slope movement and derivative.
+
+Have fun

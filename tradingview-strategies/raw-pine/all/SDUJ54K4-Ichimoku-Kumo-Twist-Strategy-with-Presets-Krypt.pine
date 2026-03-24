@@ -1,0 +1,132 @@
+//@version=3
+strategy(title="Ichimoku Kumo Twist Strategy (Presets)", shorttitle="Kumo Twist Strategy", overlay=true)
+
+xlowest_(src, len) =>
+    x = src
+    for i = 1 to len - 1
+        v = src[i]
+        if (na(v))
+            break
+        x := min(x, v)
+    x
+
+xlowest(src, len) =>
+    na(src[len]) ? xlowest_(src, len) : lowest(src, len)
+
+xhighest_(src, len) =>
+    x = src
+    for i = 1 to len - 1
+        v = src[i]
+        if (na(v))
+            break
+        x := max(x, v)
+    x
+
+xhighest(src, len) =>
+    na(src[len]) ? xhighest_(src, len) : highest(src, len)
+
+dropn(src, n) =>
+    na(src[n]) ? na : src
+
+ichiConversionPeriods(presets) =>
+    if presets == "Cpt 20 60 120 30"
+        20
+    else
+        if presets == "Cpt 10 30 60 30"
+            10
+        else
+            if presets == "Std 18 52 104 26"
+                18
+            else
+                9
+
+ichiBasePeriods(presets) =>
+    if presets == "Cpt 20 60 120 30"
+        60
+    else
+        if presets == "Cpt 10 30 60 30"
+            30
+        else
+            if presets == "Std 18 52 104 26"
+                52
+            else
+                26
+
+ichiLaggingSpan2Periods(presets) =>
+    if presets == "Cpt 20 60 120 30"
+        120
+    else
+        if presets == "Cpt 10 30 60 30"
+            60
+        else
+            if presets == "Std 18 52 104 26"
+                104
+            else
+                52
+
+ichiDisplacement(presets) =>
+    if presets == "Cpt 20 60 120 30"
+        30
+    else
+        if presets == "Cpt 10 30 60 30"
+            30
+        else
+            if presets == "Std 18 52 104 26"
+                26
+            else
+                26
+
+scaling = input(title="Scaling", options=["Linear", "Log"], defval="Linear")
+presets = input(title="Presets", type=string, options=["Cpt 20 60 120 30", "Cpt 10 30 60 30", "Std 18 52 104 26", "Std 9 26 52 26"], defval="Cpt 20 60 120 30")
+dropCandles = input(1, minval=0, title="Drop first N candles")
+showClouds = input(false, "Show Clouds")
+stoploss = input(true, title="Stop Loss")
+
+conversionPeriods = ichiConversionPeriods(presets)
+basePeriods = ichiBasePeriods(presets)
+laggingSpan2Periods = ichiLaggingSpan2Periods(presets)
+displacement = ichiDisplacement(presets)
+logScaling = scaling == "Log"
+
+lows = dropn(low, dropCandles)
+highs = dropn(high, dropCandles)
+
+lowsp = logScaling ? log(lows) : lows
+highsp = logScaling ? log(highs) : highs
+
+donchian(len) =>
+    avg(xlowest(lowsp, len), xhighest(highsp, len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+golong = crossover(leadLine1, leadLine2)
+goshort = crossunder(leadLine1, leadLine2)
+
+strategy.entry("Buy", strategy.long, when=golong, stop=(stoploss ? high+syminfo.mintick : na))
+strategy.entry("Sell", strategy.short, when=goshort, stop=(stoploss ? low-syminfo.mintick : na))
+
+conversionLinep = logScaling ? exp(conversionLine) : conversionLine
+baseLinep = logScaling ? exp(baseLine) : baseLine
+leadLine1p = logScaling ? exp(leadLine1) : leadLine1
+leadLine2p = logScaling ? exp(leadLine2) : leadLine2
+
+plot(showClouds ? conversionLinep : na, color=#0496ff, title="Conversion Line")
+plot(showClouds ? baseLinep : na, color=#991515, title="Base Line")
+
+p1 = plot(showClouds ? leadLine1p : na, offset = displacement, color=green, title="Lead 1")
+p2 = plot(showClouds ? leadLine2p : na, offset = displacement, color=red, title="Lead 2")
+fill(p1, p2, color = showClouds ? (leadLine1p > leadLine2p ? green : red) : na)
+
+View in Pine Editor・121 lines
+Use on chart
+1 K
+5
+23 460
+Feb 8, 2018
+A simple strategy for testing Ichimoku settings used in the following indicator:
+Feb 8, 2018
+Release Notes
+make presets explicit

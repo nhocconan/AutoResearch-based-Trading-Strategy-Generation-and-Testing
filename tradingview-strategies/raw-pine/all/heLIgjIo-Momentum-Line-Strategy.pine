@@ -1,0 +1,25 @@
+//@version=3
+strategy("Gap MA", overlay=true)
+per=input(35, type=integer, minval=12, step=1)
+pp=round(per/3)
+a=highest(high,4)
+ao=lowest(close[per-2*pp],pp)
+A=(a+ao)/2
+if open>A 
+    strategy.entry("long", true, 1)
+else
+    strategy.close("long")
+
+if open<A
+    strategy.entry("short", false, 1)
+else
+    strategy.close("short")
+plot(A, linewidth=3)
+
+View in Pine Editor・17 lines
+Use on chart
+9
+2
+1
+3 139
+I got the idea of an algorithm using a gap, which would behave a bit like RSI, therefore I called it momentum. Don't know if it's very useful or how to improve it, it can keeps you in trends, however it suffers from whipsawing. My first attempt in programming a strategy.

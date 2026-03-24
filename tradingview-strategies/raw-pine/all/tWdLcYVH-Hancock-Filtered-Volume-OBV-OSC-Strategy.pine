@@ -1,0 +1,3 @@
+//@version=4
+use_osc=##input(defval=true,type='INPUT_BOOL',##id='in_4')
+##root(root_metainfo,rm_0,(use_osc?0:na),input__float)

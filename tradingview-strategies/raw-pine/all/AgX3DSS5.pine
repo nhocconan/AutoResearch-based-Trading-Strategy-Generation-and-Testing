@@ -1,0 +1,414 @@
+//@version=5
+strategy("HEK Dinamik Fiyat Kanalı Stratejisi v3.1 + Sentiment",
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100)
+
+//─────────────────────────────────────────────
+// PARAMETRELER — KANAL
+//─────────────────────────────────────────────
+groupKanal   = "📌 Kanal Ayarları"
+uzunluk      = input.int(20, "Kanal Periyodu", group=groupKanal, minval=1)
+ustOran      = input.float(0.05, "Üst Yaklaşma Oranı", group=groupKanal, step=0.01)
+altOran      = input.float(0.05, "Alt Yaklaşma Oranı", group=groupKanal, step=0.01)
+
+// ✅ BUGFIX PARAM: Kaydırma artık sabit 1.0 değil, kanal genişliğinin oranı
+kaydirOran   = input.float(0.10, "Dinamik Kaydırma Oranı (Kanal Genişliğine Göre)", group=groupKanal, step=0.01, minval=0.0, maxval=0.50)
+
+//─────────────────────────────────────────────
+// KANAL HESABI
+//─────────────────────────────────────────────
+ustK  = ta.highest(high, uzunluk)
+altK  = ta.lowest(low, uzunluk)
+ortaK = (ustK + altK) / 2
+
+kanalGenisligi = math.max(syminfo.mintick, ustK - altK)
+
+//─────────────────────────────────────────────
+// ✅ DİNAMİK KANAL KAYDIRMA (BUGFIX: ORANSAL)
+//─────────────────────────────────────────────
+// Eski davranış: uA/aA = ±1.0 (sabit fiyat adımı) → ölçek bağımlı, tutarsız.
+// Yeni davranış: uRatio/lRatio * kanalGenisligi → ölçek bağımsız, tutarlı.
+
+var float uRatio = 0.0
+var float aRatio = 0.0
+
+crossUp   = ta.crossover(close, ortaK)
+crossDown = ta.crossunder(close, ortaK)
+
+if crossUp
+    // fiyat orta hattın üstüne geçti → üst bandı aşağı "kaydır"
+    uRatio := -kaydirOran
+    aRatio := 0.0
+else if crossDown
+    // fiyat orta hattın altına indi → alt bandı yukarı "kaydır"
+    aRatio :=  kaydirOran
+    uRatio := 0.0
+
+ustKanal = ustK + (kanalGenisligi * uRatio)
+altKanal = altK + (kanalGenisligi * aRatio)
+
+// Limit bölgeleri
+ustLimit = ustKanal - kanalGenisligi * ustOran
+altLimit = altKanal + kanalGenisligi * altOran
+
+var bool alIzin  = true
+var bool cikIzin = true
+
+//─────────────────────────────────────────────
+// SENTIMENT AYARLARI
+//─────────────────────────────────────────────
+groupSent = "📌 Sentiment Ayarları"
+
+useSentiment        = input.bool(true, "Sentiment Filtresi Kullan", group=groupSent)
+sentimentLimit      = input.int(50, "Sentiment Eşiği", group=groupSent)
+
+useDynamicWeights   = input.bool(true, "Dinamik Ağırlıklandırma Kullan", group=groupSent)
+w_hisse_base        = input.float(0.4, "Hisse Temel Ağırlığı",  group=groupSent)
+w_sector_base       = input.float(0.3, "Alt Endeks Temel Ağırlığı", group=groupSent)
+w_endeks_base       = input.float(0.2, "Genel Endeks Temel Ağırlığı", group=groupSent)
+w_vadeli_base       = input.float(0.1, "Vadeli Temel Ağırlığı", group=groupSent)
+
+genelKodu = input.symbol("BIST:XU030", "Genel Endeks", group=groupSent)
+altKodu   = input.symbol("BIST:XUSIN", "Alt Endeks", group=groupSent)
+vadelikodu= input.symbol("F_XU0300425", "Vadeli Kontrat", group=groupSent)
+
+//─────────────────────────────────────────────
+// SENTIMENT HESAPLARI
+//─────────────────────────────────────────────
+
+// ---- Genel Endeks ----
+genelFiyat  = request.security(genelKodu, timeframe.period, close)
+genelRSI    = ta.rsi(genelFiyat, 14)
+genelROC    = ta.roc(genelFiyat, 10)
+genelVol    = request.security(genelKodu, timeframe.period, volume)
+genelVolChg = genelVol - genelVol[1]
+genelATR    = ta.atr(14)
+genelATRChg = genelATR - genelATR[1]
+
+e_score = 0
+e_score += genelRSI > 70 ? 25 : genelRSI < 30 ? -25 : 0
+e_score += genelROC > 0 ? 20 : genelROC < 0 ? -20 : 0
+e_score += genelVolChg > 0 ? 20 : genelVolChg < 0 ? -20 : 0
+e_score += genelATRChg > 0 ? 20 : genelATRChg < 0 ? -20 : 0
+
+// ---- Alt Endeks ----
+altFiyat  = request.security(altKodu, timeframe.period, close)
+altRSI    = ta.rsi(altFiyat, 14)
+altROC    = ta.roc(altFiyat, 10)
+altVol    = request.security(altKodu, timeframe.period, volume)
+altVolChg = altVol - altVol[1]
+altATR    = ta.atr(14)
+altATRChg = altATR - altATR[1]
+
+s_score = 0
+s_score += altRSI > 70 ? 25 : altRSI < 30 ? -25 : 0
+s_score += altROC > 0 ? 20 : altROC < 0 ? -20 : 0
+s_score += altVolChg > 0 ? 20 : altVolChg < 0 ? -20 : 0
+s_score += altATRChg > 0 ? 20 : altATRChg < 0 ? -20 : 0
+
+// ---- Hisse ----
+rsi    = ta.rsi(close, 14)
+roc    = ta.roc(close, 10)
+vol    = volume
+volChg = vol - vol[1]
+atr    = ta.atr(14)
+atrChg = atr - atr[1]
+
+h_score = 0
+h_score += rsi > 70 ? 25 : rsi < 30 ? -25 : 0
+h_score += roc > 0 ? 20 : roc < 0 ? -20 : 0
+h_score += volChg > 0 ? 20 : volChg < 0 ? -20 : 0
+h_score += atrChg > 0 ? 20 : atrChg < 0 ? -20 : 0
+
+// ---- Vadeli ----
+vadelifiyat = request.security(vadelikodu, timeframe.period, close)
+vadeliRSI   = ta.rsi(vadelifiyat, 14)
+vadeliROC   = ta.roc(vadelifiyat, 10)
+vadelivol   = request.security(vadelikodu, timeframe.period, volume)
+vadelivolchg= vadelivol - vadelivol[1]
+vadeliATR   = ta.atr(14)
+vadeliATRchg= vadeliATR - vadeliATR[1]
+
+v_score = 0
+v_score += vadeliRSI > 70 ? 25 : vadeliRSI < 30 ? -25 : 0
+v_score += vadeliROC > 0 ? 20 : vadeliROC < 0 ? -20 : 0
+v_score += vadelivolchg > 0 ? 20 : vadelivolchg < 0 ? -20 : 0
+v_score += vadeliATRchg > 0 ? 20 : vadeliATRchg < 0 ? -20 : 0
+
+// ---- Dinamik Ağırlıklandırma ----
+genelVolatility = ta.stdev(genelFiyat,20)
+altVolatility   = ta.stdev(altFiyat,20)
+hisseVolatility = ta.stdev(close,20)
+vadeliVolatility= ta.stdev(vadelifiyat,20)
+
+totalVolatility = math.max(1, genelVolatility + altVolatility + hisseVolatility + vadeliVolatility)
+
+minWeight = 0.05
+w_hisse_dyn  = math.max(minWeight, hisseVolatility / totalVolatility)
+w_sector_dyn = math.max(minWeight, altVolatility / totalVolatility)
+w_endeks_dyn = math.max(minWeight, genelVolatility / totalVolatility)
+w_vadeli_dyn = math.max(minWeight, vadeliVolatility / totalVolatility)
+
+total_dyn = w_hisse_dyn + w_sector_dyn + w_endeks_dyn + w_vadeli_dyn
+
+w_hisse   = useDynamicWeights ? w_hisse_dyn  / total_dyn : w_hisse_base
+w_sector  = useDynamicWeights ? w_sector_dyn / total_dyn : w_sector_base
+w_endeks  = useDynamicWeights ? w_endeks_dyn / total_dyn : w_endeks_base
+w_vadeli  = useDynamicWeights ? w_vadeli_dyn / total_dyn : w_vadeli_base
+
+weightedSentiment = (h_score * w_hisse) + (s_score * w_sector) + (e_score * w_endeks) + (v_score * w_vadeli)
+
+sentimentOk = weightedSentiment > sentimentLimit
+
+//─────────────────────────────────────────────
+// STRATEJİ MANTIĞI
+//─────────────────────────────────────────────
+alKosul  = close >= ustLimit and (not useSentiment or sentimentOk)
+satKosul = close <= altLimit
+
+if alKosul
+    if alIzin
+        strategy.entry("AL", strategy.long)
+    cikIzin := false
+else
+    cikIzin := true
+
+if satKosul
+    if cikIzin
+        strategy.close("AL")
+    alIzin := false
+else
+    alIzin := true
+
+//─────────────────────────────────────────────
+// GÖRSEL
+//─────────────────────────────────────────────
+plot(ustKanal, color=color.lime, title="Üst Kanal")
+plot(ortaK,    color=color.orange, title="Orta Hat")
+plot(altKanal, color=color.red, title="Alt Kanal")
+plot(ustLimit, color=color.new(color.lime, 70), title="Üst Limit")
+plot(altLimit, color=color.new(color.red, 70),  title="Alt Limit")
+plot(weightedSentiment, title="Ağırlıklı Sentiment", color=color.yellow, linewidth=2)
+hline(sentimentLimit, "Sentiment Eşiği", color=color.green)
+
+View in Pine Editor・194 lines
+Use on chart
+4
+8
+1 687
+Nov 3, 2025
+HEK Dynamic Price Channel Strategy
+Concept
+
+The HEK Dynamic Price Channel provides a channel structure that expands and contracts according to price momentum and time-based equilibrium.
+Unlike fixed-band systems, it evaluates the interaction between price and its balance line through an adaptive channel width that dynamically adjusts to changing market conditions.
+
+How It Works
+
+When the price reacts to the midline, the channel bands automatically reposition themselves.
+
+Touching the upper band indicates a strengthening trend, while touching the lower band signals weakening momentum.
+
+This adaptive mechanism helps filter out false signals during sudden directional changes, enhancing overall signal quality.
+
+Advantages
+
+✅ Maintains trend continuity while avoiding overtrading.
+✅ Automatically adapts to changing volatility conditions.
+✅ Detects early signals of short- and mid-term trend reversals.
+
+Applications
+
+Directional confirmation in spot and futures markets.
+
+A supporting tool in channel breakout strategies.
+
+Identifying price consolidation and equilibrium zones.
+
+Note
+
+This strategy is intended for educational and research purposes only.
+It should not be considered financial advice. Always consult a professional financial advisor before making investment decisions.
+
+© HEK — Adaptive Channel Approach on Dynamic Market Structures
+6 gün önce
+Sürüm Notları
+HEK Dynamic Price Channel Strategy
+Concept
+
+The HEK Dynamic Price Channel provides a channel structure that expands and contracts according to price momentum and time-based equilibrium.
+Unlike fixed-band systems, it evaluates the interaction between price and its balance line through an adaptive channel width that dynamically adjusts to changing market conditions.
+
+How It Works
+
+When the price reacts to the midline, the channel bands automatically reposition themselves.
+
+Touching the upper band indicates a strengthening trend, while touching the lower band signals weakening momentum.
+
+This adaptive mechanism helps filter out false signals during sudden directional changes, enhancing overall signal quality.
+
+Advantages
+
+✅ Maintains trend continuity while avoiding overtrading.
+✅ Automatically adapts to changing volatility conditions.
+✅ Detects early signals of short- and mid-term trend reversals.
+
+Applications
+
+Directional confirmation in spot and futures markets.
+
+A supporting tool in channel breakout strategies.
+
+Identifying price consolidation and equilibrium zones.
+
+Note
+
+This strategy is intended for educational and research purposes only.
+It should not be considered financial advice. Always consult a professional financial advisor before making investment decisions.
+
+© HEK — Adaptive Channel Approach on Dynamic Market Structures
+Nov 19, 2025
+Release Notes
+# **v2 Update Notes – (v1 → v2)**
+
+### **Upper & Lower Proximity Ratios Added**
+
+Instead of requiring direct band touches, v2 introduces:
+
+* **Upper Proximity Ratio (ustOran)**
+* **Lower Proximity Ratio (altOran)**
+
+allowing the user to define how close the price must get to the band to trigger signals.
+
+This significantly increases flexibility and signal precision.
+
+---
+
+### **Proximity Calculated Relative to Channel Width**
+
+Limits are now defined as:
+
+```
+upperLimit = upperChannel - channelWidth * upperRatio
+lowerLimit = lowerChannel + channelWidth * lowerRatio
+```
+
+This ensures:
+
+* Stable behavior during tight channels
+* Accurate signals during strong trends
+* Reduced noise in low-volatility conditions
+
+---
+
+### **Improved Trade Permission Logic**
+
+The alIzin (long permission) and cikIzin (exit permission) system was adapted to the new limit-based structure.
+
+* Approaching the upper limit → **Long Entry Only**
+* Approaching the lower limit → **Exit Only**
+
+Repeated signals are blocked automatically.
+
+---
+
+### **Improved Stability & Signal Quality**
+
+* Smoother adaptive channel calculations
+* Better approach-based signal zone
+* Enhanced direction filtering
+
+Overall, v2 is significantly more robust and stable than v1.
+
+---
+
+## **Note**
+
+This strategy is for educational and research purposes only.
+It should not be considered financial advice. Please consult a certified financial advisor before making investment decisions.
+
+© HEK
+Nov 24, 2025
+Release Notes
+## **HEK Dynamic Price Channel Strategy v3 + Sentiment**
+
+The **HEK Dynamic Price Channel Strategy** is a hybrid trend–momentum model that uses a dynamic price channel based on the highest and lowest values within a selected period.
+Version **v3** introduces major upgrades in filtering, sentiment modeling, dynamic weighting, and signal precision.
+
+---
+
+## **What’s New in v3**
+
+### **1️ Rebuilt Sentiment Engine**
+
+The strategy now calculates separate sentiment scores for:
+
+* Stock
+* Sector Index
+* Main Index
+* Futures Contract
+
+Each score uses four analytical components:
+**RSI, ROC, Volume Change, and ATR Change**, normalized to ±25/±20 scale.
+
+---
+
+### **2️ Dynamic Volatility-Based Weighting (New)**
+
+A new module allocates weights based on real-time volatility:
+
+* More volatile components receive higher influence.
+* In stable conditions, stock sentiment dominates.
+* Minimum-weight protection prevents skewed results.
+
+Users may switch to manual weights instantly.
+
+---
+
+### **3️ Stronger & Cleaner Trade Logic**
+
+* Upper/lower channel bands adjusted with dynamic offsets.
+* Buy signal only when price approaches the upper limit.
+* Exit signal only when price approaches the lower limit.
+* Buy signals occur **only when no position is open**,
+Exit signals occur **only when a position is open**
+→ prevents repeated or ghost signals.
+
+---
+
+## **Purpose of the Strategy**
+
+This hybrid model aims to:
+
+* Capture trend continuation using dynamic channel breakouts,
+* Filter false entries using multi-layer sentiment confirmation,
+* Automatically adapt weighting to market regime shifts.
+
+---
+
+## Disclaimer
+
+This script is for educational purposes only and does not provide financial advice.
+
+© HEK
+Mar 2
+Release Notes
+Bug Fix – Channel Shift Normalization
+
+Issue:
+The dynamic channel shift was previously applied using a fixed price offset (±1.0). This caused inconsistent behavior across instruments with different price scales. For example, a 1-point shift has a large relative impact on low-priced assets, but almost no effect on high-priced assets.
+
+Fix:
+The channel shift is now applied proportionally to the channel width instead of using a fixed price value.
+
+Impact:
+
+Channel behavior is now scale-independent
+
+Consistent performance across low- and high-priced instruments
+
+Improved structural stability of the dynamic channel mechanism
+
+This update affects only the channel movement logic. Strategy rules and sentiment calculations remain unchanged.

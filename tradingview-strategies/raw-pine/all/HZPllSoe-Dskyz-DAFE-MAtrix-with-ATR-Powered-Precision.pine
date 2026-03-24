@@ -1,0 +1,418 @@
+//@version=6
+strategy("Dskyz (DAFE) MAtrix with ATR-Powered Precision", 
+     overlay=true, 
+     default_qty_type=strategy.fixed, 
+     initial_capital=1000000, 
+     commission_value=0, 
+     slippage=1, 
+     pyramiding=10)
+
+// ==================================================================
+// USER-DEFINED FUNCTIONS
+// ==================================================================
+
+// Hull Moving Average (HMA)
+hma(src, len) =>
+    halfLen = math.round(len * 0.5)
+    sqrtLen = math.round(math.sqrt(len))
+    wmaf = ta.wma(src, halfLen)
+    wmaFull = ta.wma(src, len)
+    ta.wma(2 * wmaf - wmaFull, sqrtLen)
+
+// Triple Exponential Moving Average (TEMA)
+tema(src, len) =>
+    ema1 = ta.ema(src, len)
+    ema2 = ta.ema(ema1, len)
+    ema3 = ta.ema(ema2, len)
+    3 * (ema1 - ema2) + ema3
+
+// Double Exponential Moving Average (DEMA)
+dema(src, len) =>
+    ema1 = ta.ema(src, len)
+    ema2 = ta.ema(ema1, len)
+    2 * ema1 - ema2
+
+// VWMA - Volume Weighted Moving Average
+vwma(src, len) =>
+    ta.vwma(src, len)
+
+// ZLEMA - Zero Lag EMA
+zlema(src, len) =>
+    lag = math.floor((len - 1) / 2)
+    ta.ema(2 * src - src[lag], len)
+
+// ALMA - Arnaud Legoux Moving Average
+alma(src, len, offset=0.85, sigma=6) =>
+    ta.alma(src, len, offset, sigma)
+
+// Custom Kaufman Adaptive Moving Average (KAMA)
+kama(src, len) =>
+    fastSC = 2.0 / (2 + 1)
+    slowSC = 2.0 / (30 + 1)
+    change = math.abs(src - src[len])
+    volatility = 0.0
+    for i = 0 to len - 1
+        volatility += math.abs(src - src[i])
+    er = volatility != 0 ? change / volatility : 0.0
+    sc = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    var float kama_val = na
+    kama_val := na(kama_val) ? ta.sma(src, len) : kama_val + sc * (src - kama_val)
+    kama_val
+
+// ==================================================================
+// INPUTS
+// ==================================================================
+
+fastLength   = input.int(9, "[MA] Fast MA Length", minval=1)
+slowLength   = input.int(19, "[MA] Slow MA Length", minval=1)
+fastMAType   = input.string("SMA", "Fast MA Type", options=["SMA", "EMA", "SMMA", "HMA", "TEMA", "WMA", "VWMA", "ZLEMA", "ALMA", "KAMA", "DEMA"])
+slowMAType   = input.string("SMA", "Slow MA Type", options=["SMA", "EMA", "SMMA", "HMA", "TEMA", "WMA", "VWMA", "ZLEMA", "ALMA", "KAMA", "DEMA"])
+
+atrPeriod           = input.int(14, "ATR Period", minval=1)
+atrMultiplier       = input.float(1.5, "ATR Multiplier for Filter", minval=0.1, step=0.1)
+useTrendFilter      = input.bool(true, "[Filter Settings] Use 15m Trend Filter")
+minVolume           = input.int(10, "Minimum Volume", minval=1)
+volatilityThreshold = input.float(1.0, "Volatility Threshold (%)", minval=0.1, step=0.1) / 100
+tradingStartHour    = input.int(9, "Trading Start Hour (24h)", minval=0, maxval=23)
+tradingEndHour      = input.int(16, "Trading End Hour (24h)", minval=0, maxval=23)
+trailOffset         = input.float(0.5, "[Exit Settings] Trailing Stop Offset ATR Multiplier", minval=0.01, step=0.01)
+profitTargetATRMult = input.float(1.2, "Profit Target ATR Multiplier", minval=0.1, step=0.1)
+fixedStopMultiplier = input.float(1.3, "Fixed Stop Multiplier", minval=0.5, step=0.1)
+fixedQuantity       = input.int(2, "Trade Quantity", minval=1)
+
+resetDashboard      = input.bool(false, "Reset Dashboard Stats")
+
+// ==================================================================
+// CALCULATIONS
+// ==================================================================
+
+volumeOk    = volume >= minVolume
+currentHour = hour(time)
+timeWindow  = currentHour >= tradingStartHour and currentHour <= tradingEndHour
+volumeSpike = volume > 1.2 * ta.sma(volume, 10)
+
+// ATR Calculation
+atr          = ta.atr(atrPeriod)
+volatility   = nz(atr / close, 0)
+volatilityOk = volatility <= volatilityThreshold
+
+// ==================================================================
+// MOVING AVERAGES CALCULATIONS
+// ==================================================================
+
+var float fastMA = na
+var float slowMA = na
+
+// Fast MA Logic
+if fastMAType == "SMA"
+    fastMA := ta.sma(close, fastLength)
+else if fastMAType == "EMA"
+    fastMA := ta.ema(close, fastLength)
+else if fastMAType == "SMMA"
+    fastMA := ta.rma(close, fastLength)
+else if fastMAType == "HMA"
+    fastMA := hma(close, fastLength)
+else if fastMAType == "TEMA"
+    fastMA := tema(close, fastLength)
+else if fastMAType == "WMA"
+    fastMA := ta.wma(close, fastLength)
+else if fastMAType == "VWMA"
+    fastMA := vwma(close, fastLength)
+else if fastMAType == "ZLEMA"
+    fastMA := zlema(close, fastLength)
+else if fastMAType == "ALMA"
+    fastMA := alma(close, fastLength)
+else if fastMAType == "KAMA"
+    fastMA := kama(close, fastLength)
+else if fastMAType == "DEMA"
+    fastMA := dema(close, fastLength)
+
+// Slow MA Logic
+if slowMAType == "SMA"
+    slowMA := ta.sma(close, slowLength)
+else if slowMAType == "EMA"
+    slowMA := ta.ema(close, slowLength)
+else if slowMAType == "SMMA"
+    slowMA := ta.rma(close, slowLength)
+else if slowMAType == "HMA"
+    slowMA := hma(close, slowLength)
+else if slowMAType == "TEMA"
+    slowMA := tema(close, slowLength)
+else if slowMAType == "WMA"
+    slowMA := ta.wma(close, slowLength)
+else if slowMAType == "VWMA"
+    slowMA := vwma(close, slowLength)
+else if slowMAType == "ZLEMA"
+    slowMA := zlema(close, slowLength)
+else if slowMAType == "ALMA"
+    slowMA := alma(close, slowLength)
+else if slowMAType == "KAMA"
+    slowMA := kama(close, slowLength)
+else if slowMAType == "DEMA"
+    slowMA := dema(close, slowLength)
+
+// ==================================================================
+// TREND FILTER & SIGNAL LOGIC
+// ==================================================================
+
+// Retrieve 15-minute MAs for trend filtering
+[fastMA15m, slowMA15m] = request.security(syminfo.tickerid, "15", [ta.sma(close, fastLength), ta.sma(close, slowLength)])
+trend15m    = fastMA15m > slowMA15m ? 1 : fastMA15m < slowMA15m ? -1 : 0
+trendLongOk = not useTrendFilter or trend15m >= 0
+trendShortOk= not useTrendFilter or trend15m <= 0
+
+// ATR-based Price Filter
+atrFilterLong  = close > slowMA + atr * atrMultiplier
+atrFilterShort = close < slowMA - atr * atrMultiplier
+
+// Signal Logic: MA alignment + filters
+maAbove       = close > fastMA and fastMA > slowMA
+maBelow       = close < fastMA and fastMA < slowMA
+longCondition = maAbove and trendLongOk and atrFilterLong and volumeOk and volumeSpike and timeWindow and volatilityOk
+shortCondition= maBelow and trendShortOk and atrFilterShort and volumeOk and volumeSpike and timeWindow and volatilityOk
+
+// ==================================================================
+// ENTRY LOGIC
+// ==================================================================
+
+if strategy.position_size == 0 and longCondition
+    strategy.entry("Long", strategy.long, qty=fixedQuantity)
+if strategy.position_size == 0 and shortCondition
+    strategy.entry("Short", strategy.short, qty=fixedQuantity)
+
+// ==================================================================
+// EXIT LOGIC
+// ==================================================================
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+         stop  = strategy.position_avg_price - atr * fixedStopMultiplier,
+         limit = strategy.position_avg_price + atr * profitTargetATRMult,
+         trail_offset = atr * trailOffset,
+         trail_points = atr * trailOffset)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+         stop  = strategy.position_avg_price + atr * fixedStopMultiplier,
+         limit = strategy.position_avg_price - atr * profitTargetATRMult,
+         trail_offset = atr * trailOffset,
+         trail_points = atr * trailOffset)
+
+// ==================================================================
+// VISUALS: PLOT MAs
+// ==================================================================
+
+plot(fastMA, color=color.blue, linewidth=2, title="Fast MA")
+plot(slowMA, color=color.red, linewidth=2, title="Slow MA")
+
+// ==================================================================
+// METRICS CALCULATIONS (for Dashboard)
+// ==================================================================
+
+// Additional metrics:
+atrPct   = close != 0 ? (atr / close) * 100 : na               // ATR as percentage of Close
+maGapPct = (slowMA != 0) ? (math.abs(fastMA - slowMA) / slowMA) * 100 : na  // % difference between MAs
+
+// Open PnL Calculation
+currentPnL = strategy.position_size != 0 ? (close - strategy.position_avg_price) * strategy.position_size : 0
+
+// Persistent variable for highest equity (for drawdown calculation)
+var float highestEquity = strategy.equity
+highestEquity := math.max(highestEquity, strategy.equity)
+totalDrawdown = strategy.equity - highestEquity
+
+// Reset dashboard metrics if reset toggle is on.
+if resetDashboard
+    highestEquity := strategy.equity
+
+// ==================================================================
+// DASHBOARD: WATERMARK LOGO (Bottom-Right)
+// ==================================================================
+var table watermarkTable = table.new(position.bottom_right, 1, 1, bgcolor=color.rgb(0, 0, 0, 80), border_color=color.rgb(0, 50, 137), border_width=1)
+if barstate.islast
+    table.cell(watermarkTable, 0, 0, "⚡ Dskyz - DAFE Trading Systems", text_color=color.rgb(159, 127, 255, 80), text_size=size.large)
+
+// ==================================================================
+// DASHBOARD: METRICS TABLE (Bottom-Left)
+// ==================================================================
+var table dashboard = table.new(position.middle_right, 2, 12, bgcolor=color.new(#000000, 29), border_color=color.rgb(80, 80, 80), border_width=1)
+if barstate.islast
+    // Row 0 – Dashboard Title (duplicated in both columns to simulate spanning)
+    table.cell(dashboard, 0, 0, "⚡(DAFE) Trading Systems", text_color=color.rgb(135, 135, 135), text_size=size.small)
+    
+    // Row 1 – Position
+    table.cell(dashboard, 0, 1, "Position", text_color=color.gray)
+    positionText = strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat"
+    table.cell(dashboard, 1, 1, positionText, text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.blue)
+    
+    // Row 2 – Current PnL
+    table.cell(dashboard, 0, 2, "Current P/L", text_color=color.gray)
+    table.cell(dashboard, 1, 2, str.tostring(currentPnL, "#.##"), text_color=(currentPnL > 0 ? color.green : currentPnL < 0 ? color.red : color.gray))
+    
+    // Row 3 – Equity
+    table.cell(dashboard, 0, 3, "Equity", text_color=color.gray)
+    table.cell(dashboard, 1, 3, str.tostring(strategy.equity, "#.##"), text_color=color.white)
+
+    // Row 4 – Closed Trades
+    table.cell(dashboard, 0, 4, "Closed Trades", text_color=color.gray)
+    table.cell(dashboard, 1, 4, str.tostring(strategy.closedtrades), text_color=color.white)
+
+    // Row 5 – Title Step
+    table.cell(dashboard, 0, 5, "Metrics", text_color=color.rgb(76, 122, 23))
+   
+    // Row 6 – Fast MA
+    table.cell(dashboard, 0, 6, "Fast MA", text_color=color.gray)
+    table.cell(dashboard, 1, 6, str.tostring(fastMA, "#.##"), text_color=color.white)
+    
+    // Row 7 – Slow MA
+    table.cell(dashboard, 0, 7, "Slow MA", text_color=color.gray)
+    table.cell(dashboard, 1, 7, str.tostring(slowMA, "#.##"), text_color=color.white)
+    
+    // Row 8 – ATR (Raw)
+    table.cell(dashboard, 0, 8, "ATR", text_color=color.gray)
+    table.cell(dashboard, 1, 8, str.tostring(atr, "#.##"), text_color=color.white)
+    
+    // Row 9 – ATR (%)
+    table.cell(dashboard, 0, 9, "ATR (%)", text_color=color.gray)
+    table.cell(dashboard, 1, 9, str.tostring(atrPct, "#.##") + "%", text_color=color.white)
+    
+    // Row 10 – MA Gap (%)
+    table.cell(dashboard, 0, 10, "MA Gap (%)", text_color=color.gray)
+    table.cell(dashboard, 1, 10, na(maGapPct) ? "N/A" : str.tostring(maGapPct, "#.##") + "%", text_color=color.white)
+    
+    // Row 11 – Volatility (%)
+    table.cell(dashboard, 0, 11, "Volatility (%)", text_color=color.gray)
+    table.cell(dashboard, 1, 11, str.tostring(volatility * 100, "#.##") + "%", text_color=color.white)
+
+View in Pine Editor・283 lines
+Use on chart
+1
+7
+4
+16
+4 281
+Dskyz (DAFE) MAtrix with ATR-Powered Precision
+
+This cutting‐edge futures trading strategy built to thrive in rapidly changing market conditions. Developed for high-frequency futures trading on instruments such as the CME Mini MNQ, this strategy leverages a matrix of sophisticated moving averages combined with ATR-based filters to pinpoint high-probability entries and exits. Its unique combination of adaptable technical indicators and multi-timeframe trend filtering sets it apart from standard strategies, providing enhanced precision and dynamic responsiveness.
+https://imgur.com/a/AAlunm1
+
+
+Core Functional Components
+
+
+1. Advanced Moving Averages
+A distinguishing feature of the DAFE strategy is its robust, multi-choice moving averages (MAs). Clients can choose from a wide array of MAs—each with specific strengths—in order to fine-tune their trading signals. The code includes user-defined functions for the following MAs:
+https://imgur.com/BxGOAxJ
+
+
+Hull Moving Average (HMA):
+The hma(src, len) function calculates the HMA by using weighted moving averages (WMAs) to reduce lag considerably while smoothing price data. This function computes an intermediate WMA of half the specified length, then a full-length WMA, and finally applies a further WMA over the square root of the length. This design allows for rapid adaptation to price changes without the typical delays of traditional moving averages.
+
+Triple Exponential Moving Average (TEMA):
+Implemented via tema(src, len), TEMA uses three consecutive exponential moving averages (EMAs) to effectively cancel out lag and capture price momentum. The final formula—3 * (ema1 - ema2) + ema3—produces a highly responsive indicator that filters out short-term noise.
+
+Double Exponential Moving Average (DEMA):
+Through the dema(src, len) function, DEMA calculates an EMA and then a second EMA on top of it. Its simplified formula of 2 * ema1 - ema2 provides a smoother curve than a single EMA while maintaining enhanced responsiveness.
+
+Volume Weighted Moving Average (VWMA):
+With vwma(src, len), this MA accounts for trading volume by weighting the price, thereby offering a more contextual picture of market activity. This is crucial when volume spikes indicate significant moves.
+
+Zero Lag EMA (ZLEMA):
+The zlema(src, len) function applies a correction to reduce the inherent lag found in EMAs. By subtracting a calculated lag (based on half the moving average window), ZLEMA is exceptionally attuned to recent price movements.
+
+Arnaud Legoux Moving Average (ALMA):
+The alma(src, len, offset, sigma) function introduces ALMA—a type of moving average designed to be less affected by outliers. With parameters for offset and sigma, it allows customization of the degree to which the MA reacts to market noise.
+
+Kaufman Adaptive Moving Average (KAMA):
+The custom kama(src, len) function is noteworthy for its adaptive nature. It computes an efficiency ratio by comparing price change against volatility, then dynamically adjusts its smoothing constant. This results in an MA that quickly responds during trending periods while remaining smoothed during consolidation.
+
+Each of these functions—integrated into the strategy—is selectable by the trader (via the fastMAType and slowMAType inputs). This flexibility permits the tailored application of the MA most suited to current market dynamics and individual risk management preferences.
+
+2. ATR-Based Filters and Risk Controls
+ATR Calculation and Volatility Filter:
+The strategy computes the Average True Range (ATR) over a user-defined period (atrPeriod). ATR is then used to derive both:
+
+Volatility Assessment: Expressed as a ratio of ATR to closing price, ensuring that trades are taken only when volatility remains within a safe, predefined threshold (volatilityThreshold).
+
+ATR-Based Entry Filters: Implemented as atrFilterLong and atrFilterShort, these conditions ensure that for long entries the price is sufficiently above the slow MA and vice versa for shorts. This acts as an additional confirmation filter.
+
+Dynamic Exit Management:
+The exit logic employs a dual approach:
+
+Fixed Stop and Profit Target: Stops and targets are set at multiples of ATR (fixedStopMultiplier and profitTargetATRMult), helping manage risk in volatile markets.
+
+Trailing Stop Adjustments: A trailing stop is calculated using the ATR multiplied by a user-defined offset (trailOffset), which captures additional profits as the trade moves favorably while protecting against reversals.
+
+3. Multi-Timeframe Trend Filtering
+The strategy enhances its signal reliability by leveraging a secondary, higher timeframe analysis:
+
+15-Minute Trend Analysis:
+By retrieving 15-minute moving averages (fastMA15m and slowMA15m) via request.security, the strategy determines the broader market trend. This secondary filter (enabled or disabled through useTrendFilter) ensures that entries are aligned with the prevailing market direction, thereby reducing the incidence of false signals.
+
+4. Signal and Execution Logic
+Combined MA Alignment:
+The entry conditions are based primarily on the alignment of the fast and slow MAs. A long condition is triggered when the current price is above both MAs and the fast MA is above the slow MA—complemented by the ATR filter and volume conditions. The reverse applies for a short condition.
+
+Volume and Time Window Validation:
+Trades are permitted only if the current volume exceeds a minimum (minVolume) and the current hour falls within the predefined trading window (tradingStartHour to tradingEndHour). An additional volume spike check (comparing current volume to a moving average of past volumes) further filters for optimal market conditions.
+
+Comprehensive Order Execution:
+The strategy utilizes flexible order execution functions that allow pyramiding (up to 10 positions), ensuring that it can scale into positions as favorable conditions persist. The use of both market entries and automated exits (with profit targets, stop-losses, and trailing stops) ensures that risk is managed at every step.
+
+5. Integrated Dashboard and Metrics
+For transparency and real-time analysis, the strategy includes:
+
+On-Chart Visualizations:
+Both fast and slow MAs are plotted on the chart, making it easy to see the market’s technical foundation.
+
+Dynamic Metrics Dashboard:
+A built-in table displays crucial performance statistics—including current profit/loss, equity, ATR (both raw and as a percentage), and the percentage gap between the moving averages. These metrics offer immediate insight into the health and performance of the strategy.
+
+Input Parameters: Detailed Breakdown
+Every input is meticulously designed to offer granular control:
+
+[MA] Fast & Slow Lengths:
+Determine the window size for the fast and slow moving averages. Smaller values yield more sensitivity, while larger values provide a smoother, delayed response.
+
+Fast/Slow MA Types:
+Choose the type of moving average for fast and slow signals. The versatility—from basic SMA and EMA to more complex ones like HMA, TEMA, ZLEMA, ALMA, and KAMA—allows customization to fit different market scenarios.
+
+ATR Parameters:
+atrPeriod and atrMultiplier shape the volatility assessment, directly affecting entry filters and risk management through stop-loss and profit target levels.
+
+Trend and Volume Filters:
+Inputs such as useTrendFilter, minVolume, and the volume spike condition help confirm that a trade occurs in active, trending markets rather than during periods of low liquidity or market noise.
+
+Trading Hours:
+Restricting trade execution to specific hours (tradingStartHour and tradingEndHour) helps avoid illiquid or choppy markets outside of prime trading sessions.
+
+Exit Strategies:
+Parameters like trailOffset, profitTargetATRMult, and fixedStopMultiplier provide multiple layers of risk management and profit protection by tailoring how exits are generated relative to current market conditions.
+
+Pyramiding and Fixed Trade Quantity:
+The strategy supports multiple entries within a trend (up to 10 positions) and sets a predefined trade quantity (fixedQuantity) to maintain consistent exposure and risk per trade.
+
+Dashboard Controls:
+The resetDashboard input allows for on-the-fly resetting of performance metrics, keeping the strategy’s performance dashboard accurate and up-to-date.
+
+Why This Strategy is Truly Exceptional
+
+Multi-Faceted Adaptability:
+The ability to switch seamlessly between various moving average types—each suited to particular market conditions—enables the strategy to adapt dynamically. This is a testament to the high level of coding sophistication and market insight infused within the system.
+
+Robust Risk Management:
+The integration of ATR-based stops, profit targets, and trailing stops ensures that every trade is executed with well-defined risk parameters. The system is designed to mitigate unexpected market swings while optimizing profit capture.
+
+Comprehensive Market Filtering:
+By combining moving average crossovers with volume analysis, volatility thresholds, and multi-timeframe trend filters, the strategy only enters trades under the most favorable conditions. This multi-layered filtering reduces noise and enhances signal quality.
+
+-Final Thoughts-
+The Dskyz Adaptive Futures Elite (DAFE) MAtrix with ATR-Powered Precision strategy is not just another trading algorithm—it is a multi-dimensional, fully customizable system built on advanced technical principles and sophisticated risk management techniques. Every function and input parameter has been carefully engineered to provide traders with a system that is both powerful and transparent.
+
+For clients seeking a state-of-the-art trading solution that adapts dynamically to market conditions while maintaining strict discipline in risk management, this strategy truly stands in a class of its own.
+
+****Please show support if you enjoyed this strategy. I'll have more coming out in the near future!!
+
+-Dskyz
+
+Caution
+
+DAFE is experimental, not a profit guarantee. Futures trading risks significant losses due to leverage. Backtest, simulate, and monitor actively before live use. All trading decisions are your responsibility.

@@ -1,0 +1,95 @@
+//@version=5
+strategy("SMH_DualMomentum (ROC + Volume Trend)", overlay=true, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.0)
+
+// === Inputs (match Python hyperparameters) ===
+rocPeriod     = input.int(20, "ROC Period", minval=1)
+rocThreshold  = input.float(3.0, "ROC Threshold (%)", step=0.1)   // e.g., 3 means +3%
+volPeriod     = input.int(20, "Volume SMA Period", minval=1)
+
+// === Core indicators ===
+// ROC as percent change over rocPeriod
+roc = 100 * (close / close[rocPeriod] - 1)
+
+// Volume SMA
+volSma = ta.sma(volume, volPeriod)
+
+// Volume rising condition (volume above its SMA)
+volumeRising = volume > volSma
+
+// Entry: Strong positive momentum + rising volume
+longCondition = (roc > rocThreshold) and volumeRising
+
+// Exit: Momentum turns negative
+exitCondition = (roc < 0)
+
+// === Orders ===
+if (longCondition) and (strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long)
+
+if (exitCondition) and (strategy.position_size > 0)
+    strategy.close("Long")
+
+// === Visuals ===
+plot(volSma, title="Volume SMA", color=color.new(color.orange, 0), style=plot.style_line, linewidth=2, display=display.none)
+plotchar(longCondition, title="Entry Signal", char="▲", location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
+plotchar(exitCondition and strategy.position_size > 0, title="Exit Signal", char="▼", location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+
+// Optional: show ROC in Data Window (not overlay)
+rocPlot = input.bool(false, "Plot ROC in separate pane?")
+plot(rocPlot ? roc : na, title="ROC (%)", color=color.new(color.blue, 0), linewidth=2)
+hline(0, "ROC 0%", color=color.new(color.gray, 70))
+hline(rocThreshold, "ROC Threshold", color=color.new(color.green, 70))
+
+View in Pine Editor・44 lines
+Use on chart
+9
+516
+SMH Dual Momentum (ROC + Volume Confirmation)
+
+This indicator identifies high-quality bullish trends by combining price momentum (Rate of Change) with volume confirmation, and exits when momentum structurally fails.
+
+Core Logic
+
+BUY signal
+
+Rate of Change (ROC) over N periods is above a positive threshold (strong upside momentum)
+
+Current volume is above its moving average (rising market participation)
+
+SELL signal
+
+ROC crosses below zero, indicating loss of bullish momentum
+
+Why It Works
+
+ROC measures the speed and strength of price movement, filtering out weak or drifting trends
+
+Volume confirmation ensures momentum is supported by real capital flow, reducing false breakouts
+
+Momentum-based exit avoids prolonged drawdowns and capital stagnation
+
+Key Advantages
+
+Focuses on trend continuation, not prediction
+
+Filters out low-quality price moves and range-bound markets
+
+Captures long, high-conviction trends with relatively few trades
+
+Simple, robust rules using only price and volume
+
+Best Use Cases
+
+Designed for trend-driven ETFs such as SMH (Semiconductors)
+
+Suitable for swing to position trading on daily charts
+
+Works best in markets with strong sector rotation and institutional participation
+
+Notes
+
+This is a trend-following momentum tool, not a mean-reversion indicator
+
+No stop-loss is built in; risk management should be handled externally if required
+
+Parameters can be adjusted to match different timeframes or assets

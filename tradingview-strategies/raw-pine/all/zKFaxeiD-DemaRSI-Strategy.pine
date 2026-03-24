@@ -1,0 +1,4 @@
+//@version=5
+l=##input(defval=0.0001,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,l,input__float)
+##root(root_metainfo,rm_1,(-l),input__float)

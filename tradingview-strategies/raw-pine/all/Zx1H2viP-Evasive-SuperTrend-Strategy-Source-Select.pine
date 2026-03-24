@@ -1,0 +1,89 @@
+//@version=6
+strategy("Evasive SuperTrend Strategy [Source Select]", overlay = true, 
+     initial_capital = 10000, 
+     default_qty_type = strategy.cash, 
+     default_qty_value = 1000, 
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.05)
+
+// --- INPUTS ---
+string ST_GROUP      = 'Supertrend Settings'
+int lengthInput      = input.int(10, 'ATR Length', minval = 1, group = ST_GROUP)
+float multiplierInput = input.float(3.0, 'Base Multiplier', minval = 0.1, step = 0.1, group = ST_GROUP)
+series float srcInput = input.source(hl2, 'Source', group = ST_GROUP) // Тот самый выбор источника
+
+string NOISE_GROUP   = 'Noise Avoidance Logic'
+float thresholdInput = input.float(1.0, 'Noise Threshold (xATR)', minval = 0.0, step = 0.1, group = NOISE_GROUP)
+float alphaInput     = input.float(0.5, 'Expansion Alpha (xATR)', minval = 0.0, step = 0.1, group = NOISE_GROUP)
+
+// --- CORE CALCULATIONS ---
+float atr = ta.atr(lengthInput)
+var float st_line = na
+var int trend = 1 
+
+float upperBase = srcInput + multiplierInput * atr
+float lowerBase = srcInput - multiplierInput * atr
+
+float prevLine = nz(st_line[1], trend == 1 ? lowerBase : upperBase)
+bool isNoisy = math.abs(close - prevLine) < (atr * thresholdInput)
+
+if trend == 1
+    st_line := isNoisy ? prevLine - (atr * alphaInput) : math.max(lowerBase, prevLine)
+    if close < st_line
+        trend := -1
+        st_line := upperBase
+else
+    st_line := isNoisy ? prevLine + (atr * alphaInput) : math.min(upperBase, prevLine)
+    if close > st_line
+        trend := 1
+        st_line := lowerBase
+
+// --- VISUALS ---
+color trendColor = trend == 1 ? color.teal : color.maroon
+plot(isNoisy ? na : st_line, "Solid Band", color = trendColor, linewidth = 2, style = plot.style_linebr)
+plot(isNoisy ? st_line : na, "Dotted Band", color = trendColor, linewidth = 2, style = plot.style_linebr, linestyle = plot.linestyle_dotted)
+
+// --- STRATEGY ---
+if (ta.change(trend) > 0)
+    strategy.entry("Long", strategy.long)
+if (ta.change(trend) < 0)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・50 lines
+Use on chart
+7
+534
+🛡️ Evasive SuperTrend Strategy [Source Select]
+The Evasive SuperTrend is a high-performance evolution of the classic SuperTrend indicator, engineered to solve the "choppiness" problem. While standard SuperTrends often fail in sideways markets by producing frequent false signals, the Evasive version utilizes dynamic expansion logic to "step back" from market noise.
+
+🚀 The "Evasive" Edge
+Typical trend trackers are rigid—they either stay flat or move closer to the price. This script introduces a Noise Avoidance Logic. When the price enters a pre-defined "Noise Zone," the indicator expands its buffer (Expansion Alpha) instead of tightening. This gives the asset room to breathe, preventing premature exits and keeping you in the trend during temporary volatility.
+
+🛠️ Key Parameters
+Source Select (Versatility): Unlike standard versions, you can choose any source (hl2, close, ohlc4, etc.). This is vital for volatile assets like XRP or ETH, where long wicks can trigger false trend reversals.
+
+Noise Threshold (Sensitivity): Defines the distance (in ATR units) where the market is considered "noisy."
+
+Expansion Alpha (The Buffer): The coefficient by which the trend line retreats when noise is detected. This effectively filters out market "hiccups."
+
+📊 Visual Guide
+Solid Band: The market is stable, and the trend is confirmed.
+
+Dotted Band: The "Evasive" logic is active. The price is currently in the Noise Zone, and the script is actively filtering for false breakouts.
+
+Color Coding: Teal represents a Bullish trend, while Maroon indicates a Bearish trend.
+
+📈 Strategy & Backtesting
+The script is fully optimized for Deep Backtesting on TradingView.
+
+Default Setup: 10 ATR Length, 3.0 Multiplier.
+
+Best Timeframes: 15m, 1h, and 4h.
+
+Risk Management: Includes a built-in 0.05% commission model to reflect realistic trading conditions on exchanges like Binance.
+
+⚠️ Disclaimer
+Trading involves significant risk. This strategy is a technical analysis tool and does not guarantee profits. Always perform your own due diligence and test the settings on a demo account before live trading.
+
+Suggested Tags:
+SuperTrend Evasive Trend Following Algo Trading Noise Filter Backtest

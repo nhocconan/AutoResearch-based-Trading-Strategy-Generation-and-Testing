@@ -1,0 +1,55 @@
+//@version=2
+strategy("TEMA Cross", overlay = true, precision = 7, overlay=true, pyramiding = 100, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.25)
+
+tema(src, len) =>
+    3*ema(src, len) - 3*ema(ema(src, len), len) + ema(ema(ema(src, len),len),len)
+
+smma(src, len) =>
+    sa = 0.0
+    sa := na(sa[1]) ? sma(src, len) : (sa[1] * (len - 1) + src) / len
+    sa
+
+temaLength = input(5)
+smaLength = input(3)
+smmaLength = input(30)
+tema1 = tema(close, temaLength)
+sma1 = sma(tema1, smaLength)
+smma1 = smma(close,smmaLength)
+
+
+plot(tema1, color = green, title = "TEMA")
+plot(sma1, color = orange, title = "SMA")
+plot(smma1, color = red, title = "SMMA")
+minGainPercent = input(2)
+gainMultiplier = minGainPercent * 0.01 + 1
+
+avg_protection = input(1)
+gain_protection = input(1)
+
+longCondition = crossover(tema1, sma1) and tema1 < smma1
+shortCondition = crossunder(tema1, sma1)
+
+strategy.entry("Buy", strategy.long, when = longCondition and time > timestamp(2017, 9, 22, 4, 20)  and (avg_protection >= 1 ? (na(strategy.position_avg_price) ? true : close <= strategy.position_avg_price) : true))
+strategy.close_all(when = shortCondition and time > timestamp(2017, 9, 22, 4, 20) and (gain_protection >=1 ? (close >= gainMultiplier * strategy.position_avg_price) : true))
+
+View in Pine Editor・33 lines
+Use on chart
+2
+6
+4
+5
+9 030
+Renko candles filter out noise by plotting a fixed change in price rather than a fixed time frame.
+
+Strategies like MACD or MA cross can give a lot of false signals when the price is wavy, but not actually going anywhere. This is especially a problem with small time frames.
+
+Since it's so easy to identify trends on a Renko plot, this strategy uses a simple moving average cross idea. Instead of an EMA, we use a TEMA (triple exponential moving average
+) because that version does not lag as much.
+
+We also will avoid buying when the price is above a longer-term smoothed moving average. This means we will hopefully reduce bags, but we will also miss some trades.
+
+Also included are
+avg_protection -- if >0 only buy when it will bring down our average price, else buy whenever the TEMA crosses over the short-term SMA
+gain_protection -- if >0 only sell when we meet out min_gain %, otherwise sell whenever TEMA crosses under the short-term SMA
+
+I've been setting my Renko candles to a fixed range instead of ATR, and I use increments of roughly 0.1% in the example chart.

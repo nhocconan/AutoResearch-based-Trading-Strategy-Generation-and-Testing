@@ -1,0 +1,100 @@
+//@version=5
+strategy(title='Quatro SMA ', overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.03)
+
+// Volume
+vol_sma_length = input.int(40, title='Volume lenght  ', minval=1)
+Volume_condt = volume > ta.sma(volume, vol_sma_length) * 2.5
+
+// SMAas
+Length1 = input.int(4, title='  1-SMA Lenght', minval=1, group='SMA')
+Length2 = input.int(16, title='  2-SMA Lenght', minval=1, group='SMA')
+Length3 = input.int(32, title='  3-SMA Lenght', minval=1, group='SMA')
+lengthSMA = input(200, title="Lenght SMA")
+SMA1 = ta.sma(close, Length1)
+SMA2 = ta.sma(close, Length2)
+SMA3 = ta.sma(close, Length3)
+SMA = ta.sma(close, lengthSMA)
+
+//SMA cond
+Long_ma = SMA1 > SMA2 and SMA2 > SMA3
+Short_ma = SMA1 < SMA2 and SMA2 < SMA3
+
+//Entry cond
+Long_cond = (Long_ma and close > SMA) and Volume_condt
+Short_cond = (Short_ma and close < SMA) and Volume_condt
+
+//Close cond
+Long_close = Short_ma and close > SMA  
+Short_close = Long_ma and close < SMA  
+
+//Entry
+if Long_cond
+    strategy.entry("Long", strategy.long)
+if  Short_cond
+    strategy.entry("Short", strategy.short)
+
+//Close
+if (Long_close)
+    strategy.close("Long")
+if (Short_close)
+    strategy.close("Short")
+
+//Backtesting inputs
+sl = input.float(10.0, '% Stop Loss', step=0.1)
+
+tp_1 = input.float(10.0,"  TP 1", minval=1.0, step=0.1)
+tp_2 = input.float(20.0,"  TP 2", minval=1.0, step=0.1)
+tp_3 = input.float(50.0,"  TP 3", minval=1.0, step=0.1)
+
+q_1 = input.int(title='  % TP 1 Q ', defval=25,  minval=1, step=10)
+q_2 = input.int(title='  % TP 2 Q ', defval=50,  minval=1, step=10)
+q_3 = input.int(title='  % TP 3 Q ', defval=100,  minval=1, step=10)
+
+//Stop-Loss// this code is from author RafaelZioni, modified by wielkieef
+per(procent) =>
+    strategy.position_size != 0 ? math.round(procent / 100 * strategy.position_avg_price / syminfo.mintick) : float(na)
+// --------------------------------------------------------------------------------------------------------------------
+strategy.exit('TP 1', qty_percent=q_1, profit=per(tp_1), loss=per(sl) )
+strategy.exit('TP 2', qty_percent=q_2, profit=per(tp_2), loss=per(sl) )
+strategy.exit('TP 3', qty_percent=q_3, profit=per(tp_3), loss=per(sl) )
+
+
+// by wielkieef
+
+View in Pine Editor・65 lines
+Use on chart
+3
+5
+9
+5 214
+Hello, I would like to present to you The "Quatro SMA" strategy
+
+Strategy is based on four simple moving averages of different lengths and monitoring trading volume. The key idea is to identify strong market trends by comparing short-term moving averages with the long-term SMA. The strategy generates buy signals when all short-term SMAs are above the SMA(200) and the volume confirms the strength of the move. Similarly, sell signals are generated when all short-term SMAs are below the SMA(200), and the volume is sufficiently high.
+
+The strategy manages risk by applying a stop loss and three different Take Profit levels (TP1, TP2, TP3), with varying percentages of the position closed at each level.
+
+Each Take Profit level is triggered at a specific percentage gain, with the position being closed gradually depending on the achieved targets. The percentage of the position closed at each TP level is also defined by the user.
+
+Indicators and Parameters:
+
+Simple Moving Averages (SMA):
+The script utilizes four simple moving averages with different lengths (4, 16, 32, 200). The first three SMAs (SMA1, SMA2, SMA3) are used to determine the trend direction, while the fourth SMA (with a length of 200) serves as a support/resistance line.
+
+Volume:
+The script monitors trading volume and checks if the current volume exceeds 2.5 times the average volume of the last 40 candles. High volume is considered as confirmation of trend strength.
+
+Entry Conditions:
+- Long Position: Triggered when SMA1 > SMA2 > SMA3, the closing price is above SMA(200), and the volume condition is met.
+- Short Position: Triggered when SMA1 < SMA2 < SMA3, the closing price is below SMA(200), and the volume condition is met.
+
+Exit Conditions:
+- Long Position: Closed when SMA1 < SMA2 < SMA3 and the closing price is above SMA(200).
+- Short Position: Closed when SMA1 > SMA2 > SMA3 and the closing price is below SMA(200).
+
+to determine the level of stop loss and target point I used a piece of code by RafaelZioni, here is the script from which a piece of code was taken
+https://pl.tradingview.com/script/xGk5K4DE-BTC-15-min/
+
+
+I hope the strategy will be helpful, as always, best regards and safe trades
+;)
+

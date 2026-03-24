@@ -1,0 +1,23 @@
+//@version=4
+
+strategy("Trend Following or Mean Reverting",shorttitle = "TF/MR",default_qty_type = strategy.percent_of_equity,default_qty_value = 100, overlay=true)
+
+buy = close>high[1]
+sell = close<low[1]
+if (buy)
+    strategy.entry("Long", strategy.long,qty=1)
+if (sell)
+    strategy.entry("Short", strategy.short,qty=1)
+
+View in Pine Editor・14 lines
+Use on chart
+2
+3
+6
+10 105
+The strategy checks nature of the instruments. It Buys if the close is greater than yesterday's high, reverse the position if the close is lower than yesterday's low and repeat the process.
+
+1. If it is trend following then the equity curve will be in uptrend
+2. If it is mean reverting then the equity curve will be downtrend
+
+Thanks to Rayner Teo.

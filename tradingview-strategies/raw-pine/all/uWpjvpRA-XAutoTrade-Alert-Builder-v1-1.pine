@@ -1,0 +1,254 @@
+//@version=6
+strategy("XAutoTrade Alert Builder", shorttitle="XAutoTrade Alert", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Signal Configuration
+enableBuySignals = input.bool(true, "Enable Buy Signals", group="Signal Logic", tooltip="Enable to generate buy/long entry signals")
+enableSellSignals = input.bool(false, "Enable Sell Signals", group="Signal Logic", tooltip="Enable to generate sell/short entry signals")
+signalLogic = input.string("Single", "Signal Logic", options=["Single"], group="Signal Logic", tooltip="Compare two signal sources using one logic condition")
+buySignalSource1 = input.source(close, "Buy Signal Source 1", group="Signal Logic", tooltip="Primary signal source for buy logic (only used when 'Enable Buy Signals' is checked)")
+buySignalSource2 = input.source(close, "Buy Signal Source 2", group="Signal Logic", tooltip="Secondary signal source for buy logic (only used when 'Enable Buy Signals' is checked)")
+sellSignalSource1 = input.source(close, "Sell Signal Source 1", group="Signal Logic", tooltip="Primary signal source for sell logic (only used when 'Enable Sell Signals' is checked)")
+sellSignalSource2 = input.source(close, "Sell Signal Source 2", group="Signal Logic", tooltip="Secondary signal source for sell logic (only used when 'Enable Sell Signals' is checked)")
+buyLogicType = input.string("Crossover", "Buy Logic", options=["Crossover", "Crossunder", "Greater Than", "Less Than"], group="Signal Logic", tooltip="Comparison logic: Crossover (Source1 crosses above Source2), Crossunder, Greater Than, or Less Than")
+sellLogicType = input.string("Crossunder", "Sell Logic", options=["Crossover", "Crossunder", "Greater Than", "Less Than"], group="Signal Logic", tooltip="Comparison logic: Crossover, Crossunder (Source1 crosses below Source2), Greater Than, or Less Than")
+
+// Exit Configuration
+exitMethod = input.string("ATM Strategy", "Exit Method", options=["ATM Strategy", "Source Signals", "Fixed Levels"], group="Exit Configuration", tooltip="Choose how positions will exit: ATM Strategy (use NinjaTrader ATM templates), Source Signals (exit based on opposite signals), or Fixed Levels (set stop loss and profit targets)")
+
+// ATM Strategy fields
+atmStrategyName = input.string("", "ATM Strategy Name", group="Exit Configuration - ATM Strategy", tooltip="Must match your NinjaTrader ATM template name exactly. Used when Exit Method = 'ATM Strategy'")
+
+// Source Signals fields
+buyExitSource = input.source(close, "Buy Exit Source", group="Exit Configuration - Source Signals", tooltip="Signal source for exiting long positions. Used when Exit Method = 'Source Signals'")
+sellExitSource = input.source(close, "Sell Exit Source", group="Exit Configuration - Source Signals", tooltip="Signal source for exiting short positions. Used when Exit Method = 'Source Signals'")
+
+// Fixed Levels fields
+exitLevelType = input.string("Ticks", "Exit Level Type", options=["Ticks", "Percentage"], group="Exit Configuration - Fixed Levels", tooltip="Choose whether to specify stop loss and take profit using ticks or percentage. Only the selected type will be used. Used when Exit Method = 'Fixed Levels'")
+stopLossTicks = input.int(10, "Stop Loss (Ticks)", group="Exit Configuration - Fixed Levels", tooltip="Distance in ticks from entry price for stop loss. Used when Exit Level Type = 'Ticks'")
+takeProfitTicks = input.int(20, "Take Profit (Ticks)", group="Exit Configuration - Fixed Levels", tooltip="Distance in ticks from entry price for profit target. Used when Exit Level Type = 'Ticks'")
+stopLossPercent = input.float(1.0, "Stop Loss (%)", step=0.1, group="Exit Configuration - Fixed Levels", tooltip="Percentage from entry price for stop loss. Used when Exit Level Type = 'Percentage'")
+takeProfitPercent = input.float(2.0, "Take Profit (%)", step=0.1, group="Exit Configuration - Fixed Levels", tooltip="Percentage from entry price for profit target. Used when Exit Level Type = 'Percentage'")
+
+// XAutoTrade Settings
+symbolOverride = input.string("", "Symbol", group="XAutoTrade Settings")
+quantity = input.int(1, "Quantity", minval=1, group="XAutoTrade Settings")
+maxPositions = input.int(2, "Max Positions", minval=1, group="XAutoTrade Settings", tooltip="Maximum positions allowed to open at the same time")
+accountNames = input.string("Sim101", "Account Names", group="XAutoTrade Settings", tooltip="Separate accounts with comma(,). Example: Sim101,Sim102")
+webhookSecret = input.string("", "Webhook Secret", group="XAutoTrade Settings", tooltip="Secret for your personal XAutoTrade webhook")
+orderType = input.string("Market", "Order Type", options=["Market", "Limit"], group="XAutoTrade Settings")
+limitOffsetTicks = input.int(0, "Limit Offset Ticks", group="XAutoTrade Settings", tooltip="Number of ticks required for placing limit fill price")
+timeInForce = input.string("DAY", "Time In Force", options=["DAY", "GTC"], group="XAutoTrade Settings")
+activeHours = input.string("", "Active Hours (US ET)", group="XAutoTrade Settings", tooltip="Time range when alerts are accepted (HH:MM:SS-HH:MM:SS). Leave empty for 24/7. Example: 09:30:00-16:00:00")
+
+// Calculate Signals
+var bool buySignal = false
+var bool sellSignal = false
+
+if signalLogic == "Single"
+    if buyLogicType == "Crossover"
+        buySignal := ta.crossover(buySignalSource1, buySignalSource2)
+    else if buyLogicType == "Crossunder"
+        buySignal := ta.crossunder(buySignalSource1, buySignalSource2)
+    else if buyLogicType == "Greater Than"
+        buySignal := buySignalSource1 > buySignalSource2
+    else
+        buySignal := buySignalSource1 < buySignalSource2
+
+    if sellLogicType == "Crossover"
+        sellSignal := ta.crossover(sellSignalSource1, sellSignalSource2)
+    else if sellLogicType == "Crossunder"
+        sellSignal := ta.crossunder(sellSignalSource1, sellSignalSource2)
+    else if sellLogicType == "Greater Than"
+        sellSignal := sellSignalSource1 > sellSignalSource2
+    else
+        sellSignal := sellSignalSource1 < sellSignalSource2
+
+buyEntry = buySignal and enableBuySignals
+sellEntry = sellSignal and enableSellSignals
+
+// Strategy Execution
+if buyEntry
+    if exitMethod == "Fixed Levels"
+        // Calculate exit prices at entry
+        usePercentage = exitLevelType == "Percentage"
+        stopDistance = usePercentage ? close * (stopLossPercent/100) : stopLossTicks * syminfo.mintick
+        targetDistance = usePercentage ? close * (takeProfitPercent/100) : takeProfitTicks * syminfo.mintick
+
+        longStopPrice = close - stopDistance
+        longTargetPrice = close + targetDistance
+
+        strategy.entry("Long", strategy.long, qty=quantity)
+        strategy.exit("Exit Long", "Long", limit=longTargetPrice, stop=longStopPrice)
+    else
+        strategy.entry("Long", strategy.long, qty=quantity)
+
+if sellEntry
+    if exitMethod == "Fixed Levels"
+        // Calculate exit prices at entry
+        usePercentage = exitLevelType == "Percentage"
+        stopDistance = usePercentage ? close * (stopLossPercent/100) : stopLossTicks * syminfo.mintick
+        targetDistance = usePercentage ? close * (takeProfitPercent/100) : takeProfitTicks * syminfo.mintick
+
+        shortStopPrice = close + stopDistance
+        shortTargetPrice = close - targetDistance
+
+        strategy.entry("Short", strategy.short, qty=quantity)
+        strategy.exit("Exit Short", "Short", limit=shortTargetPrice, stop=shortStopPrice)
+    else
+        strategy.entry("Short", strategy.short, qty=quantity)
+
+// Source Signals exits
+if exitMethod == "Source Signals"
+    if sellEntry
+        strategy.close("Long")
+    if buyEntry
+        strategy.close("Short")
+
+// Generate Payload Function
+generatePayload(action, isLong) =>
+    sym = symbolOverride != "" ? symbolOverride : str.tostring(syminfo.ticker)
+    currentPrice = str.tostring(close)
+    alertTime = str.format("{0,date,yyyy-MM-dd} {0,time,HH:mm:ss}", timenow)
+
+    var string payload = ""
+    payload := '{\n  "symbol": "' + sym + '",\n  "action": "' + action + '",\n  "price": ' + currentPrice + ',\n  "quantity": ' + str.tostring(quantity) + ',\n  "max_positions": ' + str.tostring(maxPositions) + ',\n  "account_names": "' + accountNames + '",\n  "alert_time": "' + alertTime + '"'
+
+    if webhookSecret != ""
+        payload := payload + ',\n  "hook_secret": "' + webhookSecret + '"'
+
+    if exitMethod == "ATM Strategy"
+        if atmStrategyName != ""
+            payload := payload + ',\n  "use_atm": true,\n  "atm_strategy": "' + atmStrategyName + '"'
+        else
+            // If ATM Strategy is selected but no name provided, set use_atm to false
+            payload := payload + ',\n  "use_atm": false'
+    else if exitMethod == "Source Signals"
+        // Explicitly set use_atm to false for Source Signals, even if ATM Strategy Name is configured
+        payload := payload + ',\n  "use_atm": false'
+    else if exitMethod == "Fixed Levels"
+        // Explicitly set use_atm to false for Fixed Levels, even if ATM Strategy Name is configured
+        payload := payload + ',\n  "use_atm": false,\n  "enable_oco": true'
+
+        var float stopDistance = 0.0
+        var float targetDistance = 0.0
+
+        if exitLevelType == "Percentage"
+            // For percentage, calculate the point distance from entry price
+            // stop_loss/profit_target = entry_price * (percent / 100)
+            stopDistance := close * (stopLossPercent / 100)
+            targetDistance := close * (takeProfitPercent / 100)
+        else
+            // For ticks, convert to points (point distance from entry)
+            stopDistance := stopLossTicks * syminfo.mintick
+            targetDistance := takeProfitTicks * syminfo.mintick
+
+        payload := payload + ',\n  "stop_loss": ' + str.tostring(stopDistance) + ',\n  "profit_target": ' + str.tostring(targetDistance)
+
+    if orderType == "Limit" and limitOffsetTicks > 0
+        offset = limitOffsetTicks * syminfo.mintick
+        limitPrice = isLong ? close - offset : close + offset
+        payload := payload + ',\n  "limit_price": ' + str.tostring(limitPrice)
+
+    // Always include time_in_force
+    payload := payload + ',\n  "time_in_force": "' + timeInForce + '"'
+
+    // Always include active_hours_us_et, default to 24/7 if empty
+    activeHoursValue = activeHours != "" ? activeHours : "00:00:00-23:59:59"
+    payload := payload + ',\n  "active_hours_us_et": "' + activeHoursValue + '"'
+
+    payload + '\n}'
+
+// Generate Payloads
+buyAction = orderType == "Market" ? "BUYMARKET" : "BUYLIMIT"
+sellAction = orderType == "Market" ? "SELLSHORTMARKET" : "SELLSHORTLIMIT"
+buyPayload = generatePayload(buyAction, true)
+sellPayload = generatePayload(sellAction, false)
+
+// Alerts
+if buyEntry
+    alert(buyPayload, alert.freq_once_per_bar_close)
+if sellEntry
+    alert(sellPayload, alert.freq_once_per_bar_close)
+
+// Visual Display
+plotshape(buyEntry, "Long", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(sellEntry, "Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="SELL")
+
+// Info Table
+var table info = table.new(position.bottom_right, 2, 5, bgcolor=color.new(color.black, 85), frame_width=1, frame_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "XAutoTrade", bgcolor=color.new(color.teal, 70), text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, "Alert Builder", bgcolor=color.new(color.teal, 70), text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 1, "Signals:", text_color=color.white, text_size=size.tiny)
+    signalText = (enableBuySignals ? "BUY " : "") + (enableSellSignals ? "SELL" : "")
+    table.cell(info, 1, 1, signalText, text_color=color.yellow, text_size=size.tiny)
+    table.cell(info, 0, 2, "Exit:", text_color=color.white, text_size=size.tiny)
+    exitText = exitMethod == "ATM Strategy" ? atmStrategyName : exitMethod
+    table.cell(info, 1, 2, exitText, text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 3, "Account:", text_color=color.white, text_size=size.tiny)
+    table.cell(info, 1, 3, accountNames, text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 4, "Status:", text_color=color.white, text_size=size.tiny)
+    statusText = webhookSecret != "" ? "✓ Ready" : "⚠ Setup"
+    statusColor = webhookSecret != "" ? color.green : color.orange
+    table.cell(info, 1, 4, statusText, text_color=statusColor, text_size=size.tiny)
+
+View in Pine Editor・199 lines
+Use on chart
+1
+8
+920
+Automate Your NinjaTrader Trading with TradingView Alerts
+
+The XAutoTrade Alert Builder is a flexible Pine Script strategy that bridges TradingView alerts with
+NinjaTrader automated trading. Design custom entry signals, configure exit strategies, and execute trades
+automatically on your NinjaTrader account - all from TradingView charts.
+
+Key Features
+
+📊 Flexible Signal Logic
+- Configure buy/sell signals independently
+- Compare any two indicators or price sources using crossover, crossunder, greater than, or less than
+logic
+- Visual buy/sell markers on chart for easy signal verification
+
+🎯 Multiple Exit Methods
+1. ATM Strategy - Leverage your existing NinjaTrader ATM templates for advanced order management
+2. Source Signals - Exit positions based on opposite entry signals
+3. Fixed Levels - Set stop loss and profit targets using ticks or percentage
+
+⚙️ NinjaTrader Integration
+- Direct webhook integration with XAutoTrade backend service
+- Multi-account support (trade multiple accounts simultaneously)
+- Position sizing and max position limits
+- Market or limit order types with configurable offset
+- Time-in-force options (DAY/GTC)
+- Active hours filter (US ET timezone) to control when alerts execute
+
+🔐 Secure & Reliable
+- Webhook secret authentication
+- Symbol override capability
+- Real-time status indicator showing configuration readiness
+
+How It Works
+
+1. Configure Entry Signals - Choose your buy/sell logic by comparing any two data sources (price,
+indicators, etc.)
+2. Set Exit Strategy - Select ATM templates, signal-based exits, or fixed stop/profit levels
+3. Connect to NinjaTrader - Enter your XAutoTrade webhook secret and account details
+4. Create Alert - Use the strategy's alert system to send formatted JSON payloads to your XAutoTrade
+webhook
+5. Trade Futures & Stocks Automatically - TradingView alerts trigger real trades in your NinjaTrader account
+
+Perfect For
+
+- Traders wanting to automate TradingView strategies in NinjaTrader
+- Users with existing ATM templates who want TradingView signal automation
+- Multi-account traders managing several NinjaTrader accounts
+- Anyone seeking a no-code bridge between TradingView and NinjaTrader
+
+Requirements
+
+- Active XAutoTrade account and subscription
+- NinjaTrader 8 with XAutoTrade AddOn installed
+- TradingView Premium/Pro account (for webhook alerts)

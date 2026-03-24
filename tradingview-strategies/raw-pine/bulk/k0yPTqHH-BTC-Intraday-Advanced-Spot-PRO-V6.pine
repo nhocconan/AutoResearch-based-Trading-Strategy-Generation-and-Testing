@@ -1,0 +1,77 @@
+//@version=6
+strategy("BTC Intraday Advanced Spot PRO V6",
+     overlay = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     calc_on_every_tick = true)
+
+// ===== INPUTS =====
+emaFastLen = input.int(21, "EMA Rapide")
+emaSlowLen = input.int(50, "EMA Lente")
+rsiLen = input.int(14, "RSI Length")
+rsiBuy = input.int(55, "RSI Seuil Buy")
+rsiSell = input.int(45, "RSI Seuil Sell")
+
+slPerc = input.float(0.5, "Stop Loss %") / 100
+tp1Perc = input.float(0.7, "Take Profit 1 %") / 100
+tp2Perc = input.float(1.5, "Take Profit 2 %") / 100
+useBE = input.bool(true, "Activer Break Even")
+
+// ===== INDICATEURS =====
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsiVal = ta.rsi(close, rsiLen)
+
+// ===== CONDITIONS =====
+longCondition = ta.crossover(emaFast, emaSlow) and rsiVal > rsiBuy
+shortCondition = ta.crossunder(emaFast, emaSlow) and rsiVal < rsiSell
+
+// ===== PRIX CALCULS =====
+longSL = strategy.position_avg_price * (1 - slPerc)
+longTP1 = strategy.position_avg_price * (1 + tp1Perc)
+longTP2 = strategy.position_avg_price * (1 + tp2Perc)
+
+shortSL = strategy.position_avg_price * (1 + slPerc)
+shortTP1 = strategy.position_avg_price * (1 - tp1Perc)
+shortTP2 = strategy.position_avg_price * (1 - tp2Perc)
+
+// ===== ENTRÉES =====
+if (longCondition)
+    strategy.entry("BUY", strategy.long)
+
+if (shortCondition)
+    strategy.entry("SELL", strategy.short)
+
+// ===== SORTIES LONG =====
+if (strategy.position_size > 0)
+    strategy.exit("TP1 Long", from_entry="BUY", qty_percent=50, limit=longTP1, stop=longSL)
+    strategy.exit("TP2 Long", from_entry="BUY", limit=longTP2)
+
+    if (useBE and close > longTP1)
+        strategy.exit("BE Long", from_entry="BUY", stop=strategy.position_avg_price)
+
+// ===== SORTIES SHORT =====
+if (strategy.position_size < 0)
+    strategy.exit("TP1 Short", from_entry="SELL", qty_percent=50, limit=shortTP1, stop=shortSL)
+    strategy.exit("TP2 Short", from_entry="SELL", limit=shortTP2)
+
+    if (useBE and close < shortTP1)
+        strategy.exit("BE Short", from_entry="SELL", stop=strategy.position_avg_price)
+
+// ===== AFFICHAGE =====
+plot(emaFast, color=color.orange, title="EMA 21")
+plot(emaSlow, color=color.blue, title="EMA 50")
+
+plotshape(longCondition, title="Signal BUY", location=location.belowbar,
+          color=color.green, style=shape.labelup, text="BUY")
+
+plotshape(shortCondition, title="Signal SELL", location=location.abovebar,
+          color=color.red, style=shape.labeldown, text="SELL")
+View in Pine Editor・72 lines
+Use on chart
+4
+7
+6
+1
+5 521
+BTC indicator in 5-minute spot intraday timeframe, automated strategy version, with SL, TP, BE crossing, alerts.

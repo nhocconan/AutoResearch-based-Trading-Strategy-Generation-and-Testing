@@ -1,0 +1,106 @@
+//@version=3
+//Vortex MAs
+strategy(title="Moving Averages - Backtesting", precision = 6, pyramiding = 1, default_qty_type = strategy.percent_of_equity, default_qty_value = 99, commission_type = strategy.commission.percent, commission_value = 0.0, initial_capital = 1000, overlay = true)
+//study(title="Vortex Based Moving Averages", shorttitle="Vortex MA", overlay=true, precision = 6)
+len1 = input(6 , minval=1, title="Length 1")
+len2 = input(27 , minval=1, title="Length 2")
+len3 = input(72, minval=1, title="Length 3")
+len4 = input(234, minval=1, title="Length 4")
+len5 = input(432, minval=1, title="Length 5")
+len6 = input(1077, minval=1, title="Length 6")
+src = input(close, "Source")
+
+out1 = sma(src, len1)
+out2 = sma(src, len2)
+out3 = sma(src, len3)
+out4 = sma(src, len4)
+out5 = sma(src, len5)
+out6 = sma(src, len6)
+
+plot(out1, color=green, title="MA 1", linewidth = 4)
+plot(out2, color=red, title="MA 2", linewidth = 3)
+plot(out3, color=yellow, title="MA 3", linewidth = 3)
+plot(out4, color=blue, title="MA 4", style =area, transp = 81)
+plot(out5, color=purple, title="MA 5", linewidth = 3)
+plot(out6, color=white, title="MA 6", linewidth = 3, transp = 81)
+
+//waveform
+wave1 = out1 - out2
+wave2 = out1 - out3
+wave3 = out1 - out4
+
+wave1_div = input(3, minval = 0)
+wave2_div = input(2, minval = 0)
+wave3_div = input(4, minval = 0)
+
+waveform = avg((wave1 / wave1_div), (wave2 / wave2_div), (wave3 / wave3_div))
+antiwaveform1 = out1 + waveform
+antiwaveform2 = out1 - waveform
+
+plot(antiwaveform1, title = "Wave 1", color = white, style = line, linewidth = 1, trackprice = false, transp = 0)
+plot(antiwaveform2, title = "Wave 2", color = fuchsia, style = line, linewidth = 1, trackprice = false, transp = 0)
+
+//alert conditions
+use_control = input(true,"Use Control MA?")
+control_length = input(234,"Control MA")
+control = sma(src, control_length)
+buyplot = use_control == false ? crossover(out1,out3) or crossover(out1,out2) and out1 > out3 : crossover(out1,out3) and out1 > control or crossover(out1,out2) and out1 > control and out1 > out3 and out1 > control or crossover(out1,control)
+sellplot = use_control == false ? crossunder(out1,out3) or crossunder(out1,out2) and out1 >= out3 : crossunder(out1,out3) or crossunder(out1,out2) and out1 >= out3 or crossunder(out1, control)
+
+num_bars_buy = barssince(buyplot)
+num_bars_sell = barssince(sellplot)
+//plot(num_bars_buy, color = teal)
+//plot(num_bars_sell, color = orange)
+
+xbuy = crossover(num_bars_sell, num_bars_buy)
+xsell = crossunder(num_bars_sell, num_bars_buy)
+plotshape(xbuy,"Buy Up Arrow", shape.triangleup, location.belowbar, fuchsia, size = size.tiny)
+plotshape(xsell,"Sell Down Arrow", shape.triangledown, location.abovebar, orange, size = size.tiny)
+
+//alerts - alerts only work on the study version
+alertcondition(xbuy,"*Buy Signal", "Buy Test")
+alertcondition(xsell,"*Sell Signal", "Sell Test")
+
+// Component Code Start
+// Example usage:
+// if testPeriod()
+//   strategy.entry("LE", strategy.long)
+testStartYear = input(2017, "Backtest Start Year")
+testStartMonth = input(01, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(7, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+// Component Code Stop
+
+if testPeriod()
+    strategy.entry("buy", true, 1000, when = xbuy, limit = close)
+    strategy.close("buy", when = xsell)
+
+View in Pine Editor・89 lines
+Use on chart
+1
+7
+3
+6
+6 103
+Alerts script that has triggers on multiple moving average crossovers so that profit is maximised, it also has an optional control moving average, enabled by default, that when active will stop trading when the price (first ma) is below the control moving average.
+
+Source code is open so that others can use and modify
+Click Below for Alerts Study version:
+
+
+Disclaimers, not an expert, not intended to be financial advise.
+
+Biffy

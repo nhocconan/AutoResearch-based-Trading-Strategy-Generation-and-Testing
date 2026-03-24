@@ -1,0 +1,91 @@
+//@version=5
+strategy("123 Reversal Trading Strategy", overlay=true)
+
+// Input for number of days to hold the trade
+daysToHold = input(7, title="Days to Hold Trade")
+
+// Input for 20-day moving average
+maLength = input(200, title="Moving Average Length")
+
+// Calculate the 20-day moving average
+ma20 = ta.sma(close, maLength)
+
+// Define the conditions for the 123 reversal pattern (bullish reversal)
+// Condition 1: Today's low is lower than yesterday's low
+condition1 = low < low[1]
+
+// Condition 2: Yesterday's low is lower than the low three days ago
+condition2 = low[1] < low[3]
+
+// Condition 3: The low two days ago is lower than the low four days ago
+condition3 = low[2] < low[4]
+
+// Condition 4: The high two days ago is lower than the high three days ago
+condition4 = high[2] < high[3]
+
+// Entry condition: All conditions must be true
+entryCondition = condition1 and condition2 and condition3 and condition4
+
+// Exit condition: Close the position after a certain number of bars or when the price reaches the 20-day moving average
+exitCondition = ta.barssince(entryCondition) >= daysToHold or close >= ma20
+
+// Execute buy and sell signals
+if (entryCondition)
+    strategy.entry("Buy", strategy.long)
+if (exitCondition)
+    strategy.close("Buy")
+
+View in Pine Editor・39 lines
+Use on chart
+8
+5
+3 443
+The 123 Reversal Trading Strategy is a technical analysis approach that seeks to identify potential reversal points in the market by analyzing price patterns. This Pine Script™ code implements a version of this strategy, and here’s a detailed description:
+
+Strategy Overview
+
+Objective: The strategy aims to identify bullish reversal patterns using the 123 pattern and manage trades with a specified holding period and a 20-day moving average as an additional exit condition.
+
+Key Components:
+
+Holding Period: The number of days to hold a trade is adjustable, with the default set to 7 days.
+
+Moving Average: A 200-day simple moving average (SMA) is used to determine an exitcondition based on the price crossing this average.
+
+Pattern Recognition:
+
+Condition 1: The low of the current day must be lower than the low of the previous day.
+
+Condition 2: The low of the previous day must be lower than the low from three days ago.
+
+Condition 3: The low two days ago must be lower than the low from four days ago.
+
+Condition 4: The high two days ago must be lower than the high three days ago.
+
+Entry Condition: All four conditions must be met for a buy signal.
+
+Exit Condition: The position is closed either after the specified holding period or when the price reaches or exceeds the 200-day moving average.
+
+Relevant Literature
+
+Graham, B., & Dodd, D. L. (1934). Security Analysis. This classic work introduces fundamental analysis and technical analysis principles which are foundational to understanding patterns like the 123 reversal.
+
+Murphy, J. J. (1999). Technical Analysis of the Financial Markets. Murphy provides an extensive overview of technical indicators and chart patterns, including reversal patterns similar to the 123 pattern.
+
+Elder, A. (1993). Trading for a Living. Elder discusses various trading strategies and technical analysis techniques that complement the understanding of reversal patterns and their application in trading.
+
+Risks and Considerations
+
+Pattern Reliability: The 123 reversal pattern, like many technical patterns, is not foolproof. It can generate false signals, especially in volatile or trending markets. This may lead to losses if the pattern does not play out as expected.
+
+Market Conditions: The strategy may perform differently under various market conditions. In strongly trending markets, reversal patterns might not be as reliable.
+
+Lagging Indicators: The use of the 200-day moving average as an exit condition can be considered a lagging indicator. This means it reacts to price movements with a delay, which might result in late exits and missed profit opportunities.
+
+Holding Period: The fixed holding period of 7 days may not be optimal for all market conditions or stocks. It is essential to adjust the holding period based on market dynamics and individual stock behavior.
+
+Overfitting: The parameters used (like the number of days and moving average length) are set based on historical data. Overfitting can occur if these parameters are tailored too specifically to past data, leading to reduced performance in future scenarios.
+
+Conclusion
+
+The 123 Reversal Trading Strategy is designed to identify potential market reversals using specific conditions related to price lows and highs. While it offers a structured approach to trading, it is essential to be aware of its limitations and potential risks. As with any trading strategy, it should be tested thoroughly in various market conditions and adjusted according to the individual trading style and risk tolerance.

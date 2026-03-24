@@ -1,0 +1,30 @@
+//@version=4
+strategy(title="Scalping", shorttitle="Scalp", initial_capital=10000, currency="EUR", default_qty_type=strategy.percent_of_equity, default_qty_value=1, precision=5, pyramiding=10)
+pMAs=input(title="Periodo para tendencia", type=input.integer, defval=50)
+pMAf=input(title="Periodo para filtro", type=input.integer, defval=14)
+pSIGNAL=input(title="Periodo para señal", type=input.integer, defval=10)
+pVOLAT=input(title="Periodo para volatilidad", type=input.integer, defval=14)
+oVOLAT=input(title="Minimo de volatilidad", type=input.float, defval=0.001)
+
+MAs = ema(close, pMAs)
+MAf = ema(close, pMAf)
+Signal = rsi(close, pSIGNAL)
+volat = atr(pVOLAT)/close
+
+plot((close-MAs)/atr(pVOLAT), color=color.orange)
+
+strategy.entry("buy", true, when = high>MAs and high>MAf and year(time_close)>2018 and change(Signal)>0 and volat>oVOLAT)
+//strategy.exit("End buy", "buy", loss=70)
+strategy.close("buy", when = change(Signal)<0)
+
+strategy.entry("sell", false, when = low<MAs and low<MAf and year(time_close)>2018 and change(Signal)<0 and volat>oVOLAT)
+//strategy.exit("End sell", "sell", loss=100)
+strategy.close("sell", when = change(Signal)>0)
+
+View in Pine Editor・22 lines
+Use on chart
+6
+2
+2
+4 123
+Un poco de sentido común y muchas pruebas

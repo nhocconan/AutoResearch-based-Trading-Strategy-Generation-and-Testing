@@ -1,0 +1,194 @@
+//@version=6
+strategy("Ratchet Exit Trend Strategy with VIX Filter (Stage 1 Dynamic)", 
+     overlay = true, 
+     initial_capital = 10000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 100, 
+     pyramiding = 1, 
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.1,
+     currency = currency.USD)
+
+// ─────────────────────
+// 1. Inputs
+// ─────────────────────
+sma25Len  = input.int(25,  "SMA 25 (Momentum)", group="SMAs")
+sma50Len  = input.int(50,  "SMA 50 (Trend)",    group="SMAs")
+sma100Len = input.int(100, "SMA 100 (Medium)",  group="SMAs")
+sma200Len = input.int(200, "SMA 200 (Long)",    group="SMAs")
+
+// VIX Filter Inputs
+group_vix = "VIX Filter"
+useVixFilter = input.bool(true, "VIX Filter aktivieren?", group=group_vix)
+vixThreshold = input.float(32.0, "VIX Schwellenwert", group=group_vix, tooltip="Kein Entry über diesem Wert. Sofort Exit über diesem Wert.")
+
+// Exit Einstellungen
+group_exit    = "Exit Logic (Ratchet System)"
+slInitialPerc = input.float(10.0, "Initial Stop Loss %",        group=group_exit)
+profitStep1   = input.float(10.0, "Trigger für Stufe 1 (+%)",   group=group_exit)
+slStep1Perc   = input.float(8.0,  "Abstand Stufe 1 (%)",  group=group_exit, tooltip="Abstand vom Kurs zum Zeitpunkt des Erreichens von Stufe 1")
+profitStep2   = input.float(15.0, "Trigger für Stufe 2 (+%)",   group=group_exit)
+trailPerc     = input.float(8.0,  "Trailing Abstand (%)",       group=group_exit)
+
+// ─────────────────────
+// 2. Datenabruf & Indikatoren
+// ─────────────────────
+vixClose = request.security("CBOE:VIX", "D", close)
+
+sma25  = ta.sma(close, sma25Len)
+sma50  = ta.sma(close, sma50Len)
+sma100 = ta.sma(close, sma100Len)
+sma200 = ta.sma(close, sma200Len)
+
+plot(sma25, "SMA 25", color=color.purple)
+plot(sma50, "SMA 50", color=color.green, linewidth=2)
+plot(sma100, "SMA 100", color=color.blue)
+plot(sma200, "SMA 200", color=color.orange, linewidth=2)
+
+// ─────────────────────
+// 3. Entry Logik
+// ─────────────────────
+entryCross  = ta.crossover(sma25, sma50)
+f_threeBarBreak(float _sma) => close > _sma and close[1] > _sma[1] and close[2] > _sma[2] and close[3] < _sma[3]
+
+breakout50  = f_threeBarBreak(sma50)
+breakout100 = f_threeBarBreak(sma100)
+breakout200 = f_threeBarBreak(sma200)
+
+vixCondition = (not useVixFilter) or (vixClose < vixThreshold)
+
+if vixCondition
+    if entryCross
+        strategy.entry("Long", strategy.long, comment="Entry: 25x50")
+    if breakout50
+        strategy.entry("Long", strategy.long, comment="Entry: SMA50")
+    if breakout100
+        strategy.entry("Long", strategy.long, comment="Entry: SMA100")
+    if breakout200
+        strategy.entry("Long", strategy.long, comment="Entry: SMA200")
+
+// ─────────────────────
+// 4. VIX PANIC EXIT
+// ─────────────────────
+if useVixFilter and vixClose > vixThreshold
+    strategy.close_all(comment = "VIX Panic Exit (> " + str.tostring(vixThreshold) + ")")
+
+// ─────────────────────
+// 5. STATE MACHINE EXIT LOGIK (Ratchet - MODIFIZIERT)
+// ─────────────────────
+
+var int exitStage = 0         
+var float activeStopPrice = 0.0 
+var float highestHigh = 0.0    
+// NEU: Variable um den Preis beim Erreichen von Stufe 1 zu speichern
+var float stage1RefPrice = 0.0
+
+float plotStop = na
+
+// RESET-LOGIK
+if strategy.position_size == 0
+    exitStage := 0
+    activeStopPrice := 0.0
+    highestHigh := 0.0
+    stage1RefPrice := 0.0 // Reset der neuen Variable
+
+// TRADE-LOGIK
+if strategy.position_size > 0
+    float avgEntry = strategy.position_avg_price
+    float currentProfitPerc = (close - avgEntry) / avgEntry * 100.0
+    
+    // Highest High tracking
+    if highestHigh == 0.0
+        highestHigh := high
+    else
+        highestHigh := math.max(highestHigh, high)
+
+    // STUFEN-LOGIK
+    
+    // Check auf Stufe 1
+    if exitStage < 1 and currentProfitPerc >= profitStep1
+        exitStage := 1 
+        stage1RefPrice := close // WICHTIG: Wir merken uns den aktuellen Kurs beim Eintritt!
+    
+    // Check auf Stufe 2
+    if exitStage < 2 and currentProfitPerc >= profitStep2
+        exitStage := 2
+
+    // STOP-BERECHNUNG
+    float potentialStop = 0.0
+    string commentText = ""
+
+    if exitStage == 0
+        // Stufe 0: Initialer Hard Stop vom Entry
+        potentialStop = avgEntry * (1 - slInitialPerc / 100.0)
+        commentText := "Initial Stop"
+        
+    else if exitStage == 1
+        // Stufe 1: Fixiert auf "Kurs bei Eintritt in Stufe 1" minus X%
+        // HIER IST DIE ÄNDERUNG:
+        potentialStop = stage1RefPrice * (1 - slStep1Perc / 100.0)
+        commentText := "Locked Stage 1"
+        
+    else if exitStage == 2
+        // Stufe 2: Trailing Stop
+        potentialStop = highestHigh * (1 - trailPerc / 100.0)
+        commentText := "Trailing"
+
+    // RATCHET (Stop darf nur steigen)
+    if strategy.position_size[1] == 0
+        activeStopPrice := potentialStop
+    else
+        activeStopPrice := math.max(activeStopPrice, potentialStop)
+
+    plotStop := activeStopPrice
+    strategy.exit("Ratchet Exit", stop = activeStopPrice, comment_loss = commentText)
+
+// Dead Cross Backup
+if ta.crossunder(sma25, sma50)
+    strategy.close_all(comment = "Dead Cross")
+
+plot(plotStop, "Active Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・150 lines
+Use on chart
+8
+630
+Overview This strategy is a long-only trend-following system designed to capture major market moves while strictly managing downside risk through a state-machine based "Ratchet" exit logic. It incorporates a volatility filter using the CBOE VIX index to stay out of (or exit) the market during high-stress environments.
+
+Key Features
+
+1. Multi-Condition Entries The strategy looks for momentum shifts and trend breakouts using four Simple Moving Averages (25, 50, 100, 200).
+
+Momentum Cross: SMA 25 crossover above SMA 50.
+
+Trend Breakouts: A specific "3-Bar Breakout" logic above the SMA 50, 100, or 200. This requires the price to hold above the SMA for 3 consecutive bars after being below it, reducing false signals compared to simple closes.
+
+2. VIX Volatility Filter Before entering any trade, the script checks the CBOE:VIX.
+
+Filter: If VIX is above the threshold (default 32), new entries are blocked.
+
+Panic Exit: If you are in a position and the VIX spikes above the threshold, the strategy executes an immediate "Panic Exit" to preserve capital during market crashes.
+
+3. The "Ratchet" Exit System (3 Stages) Unlike a standard trailing stop, this strategy uses a 3-stage dynamic exit mechanism that tightens as profits grow:
+
+Stage 0 (Initial Risk): Standard percentage-based Stop Loss from the entry price.
+
+Stage 1 (The Lock-In): Triggered when profit hits 10% (configurable).
+
+Unique Logic: Instead of trailing from the highest high, the stop is calculated based on the price at the exact moment this stage was triggered. It "steps up" once and holds, securing the initial move without being prematurely stopped out by normal volatility.
+
+Stage 2 (Trailing Mode): Triggered when profit hits 15% (configurable).
+
+The strategy switches to a classic Trailing Stop, following the percentage distance from the Highest High.
+
+4. Emergency Backup A "Dead Cross" (SMA 25 crossing under SMA 50) acts as a final fail-safe to close positions if the trend reverses completely before hitting a stop.
+
+Settings & Inputs
+
+SMAs: Customize the lengths for all four moving averages.
+
+VIX Filter: Toggle the filter on/off and set the panic threshold.
+
+Exit Logic: Fully customizable percentages for Initial SL, Stage 1 Trigger/Distance, and Stage 2 Trigger/Trailing Distance.
+
+Disclaimer This script is for educational purposes only. Past performance is not indicative of future results. Always manage your risk appropriately.

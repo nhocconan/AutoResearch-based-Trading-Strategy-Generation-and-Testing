@@ -1,0 +1,231 @@
+//@version=6
+strategy('TrendSync Pro (SMC)', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.075)
+
+// === Created by Shubham Singh ===
+
+// === Strategy Mode ===
+strategy_type = input.string("6H Trading", title="Strategy Type", options=["Scalping", "6H Trading", "Long-Term"], group="Strategy Mode")
+
+// === Default Values Based on Strategy Type ===
+default_trend_period = strategy_type == "Scalping"   ? 7  :
+                       strategy_type == "Long-Term"  ? 35 :
+                                                       20
+default_htf         = strategy_type == "Scalping"   ? "15"  :
+                       strategy_type == "Long-Term" ? "D"   :
+                                                       "60"
+default_sl_percent  = strategy_type == "Scalping"   ? 0.5  :
+                       strategy_type == "Long-Term" ? 2.0  :
+                                                       1.0
+default_tp_percent  = strategy_type == "Scalping"   ? 1.0  :
+                       strategy_type == "Long-Term" ? 10.0 :
+                                                       5.0
+
+// === Manual Overrides ===
+override_trend = input.bool(false, "Override Trend Period", group="Manual Settings")
+trend_period   = override_trend ? input.int(20, "Manual Trend Period", minval=1, group="Manual Settings") : default_trend_period
+
+override_htf = input.bool(false, "Override HTF", group="Manual Settings")
+htf          = override_htf ? input.timeframe("60", "Manual HTF", group="Manual Settings") : default_htf
+
+override_risk = input.bool(false, "Override SL/TP", group="Manual Settings")
+sl_percent    = override_risk ? input.float(1.0, "Manual Stop Loss (%)", minval=0.1, maxval=10, step=0.1, group="Manual Settings") : default_sl_percent
+tp_percent    = override_risk ? input.float(2.0, "Manual Take Profit (%)", minval=0.1, maxval=20, step=0.1, group="Manual Settings") : default_tp_percent
+
+// === Trade Direction Option ===
+trade_dir = input.string("Both", title="Trade Direction", options=["Both", "Bullish Only", "Bearish Only"], group="Strategy Mode")
+
+// === Visual Settings ===
+show_trendlines = input.bool(true, "Show Trendlines", group="Visual Settings")
+
+// === Trendline Detection ===
+var line trendline = na
+var float trend_value = na
+var bool trend_direction_up = false
+
+pivot_high = ta.pivothigh(high, trend_period, trend_period)
+pivot_low = ta.pivotlow(low, trend_period, trend_period)
+
+if not na(pivot_high)
+    trend_value := pivot_high
+    trend_direction_up := false
+    if show_trendlines
+        trendline := line.new(bar_index[trend_period], pivot_high, bar_index, high, color=color.new(color.blue, 50), width=2)
+
+if not na(pivot_low)
+    trend_value := pivot_low
+    trend_direction_up := true
+    if show_trendlines
+        trendline := line.new(bar_index[trend_period], pivot_low, bar_index, low, color=color.new(color.red, 50), width=2)
+
+// === Higher Timeframe Trend ===
+htf_close = request.security(syminfo.tickerid, htf, close)
+htf_trend_up = htf_close > htf_close[1]
+htf_trend_down = htf_close < htf_close[1]
+
+// === Trade Logic ===
+long_condition = ta.crossover(close, trend_value) and htf_trend_up and trend_direction_up
+short_condition = ta.crossunder(close, trend_value) and htf_trend_down and not trend_direction_up
+
+take_long = (trade_dir == "Both" or trade_dir == "Bullish Only") and long_condition
+take_short = (trade_dir == "Both" or trade_dir == "Bearish Only") and short_condition
+
+// === Entry/Exit ===
+if strategy.position_size == 0
+    if take_long
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", "Long", stop=close * (1 - sl_percent / 100), limit=close * (1 + tp_percent / 100))
+    
+    if take_short
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", "Short", stop=close * (1 + sl_percent / 100), limit=close * (1 - tp_percent / 100))
+
+// === Manual Exit ===
+if strategy.position_size > 0 and ta.crossunder(close, trend_value)
+    strategy.close("Long")
+if strategy.position_size < 0 and ta.crossover(close, trend_value)
+    strategy.close("Short")
+
+View in Pine Editor・86 lines
+Use on chart
+3
+1
+5
+8 340
+📊 TrendSync Pro (SMC) – Advanced Trend-Following Strategy with HTF Alignment
+Created by Shubham Singh
+
+🔍 Strategy Overview
+TrendSync Pro (SMC) is a precision-based smart trend-following strategy inspired by Smart Money Concepts (SMC). It combines:
+[] Real-time pivot-based trendline detection
+[] Higher Time Frame (HTF) filtering to align trades with dominant trend
+[] Risk management via adjustable Stop Loss (SL) and Take Profit (TP)
+[] Directional control — trade only bullish, bearish, or both setups
+[] Realistic backtesting using commissions and slippage
+[] Pre-optimized profiles for scalpers, intraday, swing, and long-term traders
+
+
+
+🧠 How It Works:
+
+🔧 Strategy Settings Image:
+https://beeimg.com/images/i24866300893.png
+
+
+
+The strategy dynamically identifies trend direction by using swing high/low pivots. When a new pivot forms:
+[] It draws a trendline from the last significant pivot
+[] Detects whether the trend is up (based on pivot lows) or down (based on pivot highs)
+[] Waits for price to break above/below the trendline
+[] Confirms with HTF price direction (HTF close > previous HTF close = bullish)
+[] Only then it triggers a long or short trade
+[] It exits either at TP, SL, or a manual trendline break
+
+
+
+🛠️ Adjustable Parameters:
+
+[] Trend Period: Length for pivot detection (affects sensitivity of trendlines)
+[] HTF Timeframe: Aligns lower timeframe entries with higher timeframe direction
+[] SL% and TP%: Customize your risk-reward profile
+[] Commission & Slippage: Make backtests more realistic
+
+Trade Direction: Choose to trade: Long only, Short only, or Both
+
+
+🎛️ Trade Direction Control:
+In settings, you can choose:
+[] Bullish Only: Executes only long entries
+[] Bearish Only: Executes only short entries
+
+Both: Executes both long and short entries when conditions are met
+
+
+
+This allows you to align trades with your own market bias or external analysis.
+
+📈 Entry Logic:
+Long Entry:
+ • Price crosses above trendline
+ • HTF is bullish (HTF close > previous close)
+ • Latest pivot is a low (trend is considered up)
+
+
+Short Entry:
+ • Price crosses below trendline
+ • HTF is bearish (HTF close < previous close)
+ • Latest pivot is a high (trend is considered down)
+
+
+
+📉 Exit Logic:
+[] Hit Take Profit or Stop Loss
+[] Manual trendline invalidation: If price crosses opposite of the trend direction
+
+
+
+⏰ Best Timeframes & Recommended Settings:
+
+
+Scalping (1m to 5m):
+ HTF = 15m | Trend Period = 7
+ SL = 0.5% | TP = 1% to 2%
+
+
+Intraday (15m to 30m):
+ HTF = 1H | Trend Period = 10–14
+ SL = 0.75% | TP = 2% to 3%
+
+
+6 Hour Trading (30m to 1H):
+ HTF = 4H | Trend Period = 20
+ SL = 1% | TP = 4% to 6%
+
+
+Swing Trading (4H to 1D):
+ HTF = 1D | Trend Period = 35
+ SL = 2% | TP = 8% to 12%
+
+
+Long-Term Investing (1D+):
+ HTF = 1W | Trend Period = 50
+ SL = 3% | TP = 15%+
+
+
+
+Note: These are recommended base settings. Adjust based on volatility, asset class, or personal trading style.
+
+📸 Testing Note:
+
+https://beeimg.com/images/n08397397562.png
+
+
+TradingView limits test length to 20k bars (~40 trades on smaller timeframes). To show long-term results:
+[] Test on higher timeframes (e.g., 1H, 4H, 1D)
+[] Share images of backtest result in description
+
+Host longer test result screenshots on Imgur or any public drive
+
+
+
+📍 Asset Behavior Insight:
+This strategy works on multiple assets, including BTC, ETH, etc.
+Performance varies by trend strength:
+
+[] Sometimes BTC performs better than ETH
+[] Other times ETH gives better results
+
+That’s normal as both assets follow different volatility and trend behavior
+
+
+It’s a trend-following setup. Longer and clearer the trend → better the results.
+
+✅ Best Practices:
+[] Avoid ranging markets
+[] Use proper SL/TP for each timeframe
+[] Use directional filter if you already have a directional bias
+[] Always forward test before going live
+
+
+
+⚠️ Trading Disclaimer:
+This script is for educational and backtesting purposes only. Trading involves risk. Always use risk management and never invest more than you can afford to lose.

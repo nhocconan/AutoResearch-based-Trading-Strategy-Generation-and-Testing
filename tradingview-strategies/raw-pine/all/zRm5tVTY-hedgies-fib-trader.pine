@@ -1,0 +1,245 @@
+//@version=5
+strategy("NQ Fib Zone Trader v2", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     initial_capital=50000, commission_type=strategy.commission.cash_per_contract,
+     commission_value=4.50, slippage=2, calc_on_every_tick=false)
+
+// === INPUTS ===
+swingLen       = input.int(7, "Swing Detection Length (Daily bars)", minval=3, maxval=20, group="Fibonacci",
+                 tooltip="Lower = more frequent swing updates. 7 works well for NQ daily structure.")
+fallbackLen    = input.int(30, "Fallback Lookback (Daily bars)", minval=10, group="Fibonacci",
+                 tooltip="If no pivot detected, use highest/lowest of this many daily bars.")
+fibZoneATR     = input.float(1.0, "Fib Zone Width (ATR multiplier)", minval=0.3, step=0.1, group="Fibonacci",
+                 tooltip="Zone width around each fib level in ATR units. Wider = more triggers.")
+fib1           = input.float(0.382, "Fib Level 1", group="Fibonacci")
+fib2           = input.float(0.5, "Fib Level 2", group="Fibonacci")
+fib3           = input.float(0.618, "Fib Level 3 (Golden)", group="Fibonacci")
+fib4           = input.float(0.786, "Fib Level 4 (Deep)", group="Fibonacci")
+atrLen         = input.int(14, "ATR Length", group="Stops")
+stopMult       = input.float(1.5, "Stop ATR Multiplier", minval=0.5, step=0.25, group="Stops")
+tp1Mult        = input.float(1.5, "TP1 R:R Ratio", minval=1.0, step=0.5, group="Stops")
+tp2Mult        = input.float(3.0, "TP2 R:R Ratio", minval=1.5, step=0.5, group="Stops")
+tp1Pct         = input.float(50, "% Close at TP1", minval=10, maxval=90, step=10, group="Stops")
+rsiLen         = input.int(14, "RSI Length", group="Confirmation")
+rsiOB          = input.int(70, "RSI OB", group="Confirmation")
+rsiOS          = input.int(30, "RSI OS", group="Confirmation")
+useEmaConf     = input.bool(true, "EMA Confirmation (price reclaims 9 EMA)", group="Confirmation")
+emaConfLen     = input.int(9, "Confirmation EMA Length", group="Confirmation")
+trendEmaLen    = input.int(50, "Trend EMA Length (Daily)", group="Confirmation",
+                 tooltip="Used for trend bias instead of swing midpoint.")
+useSession     = input.bool(true, "Session Filter", group="Session")
+sessStart      = input.int(9, "Start Hour (ET)", group="Session")
+sessEnd        = input.int(15, "End Hour (ET)", group="Session")
+closeEOD       = input.bool(false, "Close EOD (disable for swing trades)", group="Session")
+closeHour      = input.int(15, "EOD Close Hour", group="Session")
+closeMin       = input.int(45, "EOD Close Minute", group="Session")
+maxStaleSwing  = input.int(40, "Max Swing Staleness (daily bars)", minval=10, group="Advanced",
+                 tooltip="If swing hasn't updated in this many days, force refresh from rolling H/L.")
+
+// === DATE FILTER ===
+startDate = input.time(timestamp("2020-01-01"), "Backtest Start", group="Backtest")
+endDate   = input.time(timestamp("2030-12-31"), "Backtest End", group="Backtest")
+inDateRange = time >= startDate and time <= endDate
+
+// === SESSION FILTER ===
+inSession = useSession ? (hour >= sessStart and hour < sessEnd) : true
+isCloseTime = closeEOD ? (hour == closeHour and minute >= closeMin) : false
+
+// === DAILY DATA VIA SECURITY ===
+dailyClose = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+dailyATR   = request.security(syminfo.tickerid, "D", ta.atr(atrLen), lookahead=barmerge.lookahead_off)
+dailyEma   = request.security(syminfo.tickerid, "D", ta.ema(close, trendEmaLen), lookahead=barmerge.lookahead_on)
+
+// Pivot detection on daily
+dHigh = request.security(syminfo.tickerid, "D", ta.pivothigh(high, swingLen, swingLen), lookahead=barmerge.lookahead_on)
+dLow  = request.security(syminfo.tickerid, "D", ta.pivotlow(low, swingLen, swingLen), lookahead=barmerge.lookahead_on)
+
+// Fallback: rolling highest/lowest on daily
+dFallbackHigh = request.security(syminfo.tickerid, "D", ta.highest(high, fallbackLen), lookahead=barmerge.lookahead_off)
+dFallbackLow  = request.security(syminfo.tickerid, "D", ta.lowest(low, fallbackLen), lookahead=barmerge.lookahead_off)
+
+// === FIX #1: SWING TRACKING WITH STALENESS FALLBACK ===
+var float swingHigh      = na
+var float swingLow       = na
+var int   swingHighAge   = 0
+var int   swingLowAge    = 0
+
+// Count bars since last swing update (approximate via 30min bars, ~13 per day)
+swingHighAge += 1
+swingLowAge  += 1
+
+if not na(dHigh)
+    swingHigh    := dHigh
+    swingHighAge := 0
+
+if not na(dLow)
+    swingLow    := dLow
+    swingLowAge := 0
+
+// Fallback: if swing is too stale, use rolling high/low
+staleThresholdBars = maxStaleSwing * 13  // ~13 thirty-min bars per trading day
+
+if swingHighAge > staleThresholdBars and not na(dFallbackHigh)
+    swingHigh    := dFallbackHigh
+    swingHighAge := 0
+
+if swingLowAge > staleThresholdBars and not na(dFallbackLow)
+    swingLow    := dFallbackLow
+    swingLowAge := 0
+
+// Safety: ensure swingHigh > swingLow
+validSwings = not na(swingHigh) and not na(swingLow) and swingHigh > swingLow
+swingRange  = validSwings ? swingHigh - swingLow : 0.0
+
+// === FIX #4: TREND BIAS VIA DAILY EMA SLOPE (not midpoint) ===
+// This prevents the dead zone at the 50% mark
+bullSwing = validSwings and dailyClose > dailyEma
+bearSwing = validSwings and dailyClose < dailyEma
+
+// === FIBONACCI LEVELS ===
+// Bullish fib levels (retracements of up-move = buy zones)
+bullFib382 = swingHigh - swingRange * fib1
+bullFib500 = swingHigh - swingRange * fib2
+bullFib618 = swingHigh - swingRange * fib3
+bullFib786 = swingHigh - swingRange * fib4
+
+// Bearish fib levels (retracements of down-move = sell zones)
+bearFib382 = swingLow + swingRange * fib1
+bearFib500 = swingLow + swingRange * fib2
+bearFib618 = swingLow + swingRange * fib3
+bearFib786 = swingLow + swingRange * fib4
+
+// === FIX #2: ADAPTIVE FIB ZONE WIDTH (ATR-based, not % of range) ===
+atrVal  = ta.atr(atrLen)
+fibZone = atrVal * fibZoneATR  // Zone width scales with current volatility
+
+// Bullish fib zones
+inBullFib382 = close >= (bullFib382 - fibZone) and close <= (bullFib382 + fibZone)
+inBullFib500 = close >= (bullFib500 - fibZone) and close <= (bullFib500 + fibZone)
+inBullFib618 = close >= (bullFib618 - fibZone) and close <= (bullFib618 + fibZone)
+inBullFib786 = close >= (bullFib786 - fibZone) and close <= (bullFib786 + fibZone)
+inBullFibZone = inBullFib618 or inBullFib500 or inBullFib382 or inBullFib786
+
+// Bearish fib zones
+inBearFib382 = close >= (bearFib382 - fibZone) and close <= (bearFib382 + fibZone)
+inBearFib500 = close >= (bearFib500 - fibZone) and close <= (bearFib500 + fibZone)
+inBearFib618 = close >= (bearFib618 - fibZone) and close <= (bearFib618 + fibZone)
+inBearFib786 = close >= (bearFib786 - fibZone) and close <= (bearFib786 + fibZone)
+inBearFibZone = inBearFib618 or inBearFib500 or inBearFib382 or inBearFib786
+
+// === CANDLESTICK CONFIRMATION (30-min) ===
+bodySize = math.abs(close - open)
+fullRange = high - low
+
+// Bullish: strong body, hammer, or bullish engulfing
+bullCandle = (close > open and bodySize > fullRange * 0.4) or
+             (close > open and (open - low) > bodySize * 1.5 and fullRange > 0) or
+             (close > open and bodySize > math.abs(close[1] - open[1]) and close[1] < open[1])
+
+// Bearish: strong body, shooting star, or bearish engulfing
+bearCandle = (close < open and bodySize > fullRange * 0.4) or
+             (close < open and (high - open) > bodySize * 1.5 and fullRange > 0) or
+             (close < open and bodySize > math.abs(close[1] - open[1]) and close[1] > open[1])
+
+// === INDICATORS ===
+rsiVal = ta.rsi(close, rsiLen)
+ema9   = ta.ema(close, emaConfLen)
+
+// === FIX #3: EMA CONFIRMATION ACTUALLY WIRED IN ===
+// Price reclaiming 9 EMA = momentum shifting in our direction
+emaConfLong  = useEmaConf ? close > ema9 : true
+emaConfShort = useEmaConf ? close < ema9 : true
+
+// === ENTRY CONDITIONS (all filters connected) ===
+longCond  = bullSwing and inBullFibZone and bullCandle and emaConfLong and 
+             rsiVal < rsiOB and rsiVal > 20 and  // Not overbought, not crashing
+             inSession and inDateRange and strategy.position_size == 0
+
+shortCond = bearSwing and inBearFibZone and bearCandle and emaConfShort and 
+             rsiVal > rsiOS and rsiVal < 80 and
+             inSession and inDateRange and strategy.position_size == 0
+
+// === FIX #5: PROPER SPLIT EXITS ===
+if longCond
+    stopDist = atrVal * stopMult
+    sl = close - stopDist
+    t1 = close + stopDist * tp1Mult
+    t2 = close + stopDist * tp2Mult
+    
+    strategy.entry("Fib Long", strategy.long)
+    strategy.exit("FL TP1", "Fib Long", qty_percent=tp1Pct, limit=t1, stop=sl)
+    // TP2 uses remaining qty — explicitly set to (100 - tp1Pct)
+    strategy.exit("FL TP2", "Fib Long", qty_percent=100, limit=t2, stop=sl)
+
+if shortCond
+    stopDist = atrVal * stopMult
+    sl = close + stopDist
+    t1 = close - stopDist * tp1Mult
+    t2 = close - stopDist * tp2Mult
+    
+    strategy.entry("Fib Short", strategy.short)
+    strategy.exit("FS TP1", "Fib Short", qty_percent=tp1Pct, limit=t1, stop=sl)
+    strategy.exit("FS TP2", "Fib Short", qty_percent=100, limit=t2, stop=sl)
+
+// === EOD CLOSE ===
+if isCloseTime
+    strategy.close_all(comment="EOD Close")
+
+// === PLOTS ===
+// Active fib levels (only show for current bias)
+plot(bullSwing ? bullFib382 : na, "Bull 0.382", color=color.new(color.green, 50), linewidth=1, style=plot.style_stepline)
+plot(bullSwing ? bullFib500 : na, "Bull 0.500", color=color.new(color.green, 40), linewidth=1, style=plot.style_stepline)
+plot(bullSwing ? bullFib618 : na, "Bull 0.618", color=color.new(color.lime, 20), linewidth=2, style=plot.style_stepline)
+plot(bullSwing ? bullFib786 : na, "Bull 0.786", color=color.new(color.green, 60), linewidth=1, style=plot.style_stepline)
+
+plot(bearSwing ? bearFib382 : na, "Bear 0.382", color=color.new(color.red, 50), linewidth=1, style=plot.style_stepline)
+plot(bearSwing ? bearFib500 : na, "Bear 0.500", color=color.new(color.red, 40), linewidth=1, style=plot.style_stepline)
+plot(bearSwing ? bearFib618 : na, "Bear 0.618", color=color.new(color.fuchsia, 20), linewidth=2, style=plot.style_stepline)
+plot(bearSwing ? bearFib786 : na, "Bear 0.786", color=color.new(color.red, 60), linewidth=1, style=plot.style_stepline)
+
+// Swing structure
+plot(swingHigh, "Swing High", color=color.new(color.red, 20), linewidth=2, style=plot.style_stepline)
+plot(swingLow, "Swing Low", color=color.new(color.green, 20), linewidth=2, style=plot.style_stepline)
+
+// Trend EMA
+plot(dailyEma, "Daily EMA", color=color.orange, linewidth=1, style=plot.style_stepline)
+plot(ema9, "EMA 9", color=color.aqua, linewidth=1)
+
+// Entry signals
+plotshape(longCond, "Fib Long", shape.arrowup, location.belowbar, color.lime, size=size.normal, text="FIB▲")
+plotshape(shortCond, "Fib Short", shape.arrowdown, location.abovebar, color.fuchsia, size=size.normal, text="FIB▼")
+
+// Zone highlights
+bgcolor(inBullFibZone and bullSwing ? color.new(color.green, 92) : 
+         inBearFibZone and bearSwing ? color.new(color.red, 92) : na, title="Fib Zone BG")
+
+// Staleness warning
+swingStale = (swingHighAge > staleThresholdBars * 0.8) or (swingLowAge > staleThresholdBars * 0.8)
+bgcolor(swingStale ? color.new(color.yellow, 95) : na, title="Stale Swing Warning")
+
+// === INFO TABLE ===
+var table fibTbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(fibTbl, 0, 0, "Swing H", text_color=color.red, text_size=size.small)
+    table.cell(fibTbl, 1, 0, str.tostring(swingHigh, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 1, "Swing L", text_color=color.green, text_size=size.small)
+    table.cell(fibTbl, 1, 1, str.tostring(swingLow, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 2, "0.618", text_color=color.yellow, text_size=size.small)
+    table.cell(fibTbl, 1, 2, str.tostring(bullSwing ? bullFib618 : bearFib618, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 3, "0.500", text_color=color.yellow, text_size=size.small)
+    table.cell(fibTbl, 1, 3, str.tostring(bullSwing ? bullFib500 : bearFib500, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 4, "0.382", text_color=color.yellow, text_size=size.small)
+    table.cell(fibTbl, 1, 4, str.tostring(bullSwing ? bullFib382 : bearFib382, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 5, "RSI", text_color=color.blue, text_size=size.small)
+    table.cell(fibTbl, 1, 5, str.tostring(rsiVal, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 0, 6, "Bias", text_color=color.white, text_size=size.small)
+    table.cell(fibTbl, 1, 6, bullSwing ? "BULL" : bearSwing ? "BEAR" : "FLAT", 
+               text_color=bullSwing ? color.green : bearSwing ? color.red : color.gray, text_size=size.small)
+    table.cell(fibTbl, 0, 7, "Zone ±", text_color=color.gray, text_size=size.small)
+    table.cell(fibTbl, 1, 7, str.tostring(fibZone, "#.#") + " pts", text_color=color.white, text_size=size.small)
+
+View in Pine Editor・252 lines
+Use on chart
+2
+338
+high w/r selective 15-30 min based on 10d fib best in choppy markets

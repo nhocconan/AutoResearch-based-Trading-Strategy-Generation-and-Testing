@@ -1,0 +1,77 @@
+//@version=5
+strategy("[INVX] Post-Earnings Announcement Drift", initial_capital=500000, default_qty_type=strategy.cash, default_qty_value=50000, commission_type = strategy.commission.percent, commission_value = 0.15, overlay = true, process_orders_on_close=true)
+
+holding_period = input(8, "Holding periods (Bar)")
+surprise_threshold = input(3, "Surprise threshold (%)")
+
+estimates = request.earnings(syminfo.tickerid, earnings.estimate, gaps=barmerge.gaps_on) 
+actuals = request.earnings(syminfo.tickerid, earnings.actual, gaps=barmerge.gaps_on) 
+var float surprise = na
+
+enum order_enum 
+    buy = "buy"
+    sell = "sell"
+    none = "none"
+
+order_side = order_enum.none
+if not na(actuals)  // announcement date
+    surprise := 100.0*float(actuals-estimates)/math.abs(estimates) 
+
+    order_quantity = math.floor(strategy.default_entry_qty(close)/100)*100 // Make it round lot as multiple of 100 shares
+    
+    if surprise > surprise_threshold
+        order_side := order_enum.buy
+        strategy.entry("Earnings surprise order", strategy.long, qty=order_quantity)
+    else if surprise < -surprise_threshold
+        order_side := order_enum.sell
+        strategy.entry("Earnings surprise order", strategy.short, qty=order_quantity)
+
+bgcolor( (strategy.opentrades > 0) or (order_side != order_enum.none) ? (surprise >= 0 ? color.rgb(0,255,0,85) : color.rgb(255,0,0,85)) : na )
+
+// Close position after holding_period (bars)
+if (strategy.opentrades > 0) and (bar_index - strategy.opentrades.entry_bar_index(0) + 1 >= holding_period)
+    strategy.close_all()
+
+View in Pine Editor・36 lines
+Use on chart
+3
+1
+3
+1
+5 881
+What does this strategy do?
+This Pine Script strategy implements the Post-earnings announcement drift (PEAD) strategy, which is a financial market anomaly where a stock's price tends to drift in the direction of the firm's earnings surprise for an extended period of time.
+Ref: en.wikipedia.org/wiki/Post–earnings-announcement_drift
+
+
+An earnings announcement is an official public statement of a company's profitability for a specific time period, typically a quarter or a year. It includes various financial metrics but the most watched figure is the Earnings Per Share (EPS). Analysts estimate the EPS before the announcement, and the actual EPS is compared to this estimate to determine if there was an earnings surprise.
+
+An earnings surprise occurs when the actual EPS is significantly different from the analysts' estimates. A positive earnings surprise indicates that the actual EPS is higher than the estimate, while a negative earnings surprise suggests the EPS is lower than anticipated.
+
+The script takes the following inputs
+
+"Holding periods (bar)" : This input defines the number of periods (or bars) the script will hold a position after the earnings announcement.
+
+"Surprise threshold (%)": This input sets the minimum percentage for an earnings surprise, which triggers the strategy to enter either a long or short position. In essence, it represents the minimum deviation between the estimated and actual Earnings Per Share (EPS) that will trigger a trade. A higher threshold may lead to fewer, potentially more significant trades, while a lower threshold might result in more frequent, possibly less impactful trades. This parameter allows you to adjust the sensitivity of the strategy to earnings surprises.
+
+
+
+Positive earnings surprise
+
+After the earnings announcement, the script compares the actual EPS with the estimated EPS to identify an earnings surprise. If there is a positive earnings surprise, the script will enter a long position. A long position is a bullish strategy where the investor expects the stock price to rise.
+
+
+
+Negative earnings surprise
+
+On the other hand, if there is a negative earnings surprise, the script will enter a short position. A short position is a bearish strategy where the investor expects the stock price to fall.
+
+
+
+In both scenarios, the position (either long or short) is held for the number of periods specified in the "Holding periods (bar)" input. This strategy is based on the assumption that the stock price will continue to drift in the direction of the earnings surprise for the specified holding period.
+
+Disclaimer: The script provided herein is for educational purposes only. It should not be considered as investment advice or a recommendation of any particular security, strategy or investment product. Past performance is not indicative of future results.
+
+The results of the Pine Script backtesting are hypothetical and should not be considered as a true reflection of the results that might be achieved in a live trading environment. The backtest results are based on historical data and may not take into account certain factors such as actual transaction costs, taxes, or changes in market conditions.
+
+Investors should consult with their financial advisor before making any investment decisions. All investments involve risk, including the potential loss of all invested capital.

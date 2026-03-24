@@ -1,0 +1,81 @@
+//@version=5
+strategy("VIX Futures Basis Strategy", overlay=false)
+
+// Input for the user to specify the contango/backwardation threshold
+threshold = input.float(0.1, title="Basis Threshold", step=0.01)
+
+// Fetch VIX index data
+vix = request.security("CBOE:VIX", "D", close)
+
+// Fetch VIX futures data (assuming the user has access to this symbol, replace with actual symbol)
+vix_futures_1 = request.security("CBOE:VX1!", "D", close)
+vix_futures_2 = request.security("CBOE:VX2!", "D", close)
+
+// Calculate basis for the front and second VIX futures contracts
+basis1 = vix_futures_1 - vix
+basis2 = vix_futures_2 - vix
+
+// Determine if the market is in contango or backwardation
+contango = basis1 > threshold and basis2 > threshold
+backwardation = basis1 < -threshold and basis2 < -threshold
+
+// Invert signals: long on contango, short on backwardation
+long_signal = contango
+short_signal = backwardation
+
+// Execute trades based on signals
+if (long_signal)
+    strategy.entry("Long", strategy.long)
+
+if (short_signal)
+    strategy.close("Long")
+
+// Plot signals
+plotshape(series=long_signal, location=location.belowbar, color=color.green, style=shape.triangleup, title="Long Signal")
+plotshape(series=short_signal, location=location.abovebar, color=color.red, style=shape.triangledown, title="Short Signal")
+
+// Plot the VIX and futures prices for reference
+plot(vix, color=color.blue, title="VIX Index")
+plot(vix_futures_1, color=color.orange, title="VIX Futures 1")
+plot(vix_futures_2, color=color.purple, title="VIX Futures 2")
+
+// Display basis values for debugging
+plot(basis1, color=color.gray, title="Basis 1")
+plot(basis2, color=color.gray, title="Basis 2")
+
+View in Pine Editor・44 lines
+Use on chart
+5
+1
+1 687
+VIX Futures Basis Strategy
+
+The VIX Futures Basis Strategy is a trading approach that takes advantage of the unique characteristics of the VIX index and its futures market. The VIX, often referred to as the "fear index," measures market expectations of near-term volatility. This strategy focuses on how the VIX futures contracts behave in relation to the spot VIX index and seeks to capitalize on the market's contango and backwardation phases.
+
+Key Concepts:
+
+VIX Index and VIX Futures:
+
+The VIX index reflects the market's expectation of volatility over the next 30 days.
+VIX futures allow traders to speculate on the future value of the VIX index.
+Contango and Backwardation:
+
+Contango occurs when the futures price is higher than the spot price, often indicating that the market expects volatility to rise in the future.
+Backwardation is when the futures price is lower than the spot price, suggesting that the market expects a decrease in volatility.
+Basis:
+
+The basis is the difference between the futures price and the spot price. This strategy examines the basis for two consecutive VIX futures contracts.
+
+Strategy Overview:
+
+The VIX Futures Basis Strategy uses the relationship between the VIX index and its futures contracts to generate trading signals:
+
+Long Position on Contango:
+
+When both the front month and the second month VIX futures contracts are in contango (their prices are above the spot VIX index by a specified threshold), the strategy takes a long position.
+This implies an expectation that the market will move from a state of expected higher future volatility to a more stable state, allowing profits to be made as the futures prices converge toward the spot price.
+
+Closing Position on Backwardation:
+
+If the basis for both futures contracts indicates backwardation (their prices are below the spot VIX index by a threshold), the strategy closes any long positions.
+This condition suggests that the market anticipates decreasing volatility, and closing positions helps to avoid potential losses.

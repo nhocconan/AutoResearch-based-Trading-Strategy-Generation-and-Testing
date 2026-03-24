@@ -1,0 +1,122 @@
+//@version=5
+strategy("Multi-KI-Agenten Strategie FINAL-PRO", overlay=true, initial_capital=10000, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ==============================================================================
+// 1. ALLE ANFORDERUNGEN (INPUTS)
+// ==============================================================================
+grp_ema = "EMA Agenten (Trendfolge)"
+len50  = input.int(50, "EMA 50", group=grp_ema)
+len100 = input.int(100, "EMA 100", group=grp_ema)
+len200 = input.int(200, "EMA 200", group=grp_ema)
+
+grp_rsi = "Economic Agent (RSI & Vol)"
+lenRSI     = input.int(14, "RSI Länge", group=grp_rsi)
+overbought = input.int(70, "RSI Überkauft", group=grp_rsi)
+oversold   = input.int(30, "RSI Überverkauft", group=grp_rsi)
+vol_mult   = input.float(1.5, "Volumen Sensitivität", group=grp_rsi)
+
+grp_smc = "Institutional Agent (SMC & FVG)"
+sd_lookback = input.int(20, "Supply/Demand Lookback", group=grp_smc)
+
+grp_control = "Controlling & Risikomanagement"
+threshold = input.float(4.5, "Min. Score für Freigabe", group=grp_control)
+atr_sl_mult = input.float(3.0, "Stop-Loss ATR Multiplikator", group=grp_control)
+atr_tp_mult = input.float(5.0, "Take-Profit ATR Multiplikator", group=grp_control)
+
+// ==============================================================================
+// 2. TECHNISCHE ANALYSE (AGENTEN-LOGIK)
+// ==============================================================================
+
+// --- AGENT 1: Trendfolge (EMAs) ---
+ema50 = ta.ema(close, len50)
+ema100 = ta.ema(close, len100)
+ema200 = ta.ema(close, len200)
+t_sig = (ema50 > ema100 and ema100 > ema200 and close > ema50) ? 1 : (ema50 < ema100 and ema100 < ema200 and close < ema50) ? -1 : 0
+
+// --- AGENT 2: Wirtschaftsanalyse (RSI) ---
+rsi_v = ta.rsi(close, lenRSI)
+e_sig = rsi_v < oversold ? 1 : rsi_v > overbought ? -1 : 0
+
+// --- AGENT 3: Volumenanalyse (Big Player) ---
+avg_v = ta.sma(volume, 20)
+v_sig = volume > avg_v * vol_mult ? 1 : 0
+
+// --- AGENT 4: Institutional (SMC, FVG, S&D) ---
+bull_fvg = high[2] < low[1] and close > low[1]
+bear_fvg = low[2] > high[1] and close < high[1]
+h_zone = ta.highest(high, sd_lookback)
+l_zone = ta.lowest(low, sd_lookback)
+i_sig = (bull_fvg or close <= l_zone[1]) ? 1 : (bear_fvg or close >= h_zone[1]) ? -1 : 0
+
+// --- AGENT 5: Fibonacci Retracement ---
+hi_f = ta.highest(high, 50), lo_f = ta.lowest(low, 50)
+fib618 = hi_f - (hi_f - lo_f) * 0.618
+fib382 = hi_f - (hi_f - lo_f) * 0.382
+fib_l = close > fib618 and close[1] <= fib618
+fib_s = close < fib382 and close[1] >= fib382
+
+// ==============================================================================
+// 3. KOMMUNIKATION & GEWICHTUNG (CONTROLLING)
+// ==============================================================================
+w_trend = 2.0, w_econ = 1.0, w_vol = 1.5, w_inst = 2.5, w_fib = 1.0
+
+l_score = (t_sig == 1 ? w_trend : 0) + (e_sig == 1 ? w_econ : 0) + (v_sig == 1 ? w_vol : 0) + (i_sig == 1 ? w_inst : 0) + (fib_l ? w_fib : 0)
+s_score = (t_sig == -1 ? w_trend : 0) + (e_sig == -1 ? w_econ : 0) + (v_sig == 1 ? w_vol : 0) + (i_sig == -1 ? w_inst : 0) + (fib_s ? w_fib : 0)
+
+var int final_sig = 0
+final_sig := l_score >= threshold ? 1 : s_score >= threshold ? -1 : 0
+
+// ==============================================================================
+// 4. OPTIMIERTES RISIKOMANAGEMENT (TRAILING)
+// ==============================================================================
+atr = ta.atr(14)
+var float stop_level = na
+var float target_level = na
+
+if final_sig == 1 and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+    stop_level := close - atr * atr_sl_mult
+    target_level := close + atr * atr_tp_mult
+
+if final_sig == -1 and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short)
+    stop_level := close + atr * atr_sl_mult
+    target_level := close - atr * atr_tp_mult
+
+// Trailing Stop Logik
+if strategy.position_size > 0
+    stop_level := math.max(stop_level, low - atr * 1.5)
+    strategy.exit("Exit Long", "LONG", stop=stop_level, limit=target_level)
+
+if strategy.position_size < 0
+    stop_level := math.min(stop_level, high + atr * 1.5)
+    strategy.exit("Exit Short", "SHORT", stop=stop_level, limit=target_level)
+
+// ==============================================================================
+// 5. ALERTS & DASHBOARD
+// ==============================================================================
+alert_msg = final_sig == 1 ? "LONG" : final_sig == -1 ? "SHORT" : "WAIT"
+if final_sig != final_sig[1]
+    alert(alert_msg, alert.freq_once_per_bar)
+
+var table st = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(st, 0, 0, "Agent", text_color=color.white), table.cell(st, 1, 0, "Status", text_color=color.white)
+    table.cell(st, 0, 1, "L-Score", text_color=color.white), table.cell(st, 1, 1, str.tostring(l_score), bgcolor=color.green)
+    table.cell(st, 0, 2, "S-Score", text_color=color.white), table.cell(st, 1, 2, str.tostring(s_score), bgcolor=color.red)
+    table.cell(st, 0, 3, "FINAL", text_color=color.white), table.cell(st, 1, 3, alert_msg, bgcolor=final_sig != 0 ? color.orange : color.yellow)
+
+plot(ema50, color=color.blue, title="EMA 50")
+plot(ema100, color=color.orange, title="EMA 100")
+plot(ema200, color=color.red, title="EMA 200", linewidth=2)
+plotshape(final_sig == 1, "LONG", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(final_sig == -1, "SHORT", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+View in Pine Editor・113 lines
+Use on chart
+2
+3
+738
+Multi-AI agent trading system, including EMA 50, 100 & 200, Fibonacci retracement, supply and demand, RSI, and much more. Simply add the data, set alerts, and you're ready to go.
+
+Please use this system solely to confirm your own analyses. It should never be used as a 100% reference.

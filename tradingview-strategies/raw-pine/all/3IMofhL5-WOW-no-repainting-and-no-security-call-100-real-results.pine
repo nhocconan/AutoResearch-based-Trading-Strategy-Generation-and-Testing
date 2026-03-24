@@ -1,0 +1,54 @@
+//@version=3
+strategy("My Strategy", overlay=true,pyramiding=1,currency="USD",initial_capital=1000,default_qty_value=1000, commission_type=strategy.commission.cash_per_contract, commission_value=0.00007)
+risk = input(0.20,"risk % omega lul",float)
+lev = input(500,"max leverage pogchamp",integer)
+max_dd = input(0.25,"max drawdown % dont be a chicken",float)
+bal = strategy.initial_capital + strategy.netprofit
+dd = strategy.max_drawdown
+some_thicc_var_damn = 100*risk*bal
+some_thicc_var_damn := some_thicc_var_damn>lev*bal ? lev*bal : some_thicc_var_damn
+some_thicc_var_damn := some_thicc_var_damn - some_thicc_var_damn%1000
+if(time > timestamp(2008,1,1,0,0))
+    longCondition = false
+    longCondition := close>open and strategy.opentrades == 0
+    if (longCondition)
+        strategy.entry("Long", strategy.long, qty=some_thicc_var_damn)
+    strategy.exit("Long Exit","Long",profit=500)
+    
+    shortCondition = false
+    shortCondition := close<open and strategy.opentrades == 0
+    if (shortCondition)
+        strategy.entry("Short", strategy.short, qty=some_thicc_var_damn)
+    strategy.exit("Short Exit","Short",profit=500)
+    strategy.close_all(dd/bal>max_dd)
+
+View in Pine Editor・23 lines
+Use on chart
+5
+0
+6
+8
+28 659
+If you couldn't tell by the title, this is a joke lmao.
+TV has an awful backtesting engine and I just wanted to prove this with a super simple script.
+
+We buy when close > open
+and sell when close < open.
+
+
+That's it.
+
+There is also some risk management and trade closing when we reach a certain drawdown, but wait!
+TradingView doesn't know what equity drawdown is because they don't use tick data or any lower timeframe data!Wowow!
+
+
+Ps - all tickdata for Forex & CFD historical data is free from Dukascopy if you want to perform your own backtesting ;)
+Dukascopy Data
+
+
+Enjoy
+-DasanC
+
+
+
+

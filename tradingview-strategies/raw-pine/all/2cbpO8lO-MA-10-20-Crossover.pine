@@ -1,0 +1,37 @@
+//@version=5
+strategy('MA 10/20 Crossover', overlay=true)
+
+ma10 = ta.sma(close, 10)
+ma20 = ta.sma(close, 20)
+
+long = ta.cross(ma10, ma20) and ma10 > ma20
+short = ta.cross(ma10, ma20) and ma10 < ma20
+
+plot(ma10, title='10', color=color.new(color.yellow, 0), linewidth=2)
+plot(ma20, title='20', color=color.new(color.red, 0), linewidth=2)
+
+testStartYear = input(2016, 'Backtest Start Year')
+testStartMonth = input(4, 'Backtest Start Month')
+testStartDay = input(1, 'Backtest Start Day')
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+
+testStopYear = input(2018, 'BackTest Stop Year')
+testStopMonth = input(10, 'Backtest Stop Month')
+testStopDay = input(15, 'Backtest Stop Day')
+testPeriodStop = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+
+if time >= testPeriodStart
+    if time <= testPeriodStop
+        strategy.entry('Long', strategy.long, 1.0, when=long)
+        strategy.entry('Short', strategy.short, 1.0, when=short)
+
+View in Pine Editor・29 lines
+Use on chart
+1.3 K
+1
+20 150
+Jan 5, 2019
+First pinescript making a basic 10/20 MA crossover.
+Aug 12, 2023
+Release Notes
+NOTE: This is an old algorithm which I designed when I first began my journey down the script making/trading rabbit hole in 2019. Unfortunately Tradingview doesn’t let me delete the script, so I guess it’s stuck here now. I don’t recommend using this algorithm, it was just a first script idea I had in 2019.

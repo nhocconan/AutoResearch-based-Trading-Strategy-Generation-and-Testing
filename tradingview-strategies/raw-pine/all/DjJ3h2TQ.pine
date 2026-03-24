@@ -1,0 +1,329 @@
+//@version=6
+strategy(
+     title="RSI Ladder Take Profit Strategy v1.0 (Long/Short Selectable) + Avg Price/TP/SL Lines",
+     overlay=true,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     calc_on_every_tick=false
+)
+
+//=====================
+// Input Settings
+//=====================
+grpSignal = "Entry/Exit Signals"
+rsiLen    = input.int(14, "RSI Length", group=grpSignal, minval=1)
+ob        = input.float(80, "Overbought (Cross Down → Short)", group=grpSignal, step=0.5)
+os        = input.float(20, "Oversold (Cross Up → Long)", group=grpSignal, step=0.5)
+tradeSide = input.string("Long Only", "Trade Direction", options=["Both", "Long Only", "Short Only"], group=grpSignal)
+closeOnOpp = input.bool(false, "Close Existing Position on Opposite Signal", group=grpSignal)
+
+grpTP = "Ladder Take Profit (Scaling Out)"
+tpStepPct  = input.float(1.0, "TP Step Distance (%)", group=grpTP, step=0.1, minval=0.01)
+tpClosePct = input.float(50.0, "Close % Per TP Step (of Remaining Position)", group=grpTP, step=1.0, minval=0.1, maxval=100.0)
+tpLevels   = input.int(10, "TP Levels (1%,2%,3%...)", group=grpTP, minval=1, maxval=50)
+
+grpSL = "Stop Loss"
+useSL = input.bool(false, "Enable Stop Loss", group=grpSL)
+slPct = input.float(10.0, "Stop Loss Distance (%)", group=grpSL, step=0.1, minval=0.01)
+
+grpLines = "Line Display"
+showAvgLine   = input.bool(true, "Show Average Entry Price Line", group=grpLines)
+showSLLine    = input.bool(true, "Show Stop Loss Line", group=grpLines)
+showNextTP    = input.bool(true, "Show 'Next' TP Line", group=grpLines)
+showAllTP     = input.bool(false, "Show All TP Level Lines (Many Lines)", group=grpLines)
+
+//=====================
+// RSI & Signals
+//=====================
+rsi = ta.rsi(close, rsiLen)
+
+// Strategy conditions:
+// RSI crosses down 80 → Short
+// RSI crosses up 20  → Long
+shortSignal = ta.crossunder(rsi, ob)
+longSignal  = ta.crossover(rsi, os)
+
+// Direction switches
+allowLong  = tradeSide == "Both" or tradeSide == "Long Only"
+allowShort = tradeSide == "Both" or tradeSide == "Short Only"
+
+//=====================
+// Position Info
+//=====================
+posSize = strategy.position_size
+isLong  = posSize > 0
+isShort = posSize < 0
+avg     = strategy.position_avg_price
+
+//=====================
+// Entries / Close on Opposite Signal
+//=====================
+if longSignal and allowLong
+    if closeOnOpp and isShort
+        strategy.close(id="S", comment="Close Short on Opposite Signal")
+    strategy.entry(id="L", direction=strategy.long, comment="RSI Cross Up Oversold → Long")
+
+if shortSignal and allowShort
+    if closeOnOpp and isLong
+        strategy.close(id="L", comment="Close Long on Opposite Signal")
+    strategy.entry(id="S", direction=strategy.short, comment="RSI Cross Down Overbought → Short")
+
+//=====================
+// Ladder TP / Stop Loss (Average price updates after pyramiding)
+//=====================
+
+// Long: SL + ladder TP
+if isLong
+    // Stop Loss (close 100%)
+    if useSL
+        longSL = avg * (1 - slPct/100.0)
+        strategy.exit(id="L-SL", from_entry="L", stop=longSL, qty_percent=100, comment="Long Stop Loss")
+
+    // Ladder TP (qty_percent applies to remaining position)
+    for i = 1 to tpLevels
+        tpPrice = avg * (1 + (tpStepPct * i)/100.0)
+        strategy.exit(
+            id="L-TP" + str.tostring(i),
+            from_entry="L",
+            limit=tpPrice,
+            qty_percent=tpClosePct,
+            comment="Long TP Level " + str.tostring(i)
+        )
+
+// Short: SL + ladder TP
+if isShort
+    if useSL
+        shortSL = avg * (1 + slPct/100.0)
+        strategy.exit(id="S-SL", from_entry="S", stop=shortSL, qty_percent=100, comment="Short Stop Loss")
+
+    for i = 1 to tpLevels
+        tpPrice = avg * (1 - (tpStepPct * i)/100.0)
+        strategy.exit(
+            id="S-TP" + str.tostring(i),
+            from_entry="S",
+            limit=tpPrice,
+            qty_percent=tpClosePct,
+            comment="Short TP Level " + str.tostring(i)
+        )
+
+//=====================
+// Lines: Average Price / Stop Loss / Take Profit
+//=====================
+
+// Average entry price line
+avgLine = (isLong or isShort) ? avg : na
+plot(showAvgLine ? avgLine : na, title="Average Entry Price", linewidth=2)
+
+// Stop loss line
+longSLLine  = (isLong and useSL)  ? avg * (1 - slPct/100.0) : na
+shortSLLine = (isShort and useSL) ? avg * (1 + slPct/100.0) : na
+slLine = isLong ? longSLLine : isShort ? shortSLLine : na
+plot(showSLLine ? slLine : na, title="Stop Loss", linewidth=2)
+
+// "Next" TP line (to avoid too many lines)
+// Next level is estimated by current profit% relative to average entry price
+profitPct =
+     isLong  ? (close/avg - 1) * 100 :
+     isShort ? (1 - close/avg) * 100 :
+     na
+
+nextLevel = (isLong or isShort) ? int(math.floor(nz(profitPct, 0) / tpStepPct)) + 1 : na
+nextLevelClamped = (isLong or isShort) ? math.min(math.max(nextLevel, 1), tpLevels) : na
+
+nextTPLine =
+     isLong  ? avg * (1 + (tpStepPct * nextLevelClamped)/100.0) :
+     isShort ? avg * (1 - (tpStepPct * nextLevelClamped)/100.0) :
+     na
+
+plot(showNextTP ? nextTPLine : na, title="Next Take Profit Level", linewidth=2)
+
+// Show all TP level lines (optional)
+tp1 = (isLong or isShort) ? (isLong ? avg*(1 + tpStepPct/100.0) : avg*(1 - tpStepPct/100.0)) : na
+plot(showAllTP ? tp1 : na, title="TP Level 1", linewidth=1)
+
+//=====================
+// All TP levels (valid plot usage)
+//=====================
+tp2  = (isLong ? avg*(1 + tpStepPct*2/100)  : isShort ? avg*(1 - tpStepPct*2/100)  : na)
+tp3  = (isLong ? avg*(1 + tpStepPct*3/100)  : isShort ? avg*(1 - tpStepPct*3/100)  : na)
+tp4  = (isLong ? avg*(1 + tpStepPct*4/100)  : isShort ? avg*(1 - tpStepPct*4/100)  : na)
+tp5  = (isLong ? avg*(1 + tpStepPct*5/100)  : isShort ? avg*(1 - tpStepPct*5/100)  : na)
+tp6  = (isLong ? avg*(1 + tpStepPct*6/100)  : isShort ? avg*(1 - tpStepPct*6/100)  : na)
+tp7  = (isLong ? avg*(1 + tpStepPct*7/100)  : isShort ? avg*(1 - tpStepPct*7/100)  : na)
+tp8  = (isLong ? avg*(1 + tpStepPct*8/100)  : isShort ? avg*(1 - tpStepPct*8/100)  : na)
+tp9  = (isLong ? avg*(1 + tpStepPct*9/100)  : isShort ? avg*(1 - tpStepPct*9/100)  : na)
+tp10 = (isLong ? avg*(1 + tpStepPct*10/100) : isShort ? avg*(1 - tpStepPct*10/100) : na)
+
+plot(showAllTP ? tp1  : na, title="TP Level 1", linewidth=1)
+plot(showAllTP ? tp2  : na, title="TP Level 2", linewidth=1)
+plot(showAllTP ? tp3  : na, title="TP Level 3", linewidth=1)
+plot(showAllTP ? tp4  : na, title="TP Level 4", linewidth=1)
+plot(showAllTP ? tp5  : na, title="TP Level 5", linewidth=1)
+plot(showAllTP ? tp6  : na, title="TP Level 6", linewidth=1)
+plot(showAllTP ? tp7  : na, title="TP Level 7", linewidth=1)
+plot(showAllTP ? tp8  : na, title="TP Level 8", linewidth=1)
+plot(showAllTP ? tp9  : na, title="TP Level 9", linewidth=1)
+plot(showAllTP ? tp10 : na, title="TP Level 10", linewidth=1)
+
+
+//=====================
+// RSI Display (hidden; keep for debugging)
+//=====================
+plot(rsi, title="RSI", linewidth=1, display=display.none)
+hline(ob, "Overbought", display=display.none)
+hline(os, "Oversold", display=display.none)
+
+
+// ———————————————————— Backtest
+// Define the variable "Equity" and assign it the value of "strategy.equity"
+float Equity = strategy.equity
+// Define the variable "Balance" and assign it the sum of "strategy.initial_capital" and "strategy.netprofit"
+float Balance = strategy.initial_capital + strategy.netprofit
+// Define the variable "RealizedPnL" and assign it the value of "strategy.netprofit"
+float RealizedPnL = strategy.netprofit
+// Define the variable "Floating" and assign it the value of "strategy.openprofit"
+float Floating = strategy.openprofit
+// Calculate the percentage of "Floating" relative to "Balance" and assign it to "PFloating"
+float PFloating = Floating / Balance * 100
+// Calculate the percentage of "RealizedPnL" relative to "strategy.initial_capital" and assign it to "PRealizedPnL"
+float PRealizedPnL = RealizedPnL / strategy.initial_capital * 100
+// Calculate the sum of "Floating" and "RealizedPnL" and assign it to "URealizedPnL"
+float URealizedPnL = Floating + RealizedPnL
+// Calculate the percentage of "URealizedPnL" relative to "strategy.initial_capital" and assign it to "PURealizedPnL"
+float PURealizedPnL = URealizedPnL / strategy.initial_capital * 100
+// Calculate the profit factor by dividing "strategy.grossprofit" by "strategy.grossloss" and assign it to "ProfitFactor"
+float ProfitFactor = strategy.grossprofit / strategy.grossloss
+// Calculate the position size by multiplying "strategy.position_size" and "strategy.position_avg_price" and assign it to "PositionSize"
+float PositionSize = strategy.position_size * strategy.position_avg_price
+// Calculate the cash by subtracting the product of "nz(PositionSize)" and "marginRate" from "Balance" and assign it to "Cash"
+float Cash = Balance - nz(PositionSize) * 0.015
+// Calculate the profitability by dividing "strategy.wintrades" by the sum of "strategy.wintrades" and "strategy.losstrades", multiplying by 100, and assign it to "Profitability"
+float Profitability = strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100
+// Calculate the leverage parameter by dividing the absolute value of "PositionSize" by "Balance" and assign it to "LeverageParameter"
+float LeverageParameter = math.abs(nz(PositionSize / Balance))
+// Calculate the trading time by subtracting "strategy.closedtrades.entry_time(0)" from "time_close" and assign it to "TradingTime"
+int TradingTime = time_close - strategy.closedtrades.entry_time(0)
+
+// ————— Creating the Table
+var InfoPanel = table.new(position.middle_left, 2, 10, na, color.new(color.white, 80), 1, color.new(color.white, 80), 1)
+
+// Define a function for the table formatting
+ftable(_table_id, _column, _row, _text, _text_color) =>
+    table.cell(_table_id, _column, _row, _text, 0, 0, _text_color, text.align_left, text.align_center, size.tiny, na)
+
+// Function to convert time in milliseconds to string format
+tfString(int timeInMs) =>
+    float s = timeInMs / 1000
+    float m = s / 60
+    float h = m / 60
+    float d = h / 24
+    float mo = d / 30.416
+    int tm = math.floor(m % 60)
+    int tr = math.floor(h % 24)
+    int td = math.floor(d % 30.416)
+    int tmo = math.floor(mo % 12)
+    int ys = math.floor(d / 365)
+    string result = switch 
+        d == 30 and tr == 10 and tm == 30 => '1M'
+        d == 7 and tr == 0 and tm == 0 => '1W'
+        =>
+            string yStr = bool(ys) ? str.tostring(ys) + 'Y ' : ''
+            string moStr = bool(tmo) ? str.tostring(tmo) + 'M ' : ''
+            string dStr = bool(td) ? str.tostring(td) + 'D ' : ''
+            string hStr = bool(tr) ? str.tostring(tr) + 'H ' : ''
+            string mStr = bool(tm) ? str.tostring(tm) + 'min' : ''
+            yStr + moStr + dStr + hStr + mStr
+    result
+
+ftable(InfoPanel, 0, 0, 'Equity: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 1, 'Position: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 2, 'Cash: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 3, 'Floating: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 4, 'Realized PnL: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 5, 'Unrealized PnL: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 6, 'Leverage: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 7, 'Profitability: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 8, 'Profit Factor: ', color.new(color.white, 50))
+ftable(InfoPanel, 0, 9, 'Time of Trading: ', color.new(color.white, 50))
+
+ftable(InfoPanel, 1, 0, str.tostring(Equity, '#.##') + ' ' + syminfo.currency, Equity >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 1, str.tostring(strategy.position_size, '#.#####') + ' ' + syminfo.basecurrency, strategy.position_size >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 2, str.tostring(Cash, '#.##') + ' ' + syminfo.currency, Cash >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 3, str.tostring(PFloating, '#.##') + ' %', PFloating >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 4, str.tostring(PRealizedPnL, '#.##') + ' %', PRealizedPnL >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 5, str.tostring(PURealizedPnL, '#.##') + ' %', PURealizedPnL >= 0 ? color.green : color.red)
+ftable(InfoPanel, 1, 6, str.tostring(LeverageParameter, '#.##') + ' x', math.round(LeverageParameter, 1) <= 1 ? color.green : color.red)
+ftable(InfoPanel, 1, 7, str.tostring(Profitability, '#.##') + ' %', Profitability >= 1 ? color.green : color.red)
+ftable(InfoPanel, 1, 8, str.tostring(ProfitFactor, '#.###'), ProfitFactor >= 1 ? color.green : color.red)
+ftable(InfoPanel, 1, 9, tfString(TradingTime), color.new(color.white, 50))
+
+View in Pine Editor・261 lines
+Use on chart
+3
+0
+1 254
+Overview
+
+This strategy is an RSI-based reversal entry system with a ladder-style take-profit mechanism.
+It supports Long-only, Short-only, or Both directions and provides optional Average Entry Price, Stop Loss, and Take Profit reference lines on the chart.
+
+Entry Rules
+
+Long Entry: RSI crosses above the Oversold level (default: 20).
+
+Short Entry: RSI crosses below the Overbought level (default: 80).
+
+Optional: If enabled, the script will close the current position when an opposite signal appears before opening a new one.
+
+Exit Rules (Ladder Take Profit)
+
+Take profit is placed as a ladder using tpLevels and tpStepPct.
+
+Example (default tpStepPct = 1%, tpLevels = 10):
+
+TP1 at +1%, TP2 at +2%, … TP10 at +10% (relative to current average entry price).
+
+Each TP level closes tpClosePct of the remaining position, meaning it scales out geometrically:
+
+If tpClosePct = 50% → remaining position becomes 50%, then 25%, then 12.5%, etc.
+
+Stop Loss
+
+Optional stop loss is placed at slPct (%) away from the average entry price:
+
+Long: avg * (1 - slPct%)
+
+Short: avg * (1 + slPct%)
+
+Visual Lines
+
+Average Entry Price Line: current strategy.position_avg_price
+
+Stop Loss Line: based on slPct
+
+Next TP Line: shows the estimated next TP level based on current profit%
+
+All TP Lines: optional (can clutter the chart)
+
+==============================================================
+
+Recommended Use
+
+
+This strategy is best used on markets with strong mean-reversion behavior.
+
+
+
+
+For exchanges/bots that do not support hedge mode in a single strategy, run two separate instances:
+
+
+
+
+One set to Long Only
+
+
+
+
+One set to Short Only
+

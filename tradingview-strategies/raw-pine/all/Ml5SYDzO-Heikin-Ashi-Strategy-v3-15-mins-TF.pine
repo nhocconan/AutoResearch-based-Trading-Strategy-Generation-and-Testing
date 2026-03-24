@@ -1,0 +1,60 @@
+//@version=2
+//Heikin Ashi Strategy  V1 by nachobuey
+
+strategy("Heikin Ashi Strategy  V2",shorttitle="HAS V2",overlay=true,default_qty_value=1000,initial_capital=1000,currency=currency.USD)
+res = input(title="Heikin Ashi Candle Time Frame", type=resolution, defval="15")
+hshift = input(0,title="Heikin Ashi Candle Time Frame Shift")
+//res1 = input(title="Heikin Ashi EMA Time Frame", type=resolution, defval="180")
+res1   = input(title="Time frame (Minutes. Not lower than chart)", type=string, defval="300")
+mhshift = input(0,title="Heikin Ashi EMA Time Frame Shift")
+fama = input(16,"Heikin Ashi EMA Period")
+test = input(0,"Heikin Ashi EMA Shift")
+sloma = input(21,"Slow EMA Period")
+slomas = input(0,"Slow EMA Shift")
+macdf = input(false,title="With MACD filter")
+res2 = input(title="MACD Time Frame", type=resolution, defval="60")
+macds = input(1,title="MACD Shift")
+
+
+
+
+//Heikin Ashi Open/Close Price
+ha_t = heikinashi(tickerid)
+ha_open = security(ha_t, res, open[hshift])
+ha_close = security(ha_t, res, close[hshift])
+mha_close = security(ha_t, res1, close[mhshift])
+
+//macd
+[macdLine, signalLine, histLine] = macd(close, 12, 26, 9)
+macdl = security(ha_t,res2,macdLine[macds])
+macdsl= security(ha_t,res2,signalLine[macds])
+
+//Moving Average
+fma = ema(mha_close[test],fama)
+sma = ema(ha_close[slomas],sloma)
+plot(fma,title="MA",color=lime,linewidth=2,style=line)
+plot(sma,title="SMA",color=red,linewidth=2,style=line)
+
+
+//Strategy
+golong =  crossover(fma,sma) and (macdl > macdsl or macdf == false )
+goshort =   crossunder(fma,sma) and (macdl < macdsl or macdf == false )
+
+
+strategy.entry("Long",strategy.long,when = golong)
+strategy.entry("Short",strategy.short,when = goshort)
+
+plotchar(golong,char="L", color=green)
+plotchar(goshort,char="S", color=red)
+
+alertcondition(golong, "HAS GO LONG", "OPEN LONG")
+alertcondition(goshort, "HAS GO SHORT", "OPEN SHORT")
+
+View in Pine Editor・51 lines
+Use on chart
+2
+3
+2
+6
+10 594
+Modified Script with high success rate

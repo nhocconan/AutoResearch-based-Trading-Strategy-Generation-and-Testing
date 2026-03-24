@@ -1,0 +1,224 @@
+//@version=5
+strategy("BBTrend w SuperTrend decision - Strategy [presentTrading]",overlay=false, precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital= 10000)
+
+tradeDirection = input.string("Long", "Trading Direction", options=["Both", "Long", "Short"])
+shortLengthInput = input.int(20, "Short BB Length", minval=1)
+longLengthInput = input.int(50, "Long BB Length", minval=1)
+stdDevMultInput = input.float(2.0, "StdDev", minval=0.001)
+TPSLCondition = input.string("None", "TPSL Condition", options=["TP", "SL", "Both", "None"])
+takeProfitPerc = input.float(30.0, title="Take Profit (%)")
+stopLossPerc = input.float(20.0, title="Stop Loss (%)")
+
+[shortMiddle, shortUpper, shortLower] = ta.bb(close, shortLengthInput, stdDevMultInput)
+[longMiddle, longUpper, longLower] = ta.bb(close, longLengthInput, stdDevMultInput)
+
+BBTrend = (math.abs(shortLower - longLower) - math.abs(shortUpper - longUpper)) / shortMiddle * 100
+
+posColorStrong = color.new(#089981, 25)
+negColorStrong = color.new(#F23645, 25)
+posColorWeak = color.new(#089981, 50)
+negColorWeak = color.new(#F23645, 50)
+
+histColor = switch
+    BBTrend > 0 and BBTrend >= BBTrend[1] => posColorStrong
+    BBTrend > 0 and BBTrend < BBTrend[1] => posColorWeak
+    BBTrend < 0 and BBTrend > BBTrend[1] => negColorWeak
+    BBTrend < 0 and BBTrend <= BBTrend[1] => negColorStrong
+    => posColorWeak
+
+plot(BBTrend, "BBTrend", style=plot.style_columns, color=histColor)
+hline(0, "Zero line")
+
+type bar
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+
+type supertrend_
+    float s = na
+    int d = na
+
+method src(bar b, simple string src) =>
+    float x = switch src
+        'oc2' => math.avg(b.o, b.c)
+        'hl2' => math.avg(b.h, b.l)
+        'hlc3' => math.avg(b.h, b.l, b.c)
+        'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
+        'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
+    x
+
+method atr(bar b, simple int len) =>
+    float tr = na(b.h[1]) ? b.h - b.l : math.max(math.max(b.h - b.l, math.abs(b.h - b.c[1])), math.abs(b.l - b.c[1]))
+    len == 1 ? tr : ta.rma(tr, len)
+
+method st(bar b, simple float factor, simple int len) =>
+    float atr = b.atr(len)
+    float up = b.src('hl2') + factor * atr
+    up := up < nz(up[1]) or b.c[1] > nz(up[1]) ? up : nz(up[1])
+    float dn = b.src('hl2') - factor * atr
+    dn := dn > nz(dn[1]) or b.c[1] < nz(dn[1]) ? dn : nz(dn[1])
+    float st = na
+    int dir = na
+    dir := switch
+        na(atr[1]) => 1
+        st[1] == nz(up[1]) => dir := b.c > up ? -1 : +1
+        => dir := b.c < dn ? +1 : -1
+    st := dir == -1 ? dn : up
+    supertrend_.new(st, dir)
+
+var string tp = 'Choose an indicator source of which to base the SuperTrend on.'
+var string g1 = "ENtry/Exit: SuperTrend Settings", var string gu = "UI Options"
+src = BBTrend
+len = input.int(10, "Length", inline='1', group=g1)
+mlt = input.float(7., "Factor", 1, 20, 0.5, inline='1', group=g1)
+clbl = input.bool(true, "Contrarian Signals", group=gu)
+colu = input.color(#008cff, "Bull Color", group=gu)
+cold = input.color(#ff4800, "Bear Color", group=gu)
+
+bar b = bar.new(nz(src[1]), math.max(nz(src[1]), src), math.min(nz(src[1]), src), src)
+float tr = b.atr(len)
+supertrend_ st = b.st(mlt, len)
+
+color cst = switch st.d
+    +1 => cold
+    -1 => colu
+    
+t = plot(st.d > 0 ? st.s : na, 'Bear ST', cst, 1, plot.style_linebr)
+d = plot(st.d < 0 ? st.s : na, 'Bull ST', cst, 1, plot.style_linebr)
+i = plot(st.d, 'Direction', display=display.none)
+c = plot(b.src('oc2'), 'Filler', display=display.none)
+
+fill(t, c, color.new(cold, 90))
+fill(d, c, color.new(colu, 90))
+
+bool scon = clbl and math.sign(ta.change(st.d)) == 1 ? true : false
+bool bcon = clbl and math.sign(ta.change(st.d)) == -1 ? true : false
+
+plotshape(scon ? st.s + tr / 3 : na, 'Sell Signal', shape.labeldown, location.absolute, color.new(cold, 60), 0, '𝓢', chart.fg_color)
+plotshape(bcon ? st.s - tr / 3 : na, 'Buy Signal', shape.labelup, location.absolute, color.new(colu, 60), 0, '𝓑', chart.fg_color)
+
+// Entry/Exit conditions
+LongEntry = st.d < 0
+LongExit = st.d > 0
+ShortEntry = st.d > 0
+ShortExit = st.d < 0
+
+// Strategy logic
+if (tradeDirection == "Long" or tradeDirection == "Both")
+    if LongEntry
+        strategy.entry("Long Entry", strategy.long)
+
+if (tradeDirection == "Short" or tradeDirection == "Both")
+    if ShortEntry
+        strategy.entry("Short Entry", strategy.short)
+
+if (tradeDirection == "Long" or tradeDirection == "Both")
+    if LongExit
+        strategy.close("Long Entry")
+
+if (tradeDirection == "Short" or tradeDirection == "Both")
+    if ShortExit
+        strategy.close("Short Entry")
+
+// Apply Take Profit and Stop Loss conditions
+if (TPSLCondition == "TP" or TPSLCondition == "Both")
+    strategy.exit("TakeProfit_Long", "Long Entry", limit=close * (1 + takeProfitPerc / 100))
+    strategy.exit("TakeProfit_Short", "Short Entry", limit=close * (1 - takeProfitPerc / 100))
+
+if (TPSLCondition == "SL" or TPSLCondition == "Both")
+    strategy.exit("StopLoss_Long", "Long Entry", stop=close * (1 - stopLossPerc / 100))
+    strategy.exit("StopLoss_Short", "Short Entry", stop=close * (1 + stopLossPerc / 100))
+
+View in Pine Editor・136 lines
+Use on chart
+1.5 K
+6
+30 549
+Jun 6, 2024
+This strategy aims to improve upon the performance of Traidngview's newly published "BB Trend" indicator by incorporating the SuperTrend for better trade execution and risk management. Enjoy :)
+
+█Introduction and How it is Different
+
+The "BBTrend w SuperTrend decision - Strategy [presentTrading]" is a trading strategy designed to identify market trends using Bollinger Bands and SuperTrend indicators. What sets this strategy apart is its use of two Bollinger Bands with different lengths to capture both short-term and long-term market trends, providing a more comprehensive view of market dynamics. Additionally, the strategy includes customizable take profit (TP) and stop loss (SL) settings, allowing traders to tailor their risk management according to their preferences.
+
+BTCUSD 4h Long Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+The BBTrend strategy employs two key indicators: Bollinger Bands and SuperTrend.
+
+🔶 Bollinger Bands Calculation:
+- Short Bollinger Bands**: Calculated using a shorter period (default 20).
+- Long Bollinger Bands**: Calculated using a longer period (default 50).
+- Bollinger Bands use the standard deviation of price data to create upper and lower bands around a moving average.
+
+Upper Band = Middle Band + (k * Standard Deviation)
+Lower Band = Middle Band - (k * Standard Deviation)
+
+🔶 BBTrend Indicator:
+- The BBTrend indicator is derived from the absolute differences between the short and long Bollinger Bands' lower and upper values.
+
+BBTrend = (|Short Lower - Long Lower| - |Short Upper - Long Upper|) / Short Middle * 100
+
+🔶 SuperTrend Indicator:
+- The SuperTrend indicator is calculated using the average true range (ATR) and a multiplier. It helps identify the market trend direction by plotting levels above and below the price, which act as dynamic support and resistance levels. * EliCobra makes the SuperTrend Toolkit. He is GOAT.
+
+SuperTrend Upper = HL2 + (Factor * ATR)
+SuperTrend Lower = HL2 - (Factor * ATR)
+
+The strategy determines market trends by checking if the close price is above or below the SuperTrend values:
+- Uptrend: Close price is above the SuperTrend lower band.
+- Downtrend: Close price is below the SuperTrend upper band.
+
+Short: 10 Long: 20 std 2
+
+
+
+Short: 20 Long: 40 std 2
+
+
+
+Short: 20 Long: 40 std 4
+
+
+
+█ Trade Direction
+
+The strategy allows traders to choose their trading direction:
+- Long: Enter long positions only.
+- Short: Enter short positions only.
+- Both: Enter both long and short positions based on market conditions.
+
+█ Usage
+
+To use the "BBTrend - Strategy [presentTrading]" effectively:
+1. Configure Inputs: Adjust the Bollinger Bands lengths, standard deviation multiplier, and SuperTrend settings.
+2. Set TPSL Conditions: Choose the take profit and stop loss percentages to manage risk.
+3. Choose Trade Direction: Decide whether to trade long, short, or both directions.
+4. Apply Strategy: Apply the strategy to your chart and monitor the signals for potential trades.
+
+█ Default Settings
+
+The default settings are designed to provide a balance between sensitivity and stability:
+
+- Short BB Length (20): Captures short-term market trends.
+- Long BB Length (50): Captures long-term market trends.
+- StdDev (2.0): Determines the width of the Bollinger Bands.
+- SuperTrend Length (10): Period for calculating the ATR.
+- SuperTrend Factor (12): Multiplier for the ATR to adjust the SuperTrend sensitivity.
+- Take Profit (30%): Sets the level at which profits are taken.
+- Stop Loss (20%): Sets the level at which losses are cut to manage risk.
+
+Effect on Performance
+- Short BB Length: A shorter length makes the strategy more responsive to recent price changes but can generate more false signals.
+- Long BB Length: A longer length provides smoother trend signals but may be slower to react to price changes.
+- StdDev: Higher values create wider bands, reducing the frequency of signals but increasing their reliability.
+- SuperTrend Length and Factor: Shorter lengths and higher factors make the SuperTrend more sensitive, providing quicker signals but potentially more noise.
+- Take Profit and Stop Loss: Adjusting these levels affects the risk-reward ratio. Higher take profit percentages can increase gains but may result in fewer closed trades, while higher stop loss percentages can decrease the likelihood of being stopped out but increase potential losses.
+
+Jun 30, 2024
+Release Notes
+'Overlay' is edited to be false for showing the window.

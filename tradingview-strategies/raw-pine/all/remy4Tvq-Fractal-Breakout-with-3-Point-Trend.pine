@@ -1,0 +1,64 @@
+//@version=6
+strategy("Fractal Breakout with 3-Point Trend", overlay=true)
+
+// --- Inputs ---
+n = input.int(2, "Fractal Period (2 = 5-bar pattern)")
+
+// --- Fractal Detection ---
+fHigh = ta.highest(high, n * 2 + 1) == high[n]
+fLow  = ta.lowest(low, n * 2 + 1) == low[n]
+
+// --- Store Last 3 Fractals using Arrays ---
+var float[] highFractals = array.new_float(3, na)
+var float[] lowFractals  = array.new_float(3, na)
+
+if fHigh
+    array.unshift(highFractals, high[n])
+    array.pop(highFractals)
+
+if fLow
+    array.unshift(lowFractals, low[n])
+    array.pop(lowFractals)
+
+// --- Trend Calculation ---
+avgHigh = array.avg(highFractals)
+avgLow  = array.avg(lowFractals)
+
+// Reference Levels for Breakout
+lastHigh = array.get(highFractals, 0)
+lastLow  = array.get(lowFractals, 0)
+
+// --- Strategy Conditions ---
+// Trend Filter: Only Buy if price is above the average of last 3 highs
+// Only Sell if price is below the average of last 3 lows
+buyCondition  = ta.crossover(close, lastHigh) and close > avgHigh
+sellCondition = ta.crossunder(close, lastLow) and close < avgLow
+
+// --- Execution ---
+if buyCondition
+    strategy.entry("Long", strategy.long)
+
+if sellCondition
+    strategy.entry("Short", strategy.short)
+
+// --- Visuals (Arrows) ---
+plotshape(buyCondition,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="Buy Arrow")
+plotshape(sellCondition, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, title="Sell Arrow")
+
+// Reference Lines (Optional - set to false if you want a clean chart)
+plot(avgHigh, color=color.new(color.green, 50), title="3-High Avg")
+plot(avgLow,  color=color.new(color.red, 50),   title="3-Low Avg")
+
+// --- Alerts ---
+alertcondition(buyCondition,  title="Fractal Buy Alert",  message="Price broke above last fractal high with bullish trend.")
+alertcondition(sellCondition, title="Fractal Sell Alert", message="Price broke below last fractal low with bearish trend.")
+
+View in Pine Editor・54 lines
+Use on chart
+2
+0
+653
+Triggers buy when the price breaks above the last fractal high
+Triggers sell when the price breaks below the last fractal low
+Filter is calculate the closing price of last 3 fractal highs or low to determine the trend
+

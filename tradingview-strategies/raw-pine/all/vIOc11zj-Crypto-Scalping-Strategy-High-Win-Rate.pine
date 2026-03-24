@@ -1,0 +1,60 @@
+//@version=6
+strategy("Crypto Scalping Strategy - High Win Rate", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Inputs
+hma_len = input.int(9, title="HMA Length", minval=1)
+ema_short_len = input.int(18, title="Short EMA Length", minval=1)
+ema_long_len = input.int(36, title="Long EMA Length", minval=1)
+rsi_len = input.int(14, title="RSI Length", minval=1)
+tp_pct = input.float(1.0, title="Take Profit %", minval=0.1) / 100
+sl_pct = input.float(0.5, title="Stop Loss %", minval=0.1) / 100
+rsi_long = input.int(50, title="RSI Long Threshold")
+rsi_short = input.int(50, title="RSI Short Threshold")
+
+// Indicators
+src = close
+hma = ta.hma(src, hma_len)
+ema_short = ta.ema(src, ema_short_len)
+ema_long = ta.ema(src, ema_long_len)
+rsi = ta.rsi(src, rsi_len)
+
+// Conditions (with na checks for v6 robustness)
+long_cross = ta.crossover(hma, ema_short)
+short_cross = ta.crossunder(hma, ema_short)
+long_condition = long_cross and low > ema_long and rsi > rsi_long and not na(rsi) and not na(hma) and not na(ema_short) and not na(ema_long)
+short_condition = short_cross and high < ema_long and rsi < rsi_short and not na(rsi) and not na(hma) and not na(ema_short) and not na(ema_long)
+
+// Entries
+if long_condition
+    strategy.entry("Long", strategy.long)
+if short_condition
+    strategy.entry("Short", strategy.short)
+
+// Exits
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", profit=close * tp_pct / syminfo.mintick, loss=close * sl_pct / syminfo.mintick)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", profit=close * tp_pct / syminfo.mintick, loss=close * sl_pct / syminfo.mintick)
+
+// Close on opposite signal
+if short_cross and strategy.position_size > 0
+    strategy.close("Long")
+if long_cross and strategy.position_size < 0
+    strategy.close("Short")
+
+// Plots
+plot(hma, color=color.blue, title="HMA", linewidth=2)
+plot(ema_short, color=color.orange, title="Short EMA")
+plot(ema_long, color=color.red, title="Long EMA")
+hline(50, "RSI Mid", color=color.gray, linestyle=hline.style_dashed)
+
+// Alerts (format for automation - customize for GMX connector)
+alertcondition(long_condition, title="Long Signal", message='{"action": "buy", "symbol": "{{ticker}}", "size": 0.01, "leverage": 10}')
+alertcondition(short_condition, title="Short Signal", message='{"action": "sell", "symbol": "{{ticker}}", "size": 0.01, "leverage": 10}')
+
+View in Pine Editor・53 lines
+Use on chart
+2
+8
+2 032
+grok first try. I used grok to create a scalping strategy that is automated for crypto scalp trading on 5-15 min intervals

@@ -1,0 +1,78 @@
+//@version=2
+strategy(title = "Simple Strategy Code Stub", default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital = 200000, overlay = false)
+
+//Basic strategy implementation
+//Use as a code stub for your strategy code.
+//I wrote it because I could not find one.
+
+//This strategy goes long on Tuesdays at 10 am and goes short at 3 pm on Thursdays
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//!!!! Because US markets open at 9:30 you have to have your chart in 30 minute or less resolution for trades to fire !!!!  
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+//If you build a strategy that doesn't use "hour" like I have this resolution requirement won't apply.
+//For giggles, compare its performance to other strategies.  Weird, huh? About 53% effective on most equities and indexes.
+
+//This strategy does the minimum needed to get a strategy working
+//and uses default position sizes and buys at market with no stops.
+//Again, it is the minimal code stub needed to test an indicator/rule based strategy.
+//A great code reference for building more sophisticated strategies can be
+//found here =>  https://www.tradingview.com/chart/BTCUSD/57NvsPus-Ichimoku-Lag-Line-strategy/
+//The code is written by @greatwolf and is very well structured for anyone looking to fully utilize
+//strategy features for position sizing, limit orders, stops and cancellations.
+
+
+//First, let's set our buySignal and sellSignal variables
+
+buySignal = ( dayofweek == tuesday ? (hour == 10 ? true : false) : false)
+sellSignal = ( dayofweek == thursday ? (hour == 15 ? true : false) : false)
+
+//Second, plot the signals so you can see them firing
+//You don't have to plot the signals, nor do it before trades. I placed
+//this step here to make the process of building a signal methodical.
+plot(buySignal, color = green)
+plot(sellSignal, color = red)
+
+//Third, enter the trades.
+//Yes - you'd think you could just use "buySignal" instead of "buySignal == true" but you need
+//a series of boolean values passed in as opposed to the boolean variable (even though that variable
+//is set in series).  If none of that last bit makes sense, just take my word, force the system to evaluate
+//the "== true" expression or it won't work.//
+strategy.entry("simpleBuy", strategy.long, when = (buySignal == true))
+strategy.entry("simpleSell", strategy.short, when = (sellSignal == true))
+
+//Fourth, exit the trades
+strategy.exit("simpleBuy", "simpleBuy", when = (sellSignal == true))
+strategy.exit("simpleSell", "simpleSell", when = (buySignal == true))
+
+//That's it.
+//If your strategy isn't working and your are ready to SWEAR that you are doing everything here, just copy this code
+//and paste in your changes line by line.  Why do you think I wrote it?  That's right, I was in the same spot.
+
+View in Pine Editor・50 lines
+Use on chart
+2
+4
+8
+6 863
+This is a very basic strategy implementation
+
+Use as a code stub for your strategy code. I wrote it because I could not find one.
+
+This particular strategy goes long on Tuesdays at 10 am and goes short at 3 pm on Thursdays.
+Because US markets open at 9:30 you have to have your chart in 30 minute or less resolution for trades to fire.
+
+You can gut that code and replace it with your own to start testing your own indicators and strategies.
+If you build a strategy that doesn't use "hour" like I have this resolution requirement won't apply.
+
+For giggles, compare its performance to other strategies. Weird, huh? About 53% effective on most equities and indexes.
+
+This strategy does the minimum needed to get a strategy working
+and uses default position sizes and buys at market with no stops.
+Again, it is the minimal code stub needed to test an indicator/rule based strategy.
+A great code reference for building more sophisticated strategies can be
+found here =>
+
+The code is written by greatwolf and is very well structured for anyone looking to fully utilize
+strategy features for position sizing, limit orders, stops and cancellations.
+

@@ -1,0 +1,62 @@
+//@version=5
+strategy("Cycle Position Trading", overlay=true, pyramiding=1, default_qty_value=100000, initial_capital=100000, default_qty_type=strategy.cash, process_orders_on_close=false, calc_on_every_tick=false)
+
+// Input for selecting the mode
+mode = input.string("Buy Uptrend", options = ["Buy Uptrend", "Buy Downtrend"])
+
+// Input for customizing stop loss and take profit levels
+stopLoss = input.float(0.9, title="Stop Loss (SL) level", step=0.01)
+takeProfit = input.float(1.1, title="Take Profit (TP) level", step=0.01)
+
+// Calculate the 200-day Simple Moving Average (SMA)
+sma = ta.sma(close, 200)
+
+// Plot the SMA on the chart
+plot(sma)
+
+// Define the conditions for entering a long position based on the selected mode
+longCondition = mode == "Buy Uptrend" ? close > sma and close[5] > sma : close < sma
+
+// Define the conditions for closing a position based on the selected mode
+closeCondition = mode == "Buy Uptrend" ? (strategy.position_avg_price * stopLoss > close or strategy.position_avg_price * takeProfit < close or close < sma * 0.95) : (strategy.position_avg_price * stopLoss > close or strategy.position_avg_price * takeProfit < close or close > sma * 1.05)
+
+// Execute a long position if the longCondition is met
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+// Close the position if the closeCondition is met
+if (closeCondition)
+    strategy.exit("Exit", limit = close)
+
+View in Pine Editor・32 lines
+Use on chart
+9
+9
+3 345
+Title: Cycle Position Trading Strategy v1.0
+
+Description: Cycle Position Trading Strategy is a simple yet effective trading strategy based on a 200-day Simple Moving Average (SMA). Users can select between two modes, "Buy Uptrend" and "Buy Downtrend," to customize the strategy according to their trading preferences. The strategy allows users to set their own stop loss (SL) and take profit (TP) levels, providing more flexibility and control over their trades.
+
+Features:
+
+Choose between two trading modes: "Buy Uptrend" and "Buy Downtrend."
+Customize your stop loss (SL) and take profit (TP) levels.
+Clear visual representation of the 200-day Simple Moving Average (SMA) on the chart.
+How to use:
+
+Add the strategy to your chart by searching for "Cycle Position Trading Strategy" in the TradingView "Indicators & Strategies" section.
+
+Configure the strategy settings according to your preferences:
+
+Select the trading mode from the dropdown menu. "Buy Uptrend" will open long positions when the closing price is above the 200-day SMA. "Buy Downtrend" will open long positions when the closing price is below the 200-day SMA.
+Set your desired stop loss (SL) and take profit (TP) levels. The default values are 0.9 (10% below the entry price) for the stop loss and 1.1 (10% above the entry price) for the take profit.
+Monitor the chart for trade signals based on the chosen mode and settings. The strategy will enter and exit trades automatically based on the selected mode and the configured stop loss and take profit levels.
+
+Analyze the performance of the strategy by checking the TradingView strategy performance summary or by viewing individual trades in the "Trades" list.
+
+Disclaimer: This strategy is intended for educational and illustrative purposes only. Use it at your own risk. Past performance is not indicative of future results. Trading stocks, cryptocurrencies, or any other financial instrument involves significant risk and may result in the loss of capital.
+
+Version: v1.0
+Release date: 2023-03-25
+Author: I11L
+License: Mozilla Public License 2.0 (mozilla.org/MPL/2.0/)

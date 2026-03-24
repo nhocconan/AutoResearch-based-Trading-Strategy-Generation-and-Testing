@@ -1,0 +1,138 @@
+//@version=5
+strategy("FVG Session Break Strategy with ATR RR", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Inputs ===
+atrLength   = input.int(14, "ATR Length")
+atrMult     = input.float(1.0, "ATR Multiplier")
+firstTradeOnly = input.bool(false, "Only Take First Trade Per Session")
+
+// === ATR Settings ===
+atr = ta.atr(atrLength)
+slBuffer = atr * atrMult
+tpBuffer = slBuffer * 2
+
+// === Session Time Logic (Timezone-Aware) ===
+asian_start_utc5  = 1800
+asian_end_utc5    = 0
+london_start_utc5 = 0
+london_end_utc5   = 600
+ny_start_utc5     = 930
+ny_end_utc5       = 1600
+
+get_session_time(hhmm) =>
+    hr = hhmm / 100
+    min = hhmm % 100
+    timestamp("Etc/GMT+5", year, month, dayofmonth, hr, min)
+
+asian_start_ts  = get_session_time(asian_start_utc5)
+asian_end_ts    = get_session_time(asian_end_utc5)
+london_start_ts = get_session_time(london_start_utc5)
+london_end_ts   = get_session_time(london_end_utc5)
+ny_start_ts     = get_session_time(ny_start_utc5)
+ny_end_ts       = get_session_time(ny_end_utc5)
+
+bar_time = time
+
+is_asian  = bar_time >= asian_start_ts or bar_time < asian_end_ts
+is_london = bar_time >= london_start_ts and bar_time < london_end_ts
+is_ny     = bar_time >= ny_start_ts and bar_time < ny_end_ts
+
+// === Session High/Low Tracking ===
+var float session_high = na
+var float session_low = na
+var bool sessionLimitUpdated = false
+var bool tradedThisSession = false   // NEW FLAG
+
+new_session = (is_asian and not is_asian[1]) or (is_london and not is_london[1]) or (is_ny and not is_ny[1])
+
+if new_session
+    session_high := high
+    session_low := low
+    sessionLimitUpdated := false
+    tradedThisSession := false       // RESET FLAG AT NEW SESSION
+else
+    if high > session_high
+        session_high := high
+        sessionLimitUpdated := true
+    if low < session_low
+        session_low := low
+        sessionLimitUpdated := true
+
+// === FVG Definitions ===
+bullishFVG = high[2] < low[0] and high > session_high[1] 
+bearishFVG = low[2] > high[0] and low < session_low[1]
+
+// === Trade Logic ===
+var bool canTrade = false
+
+if sessionLimitUpdated
+    canTrade := true
+
+if canTrade and (not firstTradeOnly or not tradedThisSession)
+    if bullishFVG
+        longSL = close - slBuffer
+        longTP = close + tpBuffer
+        strategy.entry("Long FVG", strategy.long)
+        strategy.exit("Long TP/SL", from_entry="Long FVG", stop=longSL, limit=longTP)
+        canTrade := false
+        sessionLimitUpdated := false
+        tradedThisSession := true   // MARK TRADE TAKEN
+    else if bearishFVG
+        shortSL = close + slBuffer
+        shortTP = close - tpBuffer
+        strategy.entry("Short FVG", strategy.short)
+        strategy.exit("Short TP/SL", from_entry="Short FVG", stop=shortSL, limit=shortTP)
+        canTrade := false
+        sessionLimitUpdated := false
+        tradedThisSession := true   // MARK TRADE TAKEN
+
+// === Plotting ===
+plotshape(bullishFVG, title="Bullish FVG", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(bearishFVG, title="Bearish FVG", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+plot(session_high, "Session High", color=color.orange, linewidth=1)
+plot(session_low, "Session Low", color=color.orange, linewidth=1)
+
+View in Pine Editor・93 lines
+Use on chart
+2
+7
+1 280
+Nov 10, 2025
+🧠 FVG Session Break Strategy with ATR RR — Timezone-Aware, Session-Savvy, and Risk-Calibrated
+This strategy captures high-probability reversals and continuations by combining Fair Value Gap (FVG) imbalances with session-based breakout logic and ATR-calibrated risk management. It’s designed for traders who want to exploit structural inefficiencies during key market sessions — with precision and portability across global exchanges.
+
+🔍 Core Logic:
+Fair Value Gap Detection: Identifies bullish and bearish FVGs using a 3-bar displacement pattern.
+
+Session Breakout Engine: Tracks session highs and lows (Asian, London, NY) and triggers trades only when price breaks these levels — ensuring trades occur at meaningful inflection points.
+
+ATR-Based RR Control: Dynamically sizes stop-loss and take-profit levels using ATR × multiplier, maintaining consistent risk across volatility regimes.
+
+🌐 Timezone-Aware Session Logic:
+Session boundaries are defined in UTC-5 (e.g., NY: 0930–1600) but automatically converted to the exchange’s local timezone using timestamp("Etc/GMT+5", ...). This ensures:
+
+Accurate session detection across all markets and assets
+
+No manual timezone adjustments needed
+
+Robust performance on crypto, forex, and global equities
+
+📈 Visuals:
+Session highs and lows plotted in orange
+
+Bullish and bearish FVGs marked with green and red triangles
+
+Strategy entries and exits shown on chart with full RR logic
+
+This strategy is ideal for traders who want to combine structural edge with session context and disciplined risk.
+Nov 25, 2025
+Release Notes
+
+
+Optionally only take the first trade of each session
+
+Only trade session breakouts, not break-ins.
+
+Nov 25, 2025
+Release Notes
+First trade only set to false by default.

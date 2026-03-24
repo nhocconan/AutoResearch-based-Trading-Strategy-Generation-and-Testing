@@ -1,0 +1,21 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+in1 = input(4,"Length")
+in2 = input(5,"Length 2")
+
+longCondition = crossover(ema(close, in1), ema(close, in2))
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(ema(close, in1), ema(close, in2))
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・12 lines
+Use on chart
+3
+2
+8
+6
+19 230
+Back with another Millionaire tool script, put like a solid 12 minutes here curve fitting the moving averages. THIS WILL MAKE YOU A MILLIONAIRE. It is so easy, it makes one of the hardest industries very very easy. Works on any market. I'VE DECIDED TO SHARE THE SCRIPT AND MAKE IT PUBLIC SO WE CAN ALL BE RICH TOGETHER, MILLIONAIRES

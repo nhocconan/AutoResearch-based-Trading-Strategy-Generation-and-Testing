@@ -1,0 +1,36 @@
+//@version=5
+strategy("Moving Average Crossover Strategy", overlay=true)
+
+// Define the lengths for the fast and slow moving averages
+fastLength = input(10, title="Fast Moving Average Length")
+slowLength = input(30, title="Slow Moving Average Length")
+
+// Calculate the moving averages
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// Determine the crossover conditions
+bullishCrossover = ta.crossover(fastMA, slowMA)
+bearishCrossover = ta.crossunder(fastMA, slowMA)
+
+// Execute a long trade when a bullish crossover occurs
+if bullishCrossover
+    strategy.entry("Buy", strategy.long)
+
+// Execute a short trade when a bearish crossover occurs
+if bearishCrossover
+    strategy.entry("Sell", strategy.short)
+
+// Plot the moving averages on the chart
+plot(fastMA, color=color.blue, title="Fast MA")
+plot(slowMA, color=color.red, title="Slow MA")
+
+View in Pine Editor・26 lines
+Use on chart
+7
+4
+1
+2 478
+moving average crossover startegy 10*30
+it indicates when to buy or sell
+

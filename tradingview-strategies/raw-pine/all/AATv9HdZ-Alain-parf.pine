@@ -1,0 +1,72 @@
+//@version=6
+strategy("Hammer & Inverted Hammer Strategy (ATR SL + RRR TP + EMA200 Filter)", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=5)
+
+// === Inputs ===
+minWickMultiplier    = input.float(2.0, "Min long wick ≥ body ×", step=0.1)
+maxOppWickMultiplier = input.float(0.3, "Max opposite wick ≤ body ×", step=0.05)
+maxBodyToRangePct    = input.float(0.35, "Max body ≤ range ×", step=0.01)
+
+atrLength   = input.int(14, "ATR Length")
+atrMult     = input.float(1.5, "ATR Multiplier (for SL)", step=0.1)
+rrr         = input.float(2.0, "Risk/Reward Ratio", step=0.1)
+emaLength   = input.int(200, "EMA Length")
+
+// === Candle parts ===
+body   = math.abs(close - open)
+upperW = high - math.max(open, close)
+lowerW = math.min(open, close) - low
+cRange = high - low
+validRange = cRange > syminfo.mintick * 10
+
+// === Hammer logic (long lower wick) ===
+hammer_small_body   = validRange and body <= cRange * maxBodyToRangePct
+hammer_long_lower   = lowerW >= body * minWickMultiplier
+hammer_small_upper  = upperW <= body * maxOppWickMultiplier
+isHammer            = hammer_small_body and hammer_long_lower and hammer_small_upper
+
+// === Inverted Hammer logic (long upper wick) ===
+inv_small_body      = validRange and body <= cRange * maxBodyToRangePct
+inv_long_upper      = upperW >= body * minWickMultiplier
+inv_small_lower     = lowerW <= body * maxOppWickMultiplier
+isInvHammer         = inv_small_body and inv_long_upper and inv_small_lower
+
+// === ATR for SL/TP ===
+atr = ta.atr(atrLength)
+
+// === EMA Filter ===
+ema200 = ta.ema(close, emaLength)
+
+// === Trading Logic ===
+// Long only if above EMA200
+if isHammer and close > ema200
+    longSL = close - atr * atrMult
+    longTP = close + (close - longSL) * rrr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+// Short only if below EMA200
+if isInvHammer and close < ema200
+    shortSL = close + atr * atrMult
+    shortTP = close - (shortSL - close) * rrr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// === Visualization ===
+plotshape(isHammer and close > ema200, title="Hammer", location=location.belowbar,
+     style=shape.triangleup, size=size.tiny, color=color.green, text="H")
+
+plotshape(isInvHammer and close < ema200, title="Inverted Hammer", location=location.abovebar,
+     style=shape.triangledown, size=size.tiny, color=color.red, text="IH")
+
+plot(ema200, "EMA200", color=color.orange, linewidth=2)
+
+View in Pine Editor・62 lines
+Use on chart
+3
+970
+Hammer signals only valid for longs above EMA200.
+
+Inverted hammer signals only valid for shorts below EMA200.
+
+EMA200 is plotted as an orange line.

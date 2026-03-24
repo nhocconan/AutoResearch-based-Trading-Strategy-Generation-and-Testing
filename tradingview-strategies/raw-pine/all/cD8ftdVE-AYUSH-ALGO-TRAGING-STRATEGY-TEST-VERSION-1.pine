@@ -1,0 +1,136 @@
+//@version=5
+strategy("AYUSH ALGO TRAGING STRATEGY TEST VERSION 1)",
+  overlay=true,
+  initial_capital=10000,
+  default_qty_type=strategy.fixed,
+  pyramiding=0,
+  calc_on_every_tick=true)   // ✅ evaluate & fill intra-bar (no bar-close wait)
+
+// ===== INPUTS =====
+emaFastLen   = input.int(21, "EMA Fast", minval=1)
+emaSlowLen   = input.int(55, "EMA Slow", minval=1)
+rsiLen       = input.int(14, "RSI Length")
+rsiLongMin   = input.int(50, "RSI min for longs")
+rsiShortMax  = input.int(50, "RSI max for shorts")
+stFactor     = input.float(3.0, "Supertrend factor", step=0.1)
+stAtrLen     = input.int(7, "Supertrend ATR length")
+atrLen       = input.int(14, "ATR for SL")
+atrMult      = input.float(1.0, "ATR multiplier for SL", step=0.1)
+riskPct      = input.float(2.0, "Risk % per trade", step=0.1)
+maxLeverage  = input.int(5, "Max leverage (cap)", minval=1)
+require15m   = input.bool(true, "Warn if chart TF ≠ 15m")
+enableAlerts = input.bool(true, "Send alert() JSON")
+
+// ===== TF warning label =====
+var label tfWarn = na
+if require15m and timeframe.period != "15"
+    if na(tfWarn)
+        tfWarn := label.new(bar_index, high, "Switch to 15m chart", yloc=yloc.abovebar, style=label.style_label_down, color=color.orange)
+    else
+        label.set_xy(tfWarn, bar_index, high)
+else
+    if not na(tfWarn)
+        label.delete(tfWarn)
+        tfWarn := na
+
+// ===== INDICATORS =====
+emaF = ta.ema(close, emaFastLen)
+emaS = ta.ema(close, emaSlowLen)
+rsi  = ta.rsi(close, rsiLen)
+[supertrend, stDir] = ta.supertrend(stFactor, stAtrLen)
+atr = ta.atr(atrLen)
+
+// ===== SIGNALS =====
+trendLong  = emaF > emaS
+trendShort = emaF < emaS
+candleLong = close > open
+candleShort= close < open
+stLong     = stDir == 1
+stShort    = stDir == -1
+
+longSignal  = trendLong  and stLong  and candleLong  and rsi >= rsiLongMin
+shortSignal = trendShort and stShort and candleShort and rsi <= rsiShortMax
+
+// ===== SL / TP (ATR-based) =====
+slDist = atr * atrMult
+canCalc = slDist > 0
+
+entryPrice = close
+
+longSL  = entryPrice - slDist
+longTP  = entryPrice + 2 * slDist
+
+shortSL = entryPrice + slDist
+shortTP = entryPrice - 2 * slDist
+
+// ===== POSITION SIZING: 2% RISK, capped by maxLeverage =====
+acctEquity  = strategy.equity
+riskAmount  = acctEquity * (riskPct / 100)
+qtyRaw      = canCalc ? (riskAmount / slDist) : 0.0      // base units (ETH approx)
+
+notionalRaw = qtyRaw * entryPrice
+maxNotional = acctEquity * maxLeverage
+
+qty = qtyRaw
+if notionalRaw > maxNotional and entryPrice > 0
+    qty := maxNotional / entryPrice
+
+// guard against tiny/invalid qty
+qty := qty >= 0.00000001 ? qty : 0
+
+// ===== DELTA LOTS (for webhook payload only) =====
+// 1 lot = 0.01 ETH → convert ETH qty to whole lots; floor to avoid over-sizing.
+lotsForAlert = math.floor(qty / 0.01)
+lotsForAlert := lotsForAlert >= 1 ? lotsForAlert : 0  // if <1 lots, treat as 0 (no alert)
+
+// Track last lots to use on exit alerts
+var float lastLots = na
+
+// ===== ENTRY GUARDS =====
+noOpen = strategy.position_size == 0
+canLong  = longSignal  and noOpen and canCalc and qty > 0 and lotsForAlert > 0
+canShort = shortSignal and noOpen and canCalc and qty > 0 and lotsForAlert > 0
+
+// ===== EXECUTION + ENTRY ALERTS =====
+if (canLong)
+    strategy.entry("Long", strategy.long, qty = qty)
+    strategy.exit("ExitLong", from_entry = "Long", stop = longSL, limit = longTP)
+    lastLots := lotsForAlert
+    if enableAlerts
+        jsonEntryLong = '{"symbol":"' + syminfo.ticker + '","side":"buy","qty":' + str.tostring(lotsForAlert, format.mintick) + ',"entry":' + str.tostring(entryPrice, format.mintick) + ',"stop":' + str.tostring(longSL, format.mintick) + ',"tp":' + str.tostring(longTP, format.mintick) + ',"risk_pct":' + str.tostring(riskPct, format.mintick) + '}'
+        alert(jsonEntryLong, alert.freq_once_per_bar)   // ✅ fire immediately (intra-bar)
+
+if (canShort)
+    strategy.entry("Short", strategy.short, qty = qty)
+    strategy.exit("ExitShort", from_entry = "Short", stop = shortSL, limit = shortTP)
+    lastLots := lotsForAlert
+    if enableAlerts
+        jsonEntryShort = '{"symbol":"' + syminfo.ticker + '","side":"sell","qty":' + str.tostring(lotsForAlert, format.mintick) + ',"entry":' + str.tostring(entryPrice, format.mintick) + ',"stop":' + str.tostring(shortSL, format.mintick) + ',"tp":' + str.tostring(shortTP, format.mintick) + ',"risk_pct":' + str.tostring(riskPct, format.mintick) + '}'
+        alert(jsonEntryShort, alert.freq_once_per_bar)  // ✅ fire immediately (intra-bar)
+
+// ===== EXIT ALERTS tied to actual strategy close =====
+justClosed = strategy.position_size[1] != 0 and strategy.position_size == 0
+
+if (enableAlerts and justClosed and not na(lastLots))
+    prevWasLong = strategy.position_size[1] > 0
+    exitSide = prevWasLong ? "sell" : "buy"
+    exitJson = '{"symbol":"' + syminfo.ticker + '","side":"' + exitSide + '","qty":' + str.tostring(lastLots, format.mintick) + ',"reason":"closed"}'
+    alert(exitJson, alert.freq_once_per_bar)            // ✅ no bar-close wait
+    lastLots := na
+
+// ===== PLOTTING =====
+plot(emaF, color=color.yellow, title="EMA Fast")
+plot(emaS, color=color.blue,  title="EMA Slow")
+plotshape(canLong  ? low  : na, title="Entry Long",  location=location.belowbar, color=color.green,  style=shape.triangleup,   size=size.small)
+plotshape(canShort ? high : na, title="Entry Short", location=location.abovebar, color=color.red,    style=shape.triangledown, size=size.small)
+plot(canCalc and strategy.position_size > 0 ? longSL  : na, "Long SL",  color=color.new(color.red, 60))
+plot(canCalc and strategy.position_size > 0 ? longTP  : na, "Long TP",  color=color.new(color.green, 60))
+plot(canCalc and strategy.position_size < 0 ? shortSL : na, "Short SL", color=color.new(color.red, 60))
+plot(canCalc and strategy.position_size < 0 ? shortTP : na, "Short TP", color=color.new(color.green, 60))
+
+View in Pine Editor・132 lines
+Use on chart
+5
+0
+1 122
+Very good strategy , it uses two moving avg crossovers and also rsi and atr for confirmation, this strategy is fully automated

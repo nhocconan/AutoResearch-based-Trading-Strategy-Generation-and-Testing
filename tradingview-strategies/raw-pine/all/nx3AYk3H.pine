@@ -1,0 +1,75 @@
+//@version=5
+strategy("Friday Bond Short Strategy", overlay=true)
+
+// Custom inputs for weekdays and hours
+entry_day = input.int(6, title="Entry Day (2=Mon, 6=Fri)", minval=2, maxval=6)
+entry_hour = input.int(13, title="Entry Hour (ET)")
+exit_day = input.int(2, title="Exit Day (2=Mon, 6=Fri)", minval=2, maxval=6)
+exit_hour = input.int(13, title="Exit Hour (ET)")
+
+// Adjust the time to Eastern Time (New York)
+et_time = timestamp("America/New_York", year, month, dayofmonth, hour, minute, second)
+et_hour = hour(et_time)
+et_dayofweek = dayofweek(et_time)
+
+// Check if it's the entry day and time
+is_entry_day = (et_dayofweek == entry_day)
+is_exit_day = (et_dayofweek == exit_day)
+
+// Entry on the specified day and hour
+if (is_entry_day and et_hour == entry_hour)
+    strategy.entry("Short", strategy.short)
+
+// Exit on the specified day and hour
+if (is_exit_day and et_hour == exit_hour)
+    strategy.close("Short")
+
+// Determine background color based on position status
+bg_color = strategy.position_size > 0 ? color.new(color.green, 90) : na
+
+// Apply the background color
+bgcolor(bg_color)
+
+View in Pine Editor・31 lines
+Use on chart
+7
+5
+1 725
+Strategy: Friday Bond Short Strategy (1H Timeframe)
+
+Objective:
+This strategy aims to open short positions on a specified day and hour (Eastern Time) and close those positions on another specified day and hour. The background color of the chart will turn green when a position is active, providing a visual cue of an open trade.
+
+Parameters:
+
+1. Entry Day:
+• Defines the day of the week on which the short position will be opened.
+• Value: 6 for Friday (Pine Script’s weekday numbering: Monday = 2, Friday = 6).
+2. Entry Hour:
+• Specifies the hour (Eastern Time) when the short position will be opened.
+• Value: 13 for 13:00 ET (1:00 PM).
+3. Exit Day:
+• Defines the day of the week on which the short position will be closed.
+• Value: 2 for Monday.
+4. Exit Hour:
+• Specifies the hour (Eastern Time) when the position will be closed.
+• Value: 13 for 13:00 ET (1:00 PM).
+
+How It Works:
+
+1. Time Adjustment to Eastern Time:
+• The script converts all time references to Eastern Time (America/New_York) to ensure the strategy operates according to the desired time zone.
+2. Entry Conditions:
+• The strategy checks if the current day of the week matches the specified entry_day and if the current hour matches the specified entry_hour.
+• If both conditions are met, a short position is opened (strategy.entry("Short", strategy.short)).
+3. Exit Conditions:
+• Similarly, the strategy checks if the current day of the week matches the specified exit_day and if the current hour matches the specified exit_hour.
+• If both conditions are met, the open short position is closed (strategy.close("Short")).
+4. Background Color:
+• The background color of the chart is adjusted based on whether there is an open position:
+• Green Background: If the strategy has an open position (strategy.position_size > 0), the background is set to light green.
+• No Background Color: If there is no open position, the background color is not set (na).
+
+Summary:
+
+The Friday Bond Short Strategy is designed to enter short positions on Fridays at 1:00 PM ET and close them on Mondays at 1:00 PM ET. The chart background color turns green when a short position is active, providing a clear visual indication of when the strategy is engaged in a trade.

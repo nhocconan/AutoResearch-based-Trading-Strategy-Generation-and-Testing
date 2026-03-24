@@ -1,0 +1,6 @@
+//@version=4
+i_sellThreshold=##input(defval=75.0,type='INPUT_FLOAT',##id='in_6')
+i_buyThreshold=##input(defval=40.0,type='INPUT_FLOAT',##id='in_7')
+##root(root_metainfo,rm_0,9,input__integer,plot,style)
+##root(root_metainfo,rm_1,i_sellThreshold,input__float)
+##root(root_metainfo,rm_2,i_buyThreshold,input__float)

@@ -1,0 +1,906 @@
+//@version=6
+strategy("Multi-Indicator Trend-Following Strategy", overlay=true)
+
+// ==========================================================================
+// 01. USER CONFIGURATION INPUTS
+// ==========================================================================
+// --- General Thresholds ---
+adxThreshold        = input.int(30,   title="ADX Threshold for Trend",          minval=1)
+breakevenBuffer     = input.float(2,  title="Breakeven Buffer in Pips",         step=0.1)
+confidenceThreshold = input.float(0.80, title="Confidence Threshold for Entries", minval=0, maxval=1, step=0.05)
+takeProfit          = input.float(20,  title="Take Profit Price",               minval=0)
+
+// --- Moving Averages ---
+shortEmaLen   = input.int(3,  title="Short EMA Length",      group="Moving Averages")
+mediumEmaLen  = input.int(5,  title="Medium EMA Length",     group="Moving Averages")
+emaLongLength = input.int(15, title="Long-Term EMA Length",  minval=1, group="Moving Averages")
+
+// --- ATR Settings ---
+atrLen        = input.int(5,  title="ATR Length",            group="ATR Settings")
+atrMultiplier = input.float(0.8, title="ATR Multiplier",      group="ATR Settings")
+
+// --- PAC Channel Settings ---
+pacLen        = input.int(5,   title="PAC Length",            group="PAC Channel Settings")
+pacMultiplier = input.float(0.5, title="PAC Multiplier",      step=0.1, group="PAC Channel Settings")
+
+// --- Bollinger Bands Settings ---
+bbLen            = input.int(10,  title="BB Length",           group="Bollinger Bands Settings")
+bbMultiplier     = input.float(1.2, title="BB Multiplier",       step=0.1, group="Bollinger Bands Settings")
+bbWidthThreshold = input.float(0.015, title="BBW Threshold",      step=0.001, group="Bollinger Bands Settings")
+
+// --- ADX Settings ---
+adxLen = input.int(5, title="ADX Length", group="ADX Settings")
+
+// --- Volume Settings ---
+volumeSmaLen         = input.int(8,  title="Volume SMA Length",              group="Volume Settings")
+volumeMultiplier     = input.float(1.5, title="Volume Spike Multiplier",        step=0.1, group="Volume Settings")
+volShortLen          = input.int(14, title="Short-Term Volume MA Length",     minval=1, group="Volume Settings")
+volMidLen            = input.int(50, title="Mid-Term Volume MA Length",       minval=1, group="Volume Settings")
+volumeSpikeThreshold = input.float(2.5, title="Volume Spike Threshold Multiplier", step=0.1, group="Volume Settings")
+volumeSpikeLength    = input.int(14, "Volume Spike Length")
+volumeSpikeMult      = input.float(1.5, "Volume Spike Multiplier")
+
+// --- RSI Settings ---
+rsiLen = input.int(4, title="RSI Length", group="RSI Settings")
+
+// --- OBV Confirmation ---
+obvSmaLen        = input.int(21, title="OBV Smoothing Length", minval=3, group="OBV Confirmation")
+obvSlopeLookback = input.int(5,  title="OBV Slope Lookback",   minval=1, group="OBV Confirmation")
+obvRisingBars    = input.int(3,  title="OBV Rising Bars",      group="OBV Confirmation")
+obvFallingBars   = input.int(3,  title="OBV Falling Bars",     group="OBV Confirmation")
+obvRisingNeeded  = input.int(2,  title="Rising Bars Needed",   group="OBV Confirmation")
+
+// --- Multi-Timeframe Filters ---
+htf_15m = input.timeframe("15", title="15m HTF", group="Multi-Timeframe Filters")
+htf_30m = input.timeframe("30", title="30m HTF", group="Multi-Timeframe Filters")
+
+// --- Cooldown Settings ---
+cooldownBarsFixed = input.int(2, "Cooldown Bars", minval=1, maxval=10)
+
+// --- Reversal Detection Inputs ---
+rsiLength        = input.int(7, "RSI Length for Reversal")
+rsiOverbought    = input.int(70, "RSI Overbought Level")
+rsiOversold      = input.int(30, "RSI Oversold Level")
+macdFastLength   = input.int(6, "MACD Fast Length")
+macdSlowLength   = input.int(13, "MACD Slow Length")
+macdSignalLength = input.int(5,  "MACD Signal Length")
+cooldownBarsUser = input.int(3,  "Cooldown Bars After Reversal")
+
+// --- Additional Indicator Inputs ---
+emaShortLength      = input.int(9,  "EMA Short Length")
+emaMediumLength     = input.int(21, "EMA Medium Length")
+length              = input.int(20, title="BB Length")
+mult                = input.float(2.0, title="BB Multiplier")
+atrLength           = input.int(14, title="ATR Length")
+atrMult             = input.float(1.5, title="KC Multiplier")
+trendScoreHigh      = input.int(5, "High Trend Score Threshold")
+trendScoreMed       = input.int(4, "Medium Trend Score Threshold")
+strictnessLevel     = input.string("Medium", title="Signal Strictness", options=["High", "Medium", "Low"])
+minConfidence       = input.float(0.75, "Minimum Confidence", step=0.05)
+enableSessionFilter = input.bool(false, "Enable Session Filter")
+
+// ==========================================================================
+// 02. INDICATOR CALCULATIONS
+// ==========================================================================
+// Moving Averages
+emaShort  = ta.ema(close, shortEmaLen)
+emaMedium = ta.ema(close, mediumEmaLen)
+emaLong   = ta.ema(close, emaLongLength)
+
+// Multi-Timeframe EMAs
+ema15m = request.security(syminfo.tickerid, htf_15m, ta.ema(close, mediumEmaLen))
+ema1h  = request.security(syminfo.tickerid, htf_30m, ta.ema(close, mediumEmaLen))
+
+// ATR Settings Computation
+atrValue = ta.atr(atrLen)
+
+// ATR & Bands
+atr    = ta.atr(atrLen)
+atrAdj = atr * atrMultiplier
+upperBand = close[1] + atrAdj
+lowerBand = close[1] - atrAdj
+
+// PAC Channel
+pacStdDev = ta.stdev(close, pacLen)
+pacUpper  = ta.highest(high, pacLen) + pacMultiplier * pacStdDev
+pacLower  = ta.lowest(low, pacLen)  - pacMultiplier * pacStdDev
+
+// Bollinger Bands
+basisBB  = ta.sma(close, bbLen)
+devBB    = bbMultiplier * ta.stdev(close, bbLen)
+upperBB  = basisBB + devBB
+lowerBB  = basisBB - devBB
+bbWidth  = (upperBB - lowerBB) / basisBB
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// MACD (Current TF)
+[macdLine, signalLine, _] = ta.macd(close, 3, 6, 5)
+macdValue     = macdLine - signalLine
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+
+// MACD (15m TF)
+[macd15m, signal15m, _] = request.security(syminfo.tickerid, "15", ta.macd(close, 3, 6, 5))
+macd15mHist    = macd15m - signal15m
+macd15mBullish = macd15mHist > 0
+macd15mBearish = macd15mHist < 0
+
+// ==========================================================================
+// 06. OBV STRENGTH CALCULATION (SMOOTHED RANGE, REGRESSION & PERCENTILE)
+// ==========================================================================
+obv               = ta.cum(volume * math.sign(close - close[1]))
+obvPeriod         = 20
+
+// Classic OBV slope
+obvSlope          = (obv - obv[obvPeriod]) / obvPeriod
+
+// Smoothed range‐based strength
+obvValue          = obv
+obvSma            = ta.ema(obvValue, obvSmaLen)
+obvDelta          = obvValue - obvSma
+
+rawRange          = ta.highest(obvDelta, obvPeriod) - ta.lowest(obvDelta, obvPeriod)
+safeRange         = rawRange == 0 ? 1 : rawRange
+
+smoothedDelta     = ta.rma(math.abs(obvDelta), obvPeriod)
+rangeOBV          = ta.rma(safeRange, obvPeriod)
+
+obvStrengthPct    = rangeOBV > 0 ? smoothedDelta / rangeOBV * 100 : 0
+obvStrengthPctTxt = str.tostring(obvStrengthPct, "#.0") + "%"
+
+obvStrengthLabelBase = obvStrengthPct > 70 ? "🚀 " + obvStrengthPctTxt :
+                       obvStrengthPct > 40 ? "📈 " + obvStrengthPctTxt :
+                                              "💤 " + obvStrengthPctTxt
+
+obvStrengthColor = obvStrengthPct > 70 ? color.lime :
+                   obvStrengthPct > 40 ? color.orange : color.red
+
+obvStrengthDir   = obvStrengthPct > obvStrengthPct[1] ? "⬆️" :
+                   obvStrengthPct < obvStrengthPct[1] ? "⬇️" : "➡️"
+
+obvStrengthLabel = obvStrengthDir + " " + obvStrengthLabelBase
+
+// Alternative trend capture: linear-regression slope
+obvSlopeLR       = ta.linreg(obvValue, obvPeriod, 0)
+
+// Alternative extreme detection: manual percentile rank
+rankCount        = 0.0
+for i = 0 to obvPeriod - 1
+    rankCount := rankCount + (obvDelta <= obvDelta[i] ? 1 : 0)
+obvRank          = rankCount / obvPeriod * 100
+
+// OBV SMA slope confirmation
+obvSmaFlat       = ta.sma(obv, obvSmaLen)
+obvSmaSlope      = (obvSmaFlat - obvSmaFlat[obvSlopeLookback]) / obvSlopeLookback
+
+isOBVBullish     = obv > obvSmaFlat and obvSlope > 0 and obvSmaSlope > 0 and close > close[obvSlopeLookback]
+isOBVBearish     = obv < obvSmaFlat and obvSlope < 0 and obvSmaSlope < 0 and close < close[obvSlopeLookback]
+obvRising        = isOBVBullish
+obvFalling       = isOBVBearish
+
+// ADX (Manual Calculation)
+upMove     = high - high[1]
+downMove   = low[1] - low
+plusDM     = upMove > downMove and upMove > 0 ? upMove : 0
+minusDM    = downMove > upMove and downMove > 0 ? downMove : 0
+tr         = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+smoothedTR      = ta.rma(tr, adxLen)
+smoothedPlusDM  = ta.rma(plusDM, adxLen)
+smoothedMinusDM = ta.rma(minusDM, adxLen)
+plusDI    = smoothedPlusDM / smoothedTR * 100
+minusDI   = smoothedMinusDM / smoothedTR * 100
+dx        = math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100
+manualADX = ta.rma(dx, adxLen)
+
+// ==========================================================================
+// 03. TREND INDICATORS
+// ==========================================================================
+ema15mTrendUp    = ema15m > emaLong
+ema15mTrendDown = ema15m < emaLong
+ema1hTrendUp    = ema1h  > emaLong
+ema1hTrendDown  = ema1h  < emaLong
+
+emaTrendUp      = emaShort > emaMedium and emaMedium > emaLong
+emaTrendDown    = emaShort < emaMedium and emaMedium < emaLong
+emaConfirmedUp  = emaShort > emaLong
+emaConfirmedDown= emaShort < emaLong
+
+emaScoreUp      = emaConfirmedUp   ? 2 : 0
+emaScoreDown    = emaConfirmedDown ? 2 : 0
+
+adxStrongTrend  = manualADX > adxThreshold
+
+// 04. VOLATILITY INDICATORS
+// ==========================================================================
+atrVolatilityOK = (atr / close) < 0.05
+
+bbBasis         = ta.sma(close, length)
+bbStdDev        = ta.stdev(close, length)
+bbUpper         = bbBasis + mult * bbStdDev
+bbLower         = bbBasis - mult * bbStdDev
+bbVolatilityOK  = bbWidth > bbWidthThreshold
+
+ma              = ta.sma(close, length)
+upperKC         = ma + atrMult * atr
+lowerKC         = ma - atrMult * atr
+isBbSqueeze     = bbUpper < upperKC and bbLower > lowerKC
+
+// ==========================================================================
+// 05. REVERSAL DETECTION LOGIC (IMPROVED WITH HTF CONFIRMATION)
+// ==========================================================================
+
+// Inputs
+htfConfirmWeight     = input.float(0.25, "15m HTF Confirmation Weight", minval=0, maxval=1, step=0.05)
+enableHTFReversalChk = input.bool(true,  "Enable 15m HTF Confirmation")
+
+// Base indicators
+rsiVal                   = ta.rsi(close, rsiLength)
+[macdVal, macdSignal, _] = ta.macd(close, macdFastLength, macdSlowLength, macdSignalLength)
+
+rsiOverboughtZone        = rsiVal >= rsiOverbought
+rsiOversoldZone          = rsiVal <= rsiOversold
+
+macdCrossUpRev           = ta.crossover(macdVal, macdSignal)
+macdCrossDownRev         = ta.crossunder(macdVal, macdSignal)
+
+// HTF confirmation from 15m chart
+htfRsi = request.security(syminfo.tickerid, "15", ta.rsi(close, rsiLength))
+[htfMacdLine, htfMacdSignal, _] = request.security(syminfo.tickerid, "15", ta.macd(close, macdFastLength, macdSlowLength, macdSignalLength))
+
+htfRsiOb      = htfRsi >= rsiOverbought
+htfRsiOs      = htfRsi <= rsiOversold
+htfMacdBear   = htfMacdLine < htfMacdSignal
+htfMacdBull   = htfMacdLine > htfMacdSignal
+htfConfirmedB = htfRsiOs and htfMacdBull
+htfConfirmedS = htfRsiOb and htfMacdBear
+
+// Reversal flags
+approachingBearishReversal = rsiOverboughtZone and macdVal < macdSignal
+approachingBullishReversal = rsiOversoldZone   and macdVal > macdSignal
+bearishReversal            = rsiOverboughtZone and macdCrossDownRev
+bullishReversal            = rsiOversoldZone   and macdCrossUpRev
+baseConfirmedReversal      = bearishReversal   or bullishReversal
+
+// Weighted HTF-enhanced confidence scoring
+htfReversalScore = enableHTFReversalChk ? ((bearishReversal and htfConfirmedS) or (bullishReversal and htfConfirmedB) ? htfConfirmWeight : 0.0) : 0.0
+
+rsiScore     = (rsiOverboughtZone or rsiOversoldZone) ? 1.0 : 0.0
+macdScore    = (macdCrossUpRev or macdCrossDownRev) ? 1.0 : 0.0
+obvScore     = rangeOBV > 0 ? math.min(math.abs(obvDelta) / rangeOBV, 1.0) : 0.0
+baseStrength = (rsiScore + macdScore + obvScore) / 3.0
+
+reversalStrength = math.min((baseStrength + htfReversalScore) / (enableHTFReversalChk ? 1.25 : 1.0) * 100, 100)
+bgColor           = reversalStrength >= 90 ? color.lime : reversalStrength >= 70 ? color.green : reversalStrength >= 50 ? color.orange : color.red
+reversalStrengthLabel = reversalStrength >= 90 ? "Strong" : reversalStrength >= 70 ? "Medium" : reversalStrength >= 50 ? "Low" : "Very Weak"
+
+// Final signal flag (strength-qualified)
+confirmedReversal = baseConfirmedReversal and reversalStrength >= 50
+
+// ==========================================================================
+// ==========================================================================
+// 06–08. REVERSAL DETECTION, COOLDOWN & LABEL DISPLAY (IMPROVED)
+// ==========================================================================
+// — Variables & Offsets
+var int   reversalCooldownCounter = 0
+var bool  cooldownBars            = false
+var label reversalBox             = na
+var label bullWarn                = na
+var label bearWarn                = na
+var int   lastConfirmedDir        = 0
+tickOffset                      = ta.atr(atrLen) * 0.2  // ATR-scaled offset
+
+// — Cooldown Logic (reset only on opposite reversal)
+if confirmedReversal
+    currDir = bullishReversal ? 1 : bearishReversal ? -1 : lastConfirmedDir
+    if currDir != lastConfirmedDir
+        reversalCooldownCounter := cooldownBarsUser
+        lastConfirmedDir        := currDir
+    if reversalCooldownCounter > 0
+        reversalCooldownCounter -= 1
+else
+    if reversalCooldownCounter > 0
+        reversalCooldownCounter -= 1
+cooldownBars := reversalCooldownCounter > 0
+
+// — Approaching Reversal Labels
+if approachingBullishReversal and not cooldownBars
+    if not na(bullWarn)
+        label.delete(bullWarn)
+    bullWarn := label.new(bar_index, low - tickOffset,
+                           text="⚠️ Bullish Reversal",
+                           style=label.style_label_up,
+                           color=color.new(color.green, 0),
+                           textcolor=color.white,
+                           size=size.small)
+
+if approachingBearishReversal and not cooldownBars
+    if not na(bearWarn)
+        label.delete(bearWarn)
+    bearWarn := label.new(bar_index, high + tickOffset,
+                           text="⚠️ Bearish Reversal",
+                           style=label.style_label_down,
+                           color=color.new(color.red, 0),
+                           textcolor=color.white,
+                           size=size.small)
+
+// — Confirmed Reversal Arrows
+plotshape(bullishReversal and not cooldownBars,
+          title="Confirmed Bullish Reversal",
+          location=location.belowbar,
+          style=shape.arrowup,
+          color=color.green,
+          size=size.normal)
+
+plotshape(bearishReversal and not cooldownBars,
+          title="Confirmed Bearish Reversal",
+          location=location.abovebar,
+          style=shape.arrowdown,
+          color=color.red,
+          size=size.normal)
+
+// — Reversal Strength Box every 5 bars
+rsiWeight  = 1.0/3.0
+macdWeight = 1.0/3.0
+obvWeight  = 1.0/3.0
+
+if bar_index % 5 == 0
+    label.delete(reversalBox)
+    reversalBox := label.new(x=bar_index,
+                             y=high + tickOffset * 3,
+                             text="🔁 Reversal Strength: " + str.tostring(reversalStrength, "#.0") +
+                                  "% (" + reversalStrengthLabel + ")",
+                             style=label.style_label_left,
+                             color=bgColor,
+                             textcolor=color.white,
+                             size=size.small,
+                             yloc=yloc.price)
+
+// ==========================================================================
+// 09. VOLUME ANALYSIS
+// ==========================================================================
+avgVolume               = ta.sma(volume, volumeSpikeLength)
+volumeRatio             = avgVolume != 0 ? volume / avgVolume : 0
+volumeSpike             = volumeRatio > volumeSpikeMult
+volumeScore             = volumeSpike ? 1.0 : math.min(volumeRatio / volumeSpikeMult, 1.0)
+volSpikeUp              = volume > volume[1] and volumeSpike
+
+volSMA_current          = ta.sma(volume, volumeSpikeLength)
+volSMA_previous         = volSMA_current[1]
+volIncreasing           = volSMA_current > volSMA_previous
+
+volumeConfidencePercent = volumeScore * 100
+volumeLabel             = "Vol Confidence: " + str.tostring(volumeConfidencePercent, "#.0f") + "%"
+volumeColor             = volumeConfidencePercent > 85 ? color.lime :
+                          volumeConfidencePercent > 65 ? color.green :
+                          volumeConfidencePercent > 45 ? color.orange : color.red
+
+// ==========================================================================
+// 10. OBV ANALYSIS
+// ==========================================================================
+obvNow               = obv
+obvLookback          = 20
+obvPast              = obvNow[obvLookback]
+obvNormalizedDelta   = rangeOBV > 0 ? obvDelta / rangeOBV : 0
+obvScoreRaw          = math.abs(obvNormalizedDelta)
+obvConfidencePercent = obvScore * 100
+
+isOBVFlat            = math.abs(obvNormalizedDelta) < 0.1
+obvLabel             = (isOBVBullish ? "OBV ↑ " : isOBVBearish ? "OBV ↓ " : "OBV → ") + str.tostring(obvConfidencePercent, "#.0f") + "%"
+
+obvConfirmBuy        = obvRising
+obvConfirmSell       = obvFalling
+
+// ==========================================================================
+// 11. OTHER FILTERS
+// ==========================================================================
+rsiBuyFilter   = rsi < 50
+rsiSellFilter  = rsi > 50
+inSession      = not na(time(timeframe.period, "0930-1600"))
+trendValidUp   = emaShort > emaLong and close > emaShort
+trendValidDown = emaShort < emaLong and close < emaShort
+isBullConfirm  = close > open
+isBearConfirm  = close < open
+isRanging      = not (trendValidUp or trendValidDown)
+exitLong       = false
+exitShort      = false
+
+// ==========================================================================
+// 12. ENTRY LOGIC (WITH CONFIDENCE INTEGRATION)
+// ==========================================================================
+
+// Entry confidence logic
+macdAbsSMA      = ta.sma(math.abs(macdValue), 10)
+entryConfidence = macdAbsSMA != 0 ? math.abs(macdValue) / macdAbsSMA : 0
+confidentEntry  = entryConfidence >= confidenceThreshold
+confScore       = confidentEntry ? 1 : 0
+
+priceBreaksUpperPAC = close > pacUpper
+priceBreaksLowerPAC = close < pacLower
+
+buySignal  = emaTrendUp       and confidentEntry and priceBreaksUpperPAC and atrVolatilityOK and bbVolatilityOK and volSpikeUp and
+              volIncreasing    and rsiBuyFilter    and obvConfirmBuy     and adxStrongTrend and ema15mTrendUp and
+              ema1hTrendUp     and not cooldownBars
+
+sellSignal = emaTrendDown     and confidentEntry and priceBreaksLowerPAC and atrVolatilityOK and bbVolatilityOK and volSpikeUp and
+              volIncreasing    and rsiSellFilter   and obvConfirmSell    and adxStrongTrend and ema15mTrendDown and
+              ema1hTrendDown   and not cooldownBars
+
+// ==========================================================================
+// 15. COMPOSITE TREND SCORING (WITH CONFIDENCE & SMOOTHING)
+// ==========================================================================
+adxScore      = manualADX >= 40 ? 3 : manualADX >= 30 ? 2 : manualADX >= adxThreshold ? 1 : 0
+macdScoreUp   = macd15mBullish ? 1 : 0
+macdScoreDown = macd15mBearish ? 1 : 0
+rsiScoreUp    = rsi > 55 ? 1 : 0
+rsiScoreDown  = rsi < 45 ? 1 : 0
+volScore      = volume > ta.sma(volume, volumeSmaLen) ? 1 : 0
+
+rawScoreUp    = adxScore + macdScoreUp   + rsiScoreUp   + emaScoreUp   + volScore + confScore
+rawScoreDown  = adxScore + macdScoreDown + rsiScoreDown + emaScoreDown + volScore + confScore
+
+maxTrendScore = 9.0  // Updated from 8.0 to include confScore
+
+smoothScoreUp   = ta.rma(rawScoreUp,   3)
+smoothScoreDown = ta.rma(rawScoreDown, 3)
+
+trendStrengthUpPct   = math.min(smoothScoreUp   / maxTrendScore * 100, 100)
+trendStrengthDownPct = math.min(smoothScoreDown / maxTrendScore * 100, 100)
+
+trendLabel = trendValidUp   ? "🟢 Uptrend ("   + str.tostring(trendStrengthUpPct, "#.0") + "%)" :
+             trendValidDown ? "🔴 Downtrend (" + str.tostring(trendStrengthDownPct, "#.0") + "%)" :
+                               "➖ Ranging"
+
+trendColor = trendStrengthUpPct > 80 ? color.lime :
+             trendStrengthUpPct > 60 ? color.green :
+             trendStrengthUpPct > 40 ? color.orange : color.red
+
+// ==========================================================================
+// 15.1. HIGHER‐TF FILTER (1H)
+// ==========================================================================
+[htfTrendUp, htfTrendDown] = request.security(syminfo.tickerid, "60", [trendValidUp, trendValidDown])
+
+longAllowed  = trendValidUp   and htfTrendUp
+shortAllowed = trendValidDown and htfTrendDown
+
+// ==========================================================================
+// 16. REUSABLE TREND VALIDATION FUNCTION
+// ==========================================================================
+isTrendValid(dir) =>
+    _adx  = manualADX >= 40        ? 3 : manualADX >= 30        ? 2 : manualADX >= adxThreshold ? 1 : 0
+    _macd = dir == "up"   ? (macdValue > 0 ? 1 : 0) : (macdValue < 0 ? 1 : 0)
+    _rsi  = dir == "up"   ? (rsi > 55 ? 1 : 0)      : (rsi < 45 ? 1 : 0)
+    _ema  = dir == "up"   ? emaScoreUp              : emaScoreDown
+    _vol  = volume > ta.sma(volume, volumeSmaLen)  ? 1 : 0
+    _tot  = _adx + _macd + _rsi + _ema + _vol
+    _tot >= 4 and (dir == "up" ? emaConfirmedUp : emaConfirmedDown)
+
+// ==========================================================================
+// 17. ENTRY CONDITIONS WITH STRICTNESS & AUTO VOLATILITY SWITCH
+// ==========================================================================
+autoStrictness = input.bool(true, "Enable Auto Strictness by Volatility")
+atr15m         = request.security(syminfo.tickerid, "15", ta.atr(14))
+atr15mSMA      = request.security(syminfo.tickerid, "15", ta.sma(ta.atr(14), 20))
+strictnessAuto = atr15m > atr15mSMA * 1.2 ? "High" :
+                 atr15m > atr15mSMA       ? "Medium" : "Low"
+
+strictnessLevelFinal = autoStrictness ? strictnessAuto : strictnessLevel
+
+longStrict  = isTrendValid("up")   and not isRanging and macd15mBullish  and close > high[1] and isBullConfirm  and close > upperBand
+shortStrict = isTrendValid("down") and not isRanging and macd15mBearish and close < low[1]  and isBearConfirm  and close < lowerBand
+
+longMedium  = isTrendValid("up")   and (macd15mBullish or macdValue > 0) and
+               (close > high[1] or close > emaShort) and
+               (isBullConfirm or rsi > 50) and
+               (close > upperBand * 0.98)
+
+shortMedium = isTrendValid("down") and (macd15mBearish or macdValue < 0) and
+               (close < low[1] or close < emaShort) and
+               (isBearConfirm or rsi < 50) and
+               (close < lowerBand * 1.02)
+
+longLoose   = isTrendValid("up")   and (macd15mBullish or macdValue > 0) and
+               (isBullConfirm or rsi > 50) and
+               (close > upperBand * 0.98)
+
+shortLoose  = isTrendValid("down") and (macd15mBearish or macdValue < 0) and
+               (isBearConfirm or rsi < 50) and
+               (close < lowerBand * 1.02)
+
+isStrongInRangingLong  = isRanging and macdValue > 0 and rsi > 55 and volumeSpike and close > emaShort and close > upperBand
+isStrongInRangingShort = isRanging and macdValue < 0 and rsi < 45 and volumeSpike and close < emaShort and close < lowerBand
+
+longLoose  := longLoose  or isStrongInRangingLong
+shortLoose := shortLoose or isStrongInRangingShort
+
+longConditionRaw  = strictnessLevelFinal == "High"   ? longStrict  : strictnessLevelFinal == "Medium" ? longMedium  : longLoose
+shortConditionRaw = strictnessLevelFinal == "High"   ? shortStrict : strictnessLevelFinal == "Medium" ? shortMedium : shortLoose
+
+// ==========================================================================
+// 18. CONFIDENCE SCORE CALCULATION
+// ==========================================================================
+isTrendConfirmed  = trendValidUp or trendValidDown
+isVolumeConfirmed = volumeSpike
+isObvConfirmed    = isOBVBullish or isOBVBearish
+isMacdConfirmed   = macd15mBullish or macd15mBearish
+
+weightTrend  = 0.30
+weightVolume = 0.25
+weightOBV    = 0.20
+weightMACD   = 0.25
+
+confidenceWeighted = (isTrendConfirmed  ? 1.0 : 0.0) * weightTrend +
+                     (isVolumeConfirmed ? 1.0 : 0.0) * weightVolume +
+                     (isObvConfirmed    ? 1.0 : 0.0) * weightOBV +
+                     (isMacdConfirmed   ? 1.0 : 0.0) * weightMACD
+
+confidencePct = confidenceWeighted * 100
+confText      = "Confidence: " + str.tostring(confidencePct, "#.0") + "%"
+confColor     = confidencePct >= 85 ? color.lime :confidencePct >= 70 ? color.green :confidencePct >= 50 ? color.orange : color.red
+
+var bool blockNewTrades = false
+blockNewTrades := confidenceWeighted < 0.5
+
+// Display trade block status
+if bar_index % 5 == 0
+    label.new(bar_index, high + ta.atr(14) * 2,
+              text=blockNewTrades ? "🔒 Blocked (Low Confidence)" : "✅ Trade OK",
+              style=label.style_label_left,
+              textcolor=color.white,
+              color=blockNewTrades ? color.red : color.green,
+              size=size.small)
+
+// Trend score percentages
+var float trendScoreUp   = na
+var float trendScoreDown = na
+trendScoreUp   := adxScore + macdScoreUp   + rsiScoreUp   + emaScoreUp   + volScore
+trendScoreDown := adxScore + macdScoreDown + rsiScoreDown + emaScoreDown + volScore
+trendScoreTotal = trendScoreUp + trendScoreDown
+trendUpPct      = trendScoreTotal > 0 ? trendScoreUp / trendScoreTotal * 100 : 0
+trendDownPct    = trendScoreTotal > 0 ? trendScoreDown / trendScoreTotal * 100 : 0
+
+// ==========================================================================
+// 19. STRONG SIGNALS & BREAKOUT CHECK
+// ==========================================================================
+strongBuySignal  = trendValidUp   and confidenceWeighted >= 0.85 and volumeSpike and macd15mBullish  and trendScoreUp   > 2
+strongSellSignal = trendValidDown and confidenceWeighted >= 0.85 and volumeSpike and macd15mBearish and trendScoreDown > 2
+
+buyBreakout      = close > ta.highest(high, 5)[1]
+sellBreakout     = close < ta.lowest(low, 5)[1]
+
+newBuySignal     = strongBuySignal  and buyBreakout  and not na(close)
+newSellSignal    = strongSellSignal and sellBreakout and not na(close)
+
+var float lastSignalPrice = na
+isNewValidBuy    = newBuySignal  and (na(lastSignalPrice) or close != lastSignalPrice)
+isNewValidSell   = newSellSignal and (na(lastSignalPrice) or close != lastSignalPrice)
+
+if isNewValidBuy
+    lastSignalPrice := close
+if isNewValidSell
+    lastSignalPrice := close
+
+longCondition  = longConditionRaw  and not blockNewTrades
+shortCondition = shortConditionRaw and not blockNewTrades
+
+// ===========================
+// 01. INPUTS & PARAMETERS
+// ===========================
+htfRmaLen         = input.int(14,    title="HTF TR RMA Length")
+htfEmaLen         = input.int(14,    title="HTF EMA Length")
+positionSize      = input.float(1.0, title="Position Size", step=0.1)
+tpBaseMultiplier  = input.float(0.8, title="TP Base Multiplier", step=0.1)
+trailOffsetPct    = input.float(0.3, title="Trail Offset Percentage", step=0.1)
+
+// ===========================
+// 02. HTF STRENGTH SMOOTHING
+// ===========================
+_tr                = ta.tr(true)
+_trRma             = ta.rma(_tr, htfRmaLen)
+htfTrendStrength   = ta.ema(_trRma, htfEmaLen)
+htfTrendStrengthPct= math.min(htfTrendStrength, 100)
+
+// Define HTF Strength Label
+htfStrengthText    = str.tostring(htfTrendStrengthPct, "#.0")
+
+htfStrengthLabelBase = htfTrendStrengthPct > 70 ? "🚀 " + htfStrengthText :
+                       htfTrendStrengthPct > 40 ? "📈 " + htfStrengthText :
+                                                  "💤 " + htfStrengthText
+
+htfStrengthColor   = htfTrendStrengthPct > 70 ? color.lime :
+                     htfTrendStrengthPct > 40 ? color.orange : color.red
+
+htfStrengthDir     = htfTrendStrengthPct > htfTrendStrengthPct[1] ? "⬆️" :
+                     htfTrendStrengthPct < htfTrendStrengthPct[1] ? "⬇️" : "➡️"
+
+htfStrengthLabel   = htfStrengthDir + " " + htfStrengthLabelBase
+
+// ===========================
+// 03. SIGNAL DE-DUPLICATION
+// ===========================
+isNewBuy  = longCondition  and close != ta.valuewhen(longCondition,  close, 1)
+isNewSell = shortCondition and close != ta.valuewhen(shortCondition, close, 1)
+
+// ===========================
+// 04. BRACKET ORDER EXECUTION
+// ===========================
+canEnterLong  = isNewBuy  and not blockNewTrades and htfTrendUp
+canEnterShort = isNewSell and not blockNewTrades and htfTrendDown
+
+tpMultiplier = tpBaseMultiplier + confidenceWeighted * 0.01
+
+if canEnterLong
+    strategy.entry("Long", strategy.long, qty=positionSize,comment="Buy @ " + str.tostring(close, "#.2f") +" | Conf: " + str.tostring(confidencePct, "#.0") + "%" +" | HTF: " + str.tostring(htfTrendStrengthPct, "#.0") + "%")
+    strategy.exit("Long Exit", from_entry="Long",trail_points=atrAdj,trail_offset=atrAdj * trailOffsetPct,limit=close + atrValue * tpMultiplier)
+
+if canEnterShort
+    strategy.entry("Short", strategy.short, qty=positionSize,comment="Sell @ " + str.tostring(close, "#.2f") +" | Conf: " + str.tostring(confidencePct, "#.0") + "%" +" | HTF: " + str.tostring(htfTrendStrengthPct, "#.0") + "%")
+    strategy.exit("Short Exit", from_entry="Short",trail_points=atrAdj,trail_offset=atrAdj * trailOffsetPct,limit=close - atrValue * tpMultiplier)
+
+if strategy.position_size > 0 and (exitLong or htfTrendDown)
+    strategy.close("Long", comment="Exit Long or HTF Trend Down")
+if strategy.position_size < 0 and (exitShort or htfTrendUp)
+    strategy.close("Short", comment="Exit Short or HTF Trend Up")
+
+// ===========================
+// 05. TP & SL LINES
+// ===========================
+var line tpLine = na
+var line slLine = na
+
+if barstate.isfirst
+    tpLine := line.new(bar_index, close + atrValue * tpMultiplier,
+                       bar_index + 10, close + atrValue * tpMultiplier,
+                       color=color.yellow, width=2, style=line.style_dotted)
+    slLine := line.new(bar_index, close - atrValue * 1.5,
+                       bar_index + 10, close - atrValue * 1.5,
+                       color=color.red, width=2, style=line.style_dotted)
+
+if strategy.position_size != 0
+    line.set_xy1(tpLine, bar_index, close + atrValue * tpMultiplier)
+    line.set_xy2(tpLine, bar_index + 10, close + atrValue * tpMultiplier)
+    line.set_xy1(slLine, bar_index, close - atrValue * 1.5)
+    line.set_xy2(slLine, bar_index + 10, close - atrValue * 1.5)
+
+// ==========================================================================
+// 08. PROFESSIONAL DASHBOARD (HIGH-CONFIDENCE VERSION)
+// ==========================================================================
+
+// === TREND & MACD LABELING ===
+mtfTrendLabel = ema15mTrendUp   ? "🔼 15m Uptrend" :                ema15mTrendDown ? "🔽 15m Downtrend" :
+                                   "➖ 15m Neutral"
+
+mtfTrendColor = ema15mTrendUp   ? color.lime :                ema15mTrendDown ? color.red :
+                                   color.gray
+
+macd15mLabel = macd15mBullish   ? "🔼 Bullish" :
+               macd15mBearish   ? "🔽 Bearish" :
+                                   "➖ Neutral"
+
+macd15mColor = macd15mBullish   ? color.lime :
+               macd15mBearish   ? color.red :
+                                   color.gray
+
+// === TREND STRENGTH (Distribution Bar) ===
+trendBar = "↑ " + str.tostring(trendUpPct, "#.0") + "% / ↓ " + str.tostring(trendDownPct, "#.0") + "%"
+
+// === CONFIDENCE BAR (Visual Progress Meter) ===
+confBar = confidencePct >= 90 ? "🟩🟩🟩🟩🟩" :          confidencePct >= 70 ? "🟩🟩🟩🟩⬜" :          confidencePct >= 50 ? "🟩🟩🟩⬜⬜" :          confidencePct >= 30 ? "🟩🟩⬜⬜⬜" :          confidencePct >= 10 ? "🟩⬜⬜⬜⬜" :                                "⬜⬜⬜⬜⬜"
+
+confBarColor = confidencePct >= 90 ? color.lime :
+               confidencePct >= 70 ? color.green :
+               confidencePct >= 50 ? color.orange :
+                                     color.red
+
+// === SIGNAL STATUS TEXT & COLOR ===
+signalLabel = blockNewTrades ? "🔒 Blocked (Low Confidence)" :
+              isNewValidBuy  ? "🟢 Buy Signal" :
+              isNewValidSell ? "🔴 Sell Signal" :
+                               "➖ Neutral"
+
+signalColor = blockNewTrades ? color.gray :
+              isNewValidBuy  ? color.lime :
+              isNewValidSell ? color.red :
+                               color.gray
+
+// === TABLE CREATION: 8x2 Summary Dashboard ===
+var table dashboard = table.new(position.bottom_right, 2, 8, frame_width=1, border_width=1, bgcolor=color.new(color.black, 85))
+
+if barstate.islast
+    headerBg = color.new(color.navy, 80)
+
+    // Headers (Top Row)
+    table.cell(dashboard, 0, 0, "📈 Trend",        text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 1, "🕒 15m Trend",    text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 2, "⚡ HTF Strength", text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 3, "🎯 Confidence",   text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 4, "📊 Volume",       text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 5, "📶 OBV",          text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 6, "📈 MACD(15m)",    text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+    table.cell(dashboard, 0, 7, "📡 Signal",       text_color=color.white, bgcolor=headerBg, text_halign=text.align_center)
+
+    // Values (Bottom Row)
+    table.cell(dashboard, 1, 0, trendBar,         text_color=color.white, bgcolor=color.new(trendColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 1, mtfTrendLabel,    text_color=color.white, bgcolor=color.new(mtfTrendColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 2, htfStrengthLabel, text_color=color.white, bgcolor=color.new(htfStrengthColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 3, confBar + " " + str.tostring(confidencePct, "#.0") + "%",
+                                text_color=color.white, bgcolor=color.new(confBarColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 4, volumeLabel,      text_color=color.white, bgcolor=color.new(volumeColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 5, obvStrengthLabel, text_color=color.white, bgcolor=color.new(obvStrengthColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 6, macd15mLabel,     text_color=color.white, bgcolor=color.new(macd15mColor, 15), text_halign=text.align_center)
+    table.cell(dashboard, 1, 7, signalLabel,      text_color=color.white, bgcolor=color.new(signalColor, 15), text_halign=text.align_center)
+
+
+
+// ===========================
+// 20. SCALPING SIGNAL VISUALS (CLEAR ENTRY HINTS)
+// ===========================
+
+// === Entry Helper ===
+shouldEnter(type) =>
+    type == "long"  ? (canEnterLong) :    type == "short" ? (canEnterShort) : false
+
+// === Scalping-Oriented SL/TP ===
+slLong  = low  - atrValue * 0.5
+slShort = high + atrValue * 0.5
+tpLong  = close + atrValue * 0.8
+tpShort = close - atrValue * 0.8
+
+// === Arrow Signals ===
+plotshape(shouldEnter("long"),  title="Buy Signal",  location=location.belowbar, style=shape.arrowup,   color=color.lime, size=size.large)
+plotshape(shouldEnter("short"), title="Sell Signal", location=location.abovebar, style=shape.arrowdown, color=color.red,  size=size.large)
+
+// === Highlight Bar ===
+bgcolor(shouldEnter("long") ? color.new(color.green, 90) : na)
+bgcolor(shouldEnter("short") ? color.new(color.red, 90) : na)
+
+// === Signal Labels on Chart ===
+if shouldEnter("long")
+    label.new(bar_index, low,
+        "🟢 BUY @ " + str.tostring(close, "#.2f") +
+        "\nSL: " + str.tostring(slLong, "#.2f") +
+        "\nTP: " + str.tostring(tpLong, "#.2f"),
+        style=label.style_label_up,
+        color=color.green,
+        textcolor=color.white,
+        size=size.small)
+
+if shouldEnter("short")
+    label.new(bar_index, high,
+        "🔴 SELL @ " + str.tostring(close, "#.2f") +
+        "\nSL: " + str.tostring(slShort, "#.2f") +
+        "\nTP: " + str.tostring(tpShort, "#.2f"),
+        style=label.style_label_down,
+        color=color.red,
+        textcolor=color.white,
+        size=size.small)
+
+
+// ==========================================================================
+// 21. STRUCTURE-BASED SL/TP SETTINGS (High-Accuracy Layer)
+// ==========================================================================
+structureLen = input.int(5, title="Structure Lookback (Accuracy Layer)")
+riskReward   = input.float(1.8, title="Risk-Reward Ratio (TP = R × SL)", step=0.1)
+
+entryLongPrice  = close
+entryShortPrice = close
+
+// --- ATR-based stop loss
+slATR_Long  = entryLongPrice - atrValue * 0.5
+slATR_Short = entryShortPrice + atrValue * 0.5
+
+// --- Structure-based SL (support/resistance)
+slStruct_Long  = ta.lowest(low, structureLen)
+slStruct_Short = ta.highest(high, structureLen)
+
+// --- Hybrid stop loss (conservative)
+finalSL_Long  = math.max(slATR_Long, slStruct_Long)
+finalSL_Short = math.min(slATR_Short, slStruct_Short)
+
+// --- Risk-based TP
+riskLong      = entryLongPrice - finalSL_Long
+riskShort     = finalSL_Short - entryShortPrice
+finalTP_Long  = entryLongPrice + (riskLong  * riskReward)
+finalTP_Short = entryShortPrice - (riskShort * riskReward)
+
+// ==========================================================================
+// 22. EXECUTION FILTERS (Refined)
+// ==========================================================================
+
+// Valid scalping candle
+validCandleLong  = close > open and (close - open) / (high - low) > 0.5
+validCandleShort = close < open and (open - close) / (high - low) > 0.5
+
+// Volatility & trend strength filter
+isHighVolatility = bbWidth > bbWidthThreshold
+isStrongTrend    = adxStrongTrend and confidencePct >= 85
+
+// Final execution permission
+execBuy  = shouldEnter("long")  and validCandleLong  and isHighVolatility and isStrongTrend
+execSell = shouldEnter("short") and validCandleShort and isHighVolatility and isStrongTrend
+
+// ==========================================================================
+// 23. STRATEGY ENTRY/EXIT EXECUTION (Precision Layer)
+// ==========================================================================
+if execBuy
+    strategy.entry("Long-Accurate", strategy.long, qty=positionSize)
+    strategy.exit("Long-Accurate-Exit", from_entry="Long-Accurate", stop=finalSL_Long, limit=finalTP_Long)
+
+if execSell
+    strategy.entry("Short-Accurate", strategy.short, qty=positionSize)
+    strategy.exit("Short-Accurate-Exit", from_entry="Short-Accurate", stop=finalSL_Short, limit=finalTP_Short)
+
+// ==========================================================================
+// 24. VISUAL CONFIRMATIONS (BUY, SL, TP Dashed Lines + Arrows + Labels)
+// ==========================================================================
+
+// === Declare persistent line variables
+var line lineEntry  = na
+var line lineSL     = na
+var line lineTP     = na
+
+// === Cleanup and draw new lines for Buy
+if execBuy
+    line.delete(lineEntry), line.delete(lineSL), line.delete(lineTP)
+    
+    // Entry Line (Dashed Yellow)
+    lineEntry := line.new(
+        bar_index, entryLongPrice, bar_index + 5, entryLongPrice,
+        color=color.yellow, width=2, style=line.style_dashed)
+
+    // Stop Loss Line (Dashed Red)
+    lineSL := line.new(
+        bar_index, finalSL_Long, bar_index + 5, finalSL_Long,
+        color=color.red, width=2, style=line.style_dashed)
+
+    // Take Profit Line (Dashed Green)
+    lineTP := line.new(
+        bar_index, finalTP_Long, bar_index + 5, finalTP_Long,
+        color=color.green, width=2, style=line.style_dashed)
+
+// === Cleanup and draw new lines for Sell
+if execSell
+    line.delete(lineEntry), line.delete(lineSL), line.delete(lineTP)
+
+    // Entry Line (Dashed Yellow)
+    lineEntry := line.new(
+        bar_index, entryShortPrice, bar_index + 5, entryShortPrice,
+        color=color.yellow, width=2, style=line.style_dashed)
+
+    // Stop Loss Line (Dashed Red)
+    lineSL := line.new(
+        bar_index, finalSL_Short, bar_index + 5, finalSL_Short,
+        color=color.red, width=2, style=line.style_dashed)
+
+    // Take Profit Line (Dashed Green)
+    lineTP := line.new(
+        bar_index, finalTP_Short, bar_index + 5, finalTP_Short,
+        color=color.green, width=2, style=line.style_dashed)
+
+
+// === Signal Arrows
+plotshape(execBuy,  title="Buy Signal",  location=location.belowbar, style=shape.arrowup,   size=size.large, color=color.lime)
+plotshape(execSell, title="Sell Signal", location=location.abovebar, style=shape.arrowdown, size=size.large, color=color.red)
+
+// === Signal Labels
+if execBuy
+    label.new(bar_index, low,
+        "🟢 BUY @ " + str.tostring(entryLongPrice, "#.2f") +
+        "\nSL: " + str.tostring(finalSL_Long, "#.2f") +
+        "\nTP: " + str.tostring(finalTP_Long, "#.2f"),
+        style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if execSell
+    label.new(bar_index, high,
+        "🔴 SELL @ " + str.tostring(entryShortPrice, "#.2f") +
+        "\nSL: " + str.tostring(finalSL_Short, "#.2f") +
+        "\nTP: " + str.tostring(finalTP_Short, "#.2f"),
+        style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+View in Pine Editor・899 lines
+Use on chart
+1
+6
+728
+Trend following using many indicators to provide accurate buy and sell signals on the 1-minute gold chart

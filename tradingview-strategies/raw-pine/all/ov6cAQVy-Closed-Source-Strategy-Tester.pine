@@ -1,0 +1,105 @@
+//@version=6
+strategy("Closed Source Strategy Tester", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true, calc_on_order_fills=true)  // Enable intrabar simulation
+
+// Core Signal Inputs (required; select from Bulletproof plots)
+buyQ8Src = input.source(close, "Buy Source", group="Signals")
+sellQ8Src = input.source(close, "Sell Source", group="Signals")
+exitLongSrc = input.source(close, "Exit Long Source", group="Signals")
+exitShortSrc = input.source(close, "Exit Short Source", group="Signals")
+
+// Risk Management Inputs
+useStopLoss = input.bool(false, "Use StopLoss", group="Risk Management")
+stopLossSrc = input.source(close, "Stop Loss Source", group="Risk Management")
+useTakeProfit = input.bool(false, "Use TakeProfit", group="Risk Management")
+takeProfitSrc = input.source(close, "Take Profit Source", group="Risk Management")
+
+// Session Filter (for day trading futures; adjust as needed)
+// Set useSession default to false.
+useSession = input.bool(false, "Use Session Filter", group="Session")  // Toggle to disable restrictions
+sessionStart = input.int(930, "Session Start (HHMM)", group="Session")
+sessionEnd = input.int(1400, "Session End (HHMM)", group="Session")
+
+// Manual zero-padding for 4-digit HHMM format
+startStr = str.tostring(sessionStart)
+startLen = str.length(startStr)
+startStr := startLen == 1 ? "000" + startStr : startLen == 2 ? "00" + startStr : startLen == 3 ? "0" + startStr : startStr
+
+endStr = str.tostring(sessionEnd)
+endLen = str.length(endStr)
+endStr := endLen == 1 ? "000" + endStr : endLen == 2 ? "00" + endStr : endLen == 3 ? "0" + endStr : endStr
+
+sessionString = startStr + "-" + endStr + ":1234567"  // Valid format like "0930-1400:1234567"
+sessionActive = not na(time(timeframe.period, sessionString))  // Raw session check
+inSession = useSession ? sessionActive : true  // Apply only if enabled; otherwise always true
+
+// Signal Conditions (use >0.5 for float precision; assumes 1.0 on signal, 0 otherwise)
+buySignal = buyQ8Src > 0.5 and inSession
+sellSignal = sellQ8Src > 0.5 and inSession
+exitLongSignal = exitLongSrc > 0.5
+exitShortSignal = exitShortSrc > 0.5
+
+// Track if SL set (for bracket orders)
+var bool slSetLong = false
+var bool slSetShort = false
+
+// Entries
+if (buySignal)
+    strategy.entry("Long", strategy.long)
+    slSetLong := false  // Reset on new entry
+if (sellSignal)
+    strategy.entry("Short", strategy.short)
+    slSetShort := false  // Reset on new entry
+
+// Set SL if position open and not yet set (bracket for intrabar)
+if (strategy.position_size > 0)  // Long open
+    if (useStopLoss and not slSetLong and not na(stopLossSrc) and stopLossSrc != 0)
+        strategy.exit("SL Long", from_entry="Long", stop=stopLossSrc)
+        slSetLong := true
+if (strategy.position_size < 0)  // Short open
+    if (useStopLoss and not slSetShort and not na(stopLossSrc) and stopLossSrc != 0)
+        strategy.exit("SL Short", from_entry="Short", stop=stopLossSrc)
+        slSetShort := true
+
+// Manual TP check every bar (fallback to ensure exit if bracket fails; uses high/low for intrabar approx)
+if (strategy.position_size > 0 and useTakeProfit and not na(takeProfitSrc) and takeProfitSrc != 0 and high >= takeProfitSrc)
+    strategy.close("Long", comment="TP Hit Long")
+if (strategy.position_size < 0 and useTakeProfit and not na(takeProfitSrc) and takeProfitSrc != 0 and low <= takeProfitSrc)
+    strategy.close("Short", comment="TP Hit Short")
+
+// Exits on signals (full close, overrides if still in position)
+if (exitLongSignal and strategy.position_size > 0)
+    strategy.close("Long", comment="Exit Long")
+    slSetLong := false  // Reset for next trade
+if (exitShortSignal and strategy.position_size < 0)
+    strategy.close("Short", comment="Exit Short")
+    slSetShort := false  // Reset for next trade
+
+// Visualization (optional shapes for your strategy; mimics Bulletproof)
+plotshape(buySignal, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Buy Long")
+plotshape(sellSignal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell Short")
+plotshape(exitLongSignal or exitShortSignal, style=shape.xcross, location=location.abovebar, color=color.orange, size=size.small, title="Exit")
+
+// Plots for SL/TP (if using; for visual reference)
+plot(useTakeProfit ? takeProfitSrc : na, "Take Profit", color=color.blue, style=plot.style_circles)
+plot(useStopLoss ? stopLossSrc : na, "Stop Loss", color=color.red, style=plot.style_cross)
+
+View in Pine Editor・87 lines
+Use on chart
+3
+5
+1 027
+Jan 10
+Allows you to test an indicator that is closed source (you don't have access to the code). You will need to understand the exposed data elements of the indicator you are testing. This strategy is only looking for a buy, sell, exit long, or exit short to be signals that change from 0 to 1. The stop loss/take profit, if used, are expected to be price values.
+
+I encourage you to copy this code and modify it to your needs for specific indicators.
+Jan 10
+Release Notes
+Allows you to test an indicator that is closed source (you don't have access to the code). You will need to understand the exposed data elements of the indicator you are testing. This strategy is only looking for a buy, sell, exit long, or exit short to be signals that change from 0 to 1. The stop loss/take profit, if used, are expected to be price values.
+
+I encourage you to copy this code and modify it to your needs for specific indicators.
+Jan 10
+Release Notes
+Set useSession default to false.
+Jan 10
+Release Notes
+Still trying to get the TP/SL to work right.

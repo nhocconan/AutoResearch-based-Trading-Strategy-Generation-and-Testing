@@ -1,0 +1,97 @@
+//@version=6
+strategy("3 Red / 3 Green Strategy with Volatility Check", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=1, currency = currency.USD)
+
+// Input parameters
+maxTradeDuration = input.int(title="Maximum Trade Duration (days)", defval=22, minval=1)
+useGreenExit   = input.bool(title="Use 3 Green Days Exit", defval=true, tooltip = "Exit condition: either 3 consecutive green days (if enabled) or if the trade duration reaches maxTradeDuration days.")
+atrPeriod      = input.int(title="ATR Period", defval=12, minval=0, step=1, tooltip="Use zero to disable ATR filter")
+
+// Define red and green days based on open vs close prices
+redDay   = close < open
+greenDay = close > open
+
+// Conditions: 3 consecutive red days trigger an entry; 3 consecutive green days trigger an exit.
+threeRed   = redDay and redDay[1] and redDay[2]
+threeGreen = greenDay and greenDay[1] and greenDay[2]
+
+var float currentATR = 0.0
+var float averageATR = 0.0
+var bool atr_entry = true
+
+// Calculate ATR and its 30-day average
+if(atrPeriod>0)
+    currentATR := ta.atr(atrPeriod)
+    averageATR := ta.sma(currentATR, 30)
+
+atr_entry := (currentATR > 0 and averageATR > 0) ? (currentATR > averageATR) : true
+// Persistent variable to record the bar index when the trade is entered.
+var int entryBarIndex = na
+
+// Entry: When no position is open, 3 consecutive red days occur, and current ATR is above its 30-day average, enter a long trade.
+if (strategy.position_size == 0 and threeRed and atr_entry)
+    strategy.entry("Long", strategy.long)
+    entryBarIndex := bar_index
+
+// Compute trade duration in days using the absolute difference
+tradeDuration = not na(entryBarIndex) ? math.abs(bar_index - entryBarIndex) : 0
+
+// Exit condition: either 3 consecutive green days (if enabled) or if the trade duration reaches maxTradeDuration days.
+exitCondition = (useGreenExit and threeGreen) or (tradeDuration >= maxTradeDuration)
+
+if (strategy.position_size > 0 and exitCondition)
+    strategy.close("Long")
+
+// Reset the entry bar index when a trade just closed.
+if (strategy.position_size[1] > 0 and strategy.position_size == 0)
+    entryBarIndex := na
+
+// Optional: Plot signals and ATR values for visual confirmation.
+//plotshape(threeRed, title="Entry Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
+//plotshape(threeGreen, title="Green Exit Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
+//plot(currentATR, title="Current ATR", color=color.blue)
+//plot(averageATR, title="30-Day Average ATR", color=color.orange)
+
+View in Pine Editor・52 lines
+Use on chart
+7
+8
+2 191
+Feb 24, 2025
+Strategy Name: 3 Red / 3 Green Strategy with Volatility Check by AlgoTradeKit
+
+Overview
+This long-only strategy is designed for daily bars on NASDAQ (or similar instruments) and combines simple price action with a volatility filter. It “tells it like it is” – enter when the market shows weakness, but only in sufficiently volatile conditions, and exit either on signs of a reversal or after a set number of days.
+
+Entry Conditions
+- Price Action:
+Enter a long position when there are 3 consecutive red days (each day's close is below its open).
+- Volatility Filter:
+The entry is allowed only if the current ATR (Average True Range) calculated over the specified ATR Period (default 12) is greater than its 30-day simple moving average. This ensures the market has enough volatility to justify the trade.
+
+Exit Conditions
+- Reversal Signal:
+Exit the long position when 3 consecutive green days occur (each day's close is above its open), signaling a potential reversal.
+- Time Limit:
+Regardless of market conditions, any open trade is closed if it reaches the Maximum Trade Duration (default 22 days). This helps limit exposure during stagnant or unfavorable market conditions.
+- You can toggle the three-green-day exit if you want to isolate the time-based exit.
+
+Input Parameters
+- Maximum Trade Duration (days): Default is 22 days.
+- ATR Period: Default is 12.
+- Use 3 Green Days Exit: Toggle to enable or disable the three-green-day exit condition.
+
+How It Works
+1. Entry: The strategy monitors daily price action for 3 consecutive down days. When this occurs and if the market is volatile enough (current ATR > 30-day ATR average), it opens a long position.
+2. Exit: The position is closed if the price action reverses with 3 consecutive up days or if the trade has been open for the maximum allowed duration - i.e. use it on daily chart.
+
+Risk Management
+- The built-in maximum trade duration prevents trades from lingering too long in a non-trending or consolidating market.
+- The volatility filter helps ensure that trades are only taken when there is sufficient price movement, potentially increasing the odds of a meaningful move.
+
+Disclaimer
+This strategy is provided “as is” without any warranties. It is essential to backtest and validate the performance on your specific instrument and market conditions before deploying live capital. Trading involves significant risk, and you should adjust parameters to match your risk tolerance.
+
+Test and tweak this strategy to see if it fits your trading style and market conditions. Happy trading!
+Feb 26, 2025
+Release Notes
+Updated default account size and pyramiding value.

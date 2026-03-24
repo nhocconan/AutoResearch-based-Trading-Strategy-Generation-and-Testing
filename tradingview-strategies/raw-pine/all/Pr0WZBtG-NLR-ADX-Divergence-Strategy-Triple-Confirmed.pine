@@ -1,0 +1,349 @@
+//@version=5
+strategy("NLR-ADX Divergence Strategy (DI+/DI-/ADX Triple-Confirm)", overlay=true, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs: NLR-DMI core (from your indicator)
+//──────────────────────────────────────────────────────────────────────────────
+grp_dmi = "Custom DMI Settings"
+lenDMI  = input.int(14, "DMI Length", minval=2, group=grp_dmi)
+
+grp_reg = "Non-Linear Regression Model"
+useDynMean = input.string("EMA(series)", "Mean Reference", options=["EMA(series)", "Static mid"], group=grp_reg)
+staticMid  = input.float(50.0, "Static Mid (DI reference)", step=0.1, group=grp_reg)
+lenMean    = input.int(50, "Dynamic Mean Length", minval=5, group=grp_reg)
+zLen       = input.int(100, "Deviation Scale Length", minval=20, group=grp_reg)
+alphaMin   = input.float(0.00, "Min Regression (near mean)", step=0.01, group=grp_reg)
+alphaMax   = input.float(0.85, "Max Regression (far from mean)", step=0.01, group=grp_reg)
+nlPower    = input.float(2.0, "Non-Linearity Exponent (γ)", step=0.1, minval=0.1, group=grp_reg)
+
+grp_out = "Output & Visualization"
+smoothOut = input.bool(true, "EMA Smooth Outputs", group=grp_out)
+lenOut    = input.int(8, "Output EMA Length", group=grp_out)
+showSeriesOnChart = input.bool(false, "Plot DI+/DI-/ADX on price chart", group=grp_out)
+showDebugLines     = input.bool(true, "Draw divergence lines/labels", group=grp_out)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs: Divergence engine
+//──────────────────────────────────────────────────────────────────────────────
+grp_div = "Divergence Engine"
+pivotLeftBars       = input.int(8,  "Pivot Left Bars", minval=1, group=grp_div)
+pivotRightBars      = input.int(1,  "Pivot Right Bars (Confirmation Delay)", minval=1, group=grp_div)
+maxPivotsToStore    = input.int(30, "Max Historical Pivots to Store", minval=2, group=grp_div)
+minBarsBetweenPivots= input.int(5,  "Min Bars Between Pivots (P1 & P2)", minval=1, group=grp_div)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Utilities
+//──────────────────────────────────────────────────────────────────────────────
+f_clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+f_nl_regress(x, mu, sigma, aMin, aMax, gamma) =>
+    s   = math.max(sigma, 1e-10)
+    d   = math.abs(x - mu) / s
+    d01 = d / (1.0 + d)
+    w   = math.pow(d01, gamma)
+    a   = f_clamp(aMin + (aMax - aMin) * w, 0.0, 1.0)
+    mu + (x - mu) * (1.0 - a)
+
+f_apply_reg(x, useDynStr, meanLen, stdevLen, aMin, aMax, gamma, staticMid) =>
+    mu = useDynStr == "EMA(series)" ? ta.ema(x, meanLen) : staticMid
+    sd = ta.stdev(x, stdevLen)
+    f_nl_regress(x, mu, sd, aMin, aMax, gamma)
+
+// "no-intersection" test between two pivot points for a given series
+f_series_no_intersect(series float s, int p1_idx, float v1, int p2_idx, float v2) =>
+    delta = p2_idx - p1_idx
+    bool ok = true
+    if delta > 1
+        float slope = (v2 - v1) / delta
+        float prev_dev = 0.0
+        bool has_cross = false
+        for j = 1 to delta - 1
+            int hist_offset = bar_index - (p1_idx + j)
+            float lin = v1 + slope * j
+            float val_at = s[hist_offset]
+            float dev = val_at - lin
+            if j > 1 and math.sign(dev) != math.sign(prev_dev)
+                has_cross := true
+            prev_dev := dev
+        ok := not has_cross
+    ok
+
+//──────────────────────────────────────────────────────────────────────────────
+// Custom DMI Calculation (unchanged logically)
+//──────────────────────────────────────────────────────────────────────────────
+upMove   = ta.change(high)
+downMove = -ta.change(low)
+
+plusDM  = upMove > downMove and upMove > 0 ? upMove : 0.0
+minusDM = downMove > upMove and downMove > 0 ? downMove : 0.0
+
+tr1  = high - low
+tr2  = math.abs(high - nz(close[1]))
+tr3  = math.abs(low  - nz(close[1]))
+trueRange = math.max(math.max(tr1, tr2), tr3)
+
+smPlusDM  = ta.rma(plusDM, lenDMI)
+smMinusDM = ta.rma(minusDM, lenDMI)
+smTR      = ta.rma(trueRange, lenDMI)
+
+diPlus_raw  = smPlusDM  / smTR * 100.0
+diMinus_raw = smMinusDM / smTR * 100.0
+
+diPlus_reg  = f_apply_reg(diPlus_raw,  useDynMean, lenMean, zLen, alphaMin, alphaMax, nlPower, staticMid)
+diMinus_reg = f_apply_reg(diMinus_raw, useDynMean, lenMean, zLen, alphaMin, alphaMax, nlPower, staticMid)
+
+diPlus      = smoothOut ? ta.ema(diPlus_reg,  lenOut) : diPlus_reg
+diMinus     = smoothOut ? ta.ema(diMinus_reg, lenOut)  : diMinus_reg
+
+dx      = math.abs(diPlus - diMinus) / math.max(diPlus + diMinus, 1e-10) * 100.0
+adx_raw = ta.rma(dx, lenDMI)
+adx     = smoothOut ? ta.ema(adx_raw, lenOut) : adx_raw
+
+// Optional plots on price pane (off by default)
+plot(showSeriesOnChart ? diPlus  : na, title="+DI (Regressed)", color=color.new(color.teal,  0), linewidth=2)
+plot(showSeriesOnChart ? diMinus : na, title="-DI (Regressed)", color=color.new(color.red,   0), linewidth=2)
+plot(showSeriesOnChart ? adx     : na, title="ADX (Regressed)", color=color.new(color.yellow,0), linewidth=3)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Divergence storage (store *frozen* values at each pivot to avoid EMA drift)
+//──────────────────────────────────────────────────────────────────────────────
+var int[]   pivotLow_bars    = array.new_int()
+var float[] pivotLow_price   = array.new_float()
+var float[] pivotLow_diP     = array.new_float()
+var float[] pivotLow_diM     = array.new_float()
+var float[] pivotLow_adx     = array.new_float()
+
+var int[]   pivotHigh_bars   = array.new_int()
+var float[] pivotHigh_price  = array.new_float()
+var float[] pivotHigh_diP    = array.new_float()
+var float[] pivotHigh_diM    = array.new_float()
+var float[] pivotHigh_adx    = array.new_float()
+
+// Detect confirmed price pivots
+pl_price_confirmed = ta.pivotlow(low,  pivotLeftBars, pivotRightBars)
+ph_price_confirmed = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
+
+//──────────────────────────────────────────────────────────────────────────────
+// BUY side: price LL + (+DI HL) + (-DI lower) + (ADX lower)
+//──────────────────────────────────────────────────────────────────────────────
+var bool newBuySignal  = false
+var bool newSellSignal = false
+newBuySignal  := false
+newSellSignal := false
+
+if not na(pl_price_confirmed)
+    int   P2_bar_idx = bar_index - pivotRightBars
+    float P2_price   = low[pivotRightBars]
+    // *** CAPTURE FROZEN INDICATOR VALUES AT THE PIVOT BAR ***
+    float diP2_cap = diPlus[pivotRightBars]
+    float diM2_cap = diMinus[pivotRightBars]
+    float adx2_cap = adx[pivotRightBars]
+
+    // Compare vs all stored prior low pivots (using stored P1 values)
+    if array.size(pivotLow_bars) > 0
+        for i = 0 to array.size(pivotLow_bars) - 1
+            int   P1_bar_idx = array.get(pivotLow_bars,  i)
+            float P1_price   = array.get(pivotLow_price, i)
+            float diP1_cap   = array.get(pivotLow_diP,   i)
+            float diM1_cap   = array.get(pivotLow_diM,   i)
+            float adx1_cap   = array.get(pivotLow_adx,   i)
+
+            if P2_bar_idx <= P1_bar_idx
+                continue
+            if (P2_bar_idx - P1_bar_idx) < minBarsBetweenPivots
+                continue
+
+            // Price must make a Lower Low
+            bool priceLL = P2_price < P1_price
+
+            // Triple divergence at the same pair of price lows (using *captured* values)
+            bool plus_bull        = diP2_cap > diP1_cap   // +DI higher on new LL
+            bool minus_bear_equiv = diM2_cap < diM1_cap   // -DI lower (bears weakening)
+            bool adx_bear         = adx2_cap < adx1_cap   // ADX lower (weaker trend)
+
+            // No-intersection checks using stored endpoints and live series in-between
+            bool price_no_x   = f_series_no_intersect(low,    P1_bar_idx, P1_price, P2_bar_idx, P2_price)
+            bool diplus_no_x  = f_series_no_intersect(diPlus, P1_bar_idx, diP1_cap, P2_bar_idx, diP2_cap)
+            bool diminus_no_x = f_series_no_intersect(diMinus,P1_bar_idx, diM1_cap, P2_bar_idx, diM2_cap)
+            bool adx_no_x     = f_series_no_intersect(adx,    P1_bar_idx, adx1_cap, P2_bar_idx, adx2_cap)
+
+            if priceLL and plus_bull and minus_bear_equiv and adx_bear and price_no_x and diplus_no_x and diminus_no_x and adx_no_x
+                if showDebugLines
+                    label.new(P2_bar_idx, P2_price, "BUY\n+DI↑  -DI↓  ADX↓", yloc=yloc.belowbar,
+                              style=label.style_label_up, color=color.new(color.green,70), textcolor=color.white, size=size.tiny)
+                strategy.entry("Long", strategy.long, comment="DI/ADX Triple Bull Div")
+                newBuySignal := true
+                break
+
+    // Save THIS pivot-L with captured indicator values (freeze at detection time)
+    array.unshift(pivotLow_bars,  P2_bar_idx)
+    array.unshift(pivotLow_price, P2_price)
+    array.unshift(pivotLow_diP,   diP2_cap)
+    array.unshift(pivotLow_diM,   diM2_cap)
+    array.unshift(pivotLow_adx,   adx2_cap)
+
+    // Trim
+    while array.size(pivotLow_bars) > maxPivotsToStore
+        array.pop(pivotLow_bars)
+        array.pop(pivotLow_price)
+        array.pop(pivotLow_diP)
+        array.pop(pivotLow_diM)
+        array.pop(pivotLow_adx)
+
+//──────────────────────────────────────────────────────────────────────────────
+// SELL side: price HH + (+DI LH) + (-DI higher) + (ADX lower)
+//──────────────────────────────────────────────────────────────────────────────
+if not na(ph_price_confirmed)
+    int   P2_bar_idx = bar_index - pivotRightBars
+    float P2_price   = high[pivotRightBars]
+    // *** CAPTURE FROZEN INDICATOR VALUES AT THE PIVOT BAR ***
+    float diP2_cap = diPlus[pivotRightBars]
+    float diM2_cap = diMinus[pivotRightBars]
+    float adx2_cap = adx[pivotRightBars]
+
+    if array.size(pivotHigh_bars) > 0
+        for i = 0 to array.size(pivotHigh_bars) - 1
+            int   P1_bar_idx = array.get(pivotHigh_bars,  i)
+            float P1_price   = array.get(pivotHigh_price, i)
+            float diP1_cap   = array.get(pivotHigh_diP,   i)
+            float diM1_cap   = array.get(pivotHigh_diM,   i)
+            float adx1_cap   = array.get(pivotHigh_adx,   i)
+
+            if P2_bar_idx <= P1_bar_idx
+                continue
+            if (P2_bar_idx - P1_bar_idx) < minBarsBetweenPivots
+                continue
+
+            // Price must make a Higher High
+            bool priceHH = P2_price > P1_price
+
+            // Triple divergence at the same pair of price highs (using *captured* values)
+            bool plus_bear  = diP2_cap < diP1_cap   // +DI lower on new HH
+            bool minus_bull = diM2_cap > diM1_cap   // -DI higher (bears strengthening)
+            bool adx_bear   = adx2_cap < adx1_cap   // ADX lower (weaker trend)
+
+            // No-intersection checks using stored endpoints and live series in-between
+            bool price_no_x   = f_series_no_intersect(high,   P1_bar_idx, P1_price, P2_bar_idx, P2_price)
+            bool diplus_no_x  = f_series_no_intersect(diPlus, P1_bar_idx, diP1_cap, P2_bar_idx, diP2_cap)
+            bool diminus_no_x = f_series_no_intersect(diMinus,P1_bar_idx, diM1_cap, P2_bar_idx, diM2_cap)
+            bool adx_no_x     = f_series_no_intersect(adx,    P1_bar_idx, adx1_cap, P2_bar_idx, adx2_cap)
+
+            if priceHH and plus_bear and minus_bull and adx_bear and price_no_x and diplus_no_x and diminus_no_x and adx_no_x
+                if showDebugLines
+                    label.new(P2_bar_idx, P2_price, "SELL\n+DI↓  -DI↑  ADX↓", yloc=yloc.abovebar,
+                              style=label.style_label_down, color=color.new(color.red,70), textcolor=color.white, size=size.tiny)
+                strategy.entry("Short", strategy.short, comment="DI/ADX Triple Bear Div")
+                newSellSignal := true
+                break
+
+    // Save THIS pivot-H with captured indicator values (freeze at detection time)
+    array.unshift(pivotHigh_bars,  P2_bar_idx)
+    array.unshift(pivotHigh_price, P2_price)
+    array.unshift(pivotHigh_diP,   diP2_cap)
+    array.unshift(pivotHigh_diM,   diM2_cap)
+    array.unshift(pivotHigh_adx,   adx2_cap)
+
+    // Trim
+    while array.size(pivotHigh_bars) > maxPivotsToStore
+        array.pop(pivotHigh_bars)
+        array.pop(pivotHigh_price)
+        array.pop(pivotHigh_diP)
+        array.pop(pivotHigh_diM)
+        array.pop(pivotHigh_adx)
+
+// Optional: simple flip on opposite signal (exit current side on new entry the other way)
+if strategy.position_size > 0 and newSellSignal
+    strategy.close("Long", comment="FlipToShort")
+if strategy.position_size < 0 and newBuySignal
+    strategy.close("Short", comment="FlipToLong")
+
+View in Pine Editor・262 lines
+Use on chart
+3
+1
+931
+How it works
+
+Builds a cleaner DMI/ADX
+
+
+Recomputes classic +DI, −DI, ADX over a user-set length.
+
+Then “non-linear regresses” each series toward a mean (your choice: dynamic EMA of the series or a fixed Static Mid like 50).
+
+The further a value is from the mean, the stronger the pull (controlled by alphaMin/alphaMax and the γ exponent), giving smoother, more stable DI/ADX lines with less whipsaw.
+
+Optional EMA smoothing on top of that.
+
+Lock in values at confirmed pivots
+
+Uses price pivots (left/right bars) to confirm swing lows and highs.
+
+When a pivot confirms, the script captures (“freezes”) the current +DI, −DI, and ADX values at that bar and stores them. This avoids later drift from smoothing/EMAs.
+
+
+
+Check for triple divergence
+
+
+For a bullish setup (potential long):
+
+Price makes a Lower Low vs. a prior pivot low,
+
++DI is higher than before (bulls quietly stronger),
+
+−DI is lower (bears weakening),
+
+ADX is lower (trend fatigue).
+
+
+
+For a bearish setup (potential short)
+
+
+Price makes a Higher High,
+
++DI is lower, −DI is higher,
+
+ADX is lower.
+
+Adds a “no-intersection” sanity check: between the two pivots, the live series shouldn’t snake across the straight line connecting endpoints. This filters messy, low-quality structures.
+
+
+
+Trade logic
+
+
+On a valid triple-confirm, places a strategy.entry (Long for bullish, Short for bearish) and optionally labels the bar (BUY or SELL with +DI/−DI/ADX arrows).
+
+Simple flip behavior: if you’re long and a new short signal prints (or vice versa), it closes the open side and flips.
+
+
+
+Key inputs you can tweak
+
+
+Custom DMI Settings
+
+DMI Length — base length for DI/ADX.
+
+Non-Linear Regression Model
+
+Mean Reference — EMA(series) (dynamic) or Static mid (e.g., 50).
+
+Dynamic Mean Length & Deviation Scale Length — govern the mean and scale used for regression.
+
+Min/Max Regression & Non-Linearity Exponent (γ) — how strongly values are pulled toward the mean (stronger when far away).
+
+
+
+Divergence Engine
+
+
+Pivot Left/Right Bars — how strict the swing confirmation is (larger = more confirmation, more delay).
+
+Min Bars Between Pivots — avoids comparing “near-duplicate” swings.
+
+Max Historical Pivots to Store — memory cap.
+

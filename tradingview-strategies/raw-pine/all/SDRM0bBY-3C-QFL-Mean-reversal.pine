@@ -1,0 +1,6 @@
+//@version=5
+##root(root_metainfo,rm_0,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,'shape_xcross',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'small',const__string,plotshape,size)

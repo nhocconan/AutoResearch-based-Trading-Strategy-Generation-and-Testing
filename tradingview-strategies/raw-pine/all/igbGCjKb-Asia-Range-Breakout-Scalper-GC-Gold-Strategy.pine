@@ -1,0 +1,139 @@
+//@version=5
+strategy("Asia Range Breakout Scalper (GC/Gold) [Strategy]",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0)
+
+// -------------------------
+// Inputs
+// -------------------------
+asiaSession      = input.session("1900-0000", "Asia Session (New York time)") // 7pm–12am NY
+tradeSession     = input.session("0000-0500", "Breakout Trade Window (New York time)") // after Asia ends
+useSessions      = input.bool(true, "Use session windows")
+
+emaLen           = input.int(200, "Trend EMA Filter Length", minval=1)
+useTrendFilter   = input.bool(true, "Use EMA trend filter")
+
+atrLen           = input.int(14, "ATR Length", minval=1)
+slATR            = input.float(1.2, "Stop Loss (ATR multiple)", step=0.1)
+tpATR            = input.float(1.8, "Take Profit (ATR multiple)", step=0.1)
+
+useTrailing      = input.bool(false, "Use trailing stop instead of fixed stop")
+trailATR         = input.float(1.0, "Trail (ATR multiple)", step=0.1)
+
+maxTradesPerDay  = input.int(2, "Max trades per day", minval=1, maxval=10)
+bufferTicks      = input.int(2, "Breakout buffer (ticks)", minval=0, maxval=50)
+
+// GC tick size is typically 0.1
+tickSize         = input.float(0.1, "Tick size (GC usually 0.1)", step=0.1)
+
+// -------------------------
+// Session checks (America/New_York)
+// -------------------------
+inAsia   = not na(time(timeframe.period, asiaSession, "America/New_York"))
+inTrade  = not na(time(timeframe.period, tradeSession, "America/New_York"))
+okTrade  = useSessions ? inTrade : true
+
+// -------------------------
+// Build Asia range
+// -------------------------
+var float asiaHigh = na
+var float asiaLow  = na
+var bool  rangeReady = false
+
+newDay = ta.change(time("D", "America/New_York")) != 0
+
+if newDay
+    asiaHigh := na
+    asiaLow := na
+    rangeReady := false
+
+if inAsia
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow  := na(asiaLow)  ? low  : math.min(asiaLow, low)
+
+// When Asia ends, lock the range
+asiaEnded = not inAsia and inAsia[1]
+if asiaEnded and not na(asiaHigh) and not na(asiaLow)
+    rangeReady := true
+
+// -------------------------
+// Trend filter
+// -------------------------
+ema = ta.ema(close, emaLen)
+bullOK = close > ema
+bearOK = close < ema
+
+// -------------------------
+// Trade limit per day
+// -------------------------
+var int tradesToday = 0
+if newDay
+    tradesToday := 0
+
+// Buffer
+buffer = bufferTicks * tickSize
+
+// Breakout conditions (only after range ready)
+breakUp   = rangeReady and okTrade and close > (asiaHigh + buffer)
+breakDown = rangeReady and okTrade and close < (asiaLow  - buffer)
+
+allowLong  = breakUp and (not useTrendFilter or bullOK)
+allowShort = breakDown and (not useTrendFilter or bearOK)
+
+// Only enter when flat and under trade limit
+if strategy.position_size == 0 and tradesToday < maxTradesPerDay
+    if allowLong
+        strategy.entry("L", strategy.long)
+        tradesToday += 1
+    if allowShort
+        strategy.entry("S", strategy.short)
+        tradesToday += 1
+
+// -------------------------
+// Exits
+// -------------------------
+atr = ta.atr(atrLen)
+
+longStop  = strategy.position_avg_price - slATR * atr
+longLimit = strategy.position_avg_price + tpATR * atr
+
+shortStop  = strategy.position_avg_price + slATR * atr
+shortLimit = strategy.position_avg_price - tpATR * atr
+
+if useTrailing
+    // trail_points uses price units, not ticks
+    strategy.exit("LX", from_entry="L", trail_points=trailATR * atr, limit=longLimit)
+    strategy.exit("SX", from_entry="S", trail_points=trailATR * atr, limit=shortLimit)
+else
+    strategy.exit("LX", from_entry="L", stop=longStop, limit=longLimit)
+    strategy.exit("SX", from_entry="S", stop=shortStop, limit=shortLimit)
+
+// Optional: close at end of trade window
+closeAtTradeEnd = input.bool(true, "Close positions when trade window ends")
+tradeEnded = useSessions and not inTrade and inTrade[1]
+if closeAtTradeEnd and tradeEnded and strategy.position_size != 0
+    strategy.close_all(comment="Trade Window End")
+
+// -------------------------
+// Plots
+// -------------------------
+plot(ema, "EMA", linewidth=2)
+plot(rangeReady ? asiaHigh : na, "Asia High", style=plot.style_linebr)
+plot(rangeReady ? asiaLow  : na, "Asia Low",  style=plot.style_linebr)
+bgcolor(inAsia ? color.new(color.blue, 92) : na)
+bgcolor(okTrade ? color.new(color.green, 92) : na)
+
+View in Pine Editor・128 lines
+Use on chart
+1
+6
+447
+Asia Range Breakout Scalper (GC/Gold) is a session-based breakout strategy designed specifically for Gold futures (GC). The script identifies the high and low of the Asia session (New York time) and trades breakouts during the following trading window.
+
+The strategy optionally applies a 200 EMA trend filter to align trades with higher-timeframe momentum. Entries are triggered when price breaks above or below the Asia range with a configurable tick buffer. Risk management is handled using ATR-based stop loss and take profit levels, with optional trailing stop functionality. Users can also limit the number of trades per day and automatically close positions at the end of the trading window.
+
+Built as a strategy (not an indicator), it includes fully trackable entries and exits for accurate performance analysis in the TradingView Strategy Tester.

@@ -1,0 +1,71 @@
+//@version=5
+strategy("Bitcoin Exponential Profit Strategy", overlay=true)
+
+// User settings
+fastLength = input.int(9, title="Fast EMA Length", minval=1)
+slowLength = input.int(21, title="Slow EMA Length", minval=1)
+riskPercent = input.float(1, title="Risk % Per Trade", step=0.1) / 100
+rewardMultiplier = input.float(2, title="Reward Multiplier (R:R)", step=0.1)
+trailOffsetPercent = input.float(0.5, title="Trailing Stop Offset %", step=0.1) / 100
+
+// Calculate EMAs
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+
+// Plot EMAs
+plot(fastEMA, color=color.blue, title="Fast EMA")
+plot(slowEMA, color=color.red, title="Slow EMA")
+
+// Account balance and dynamic position sizing
+capital = strategy.equity
+riskAmount = capital * riskPercent
+
+// Define Stop Loss and Take Profit Levels
+stopLossLevel = close * (1 - riskPercent)
+takeProfitLevel = close * (1 + rewardMultiplier * riskPercent)
+
+// Trailing stop offset
+trailOffset = close * trailOffsetPercent
+
+// Entry Condition: Bullish Crossover
+if ta.crossover(fastEMA, slowEMA)
+    positionSize = riskAmount / math.max(close - stopLossLevel, 0.01)  // Prevent division by zero
+    strategy.entry("Long", strategy.long, qty=positionSize)
+    strategy.exit("TakeProfit", from_entry="Long", stop=stopLossLevel, limit=takeProfitLevel, trail_offset=trailOffset)
+
+// Exit Condition: Bearish Crossunder
+if ta.crossunder(fastEMA, slowEMA)
+    strategy.close("Long")
+
+// Labels for Signals
+if ta.crossover(fastEMA, slowEMA)
+    label.new(bar_index, low, "BUY", color=color.green, textcolor=color.white, style=label.style_label_up)
+if ta.crossunder(fastEMA, slowEMA)
+    label.new(bar_index, high, "SELL", color=color.red, textcolor=color.white, style=label.style_label_down)
+
+View in Pine Editor・44 lines
+Use on chart
+4
+0
+1 511
+### Strategy Description:
+The **Bitcoin Trading Strategy** is an **Exponential Moving Average (EMA) crossover strategy** designed to identify bullish trends for Bitcoin.
+
+1. **Indicators**:
+- **Fast EMA (default 9 periods)**: Represents the short-term trend.
+- **Slow EMA (default 21 periods)**: Represents the longer-term trend.
+
+2. **Entry Condition**:
+- A **bullish crossover** occurs when the Fast EMA crosses above the Slow EMA.
+- The strategy enters a **long position** with a user-defined order size (default 0.01 BTC).
+
+3. **Exit Conditions**:
+- **Take Profit**: Closes the position when the profit target is reached (default $100).
+- **Stop Loss**: Closes the position when the price drops below the stop loss level (default $50).
+- **Bearish Crossunder**: Closes the position when the Fast EMA crosses below the Slow EMA.
+
+4. **Visual Signals**:
+- **BUY signals**: Displayed when a bullish crossover occurs.
+- **SELL signals**: Displayed when a bearish crossunder occurs.
+
+This strategy is optimized for trend-following behavior, ensuring positions are aligned with upward-moving trends while managing risk through clear stop-loss and take-profit levels.

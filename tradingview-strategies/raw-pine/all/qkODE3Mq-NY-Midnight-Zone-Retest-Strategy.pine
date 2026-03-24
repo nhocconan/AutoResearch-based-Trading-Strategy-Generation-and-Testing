@@ -1,0 +1,114 @@
+//@version=5
+strategy("NY Midnight Zone Retest Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.cash, currency=currency.USD, max_bars_back=5000)
+
+// --- Inputs ---
+grp_setup   = "Zone Settings"
+timezoneStr = input.string("America/New_York", "Timezone", tooltip="Ensure this matches your chart timezone if possible", group=grp_setup)
+bufferTicks = input.int(2, "Midnight Buffer Ticks", minval=0, group=grp_setup)
+
+grp_mgmt    = "Trade Management Toggles"
+useTP       = input.bool(true, "Use Take Profit?", group=grp_mgmt)
+tpTicks     = input.int(40, "Take Profit (Ticks)", minval=1, group=grp_mgmt)
+useSL       = input.bool(true, "Use Initial Stop Loss?", group=grp_mgmt)
+slTicks     = input.int(5, "Initial Stop Loss (Ticks)", minval=1, group=grp_mgmt)
+useTS       = input.bool(true, "Use Trailing Stop?", group=grp_mgmt)
+tsTicks     = input.int(20, "Trailing Stop (Ticks)", minval=1, group=grp_mgmt)
+useBE       = input.bool(true, "Use Breakeven?", group=grp_mgmt)
+beTicks     = input.int(20, "Breakeven Activation (Ticks)", minval=1, group=grp_mgmt)
+beOffset    = input.int(1, "Breakeven Offset (Ticks)", minval=0, group=grp_mgmt)
+
+grp_time    = "Adjustable Time Windows (NY Time)"
+useWindow1  = input.bool(true, "Use Window 1", inline="w1", group=grp_time)
+w1Time      = input.session("0200-0300", "Time 1", inline="w1", group=grp_time)
+useWindow2  = input.bool(true, "Use Window 2", inline="w2", group=grp_time)
+w2Time      = input.session("0600-0700", "Time 2", inline="w2", group=grp_time)
+useWindow3  = input.bool(true, "Use Window 3", inline="w3", group=grp_time)
+w3Time      = input.session("0900-1000", "Time 3", inline="w3", group=grp_time)
+
+// --- Midnight Logic (Robust) ---
+// This looks for the first bar of the day in NY time to set the Midnight Price
+is_new_day = ta.change(time("D", timezoneStr))
+
+var float midnightPrice = na
+if is_new_day
+    midnightPrice := open
+
+tickSize  = syminfo.mintick
+upperLine = midnightPrice + (bufferTicks * tickSize)
+lowerLine = midnightPrice - (bufferTicks * tickSize)
+
+// --- Time Window Logic ---
+isInWindow = (useWindow1 and not na(time(timeframe.period, w1Time, timezoneStr))) or 
+             (useWindow2 and not na(time(timeframe.period, w2Time, timezoneStr))) or 
+             (useWindow3 and not na(time(timeframe.period, w3Time, timezoneStr)))
+
+// --- Trade State Tracking ---
+var bool priceWasInBuffer = false
+var int tradesThisWindow = 0
+
+// Reset tracking when window starts
+if isInWindow and not isInWindow[1]
+    priceWasInBuffer := false
+    tradesThisWindow := 0
+
+// Check if price is CURRENTLY in the buffer OR has touched it this window
+if isInWindow and ( (high >= lowerLine and high <= upperLine) or (low >= lowerLine and low <= upperLine) or (low <= lowerLine and high >= upperLine) )
+    priceWasInBuffer := true
+
+// --- Entry Logic ---
+// 1. Must be in window
+// 2. Price must have touched/entered buffer previously
+// 3. Current candle must CLOSE outside buffer
+// 4. No current position
+// 5. Haven't traded yet this window
+canTrade = isInWindow and priceWasInBuffer and strategy.position_size == 0 and tradesThisWindow == 0
+
+if canTrade and close > upperLine
+    strategy.entry("Long", strategy.long, comment="BUY")
+    tradesThisWindow += 1
+    priceWasInBuffer := false // Reset for next potential setup
+
+if canTrade and close < lowerLine
+    strategy.entry("Short", strategy.short, comment="SELL")
+    tradesThisWindow += 1
+    priceWasInBuffer := false
+
+// --- Exit Management ---
+if strategy.position_size != 0
+    float entryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    
+    // Core Exits
+    strategy.exit("Exit", qty_percent=100, 
+         profit       = useTP ? tpTicks : na, 
+         loss         = useSL ? slTicks : na, 
+         trail_points = useTS ? tsTicks : na, 
+         trail_offset = 0,
+         comment_loss = "SL", comment_profit = "TP", comment_trailing = "TS")
+
+    // Manual Breakeven Logic
+    if useBE
+        if strategy.position_size > 0 and (high - entryPrice) >= (beTicks * tickSize)
+            strategy.exit("Exit", stop=entryPrice + (beOffset * tickSize), comment="BE")
+        if strategy.position_size < 0 and (entryPrice - low) >= (beTicks * tickSize)
+            strategy.exit("Exit", stop=entryPrice - (beOffset * tickSize), comment="BE")
+
+// --- Visuals ---
+plot(midnightPrice, "Midnight Price", color=color.new(color.gray, 30), style=plot.style_linebr, linewidth=2)
+p_up = plot(upperLine, "Upper Buffer", color=color.new(color.green, 50), style=plot.style_linebr)
+p_lo = plot(lowerLine, "Lower Buffer", color=color.new(color.red, 50), style=plot.style_linebr)
+fill(p_up, p_lo, color.new(color.blue, 90), title="Midnight Zone")
+
+// Background highlight
+bgcolor(isInWindow ? color.new(color.yellow, 95) : na)
+
+// Visual indicator that the "Buffer Touch" has occurred
+plotchar(priceWasInBuffer and isInWindow, "Primed", char='•', location=location.top, color=color.yellow, size=size.tiny)
+
+View in Pine Editor・105 lines
+Use on chart
+1
+7
+544
+A Strategy that takes a position when price returns to, or comes close to the midnight price. You can adjust the tolerance for how close price must be to the midnight price to allow a trade. There is a robust system of take profit and stop loss. You have three adjustable time windows that limit when trades can be entered. The initial settings are just place holders and do not represent the settings on the example chart. The code is open source so you could add additional parameters like hard stops for time, for example, end of day etc. Be sure and set the parameters for units and not usd or % if trading futures. I recommend turning on recalculate on entry and I seem to get better results when it takes its position on bar close.
+
+Any signals generated from the script are for educational or entertainment purposes only and do not represent financial advice or trade recommendations. Code was created with Gemini.

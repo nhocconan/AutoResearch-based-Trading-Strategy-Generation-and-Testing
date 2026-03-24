@@ -1,0 +1,222 @@
+//@version=6
+strategy(
+     "ATR ZigZag Breakout",
+     overlay                 = true,
+     initial_capital         = 50000,
+     margin_long             = 0,
+     margin_short            = 0,
+     calc_on_every_tick      = true,
+     process_orders_on_close = false,
+     pyramiding              = 0,
+     max_lines_count         = 500,
+     max_boxes_count         = 50)
+
+import ReflexSignals/ZigZagCore/2 as zz
+
+//──────────────────────────────────
+// Inputs
+//──────────────────────────────────
+int   zzAtrLen   = input.int(50,  "ZZ ATR Length", minval = 1)
+float zzAtrMult  = input.float(3.0, "ZZ ATR Mult", minval = 0.1, step = 0.1)
+
+float slAtr      = input.float(1.0, "Stop ATR (x)",   minval = 0.1, step = 0.1)
+float rrMult     = input.float(2.0, "RR Mult (x SL)", minval = 0.1, step = 0.1)
+
+bool   enableTradingWindow = input.bool(true,  "Enable Trading Window")
+string tradingWindow       = input.session("0930-1600", "Trading Window")
+
+bool showCandidateTrades = input.bool(true, "Show Candidate Trades")
+
+//──────────────────────────────────
+// Core engine: ATR + ZigZagCore
+//──────────────────────────────────
+float atrVal = ta.atr(zzAtrLen)
+float thr    = atrVal * zzAtrMult
+
+var zz.ZzState state = zz.zz_new()
+state := zz.zz_update(state, thr)
+
+// Shorthands from state
+int   dir          = state.dir
+bool  isNewHigh    = state.isNewHigh
+bool  isNewLow     = state.isNewLow
+
+float lastHighLevel = state.lastHighLevel
+float lastLowLevel  = state.lastLowLevel
+int   lastHighIndex = state.lastHighIndex
+int   lastLowIndex  = state.lastLowIndex
+
+bool  highBroken    = state.highBroken
+bool  lowBroken     = state.lowBroken
+
+// Base breakout conditions from ZigZag structure
+bool baseLongRaw  = dir ==  1 and not highBroken and not isNewLow
+bool baseShortRaw = dir == -1 and not lowBroken  and not isNewHigh
+
+//──────────────────────────────────
+// Strategy logic: window, entries, exits
+//──────────────────────────────────
+bool inTradingWindow = not enableTradingWindow or (time(timeframe.period, tradingWindow) != 0)
+
+var float longSL  = na
+var float longTP  = na
+var float shortSL = na
+var float shortTP = na
+
+// Active trade state: entry level & side
+var float activeEntry = na
+var int   activeSide  = 0          // 1 long, -1 short, 0 none
+
+bool baseLong  = baseLongRaw  and inTradingWindow
+bool baseShort = baseShortRaw and inTradingWindow
+
+// Cancel opposite-side pending orders when direction flips
+if dir == 1
+    strategy.cancel("Short")
+if dir == -1
+    strategy.cancel("Long")
+
+// Entries and exits (stop-market at ZZ levels, ATR SL/TP)
+if strategy.position_size == 0 and inTradingWindow
+    if baseLong and not na(lastHighLevel)
+        float entryPriceL = lastHighLevel
+        float slDistL     = slAtr * atrVal
+        longSL := entryPriceL - slDistL
+        longTP := entryPriceL + rrMult * slDistL
+
+        strategy.entry("Long", strategy.long, stop = entryPriceL)
+        strategy.exit("Long Exit", from_entry = "Long", stop = longSL, limit = longTP)
+
+        activeEntry := entryPriceL
+        activeSide  := 1
+
+    else if baseShort and not na(lastLowLevel)
+        float entryPriceS = lastLowLevel
+        float slDistS     = slAtr * atrVal
+        shortSL := entryPriceS + slDistS
+        shortTP := entryPriceS - rrMult * slDistS
+
+        strategy.entry("Short", strategy.short, stop = entryPriceS)
+        strategy.exit("Short Exit", from_entry = "Short", stop = shortSL, limit = shortTP)
+
+        activeEntry := entryPriceS
+        activeSide  := -1
+
+// Clear active entry when flat again
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeEntry := na
+    activeSide  := 0
+
+//──────────────────────────────────
+// Visualization: candidate level + TP/SL bands
+//──────────────────────────────────
+bool watchLongCond  = showCandidateTrades and strategy.position_size == 0 and inTradingWindow and baseLongRaw
+bool watchShortCond = showCandidateTrades and strategy.position_size == 0 and inTradingWindow and baseShortRaw
+
+plot(
+     watchLongCond ? lastHighLevel : na,
+     title     = "Candidate Long",
+     color     = color.new(color.green, 40),
+     style     = plot.style_linebr,
+     linestyle = plot.linestyle_dotted,
+     linewidth = 1
+)
+
+plot(
+     watchShortCond ? lastLowLevel : na,
+     title     = "Candidate Short",
+     color     = color.new(color.red, 40),
+     style     = plot.style_linebr,
+     linestyle = plot.linestyle_dotted,
+     linewidth = 1
+)
+
+bool inLong  = strategy.position_size > 0
+bool inShort = strategy.position_size < 0
+
+pLongSL = plot(
+     inLong ? longSL : na,
+     color     = color.new(color.red, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+pLongTP = plot(
+     inLong ? longTP : na,
+     color     = color.new(color.green, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+pLongEntry = plot(
+     inLong ? activeEntry : na,
+     color     = color.new(color.blue, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+pShortSL = plot(
+     inShort ? shortSL : na,
+     color     = color.new(color.red, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+pShortTP = plot(
+     inShort ? shortTP : na,
+     color     = color.new(color.green, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+pShortEntry = plot(
+     inShort ? activeEntry : na,
+     color     = color.new(color.blue, 0),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+fill(pLongSL, pLongEntry,  color = color.new(color.red,   80))
+fill(pLongEntry, pLongTP,  color = color.new(color.green, 80))
+fill(pShortEntry, pShortSL, color = color.new(color.red,   80))
+fill(pShortEntry, pShortTP, color = color.new(color.green, 80))
+
+View in Pine Editor・179 lines
+Use on chart
+1
+9
+0
+2
+3 741
+ATR ZigZag Breakout
+
+This strategy uses my ATR ZigZag indicator (powered by the ZigZagCore library) to scalp breakouts at volatility-filtered highs and lows.
+
+Everyone knows stops cluster around clear swing highs and lows. Breakout traders often pile in there, too. These levels are predictable areas where aggressive orders hit the tape. The idea here is simple:
+
+→ Let ATR ZigZag define clean, volatility-filtered pivots
+→ Arm a stop market order at those pivots
+→ Join the breakout when the crowd hits the level
+
+The key to greater success in this simple strategy lies in the ZigZag. Because the pivots are filtered by ATR instead of fixed bar counts or fractals, the levels tend to be more meaningful and less noisy.
+
+This approach is especially suited for intraday trading on volatile instruments (e.g., NQ, GC, liquid crypto pairs).
+
+How It Works
+
+1. Pivot detection
+The ATR ZigZag uses an ATR-based threshold to confirm swing highs and lows. Only when price has moved far enough in the opposite direction does a pivot become “official.”
+
+2. Candidate breakout level
+When a new swing direction is detected and the most recent high/low has not yet been broken in the current leg, the strategy arms a stop market order at that pivot.
+• Long candidate → most recent swing high
+• Short candidate → most recent swing low
+
+These “candidate trades” are shown as dotted lines.
+
+3. Entry, SL, and TP
+If price breaks through the level, the stop order is filled and a bracket is placed:
+• Stop loss = ATR × SL multiplier
+• Take profit = SL distance × RR multiplier
+
+Once a level has traded, it is not reused in the same swing leg.
+
+4. Cancel & rotate
+If the market reverses and forms a new swing in the opposite direction before the level is hit, the pending order is cancelled and a new candidate is considered in the new direction.
+
+Additional Features
+• Optional session filter for backtesting specific trading hours

@@ -1,0 +1,73 @@
+//@version=3
+strategy("Crossover 100-pips", overlay=false, currency = 'USD', commission_type=strategy.commission.cash_per_order , commission_value=0.1,initial_capital=100, default_qty_value=1000)
+
+Alternate = input(false)
+
+emaYellow = ema(close, 5)
+emaRed = ema(close, 10)
+s = rsi(hl2, 10)
+
+start     = timestamp(2018, 11, 30, 00, 00) 
+finish    = timestamp(2020, 1, 1, 23, 59)       
+window()  => time >= start and time <= finish ? true : false 
+
+buy = false
+sell = false
+buy := emaYellow > emaRed and s > 50.0 and window() 
+sell := emaYellow < emaRed and s < 50.0 and window() 
+
+fB = buy
+fS = sell
+
+if(Alternate)
+    fB := buy and not buy[1]
+    fS := sell and not sell[1]
+
+strategy.entry("BUY", strategy.long, when=fB )
+strategy.exit("BUY", profit=100, loss=100, trail_points=20)
+strategy.entry("SELL", strategy.short, when=fS ) 
+strategy.exit("SELL", profit=100, loss=100, trail_points=20)
+
+plot(s)
+
+View in Pine Editor・31 lines
+Use on chart
+6
+7
+8
+7
+23 040
+I got the main concept for this system on another site. While I have made one important change, I must stress that the heart of this system was created by someone else! We must give credit where credit is due!
+
+Y'all know baby pips. Forexphantom published about this system and did both back and forward test around 10 years ago.
+I found it on the sit and now I put it to code to see how it performs. I assume 10 points spread for every trade. I use Renesource or AxiTrader to get the low spreads.
+
+There are 2 mods, the single trades and constant trading on the direction.
+
+Main concept
+Indicators
+5 EMA -- YELLOW
+10 EMA -- RED
+RSI (10 - Apply to Median Price: HL/2) -- One level at 50.
+
+TIME FRAME
+1 Hour Only (very important!)
+
+PAIRS
+Virtually any pair seems to work as this is strictly technical analysis.
+I recommend sticking to the main currencies and avoiding cross currencies (just his preference).
+
+WHEN TO ENTER A TRADE
+Enter LONG when the Yellow EMA crosses the Red EMA from underneath.
+RSI must be approaching 50 from the BOTTOM and cross 50 to warrant entry.
+
+Enter SHORT when the Yellow EMA crosses the Red EMA from the top.
+RSI must be approaching 50 from the TOP and cross 50 to warrant entry.
+
+I've attached a picture which demonstrates all these conditions.
+
+That's it!
+f.bpcdn.co/optimized/3X/1/d/1d51085bb287838197cef97443d4c36d23e744f7_1_690x305.jpg
+
+
+

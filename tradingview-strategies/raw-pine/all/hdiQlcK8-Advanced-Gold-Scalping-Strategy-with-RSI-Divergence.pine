@@ -1,0 +1,181 @@
+//@version=5
+strategy("Advanced Gold Scalping Strategy with RSI Divergence", overlay=false)
+
+// Input parameters
+rsiLengthInput = input.int(60, minval=1, title="RSI Length", group="RSI Settings")
+rsiSourceInput = input.source(ohlc4, "Source", group="RSI Settings")
+maTypeInput = input.string("SMMA (RMA)", title="MA Type", options=["SMA", "Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="MA Settings")
+maLengthInput = input.int(3, title="MA Length", group="MA Settings")
+bbMultInput = input.float(2.0, minval=0.001, maxval=50, title="BB StdDev", group="MA Settings")
+showDivergence = input(true, title="Show Divergence", group="RSI Settings")
+stopLoss = input.float(11, title="Stop Loss (pips)", group="Trade Settings")
+takeProfit = input.float(33, title="Take Profit (pips)", group="Trade Settings")
+
+// RSI and MA calculation
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "Bollinger Bands" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+up = ta.rma(math.max(ta.change(rsiSourceInput), 0), rsiLengthInput)
+down = ta.rma(-math.min(ta.change(rsiSourceInput), 0), rsiLengthInput)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsiMA = ma(rsi, maLengthInput, maTypeInput)
+isBB = maTypeInput == "Bollinger Bands"
+
+// Divergence detection
+lookbackRight = 5
+lookbackLeft = 5
+rangeUpper = 60
+rangeLower = 5
+
+plFound = na(ta.pivotlow(rsi, lookbackLeft, lookbackRight)) ? false : true
+phFound = na(ta.pivothigh(rsi, lookbackLeft, lookbackRight)) ? false : true
+
+_inRange(cond) =>
+    bars = ta.barssince(cond == true)
+    rangeLower <= bars and bars <= rangeUpper
+
+// Bullish divergence
+rsiHL = rsi[lookbackRight] > ta.valuewhen(plFound, rsi[lookbackRight], 1) and _inRange(plFound[1])
+priceLL = low[lookbackRight] < ta.valuewhen(plFound, low[lookbackRight], 1)
+bullishDivergence = priceLL and rsiHL and plFound
+
+// Bearish divergence
+rsiLH = rsi[lookbackRight] < ta.valuewhen(phFound, rsi[lookbackRight], 1) and _inRange(phFound[1])
+priceHH = high[lookbackRight] > ta.valuewhen(phFound, high[lookbackRight], 1)
+bearishDivergence = priceHH and rsiLH and phFound
+
+// Entry conditions
+longCondition = bullishDivergence and rsi < 40
+shortCondition = bearishDivergence and rsi > 60
+
+// Convert pips to price for Gold (assuming 1 pip = 0.1 for XAUUSD)
+stopLossPrice = stopLoss * 0.1
+takeProfitPrice = takeProfit * 0.1
+
+// Execute trades
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL", "Long", stop=strategy.position_avg_price - stopLossPrice, limit=strategy.position_avg_price + takeProfitPrice)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL", "Short", stop=strategy.position_avg_price + stopLossPrice, limit=strategy.position_avg_price - takeProfitPrice)
+
+// Plotting
+plot(rsi, "RSI", color=#7E57C2)
+// plot(rsiMA, "RSI-based MA", color=color.yellow)
+hline(60, "RSI Upper Band", color=#787B86)
+// hline(50, "RSI Middle Band", color=color.new(#787B86, 50))
+hline(40, "RSI Lower Band", color=#787B86)
+fill(hline(60), hline(40), color=color.rgb(126, 87, 194, 90), title="RSI Background Fill")
+
+// Divergence visualization
+plotshape(showDivergence and bullishDivergence ? rsi[lookbackRight] : na, offset=-lookbackRight, title="Bullish Divergence", text="Bull", style=shape.labelup, location=location.absolute, color=color.green, textcolor=color.white)
+plotshape(showDivergence and bearishDivergence ? rsi[lookbackRight] : na, offset=-lookbackRight, title="Bearish Divergence", text="Bear", style=shape.labeldown, location=location.absolute, color=color.red, textcolor=color.white)
+
+View in Pine Editor・80 lines
+Use on chart
+4
+9
+8
+8
+18 192
+Jun 25, 2024
+# Advanced Gold Scalping Strategy with RSI Divergence
+## Overview
+This Pine Script implements an advanced scalping strategy for gold (XAUUSD) trading, primarily designed for the 1-minute timeframe. The strategy utilizes the Relative Strength Index (RSI) indicator along with its moving average to identify potential trade setups based on divergences between price action and RSI movements.
+
+## Key Components
+
+### 1. RSI Calculation
+- Uses a customizable RSI length (default: 60)
+- Allows selection of the source for RSI calculation (default: close price)
+
+### 2. Moving Average of RSI
+- Supports multiple MA types: SMA, EMA, SMMA (RMA), WMA, VWMA, and Bollinger Bands
+- Customizable MA length (default: 3)
+- Option to display Bollinger Bands with adjustable standard deviation multiplier
+
+### 3. Divergence Detection
+- Implements both bullish and bearish divergence identification
+- Uses pivot high and pivot low points to detect divergences
+- Allows for customization of lookback periods and range for divergence detection
+
+### 4. Entry Conditions
+- Long Entry: Bullish divergence when RSI is below 40
+- Short Entry: Bearish divergence when RSI is above 60
+
+### 5. Trade Management
+- Stop Loss: Customizable, default set to 11 pips
+- Take Profit: Customizable, default set to 33 pips
+
+### 6. Visualization
+- Plots RSI line and its moving average
+- Displays horizontal lines at 30, 50, and 70 RSI levels
+- Shows Bollinger Bands when selected
+- Highlights divergences with "Bull" and "Bear" labels on the chart
+
+## Input Parameters
+- RSI Length: Adjusts the period for RSI calculation
+- RSI Source: Selects the price source for RSI (close, open, high, low, hl2, hlc3, ohlc4)
+- MA Type: Chooses the type of moving average applied to RSI
+- MA Length: Sets the period for the moving average
+- BB StdDev: Adjusts the standard deviation multiplier for Bollinger Bands
+- Show Divergence: Toggles the display of divergence labels
+- Stop Loss: Sets the stop loss distance in pips
+- Take Profit: Sets the take profit distance in pips
+
+## Strategy Logic
+
+1. **RSI Calculation**:
+- Computes RSI using the specified length and source
+- Calculates the chosen type of moving average on the RSI
+
+2. **Divergence Detection**:
+- Identifies pivot points in both price and RSI
+- Checks for higher lows in RSI with lower lows in price (bullish divergence)
+- Checks for lower highs in RSI with higher highs in price (bearish divergence)
+
+3. **Trade Entry**:
+- Enters a long position when a bullish divergence is detected and RSI is below 40
+- Enters a short position when a bearish divergence is detected and RSI is above 60
+
+4. **Position Management**:
+- Places a stop loss order at the entry price ± stop loss pips (depending on the direction)
+- Sets a take profit order at the entry price ± take profit pips (depending on the direction)
+
+5. **Visualization**:
+- Plots the RSI and its moving average
+- Draws horizontal lines for overbought/oversold levels
+- Displays Bollinger Bands if selected
+- Shows divergence labels on the chart for identified setups
+
+## Usage Instructions
+
+1. Apply the script to a 1-minute XAUUSD (Gold) chart in TradingView
+2. Adjust the input parameters as needed:
+- Increase RSI Length for less frequent but potentially more reliable signals
+- Modify MA Type and Length to change the sensitivity of the RSI moving average
+- Adjust Stop Loss and Take Profit levels based on current market volatility
+3. Monitor the chart for Bull (long) and Bear (short) labels indicating potential trade setups
+4. Use in conjunction with other analysis and risk management techniques
+
+## Considerations
+- This strategy is designed for short-term scalping and may not be suitable for all market conditions
+- Always backtest and forward test the strategy before using it with real capital
+- The effectiveness of divergence-based strategies can vary depending on market trends and volatility
+- Consider using additional confirmation signals or filters to improve the strategy's performance
+
+Remember to adapt the strategy parameters to your risk tolerance and trading style, and always practice proper risk management.
+Jun 25, 2024
+Release Notes
+XAUUSD
+Jun 25, 2024
+Release Notes
+Source for RSI OHLC4

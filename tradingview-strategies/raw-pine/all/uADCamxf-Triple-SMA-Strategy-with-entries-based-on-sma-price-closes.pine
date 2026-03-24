@@ -1,0 +1,5 @@
+//@version=4
+bullline=##input(defval=60,type='INPUT_INTEGER',##id='in_2')
+bearline=##input(defval=40,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,bullline,input__float)
+##root(root_metainfo,rm_1,bearline,input__float)

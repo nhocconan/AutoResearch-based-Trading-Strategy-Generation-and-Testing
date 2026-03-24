@@ -1,0 +1,118 @@
+//@version=5
+strategy("BIST100 Momentum Swing 1-3 Hafta", overlay=true, margin_long=100, initial_capital=100000, pyramiding=0)
+
+// === INPUTS ===
+sl_mult   = input.float(1.5, "SL ATR Çarpanı")
+tp1_mult  = input.float(1.5, "TP1 ATR Çarpanı")
+tp2_mult  = input.float(3.0, "TP2 ATR Çarpanı")
+vol_mult  = input.float(1.2, "Hacim Çarpanı")
+
+// === INDICATORS ===
+ema9  = ta.ema(close, 9)
+sma20 = ta.sma(close, 20)
+sma50 = ta.sma(close, 50)
+
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+rsi = ta.rsi(close, 14)
+vol = volume
+vol_sma = ta.sma(vol, 20)
+atr = ta.atr(14)
+
+// === CONDITIONS ===
+bull_trend = close > ema9 and close > sma20 and sma20 > sma50
+macd_ok    = macdLine > signalLine
+rsi_ok     = rsi > 50 and rsi < 65
+vol_ok     = vol > vol_sma * vol_mult
+
+longSignal = bull_trend and macd_ok and rsi_ok and vol_ok
+
+// === ENTRY ===
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+// === TP & SL HESAPLAMA ===
+entryPrice = strategy.position_avg_price
+sl_price  = entryPrice - atr * sl_mult
+tp1_price = entryPrice + atr * tp1_mult
+tp2_price = entryPrice + atr * tp2_mult
+
+// === EXIT STRATEJİSİ ===
+// TP1: Pozisyonun %50’si
+strategy.exit("TP1", from_entry="Long", qty_percent=50, limit=tp1_price)
+// TP2: Kalan %50
+strategy.exit("TP2", from_entry="Long", qty_percent=50, limit=tp2_price)
+// Stop loss (tamamı)
+strategy.exit("SL", from_entry="Long", stop=sl_price)
+
+// === EARLY EXIT (Trend Bozulursa) ===
+exitTrend = close < ema9 or macdLine < signalLine
+if (exitTrend)
+    strategy.close("Long")
+
+// === CHART ARROWS ===
+plotshape(longSignal, title="AL", style=shape.labelup, color=color.green, text="AL", size=size.small, location=location.belowbar)
+plotshape(exitTrend, title="SAT", style=shape.labeldown, color=color.red, text="SAT", size=size.small, location=location.abovebar)
+
+// === ALERTS ===
+alertcondition(longSignal, title="AL Sinyali", message="AL sinyali oluştu!")
+alertcondition(exitTrend, title="SAT Sinyali", message="SAT sinyali oluştu!")
+alertcondition(close <= sl_price, title="STOP LOSS", message="STOP LOSS çalıştı!")
+alertcondition(close >= tp1_price, title="TP1", message="TP1 hedefine ulaşıldı!")
+alertcondition(close >= tp2_price, title="TP2", message="TP2 hedefine ulaşıldı!")
+
+View in Pine Editor・62 lines
+Use on chart
+1
+3
+5
+2
+2 583
+
+✅ Entry (LONG) Conditions
+
+Price above EMA9 and SMA20
+
+SMA20 > SMA50 (trend confirmation)
+
+MACD above the signal line
+
+RSI between 50–65 (healthy momentum)
+
+Volume at least 20% above the 20-day average
+
+When all conditions align, a LONG signal is generated.
+
+✅ Exit (SELL) Conditions
+
+Price closes below EMA9
+
+MACD gives a bearish crossover
+
+Or TP/SL levels are hit
+Position is closed.
+
+✅ Multi-Stage Take Profit
+
+TP1: ATR × 1.5 → closes 50% of the position
+
+TP2: ATR × 3.0 → closes remaining 50%
+
+✅ Stop Loss
+
+ATR × 1.5 dynamic SL
+
+✅ What This Strategy Aims For
+
+Catching early trend continuation signals
+
+Filtering weak / low-volume breakouts
+
+Exiting when momentum fades
+
+Eliminating emotional decision-making through rules
+
+📌 Note
+
+Backtest performance may vary by symbol and volatility. Proper risk management is strongly recommended.
+
+

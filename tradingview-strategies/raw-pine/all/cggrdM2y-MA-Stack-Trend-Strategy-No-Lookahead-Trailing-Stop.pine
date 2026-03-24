@@ -1,0 +1,122 @@
+//@version=6
+strategy("MA Stack Trend Strategy (No Lookahead) + Trailing Stop",
+     overlay=true,
+     pyramiding=1,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.75,
+     slippage=0)
+
+//====================
+// Inputs (match your panel)
+//====================
+len13 = input.int(13, "Length", minval=1)
+src13 = input.source(close, "Source")
+
+len8  = input.int(8,  "Length", minval=1)
+src8  = input.source(close, "Source")
+
+len5  = input.int(5,  "Length", minval=1)
+src5  = input.source(close, "Source")
+
+len10 = input.int(10, "Length", minval=1)
+src10 = input.source(close, "Source")
+
+len20 = input.int(20, "Length", minval=1)
+src20 = input.source(close, "Source")
+
+len50 = input.int(50, "Length", minval=1)
+src50 = input.source(close, "Source")
+
+useTrail   = input.bool(true, "Use Trailing Stop?")
+trailPtsIn = input.float(3.0, "Stop Loss Trail Points", step=0.25)   // points (price units)
+trailOffIn = input.float(1.0, "Stop Loss Trail Offset", step=0.25)   // points (price units)
+
+qty = input.int(1, "Order Size (contracts)", minval=1)
+
+//====================
+// MAs (use EMA by default; change to SMA if needed)
+//====================
+ma13 = ta.ema(src13, len13)
+ma8  = ta.ema(src8,  len8)
+ma5  = ta.ema(src5,  len5)
+ma10 = ta.ema(src10, len10)
+ma20 = ta.ema(src20, len20)
+ma50 = ta.ema(src50, len50)
+
+//====================
+// Trend + Trigger (no lookahead)
+// Core idea:
+// - Trend filter: 20 above 50 for long, below for short
+// - Momentum/stack: fast MAs aligned (5>8>10>13) for long, reverse for short
+// - Entry trigger: 5 crosses 13 (confirmed on close, next bar execution is realistic)
+//====================
+trendLong  = ma20 > ma50
+trendShort = ma20 < ma50
+
+stackLong  = ma5 > ma8 and ma8 > ma10 and ma10 > ma13
+stackShort = ma5 < ma8 and ma8 < ma10 and ma10 < ma13
+
+// Trigger uses crossover on the JUST-CLOSED bar (no future data)
+longTrig  = ta.crossover(ma5, ma13)
+shortTrig = ta.crossunder(ma5, ma13)
+
+longCond  = trendLong  and stackLong  and longTrig
+shortCond = trendShort and stackShort and shortTrig
+
+// Optional: avoid chop by requiring some separation
+minSepPts = input.float(0.5, "Min MA Separation (pts)", step=0.25)
+sepOkLong  = (ma5 - ma13) > minSepPts
+sepOkShort = (ma13 - ma5) > minSepPts
+
+longCond  := longCond  and sepOkLong
+shortCond := shortCond and sepOkShort
+
+//====================
+// Entries
+//====================
+if longCond and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=qty)
+
+if shortCond and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=qty)
+
+//====================
+// Exits
+// 1) Trailing stop (points-based; no lookahead)
+// 2) Opposite signal closes position
+//====================
+trailPts = trailPtsIn
+trailOff = trailOffIn
+
+if strategy.position_size > 0
+    if useTrail
+        strategy.exit("XL", "L", trail_points=trailPts, trail_offset=trailOff)
+    // close on opposite trigger (confirmed)
+    if shortCond
+        strategy.close("L", comment="XS")
+
+if strategy.position_size < 0
+    if useTrail
+        strategy.exit("XS", "S", trail_points=trailPts, trail_offset=trailOff)
+    if longCond
+        strategy.close("S", comment="XL")
+
+//====================
+// Plots
+//====================
+plot(ma5,  "EMA 5",  linewidth=1)
+plot(ma8,  "EMA 8",  linewidth=1)
+plot(ma10, "EMA 10", linewidth=1)
+plot(ma13, "EMA 13", linewidth=1)
+plot(ma20, "EMA 20", linewidth=2)
+plot(ma50, "EMA 50", linewidth=2)
+
+View in Pine Editor・114 lines
+Use on chart
+1
+8
+489
+First indicator I did. Inspired by brunoss his indicator: SMA future scalper.
+Let me know ur thoughts.

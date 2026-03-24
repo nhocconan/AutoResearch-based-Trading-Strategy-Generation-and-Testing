@@ -1,0 +1,443 @@
+//@version=6
+
+strategy("VWAP & Band Cross Strategy v6 - Advanced", overlay=true, 
+     pyramiding=0, // Must be a constant/literal value here. Logic uses input below.
+     calc_on_every_tick=true, // MANDATORY for real-time daily PnL check
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100)
+
+// --- Strategy Inputs ---
+// Define group names as strings to be used in individual input calls
+strategy_group_name = "General Strategy Settings"
+vwap_group_name = "VWAP & Standard Deviation Bands Settings"
+entry_group_name = "Entry Conditions"
+exit_group_name = "Exit Conditions"
+time_group_name = "Time Parameters"
+confirm_group_name = "Confirmation Indicators Settings"
+daily_limits_group_name = "Daily Profit/Loss Limits" 
+
+// General Strategy Settings (Recommendation 3)
+trade_direction = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group=strategy_group_name)
+// The actual pyramiding limit is now used in the entry logic, not the strategy header.
+strategy_pyramiding_limit = input.int(1, "Max Pyramiding Entries", minval=1, group=strategy_group_name, tooltip="Maximum number of positions allowed simultaneously (1 for no pyramiding).")
+strategy_max_risk = input.float(0, "Max Intraday Risk ($)", minval=0.0, step=1.0, group=strategy_group_name, tooltip="Maximum realized loss allowed for the day (0 = disabled).")
+
+
+// --- VWAP and Bands Inputs (Recommendation 5) ---
+vwap_src = input.source(close, "VWAP Source", group=vwap_group_name)
+vwap_period = input.string("Session", "VWAP Reset Period", options=["Session", "Daily", "Weekly"], group=vwap_group_name, tooltip="Period over which the VWAP calculation resets.")
+std_dev_multiplier = input.float(2.0, "Standard Deviation Multiplier", minval=0.1, step=0.1, group=vwap_group_name)
+std_dev_length = input.int(20, "Standard Deviation Lookback", minval=1, group=vwap_group_name)
+
+// --- Entry Conditions Inputs ---
+use_price_vwap_band_entry = input.bool(true, "Use Price/VWAP/Band Cross Entry", group=entry_group_name)
+entry_cross_type = input.string("Price Over VWAP", "Entry Cross Type", 
+     options=[
+     "Price Over VWAP", 
+     "Price Under VWAP", 
+     "Price Over Upper Band (Breakout)", 
+     "Price Under Lower Band (Breakout)",
+     "Price Under Upper Band (Long Reversal)", 
+     "Price Over Lower Band (Short Reversal)"  
+     ], 
+     group=entry_group_name)
+
+// --- Exit Conditions Inputs (Recommendation 1: TSL/BE) ---
+use_exit_strategy = input.bool(true, "Use Exit Strategy", group=exit_group_name)
+exit_type = input.string("VWAP Cross", "Exit Type", 
+     options=[
+     "Fixed Ticks", 
+     "Fixed Ticks + TSL", // New TSL/BE Option
+     "ATR", 
+     "Capped ATR", 
+     "VWAP Cross", 
+     "Price Cross Under Upper Band (Long Exit)", 
+     "Price Cross Over Lower Band (Short Exit)"  
+     ], 
+     group=exit_group_name)
+
+fixed_ticks_take_profit = input.int(50, "Fixed Ticks Take Profit", minval=1, group=exit_group_name) 
+fixed_ticks_stop_loss = input.int(20, "Fixed Ticks Stop Loss (Initial)", minval=1, group=exit_group_name)   
+
+// TSL/BE Specific Inputs
+tsl_breakeven_trigger = input.int(40, "TSL Breakeven Trigger (Ticks)", minval=0, group=exit_group_name, tooltip="Profit in ticks needed to activate Trailing Stop/Breakeven.")
+tsl_trail_distance = input.int(20, "TSL Trail Distance (Ticks)", minval=1, group=exit_group_name, tooltip="Distance in ticks the stop trails the price.")
+
+atr_length = input.int(14, "ATR Length (for ATR/Capped ATR)", minval=1, group=exit_group_name)
+atr_multiplier = input.float(1.5, "ATR Multiplier (for ATR/Capped ATR)", minval=0.1, step=0.1, group=exit_group_name)
+atr_cap_percentage = input.float(2.0, "ATR Cap % (for Capped ATR)", minval=0.1, step=0.1, group=exit_group_name) 
+
+// --- Time Parameters Inputs (Recommendation 4: Session Input) ---
+trading_session = input.session("0930-1600", "Trading Session (Entries)", group=time_group_name, tooltip="Time window for entries (e.g., 0930-1600).")
+
+close_all_enabled = input.bool(true, "Enable Auto Close All Positions", group=time_group_name)
+close_all_hour = input.int(15, "Close All Hour", minval=0, maxval=23, group=time_group_name)
+close_all_minute = input.int(45, "Close All Minute", minval=0, maxval=59, group=time_group_name)
+
+// === TRADING DAYS SELECTION ===
+trade_sunday      = input.bool(true,  'Trade Sunday')
+trade_monday      = input.bool(true,  'Trade Monday')
+trade_tuesday     = input.bool(true,  'Trade Tuesday')
+trade_wednesday = input.bool(true,  'Trade Wednesday')
+trade_thursday    = input.bool(true,  'Trade Thursday')
+trade_friday      = input.bool(true,  'Trade Friday')
+
+// --- Daily Profit/Loss Limits Inputs ---
+use_daily_limits = input.bool(false, "Enable Daily Profit/Loss Limits", group=daily_limits_group_name)
+daily_limit_unit = input.string("Ticks", "Daily Limit Unit", options=["Ticks", "Dollars"], group=daily_limits_group_name)
+daily_take_profit_value_input = input.float(200.0, "Daily Take Profit (Value)", minval=0.0, group=daily_limits_group_name)
+daily_stop_loss_value_input = input.float(100.0, "Daily Stop Loss (Value)", minval=0.0, group=daily_limits_group_name)
+daily_reset_hour = input.int(17, "Daily Reset Hour", minval=0, maxval=23, group=daily_limits_group_name)
+daily_reset_minute = input.int(0, "Daily Reset Minute", minval=0, maxval=59, group=daily_limits_group_name)
+
+// Daily Trade Limit Inputs
+use_daily_trade_limit = input.bool(false, "Enable Daily Trade Limit", group=daily_limits_group_name)
+max_daily_trades = input.int(9, "Max Daily Trades", minval=1, group=daily_limits_group_name)
+
+
+// --- Confirmation Parameters Inputs (Recommendation 2: Logic Toggle) ---
+confirm_logic = input.string("AND", "Confirmation Logic", options=["AND", "OR"], group=confirm_group_name, tooltip="How multiple confirmations are combined: 'AND' requires all enabled confirmations; 'OR' requires at least one.")
+
+// RSI Confirmation
+use_rsi_confirm = input.bool(false, "Use RSI Confirmation", group=confirm_group_name)
+rsi_length = input.int(14, "RSI Length", minval=1, group=confirm_group_name)
+rsi_oversold = input.int(70, "RSI Oversold Level (Long)", minval=0, maxval=100, group=confirm_group_name)
+rsi_overbought = input.int(30, "RSI Overbought Level (Short)", minval=0, maxval=100, group=confirm_group_name)
+
+// SMMA Confirmation
+use_smma_confirm = input.bool(false, "Use SMMA Confirmation", group=confirm_group_name)
+smma_length = input.int(200, "SMMA Length", minval=1, group=confirm_group_name)
+
+
+// MACD Confirmation
+use_macd_confirm = input.bool(false, "Use MACD Confirmation", group=confirm_group_name)
+macd_fast_length = input.int(12, "MACD Fast Length", minval=1, group=confirm_group_name)
+macd_slow_length = input.int(26, "MACD Slow Length", minval=1, group=confirm_group_name)
+macd_signal_length = input.int(9, "MACD Signal Length", minval=1, group=confirm_group_name)
+
+
+// --- Calculations ---
+
+// VWAP and Bands Calculation
+daily_anchor = ta.change(time("D")) != 0
+weekly_anchor = ta.change(time("W")) != 0
+
+vwap_calc = vwap_period == "Daily" ? ta.vwap(vwap_src, daily_anchor) : 
+             vwap_period == "Weekly" ? ta.vwap(vwap_src, weekly_anchor) : 
+             ta.vwap(vwap_src) // Session VWAP (default)
+vwap = vwap_calc
+
+std_dev = ta.stdev(vwap_src, std_dev_length) 
+upper_band = vwap + (std_dev * std_dev_multiplier)
+lower_band = vwap - (std_dev * std_dev_multiplier)
+
+// Confirmation Indicator Calculations
+rsi_val = ta.rsi(close, rsi_length)
+smma_val = ta.ema(close, smma_length) 
+[macd_line, signal_line, hist_line] = ta.macd(close, macd_fast_length, macd_slow_length, macd_signal_length)
+
+// --- Plotting ---
+plot(vwap, color=color.purple, title="VWAP", linewidth=2)
+plot_upper_band = plot(upper_band, color=color.green, title="Upper Band", linewidth=1, style=plot.style_linebr)
+plot_lower_band = plot(lower_band, color=color.red, title="Lower Band", linewidth=1, style=plot.style_linebr)
+fill(plot_upper_band, plot_lower_band, color=color.new(color.blue, 90), title="VWAP Band Fill")
+plot(smma_val, color=color.gray, title="SMMA", linewidth=2, display=use_smma_confirm ? display.all : display.none)
+
+// --- Time Filtering (using sessions) --- 
+in_entry_time = not na(time(timeframe.period, trading_session))
+
+// Close All Time check (retains H/M custom function for single bar close)
+in_close_all_time = (hour(time_close) == close_all_hour) and (minute(time_close) == close_all_minute)
+
+// --- Daily Profit/Loss Tracking & Trade Counting ---
+var float daily_realized_pnl = 0.0 
+var bool daily_limit_reached = false
+var int prev_total_closed_trades = 0 
+var int daily_trades_count = 0 
+
+// Determine if it's time to reset daily PnL and trade count
+current_time_in_minutes = hour(time_close) * 60 + minute(time_close)
+prev_time_in_minutes = hour(time_close[1]) * 60 + minute(time_close[1])
+reset_total_minutes = daily_reset_hour * 60 + daily_reset_minute
+
+bool reset_condition = false
+if bar_index == 0 
+    reset_condition := true
+else if time("D") != time("D")[1] 
+    reset_condition := true
+else if current_time_in_minutes >= reset_total_minutes and prev_time_in_minutes < reset_total_minutes 
+    reset_condition := true
+
+if reset_condition
+    daily_realized_pnl := 0.0
+    daily_limit_reached := false
+    daily_trades_count := 0
+    prev_total_closed_trades := strategy.closedtrades 
+
+// Update daily realized PnL
+float profit_this_bar = 0.0
+if strategy.closedtrades > prev_total_closed_trades
+    for i = prev_total_closed_trades to strategy.closedtrades - 1
+        profit_this_bar := profit_this_bar + strategy.closedtrades.profit(i)
+daily_realized_pnl := daily_realized_pnl + profit_this_bar
+prev_total_closed_trades := strategy.closedtrades 
+
+// Since calc_on_every_tick=true, 'strategy.openprofit' updates on every tick.
+current_unrealized_pnl = strategy.position_size != 0 ? strategy.openprofit : 0.0
+total_daily_pnl = daily_realized_pnl + current_unrealized_pnl
+
+// DAILY LIMIT VALUE CALCULATION 
+var float daily_take_profit_value = 0.0
+var float daily_stop_loss_value = 0.0
+
+if daily_limit_unit == "Ticks"
+    daily_take_profit_value := daily_take_profit_value_input * syminfo.mintick * syminfo.pointvalue
+    daily_stop_loss_value := daily_stop_loss_value_input * syminfo.mintick * syminfo.pointvalue
+else
+    daily_take_profit_value := daily_take_profit_value_input
+    daily_stop_loss_value := daily_stop_loss_value_input
+
+// Check daily limits and Max Intraday Risk (relies on Daily SL)
+if use_daily_limits or strategy_max_risk > 0
+    daily_max_sl = math.max(daily_stop_loss_value, strategy_max_risk) // Use the larger of the two limits
+
+    // If a limit is hit, set the flag and close the position immediately on the same tick.
+    if not daily_limit_reached
+        if total_daily_pnl >= daily_take_profit_value
+            daily_limit_reached := true
+            if strategy.position_size != 0
+                strategy.close_all(comment="Daily TP Hit (Total PnL)")
+        else if total_daily_pnl <= -daily_max_sl
+            daily_limit_reached := true
+            if strategy.position_size != 0
+                strategy.close_all(comment="Daily SL Hit (Total PnL)")
+
+
+// === TRADING DAY FILTER ===
+is_trading_day = (dayofweek == dayofweek.sunday      and trade_sunday) or
+                 (dayofweek == dayofweek.monday      and trade_monday) or
+                 (dayofweek == dayofweek.tuesday     and trade_tuesday) or
+                 (dayofweek == dayofweek.wednesday and trade_wednesday) or
+                 (dayofweek == dayofweek.thursday    and trade_thursday) or
+                 (dayofweek == dayofweek.friday      and trade_friday)
+
+// --- Confirmation Logic ---
+confirm_long = confirm_logic == "AND" ? true : false
+confirm_short = confirm_logic == "AND" ? true : false
+int confirm_count_long = 0
+int confirm_count_short = 0
+total_confirmations_enabled = (use_rsi_confirm ? 1 : 0) + (use_smma_confirm ? 1 : 0) + (use_macd_confirm ? 1 : 0)
+
+// RSI Confirmation
+if use_rsi_confirm
+    rsi_long_ok = rsi_val < rsi_oversold
+    rsi_short_ok = rsi_val > rsi_overbought
+    if confirm_logic == "AND"
+        confirm_long := confirm_long and rsi_long_ok
+        confirm_short := confirm_short and rsi_short_ok
+    else
+        if rsi_long_ok
+            confirm_count_long := confirm_count_long + 1
+        if rsi_short_ok
+            confirm_count_short := confirm_count_short + 1
+
+// SMMA Confirmation
+if use_smma_confirm
+    smma_long_ok = close > smma_val
+    smma_short_ok = close < smma_val
+    if confirm_logic == "AND"
+        confirm_long := confirm_long and smma_long_ok
+        confirm_short := confirm_short and smma_short_ok
+    else
+        if smma_long_ok
+            confirm_count_long := confirm_count_long + 1
+        if smma_short_ok
+            confirm_count_short := confirm_count_short + 1
+            
+// MACD Confirmation
+if use_macd_confirm
+    macd_long_ok = macd_line > signal_line and hist_line > 0
+    macd_short_ok = macd_line < signal_line and hist_line < 0
+    if confirm_logic == "AND"
+        confirm_long := confirm_long and macd_long_ok
+        confirm_short := confirm_short and macd_short_ok
+    else
+        if macd_long_ok
+            confirm_count_long := confirm_count_long + 1
+        if macd_short_ok
+            confirm_count_short := confirm_count_short + 1
+
+// Final "OR" check: must have at least one confirmation met OR no confirmations enabled.
+if confirm_logic == "OR"
+    confirm_long := confirm_count_long > 0 or total_confirmations_enabled == 0 
+    confirm_short := confirm_count_short > 0 or total_confirmations_enabled == 0 
+
+// --- Entry Logic (Pyramiding Check Included) ---
+// Calculate all potential entry cross conditions unconditionally
+price_over_vwap_entry = ta.crossover(close, vwap)
+price_under_vwap_entry = ta.crossunder(close, vwap)
+price_over_upper_band_entry = ta.crossover(close, upper_band)
+price_under_lower_band_entry = ta.crossunder(close, lower_band)
+price_under_upper_band_entry = ta.crossunder(close, upper_band)
+price_over_lower_band_entry = ta.crossover(close, lower_band)
+
+
+long_entry_condition = false
+short_entry_condition = false
+
+// Check daily trade limit before evaluating other entry conditions
+bool can_take_more_trades = not use_daily_trade_limit or (daily_trades_count < max_daily_trades)
+
+if use_price_vwap_band_entry and in_entry_time and not daily_limit_reached and can_take_more_trades 
+    if entry_cross_type == "Price Over VWAP"
+        long_entry_condition := price_over_vwap_entry
+        short_entry_condition := false 
+    else if entry_cross_type == "Price Under VWAP"
+        long_entry_condition := false 
+        short_entry_condition := price_under_vwap_entry
+    else if entry_cross_type == "Price Over Upper Band (Breakout)"
+        long_entry_condition := price_over_upper_band_entry
+        short_entry_condition := false 
+    else if entry_cross_type == "Price Under Lower Band (Breakout)"
+        long_entry_condition := false 
+        short_entry_condition := price_under_lower_band_entry
+    else if entry_cross_type == "Price Under Upper Band (Long Reversal)"
+        long_entry_condition := price_under_upper_band_entry
+        short_entry_condition := false 
+    else if entry_cross_type == "Price Over Lower Band (Short Reversal)"
+        long_entry_condition := false 
+        short_entry_condition := price_over_lower_band_entry
+
+// Combine entry conditions with confirmations, day filter, and trade direction toggle
+final_long_entry = long_entry_condition and is_trading_day and confirm_long and (trade_direction == "Both" or trade_direction == "Long Only")
+final_short_entry = short_entry_condition and is_trading_day and confirm_short and (trade_direction == "Both" or trade_direction == "Short Only")
+
+// --- Strategy Execution (Entry) ---
+bool can_pyramid_long = strategy.position_size >= 0 and strategy.position_size < strategy_pyramiding_limit
+bool can_pyramid_short = strategy.position_size <= 0 and math.abs(strategy.position_size) < strategy_pyramiding_limit
+
+if final_long_entry and can_pyramid_long
+    strategy.entry("Long", strategy.long, comment="L Entry")
+    daily_trades_count := daily_trades_count + 1 
+
+if final_short_entry and can_pyramid_short
+    strategy.entry("Short", strategy.short, comment="S Entry")
+    daily_trades_count := daily_trades_count + 1 
+
+// --- Exit Logic (Continuously Updated TP/SL + TSL/BE) ---
+
+float take_profit_long = na
+float stop_loss_long = na
+float take_profit_short = na
+float stop_loss_short = na
+
+// Calculate ATR for exit
+atr_value = ta.atr(atr_length)
+
+// Update exit levels every bar while a position is open
+if strategy.position_size > 0 // Long position logic
+    if exit_type == "Fixed Ticks" or exit_type == "Fixed Ticks + TSL" 
+        take_profit_long := strategy.position_avg_price + fixed_ticks_take_profit * syminfo.mintick
+        stop_loss_long := strategy.position_avg_price - fixed_ticks_stop_loss * syminfo.mintick
+    else if exit_type == "ATR" or exit_type == "Capped ATR"
+        atr_tp = strategy.position_avg_price + atr_value * atr_multiplier
+        atr_sl = strategy.position_avg_price - atr_value * atr_multiplier
+        take_profit_long := atr_tp
+        stop_loss_long := atr_sl
+
+        if exit_type == "Capped ATR"
+            cap_tp = strategy.position_avg_price * (1 + atr_cap_percentage / 100)
+            take_profit_long := math.min(atr_tp, cap_tp)
+            cap_sl = strategy.position_avg_price * (1 - atr_cap_percentage / 100)
+            stop_loss_long := math.max(atr_sl, cap_sl)
+
+if strategy.position_size < 0 // Short position logic
+    if exit_type == "Fixed Ticks" or exit_type == "Fixed Ticks + TSL" 
+        take_profit_short := strategy.position_avg_price - fixed_ticks_take_profit * syminfo.mintick
+        stop_loss_short := strategy.position_avg_price + fixed_ticks_stop_loss * syminfo.mintick
+    else if exit_type == "ATR" or exit_type == "Capped ATR"
+        atr_tp = strategy.position_avg_price - atr_value * atr_multiplier
+        atr_sl = strategy.position_avg_price + atr_value * atr_multiplier
+        take_profit_short := atr_tp
+        stop_loss_short := atr_sl
+
+        if exit_type == "Capped ATR"
+            cap_tp = strategy.position_avg_price * (1 - atr_cap_percentage / 100)
+            take_profit_short := math.max(atr_tp, cap_tp)
+            cap_sl = strategy.position_avg_price * (1 + atr_cap_percentage / 100)
+            stop_loss_short := math.min(atr_sl, cap_sl)
+
+
+// Calculate all potential exit cross conditions unconditionally
+price_crossunder_vwap_exit = ta.crossunder(close, vwap)
+price_crossover_vwap_exit = ta.crossover(close, vwap)
+price_crossunder_upper_band_exit = ta.crossunder(close, upper_band)
+price_crossover_lower_band_exit = ta.crossover(close, lower_band)
+
+
+// --- Strategy Execution (Exit) ---
+if use_exit_strategy and not daily_limit_reached
+    if strategy.position_size > 0 // Long position open
+        if exit_type == "Fixed Ticks" or exit_type == "ATR" or exit_type == "Capped ATR"
+            strategy.exit("Exit Long", from_entry="Long", limit=take_profit_long, stop=stop_loss_long)
+        else if exit_type == "Fixed Ticks + TSL" 
+            strategy.exit("Exit Long", from_entry="Long", 
+                 limit=take_profit_long, 
+                 stop=stop_loss_long,
+                 trail_points=tsl_breakeven_trigger, 
+                 trail_offset=tsl_trail_distance    
+                 )
+        else if exit_type == "VWAP Cross" and price_crossunder_vwap_exit
+            strategy.close("Long", comment="VWAP Cross Exit")
+        else if exit_type == "Price Cross Under Upper Band (Long Exit)" and price_crossunder_upper_band_exit
+            strategy.close("Long", comment="Upper Band Cross Exit (Reversal)")
+        else if exit_type == "Price Cross Over Lower Band (Short Exit)" and price_crossover_lower_band_exit
+            strategy.close("Long", comment="Lower Band Cross Exit (Against Long)")
+
+    if strategy.position_size < 0 // Short position open
+        if exit_type == "Fixed Ticks" or exit_type == "ATR" or exit_type == "Capped ATR"
+            strategy.exit("Exit Short", from_entry="Short", limit=take_profit_short, stop=stop_loss_short)
+        else if exit_type == "Fixed Ticks + TSL" 
+            strategy.exit("Exit Short", from_entry="Short", 
+                 limit=take_profit_short, 
+                 stop=stop_loss_short,
+                 trail_points=tsl_breakeven_trigger, 
+                 trail_offset=tsl_trail_distance    
+                 )
+        else if exit_type == "VWAP Cross" and price_crossover_vwap_exit
+            strategy.close("Short", comment="VWAP Cross Exit")
+        else if exit_type == "Price Cross Under Upper Band (Long Exit)" and price_crossunder_upper_band_exit 
+            strategy.close("Short", comment="Upper Band Cross Exit (Against Short)")
+        else if exit_type == "Price Cross Over Lower Band (Short Exit)" and price_crossover_lower_band_exit
+            strategy.close("Short", comment="Lower Band Cross Exit (Reversal)")
+
+// --- Close All Positions at Specific Time ---
+if close_all_enabled and in_close_all_time and strategy.position_size != 0 and not daily_limit_reached
+    strategy.close_all(comment="End of Day Close")
+
+View in Pine Editor・416 lines
+Use on chart
+5
+5
+1 043
+These are a few updates made to the original script. The daily take profit and stop loss functions correctly for 1 contract but because of the pyramiding input even if not used you'll need to multiply the values by the number of contracts to keep consistent results. I have been unable to correct that function. Let me know if you test the script and have any recommendations for improvement. If trading an actual account I do recommend setting hard daily limits with your provider because there is still slippage from the original exit alerts even with the daily stop loss in place.
+
+1. Real-Time Execution & Hard PnL Limits (The Focus)
+The most critical changes were implemented to ensure the daily profit and loss limits act as hard, real-time barriers instead of waiting for the candle to close.
+• Intrabar Tick Execution: The parameter calc_on_every_tick=true was added to the strategy() declaration. This forces the entire script to re-evaluate its logic on every single price update (tick), enabling immediate action.
+• Real-Time PnL Tracking: The PnL calculation was updated to track the total_daily_pnl by summing the realized profit/loss (from closed trades) and the unrealized profit/loss (strategy.openprofit) on every tick.
+• Immediate Closure: The script now checks the total_daily_pnl against the user-defined limits (daily_take_profit_value, daily_stop_loss_value) and immediately executes strategy.close_all() the moment the threshold is breached, preventing further trading.
+• Combined Risk Enforcement: The user-defined "Max Intraday Risk ($)" and the "Daily Stop Loss (Value)" are compared, and the script enforces the tighter of the two limits.
+2. Visibility and External Alerting
+To address the unavoidable issue of slippage (which causes price overshoot in fast markets even with tick execution), dedicated alert mechanisms were added.
+• Dedicated Alert Condition: An alertcondition named DAILY PNL LIMIT REACHED was added. This allows you to set up a TradingView alert that triggers the instant the daily_limit_reached variable turns true, giving you the fastest possible notification.
+• Visual Marker: A large red triangle (\u25b2) is plotted on the chart using plotchar at the exact moment the daily limit condition is met, providing a clear visual confirmation of the trigger bar.
+3. Strategy Features and Input Flexibility
+Several user-requested features were integrated to make the strategy more robust and customizable.
+• Trailing Stop / Breakeven (TSL/BE): A new exit option, Fixed Ticks + TSL, was added, allowing you to set a fixed profit target while also deploying a trailing stop or breakeven level based on points/ticks gained.
+• Multiple Exit Types: The exit strategy was expanded to include logic for several types: Fixed Ticks, ATR-based, Capped ATR-based, VWAP Cross, and Price/Band Crosses.
+• Pyramiding Control: An input Max Pyramiding Entries was introduced to control how many positions the strategy can have open at the same time.
+• Confirmation Logic Toggle: Added an input to choose how multiple confirmation indicators (RSI, SMMA, MACD) are combined: "AND" (all must be true) or "OR" (at least one must be true).
+• Indicator Confirmations: Logic for three external indicators—RSI, SMMA (EMA), and MACD—was fully integrated to act as optional filters for entry.
+• VWAP Reset Anchors: Logic was corrected to properly reset the VWAP calculation based on the selected period ("Daily", "Weekly", or "Session") by using Pine Script v6's required anchor series.
+Trading Day Filters: Inputs were added to select which specific days of the week the strategy is allowed to trade.

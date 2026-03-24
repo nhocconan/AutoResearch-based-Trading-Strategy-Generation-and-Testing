@@ -1,0 +1,11 @@
+//@version=5
+bg_c=##input(defval=#07e2f29e,type='INPUT_COLOR',##id='in_17')
+text_head_color=##input(defval=#000000ff,type='INPUT_COLOR',##id='in_18')
+tab_month_c=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_19')
+tab_year_c=##input(defval=#000000ff,type='INPUT_COLOR',##id='in_20')
+border_c=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_21')
+##root(root_metainfo,rm_ic_0,bg_c,input__color)
+##root(root_metainfo,rm_ic_1,text_head_color,input__color)
+##root(root_metainfo,rm_ic_2,tab_month_c,input__color)
+##root(root_metainfo,rm_ic_3,tab_year_c,input__color)
+##root(root_metainfo,rm_ic_4,border_c,input__color)

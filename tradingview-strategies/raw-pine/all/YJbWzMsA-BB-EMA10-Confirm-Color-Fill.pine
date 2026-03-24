@@ -1,0 +1,83 @@
+//@version=6
+strategy("BB + EMA10 Confirm + Color Fill", overlay=true)
+
+// ===== INPUTS =====
+length  = input.int(20, "BB Length")
+mult1   = input.float(1.5, "BB Mult 1")
+mult2   = input.float(3.0, "BB Mult 2")
+
+// ===== BOLLINGER BAND =====
+basis = ta.sma(close, length)
+dev   = ta.stdev(close, length)
+
+upper1 = basis + dev * mult1
+lower1 = basis - dev * mult1
+upper2 = basis + dev * mult2
+lower2 = basis - dev * mult2
+
+// ===== EMA 10 =====
+ema10 = ta.ema(close, 10)
+
+// ===== EMA CROSS =====
+emaCrossUp   = ta.crossover(ema10, basis)
+emaCrossDown = ta.crossunder(ema10, basis)
+
+// ===== 2 CANDLE CONFIRMATION =====
+buyConfirm =
+     emaCrossUp[1] and
+     close[1] > basis[1] and
+     close > basis
+
+sellConfirm =
+     emaCrossDown[1] and
+     close[1] < basis[1] and
+     close < basis
+
+// ===== STRATEGY ENTRY =====
+if buyConfirm
+    strategy.entry("BUY", strategy.long)
+
+if sellConfirm
+    strategy.entry("SELL", strategy.short)
+
+// ===== SIGNAL (Plotted on First Candle) =====
+plotshape(buyConfirm,
+     location=location.belowbar,
+     style=shape.labelup,
+     color=color.green,
+     text="BUY",
+     offset=-1)
+
+plotshape(sellConfirm,
+     location=location.abovebar,
+     style=shape.labeldown,
+     color=color.red,
+     text="SELL",
+     offset=-1)
+
+// ===== PLOTS =====
+basisPlot = plot(basis, color=color.yellow, title="Middle BB")
+emaPlot   = plot(ema10, color=color.green, title="EMA 10")
+
+plot(upper1, color=color.blue)
+plot(lower1, color=color.blue)
+plot(upper2, color=color.red)
+plot(lower2, color=color.red)
+
+// ===== SAFE COLOR FILL =====
+color fillColor = na
+
+if ema10 > basis
+    fillColor := color.new(color.green, 85)
+else if ema10 < basis
+    fillColor := color.new(color.red, 85)
+else
+    fillColor := na
+
+fill(emaPlot, basisPlot, color=fillColor)
+
+View in Pine Editor・77 lines
+Use on chart
+3
+372
+double bollinger band with ema 10 ,when the candles go out of the band it reverses and wait for the candle to touch the middle bollinger band,when ema 10 crosses below or above buy and sell with green fill and red fill

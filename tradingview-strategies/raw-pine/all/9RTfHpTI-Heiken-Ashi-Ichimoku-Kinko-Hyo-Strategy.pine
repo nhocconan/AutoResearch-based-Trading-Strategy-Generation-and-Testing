@@ -1,0 +1,73 @@
+//@version=3
+
+strategy("Heiken Ashi + Ichimoku Kinko Hyo Strategy", shorttitle="HaI", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=1000, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+
+hahigh = security(heikinashi(tickerid), period, high)
+halow = security(heikinashi(tickerid), period, low)
+
+TenkanSenPeriods = input(9, minval=1, title="Tenkan Sen Periods")
+KijunSenPeriods = input(24, minval=1, title="Kijun Sen Periods")
+SenkouSpanBPeriods = input(51, minval=1, title="Senkou Span B Periods")
+displacement = input(24, minval=1, title="Displacement")
+donchian(len) => avg(lowest(len), highest(len))
+TenkanSen = donchian(TenkanSenPeriods)
+KijunSen = donchian(KijunSenPeriods)
+SenkouSpanA = avg(TenkanSen, KijunSen)
+SenkouSpanB = donchian(SenkouSpanBPeriods)
+SenkouSpanH = max(SenkouSpanA[displacement - 1], SenkouSpanB[displacement - 1])
+SenkouSpanL = min(SenkouSpanA[displacement - 1], SenkouSpanB[displacement - 1])
+ChikouSpan = close[displacement-1]
+
+plot(TenkanSen, color=blue, title="Tenkan Sen", linewidth = 2)
+plot(KijunSen, color=maroon, title="Kijun Sen", linewidth = 3)
+plot(close, offset = -displacement, color=orange, title="Chikou Span", linewidth = 2)
+sa=plot (SenkouSpanA, offset = displacement, color=green,  title="Senkou Span A", linewidth = 2)
+sb=plot (SenkouSpanB, offset = displacement, color=red,  title="Senkou Span B", linewidth = 3)
+fill(sa, sb, color = SenkouSpanA > SenkouSpanB ? green : red)
+
+longCondition = hahigh > max(hahigh[1],hahigh[2]) and close>ChikouSpan and close>SenkouSpanH and (TenkanSen>=KijunSen or close>KijunSen)
+if (longCondition)
+    strategy.entry("Long",strategy.long)
+
+shortCondition = halow < min(halow[1],halow[2]) and close<ChikouSpan and close<SenkouSpanL and (TenkanSen<=KijunSen or close<KijunSen)
+if (shortCondition)
+    strategy.entry("Short",strategy.short)
+
+closelong = halow < min(halow[1],halow[2]) and (TenkanSen<KijunSen or close<SenkouSpanA or close<KijunSen or close<SenkouSpanH or close<ChikouSpan)
+if (closelong)
+    strategy.close("Long")
+
+closeshort = hahigh > max(hahigh[1],hahigh[2]) and (TenkanSen>KijunSen or close>SenkouSpanA or close>KijunSen or close>SenkouSpanL or close>ChikouSpan)
+if (closeshort)
+    strategy.close("Short")
+
+View in Pine Editor・42 lines
+Use on chart
+1.1 K
+15
+50 631
+Sep 19, 2017
+Heikin-Ashi:
+
+Instead of using the open-high-low-close (OHLC) bars like standard candlestick charts, it uses a modified formula. Out of which only following two are used in this strategy.
+
+High = Max (High,Open,Close)
+
+Low = Min (Low,Open, Close)
+
+Ichimoku Kinko Hyo:
+
+The Ichimoku Kinko Hyo system includes five kinds of signal, of which this strategy uses four signals i.e. Tenkan Sen / Kijun Sen Cross, price crosses the Kijun Sen, Chikou Span and Kumo. Although the Chikou Span, Senkou Span A and Senkou Span B (Kumo) are shifted into the past/future, these trigger signals enhances the strategy.
+
+The Tenkan Sen, also known as the Turning or Conversion line, is a moving average of the highest high and lowest low over the last 9 periods in this strategy.
+
+The Kijun Sen, also known as the Standard or Base line, is a moving average of the highest high and lowest low over the last 24 periods in this strategy.
+
+The Chikou Span, also known as the Lagging line, is the closing price plotted 24 periods behind in this strategy.
+
+The Senkou Span A, also known as the 1st leading line, is a moving average of the Tenkan Sen and Kijun Sen and is plotted 24 periods ahead in this strategy.
+
+The Senkou Span B, also known as the 2nd leading line, is a moving average of the highest high and lowest low over the last 51 trading days is plotted 24 periods ahead in this strategy.
+Sep 19, 2017
+Release Notes
+Minor changes in exit conditions

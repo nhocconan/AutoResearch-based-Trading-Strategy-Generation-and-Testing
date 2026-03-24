@@ -1,0 +1,5 @@
+//@version=1
+BuyAlertLevel=##input(defval=-10,type=integer,##id='in_1')
+SellAlertLevel=##input(defval=10,type=integer,##id='in_2')
+##root(root_metainfo,rm_0,BuyAlertLevel)
+##root(root_metainfo,rm_1,SellAlertLevel)

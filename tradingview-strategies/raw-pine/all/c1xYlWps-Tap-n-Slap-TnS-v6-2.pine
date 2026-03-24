@@ -1,0 +1,478 @@
+//@version=5
+strategy("Tap'n'Slap (TnS) v6.2", shorttitle="TnS v6.2",
+     overlay=true, max_boxes_count=500, max_lines_count=500,
+     default_qty_type=strategy.fixed, default_qty_value=3,
+     pyramiding=0,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.50)
+
+// ─── INPUTS ──────────────────────────────────────────────────────────────────
+grp_model     = "Model Settings"
+minPts        = input.float(3.0,  "Min pts from each FVG edge",             group=grp_model)
+v2Mode        = input.bool(true,  "V2: opposite-color candle required",      group=grp_model)
+swingLB       = input.int(3,      "Swing lookback for OG TP",               group=grp_model, minval=1, maxval=10)
+fvgMaxAge     = input.int(50,     "Max bars to keep FVG active",            group=grp_model, minval=5, maxval=300)
+
+grp_filter    = "Filters"
+useRRFilter   = input.bool(false, "Filter by Min R:R",                      group=grp_filter)
+minRR         = input.float(1.0,  "Minimum R:R",                            group=grp_filter, minval=0.1)
+
+grp_mgmt      = "Trade Management"
+trailPts      = input.float(25.0, "Trailing Stop (points)",                  group=grp_mgmt, minval=1.0)
+beProfitPts   = input.float(25.0, "Breakeven trigger (points in profit)",    group=grp_mgmt, minval=1.0)
+beOffsetPts   = input.float(5.0,  "Breakeven offset (pts above entry)",      group=grp_mgmt, minval=0.0)
+maxStopPts    = input.float(75.0, "Max Stop Loss (points)",                  group=grp_mgmt, minval=25.0, maxval=200.0, tooltip="Caps the initial stop loss distance. 75pts = $450 max risk on 3 MNQ")
+
+grp_vis       = "Visuals"
+showFVG       = input.bool(true,  "Show FVG boxes",                          group=grp_vis)
+showLevels    = input.bool(true,  "Show Entry/SL/TP lines",                  group=grp_vis)
+bullFVGCol    = input.color(color.new(color.green, 80), "Bull FVG",          group=grp_vis)
+bearFVGCol    = input.color(color.new(color.red,   80), "Bear FVG",          group=grp_vis)
+entryCol      = input.color(color.blue,  "Entry",                             group=grp_vis)
+slCol         = input.color(color.red,   "SL",                                group=grp_vis)
+tpCol         = input.color(color.lime,  "TP",                                group=grp_vis)
+
+grp_tbl       = "Info Table"
+showTable     = input.bool(true,  "Show table",                               group=grp_tbl)
+pointVal      = input.float(2.0,  "$/point/contract (MNQ=2)",                 group=grp_tbl)
+
+QTY = 3
+
+// ─── SWING HIGH/LOW using pivot ──────────────────────────────────────────────
+ph = ta.pivothigh(high, swingLB, swingLB)
+pl = ta.pivotlow (low,  swingLB, swingLB)
+
+var int[]   ph_bi = array.new_int()
+var float[] ph_px = array.new_float()
+var int[]   pl_bi = array.new_int()
+var float[] pl_px = array.new_float()
+
+if not na(ph)
+    array.push(ph_bi, bar_index - swingLB)
+    array.push(ph_px, ph)
+    if array.size(ph_bi) > 1000
+        array.shift(ph_bi)
+        array.shift(ph_px)
+
+if not na(pl)
+    array.push(pl_bi, bar_index - swingLB)
+    array.push(pl_px, pl)
+    if array.size(pl_bi) > 1000
+        array.shift(pl_bi)
+        array.shift(pl_px)
+
+f_swingH(absBar) =>
+    res = float(na)
+    best = int(na)
+    n = array.size(ph_bi)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < n
+                b = array.get(ph_bi, k)
+                if b < absBar
+                    d = absBar - b
+                    if na(best) or d < best
+                        best := d
+                        res  := array.get(ph_px, k)
+    res
+
+f_swingL(absBar) =>
+    res = float(na)
+    best = int(na)
+    n = array.size(pl_bi)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < n
+                b = array.get(pl_bi, k)
+                if b < absBar
+                    d = absBar - b
+                    if na(best) or d < best
+                        best := d
+                        res  := array.get(pl_px, k)
+    res
+
+// ─── FVG DETECTION ───────────────────────────────────────────────────────────
+bullFVG_top = low
+bullFVG_bot = high[2]
+isBullFVG   = low > high[2]
+
+bearFVG_top = low[2]
+bearFVG_bot = high
+isBearFVG   = high < low[2]
+
+// ─── ACTIVE FVG STORAGE ──────────────────────────────────────────────────────
+var int[]   fvg_bi     = array.new_int()
+var float[] fvg_top    = array.new_float()
+var float[] fvg_bot    = array.new_float()
+var bool[]  fvg_bull   = array.new_bool()
+var bool[]  fvg_done   = array.new_bool()
+
+if barstate.isconfirmed
+    if isBullFVG and (bullFVG_top - bullFVG_bot) > 0
+        array.push(fvg_bi,   bar_index)
+        array.push(fvg_top,  bullFVG_top)
+        array.push(fvg_bot,  bullFVG_bot)
+        array.push(fvg_bull, true)
+        array.push(fvg_done, false)
+
+    if isBearFVG and (bearFVG_top - bearFVG_bot) > 0
+        array.push(fvg_bi,   bar_index)
+        array.push(fvg_top,  bearFVG_top)
+        array.push(fvg_bot,  bearFVG_bot)
+        array.push(fvg_bull, false)
+        array.push(fvg_done, false)
+
+    n = array.size(fvg_bi)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < array.size(fvg_bi)
+                if not array.get(fvg_done, k)
+                    age = bar_index - array.get(fvg_bi, k)
+                    if age > fvgMaxAge
+                        array.set(fvg_done, k, true)
+
+// ─── SETUP STORAGE ───────────────────────────────────────────────────────────
+var float[] sa_entry  = array.new_float()
+var float[] sa_sl     = array.new_float()
+var float[] sa_tp     = array.new_float()
+var bool[]  sa_bull   = array.new_bool()
+var int[]   sa_bi     = array.new_int()
+var bool[]  sa_active = array.new_bool()
+var bool[]  sa_trig   = array.new_bool()
+var line[]  sa_eline  = array.new_line()
+var line[]  sa_slline = array.new_line()
+var line[]  sa_tpline = array.new_line()
+var box[]   sa_box    = array.new_box()
+
+f_hasEntry(px) =>
+    found = false
+    n = array.size(sa_entry)
+    if n > 0
+        for k = 0 to n - 1
+            if k >= 0 and k < n
+                if math.abs(array.get(sa_entry, k) - px) < 0.25
+                    found := true
+                    break
+    found
+
+// ─── v6.2: CAPPED STOP LOSS FUNCTION ─────────────────────────────────────────
+f_cappedSL(entryPx, rawSL, isBull) =>
+    slDist = math.abs(entryPx - rawSL)
+    cappedDist = math.min(slDist, maxStopPts)
+    result = isBull ? entryPx - cappedDist : entryPx + cappedDist
+    result
+
+// ─── SCAN FOR ENTRY CANDLES ──────────────────────────────────────────────────
+if barstate.isconfirmed
+    nFVG = array.size(fvg_bi)
+    if nFVG > 0
+        for k = 0 to nFVG - 1
+            if k >= 0 and k < array.size(fvg_bi) and not array.get(fvg_done, k)
+                ft  = array.get(fvg_top,  k)
+                fb  = array.get(fvg_bot,  k)
+                bull= array.get(fvg_bull, k)
+                fbi = array.get(fvg_bi,   k)
+
+                isBear  = close < open
+                isBullC = close > open
+
+                if bar_index > fbi + 2 and bull
+                    colorOk = v2Mode ? isBear : true
+                    inFVG   = high > (fb + minPts) and high < (ft - minPts)
+
+                    if colorOk and inFVG
+                        entryPx = high
+                        rawSL   = low
+// v6.2: Cap the stop loss distance
+                        slPx    = f_cappedSL(entryPx, rawSL, true)
+                        tpPx = f_swingH(bar_index)
+                        if na(tpPx)
+                            tpPx := high
+
+                        if tpPx > entryPx and not f_hasEntry(entryPx)
+                            slRng = math.abs(entryPx - slPx)
+                            tpRng = math.abs(tpPx - entryPx)
+                            rr    = slRng > 0 ? tpRng / slRng : 0.0
+                            rrOk  = useRRFilter ? rr >= minRR : true
+                            if rrOk
+                                array.push(sa_entry,  entryPx)
+                                array.push(sa_sl,     slPx)
+                                array.push(sa_tp,     tpPx)
+                                array.push(sa_bull,   true)
+                                array.push(sa_bi,     bar_index)
+                                array.push(sa_active, true)
+                                array.push(sa_trig,   false)
+                                bx = showFVG ? box.new(fbi, ft, bar_index + fvgMaxAge, fb,
+                                     bgcolor=bullFVGCol, border_color=color.new(color.green,40),
+                                     extend=extend.none) : box(na)
+                                array.push(sa_box, bx)
+                                el = showLevels ? line.new(bar_index, entryPx, bar_index + fvgMaxAge, entryPx,
+                                     color=entryCol, style=line.style_dashed, width=1) : line(na)
+                                sl2= showLevels ? line.new(bar_index, slPx,    bar_index + fvgMaxAge, slPx,
+                                     color=slCol, style=line.style_dashed, width=1) : line(na)
+                                tl = showLevels ? line.new(bar_index, tpPx,    bar_index + fvgMaxAge, tpPx,
+                                     color=tpCol, style=line.style_dashed, width=1) : line(na)
+                                array.push(sa_eline,  el)
+                                array.push(sa_slline, sl2)
+                                array.push(sa_tpline, tl)
+                                array.set(fvg_done, k, true)
+
+                else if bar_index > fbi + 2
+                    colorOk = v2Mode ? isBullC : true
+                    inFVG   = low > (fb + minPts) and low < (ft - minPts)
+
+                    if colorOk and inFVG
+                        entryPx = low
+                        rawSL   = high
+                        // v6.2: Cap the stop loss distance
+                        slPx    = f_cappedSL(entryPx, rawSL, false)
+                        tpPx = f_swingL(bar_index)
+                        if na(tpPx)
+                            tpPx := low
+
+                        if tpPx < entryPx and not f_hasEntry(entryPx)
+                            slRng = math.abs(slPx - entryPx)
+                            tpRng = math.abs(entryPx - tpPx)
+                            rr    = slRng > 0 ? tpRng / slRng : 0.0
+                            rrOk  = useRRFilter ? rr >= minRR : true
+                            if rrOk
+                                array.push(sa_entry,  entryPx)
+                                array.push(sa_sl,     slPx)
+                                array.push(sa_tp,     tpPx)
+                                array.push(sa_bull,   false)
+                                array.push(sa_bi,     bar_index)
+                                array.push(sa_active, true)
+                                array.push(sa_trig,   false)
+                                bx = showFVG ? box.new(fbi, ft, bar_index + fvgMaxAge, fb,
+                                     bgcolor=bearFVGCol, border_color=color.new(color.red,40),
+                                     extend=extend.none) : box(na)
+                                array.push(sa_box, bx)
+                                el = showLevels ? line.new(bar_index, entryPx, bar_index + fvgMaxAge, entryPx,
+                                     color=entryCol, style=line.style_dashed, width=1) : line(na)
+                                sl2= showLevels ? line.new(bar_index, slPx,    bar_index + fvgMaxAge, slPx,
+                                     color=slCol, style=line.style_dashed, width=1) : line(na)
+                                tl = showLevels ? line.new(bar_index, tpPx,    bar_index + fvgMaxAge, tpPx,
+                                     color=tpCol, style=line.style_dashed, width=1) : line(na)
+                                array.push(sa_eline,  el)
+                                array.push(sa_slline, sl2)
+                                array.push(sa_tpline, tl)
+                                array.set(fvg_done, k, true)
+
+// ─── TRADE STATE ─────────────────────────────────────────────────────────────
+var float pos_fill   = na
+var bool  pos_beHit  = false
+var float pos_dynSL  = na
+var bool  pos_bull   = true
+var float pos_tp     = na
+
+if strategy.position_size == 0
+    pos_fill  := na
+    pos_beHit := false
+    pos_dynSL := na
+    pos_tp    := na
+
+if strategy.position_size != 0 and na(pos_fill)
+    pos_fill := strategy.position_avg_price
+    pos_bull := strategy.position_size > 0
+
+// ─── EXECUTE ORDERS ──────────────────────────────────────────────────────────
+aSz = array.size(sa_active)
+if aSz > 0
+    for i = 0 to aSz - 1
+        if i >= 0 and i < array.size(sa_active) and array.get(sa_active, i)
+            eP   = array.get(sa_entry,  i)
+            sP   = array.get(sa_sl,     i)
+            tP   = array.get(sa_tp,     i)
+            bull = array.get(sa_bull,   i)
+            trig = array.get(sa_trig,   i)
+            tid  = "TnS_" + str.tostring(i)
+
+            if not trig and strategy.position_size == 0
+                hit = bull ? (low <= eP) : (high >= eP)
+                if hit
+                    if bull
+                        strategy.entry(tid, strategy.long,  qty=QTY, comment="TnS L")
+                        strategy.exit(tid+"_X", from_entry=tid, qty=QTY,
+                             stop=sP, limit=tP, trail_points=trailPts,
+                             comment_loss="SL/Trail", comment_profit="TP")
+                    else
+                        strategy.entry(tid, strategy.short, qty=QTY, comment="TnS S")
+                        strategy.exit(tid+"_X", from_entry=tid, qty=QTY,
+                             stop=sP, limit=tP, trail_points=trailPts,
+                             comment_loss="SL/Trail", comment_profit="TP")
+                    pos_tp    := tP
+                    pos_dynSL := sP
+                    pos_bull  := bull
+                    array.set(sa_trig, i, true)
+
+            if trig and strategy.position_size == 0
+                array.set(sa_active, i, false)
+
+            if not trig and (bar_index - array.get(sa_bi, i)) > fvgMaxAge
+                array.set(sa_active, i, false)
+
+// ─── BREAKEVEN MANAGEMENT ────────────────────────────────────────────────────
+if strategy.position_size != 0 and not na(pos_fill)
+    activeID = ""
+    activeTP = pos_tp
+    bSz = array.size(sa_active)
+    if bSz > 0
+        for i = 0 to bSz - 1
+            if i >= 0 and i < array.size(sa_active)
+                if array.get(sa_trig, i) and array.get(sa_active, i)
+                    activeID := "TnS_" + str.tostring(i)
+                    activeTP  := array.get(sa_tp, i)
+                    break
+
+    if activeID != ""
+        if pos_bull
+            profit  = high - pos_fill
+            beLevel = pos_fill + beOffsetPts
+            if not pos_beHit and profit >= beProfitPts
+                pos_dynSL := beLevel
+                pos_beHit := true
+            if pos_beHit
+                pos_dynSL := math.max(pos_dynSL, beLevel)
+            strategy.exit(activeID+"_X", from_entry=activeID, qty=QTY,
+                 stop=pos_beHit ? pos_dynSL : na, limit=activeTP,
+                 trail_points=trailPts, comment_loss="SL/Trail", comment_profit="TP")
+        else
+            profit  = pos_fill - low
+            beLevel = pos_fill - beOffsetPts
+            if not pos_beHit and profit >= beProfitPts
+                pos_dynSL := beLevel
+                pos_beHit := true
+            if pos_beHit
+                pos_dynSL := math.min(pos_dynSL, beLevel)
+            strategy.exit(activeID+"_X", from_entry=activeID, qty=QTY,
+                 stop=pos_beHit ? pos_dynSL : na, limit=activeTP,
+                 trail_points=trailPts, comment_loss="SL/Trail", comment_profit="TP")
+
+// ─── VISUALS ─────────────────────────────────────────────────────────────────
+latestEntry  = float(na)
+latestSL     = float(na)
+latestTP     = float(na)
+latestBull   = true
+
+vSz = array.size(sa_active)
+if vSz > 0
+    for i = 0 to vSz - 1
+        if i >= 0 and i < array.size(sa_active)
+            if array.get(sa_active, i) and array.get(sa_trig, i)
+                latestEntry := array.get(sa_entry, i)
+                latestSL    := array.get(sa_sl,    i)
+                latestTP    := array.get(sa_tp,    i)
+                latestBull  := array.get(sa_bull,  i)
+                break
+
+plot(latestEntry, "Entry", color=entryCol, style=plot.style_linebr, linewidth=2)
+plot(latestSL,    "SL",    color=slCol,    style=plot.style_linebr, linewidth=1)
+plot(latestTP,    "TP",    color=tpCol,    style=plot.style_linebr, linewidth=2)
+
+// ─── INFO TABLE ──────────────────────────────────────────────────────────────
+var table tbl = table.new(position.bottom_right, 2, 9,
+     border_color=color.gray, border_width=1, bgcolor=color.new(color.black, 70))
+
+if showTable and not na(latestEntry)
+    slPts    = math.abs(latestEntry - latestSL)
+    tpPts    = math.abs(latestTP    - latestEntry)
+    rrVal    = slPts > 0 ? tpPts / slPts : float(na)
+    slDollar = slPts * pointVal * QTY
+    tpDollar = tpPts * pointVal * QTY
+    maxRisk  = maxStopPts * pointVal * QTY
+    dir      = latestBull ? "▲ LONG" : "▼ SHORT"
+    dirCol   = latestBull ? color.new(color.green, 20) : color.new(color.red, 20)
+    bg       = color.new(color.black, 80)
+    table.cell(tbl, 0, 0, "TnS v6.2",    text_color=color.white, bgcolor=dirCol, text_size=size.small)
+    table.cell(tbl, 1, 0, dir,           text_color=color.white, bgcolor=dirCol, text_size=size.small)
+    table.cell(tbl, 0, 1, "Entry",       text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(latestEntry, "#.##"), text_color=entryCol, bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 2, "Stop Loss",   text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(latestSL,"#.##") + "  (−$" + str.tostring(slDollar,"#.##") + ")",
+         text_color=slCol, bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 3, "Take Profit", text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(latestTP,"#.##") + "  (+$" + str.tostring(tpDollar,"#.##") + ")",
+         text_color=tpCol, bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 4, "R : R",       text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(rrVal,"#.##") + " : 1",
+         text_color=rrVal >= minRR ? color.green : color.orange, bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 5, "Contracts",   text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 5, "3 MNQ",       text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 6, "Max Profit",  text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 6, "+$" + str.tostring(tpDollar,"#.##"), text_color=color.new(color.green,10), bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 7, "Trail / BE",  text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 7, str.tostring(trailPts,"#") + "pt trail | BE@+" + str.tostring(beProfitPts,"#") + "→+" + str.tostring(beOffsetPts,"#") + "pts",
+         text_color=color.new(color.yellow,10), bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 0, 8, "Max Risk",    text_color=color.gray,  bgcolor=bg, text_size=size.small)
+    table.cell(tbl, 1, 8, str.tostring(maxStopPts,"#") + "pts = $" + str.tostring(maxRisk,"#.##") + " cap",
+         text_color=color.new(color.orange,10), bgcolor=bg, text_size=size.small)
+
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+alertcondition(strategy.position_size > strategy.position_size[1] and strategy.position_size > 0,
+     "TnS Long",  "TnS ▲ LONG  | Entry:{{plot_0}} SL:{{plot_1}} TP:{{plot_2}} | 3 MNQ")
+alertcondition(strategy.position_size < strategy.position_size[1] and strategy.position_size < 0,
+     "TnS Short", "TnS ▼ SHORT | Entry:{{plot_0}} SL:{{plot_1}} TP:{{plot_2}} | 3 MNQ")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0,
+     "TnS Closed", "TnS: Closed at {{close}}")
+
+View in Pine Editor・421 lines
+Use on chart
+9
+285
+█ OVERVIEW
+
+Tap'n'Slap (TnS) is a price-action strategy designed for Micro E-mini Nasdaq (MNQ) futures. It identifies Fair Value Gaps (FVGs) — imbalances left by aggressive price movement — and enters when price "taps" back into these zones, aiming to capture the continuation move as price "slaps" toward the next swing pivot.
+
+
+█ HOW IT WORKS
+
+1. FVG Detection
+The strategy scans for bullish and bearish Fair Value Gaps based on a configurable lookback period. FVGs represent institutional footprints where price moved too quickly to fill orders efficiently.
+
+2. Entry Logic
+• Long: Price taps into a bullish FVG from above
+• Short: Price taps into a bearish FVG from below
+Entries are taken with market orders when conditions align.
+
+3. Take Profit Targeting
+Profits are targeted at recent swing highs (for longs) or swing lows (for shorts) identified via pivot detection. This provides logical, structure-based exits.
+
+4. Risk Management
+• Trailing Stop: Locks in profits as price moves favorably
+• Breakeven Protection: Moves stop to entry + offset after initial profit threshold
+• Max Stop Cap: Limits worst-case loss per trade (default: 75 points / \$450 on 3 contracts)
+
+
+█ KEY FEATURES
+
+✓ Pure price action — no lagging indicators
+✓ Institutional concept (FVG) for high-probability entries
+✓ Dynamic profit targets based on market structure
+✓ Built-in risk controls with capped max loss
+✓ Optimized for MNQ 5-minute charts
+
+
+█ SETTINGS
+
+Trade Management
+• Trail Points: Distance for trailing stop activation
+• BE Profit Points: Profit threshold to move stop to breakeven
+• BE Offset Points: Buffer above breakeven for stop placement
+• Max Stop Loss: Hard cap on stop distance (protects against gap risk)
+
+FVG Settings
+• Lookback Period: How far back to scan for valid FVGs
+• Pivot Length: Sensitivity for swing high/low detection
+
+
+█ USAGE NOTES
+
+• Designed for MNQ (Micro Nasdaq futures) but adaptable to other instruments
+• Best performance observed on 5-minute timeframe
+• Recommended to backtest on your preferred session times
+• Default settings use 3 contracts — adjust position sizing to your risk tolerance
+
+
+█ DISCLAIMER
+
+This strategy is for educational purposes. Past backtest performance does not guarantee future results. Always use proper risk management and never risk more than you can afford to lose. Paper trade before going live.

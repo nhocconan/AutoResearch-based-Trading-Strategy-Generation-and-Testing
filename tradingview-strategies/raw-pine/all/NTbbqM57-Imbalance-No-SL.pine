@@ -1,0 +1,101 @@
+//@version=6
+strategy("Imbalance No SL", overlay=true, max_boxes_count=500, max_labels_count=500, pyramiding=1)
+
+var box[] imbalanceBoxes = array.new_box()
+var label[] imbalanceLabels = array.new<label>()
+qty = input.int(1, "Lot Size (Qty Per Signal)", minval=1)
+var float buy_avg = na
+var int   buy_count = 0
+var float sell_avg = na
+var int   sell_count = 0
+is_imb_bull = low > high[1]
+is_imb_bear = high < low[1]
+if is_imb_bull
+    newbox = box.new(left=bar_index[1], right=bar_index, top=high, bottom=low[1], bgcolor=color.new(color.green, 80), border_color=color.lime)
+    array.unshift(imbalanceBoxes, newbox)
+    newlabel = label.new(bar_index, low, "IMB BULL", color=color.lime, textcolor=color.black, style=label.style_label_up, yloc=yloc.belowbar)
+    array.unshift(imbalanceLabels, newlabel)
+    if strategy.position_size >= 0
+        strategy.entry("IMB BUY", strategy.long, qty=qty)
+        buy_avg := na(buy_avg) ? close : (buy_avg * buy_count + close) / (buy_count + 1)
+        buy_count += 1
+        sell_avg := na
+        sell_count := 0
+if is_imb_bear
+    newbox = box.new(left=bar_index[1], right=bar_index, top=high[1], bottom=low, bgcolor=color.new(color.red, 85), border_color=color.red)
+    array.unshift(imbalanceBoxes, newbox)
+    newlabel = label.new(bar_index, high, "IMB BEAR", color=color.red, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar)
+    array.unshift(imbalanceLabels, newlabel)
+    if strategy.position_size <= 0
+        strategy.entry("IMB SELL", strategy.short, qty=qty)
+        sell_avg := na(sell_avg) ? close : (sell_avg * sell_count + close) / (sell_count + 1)
+        sell_count += 1
+        buy_avg := na
+        buy_count := 0
+if is_imb_bear and strategy.position_size > 0 and close > buy_avg
+    strategy.close("IMB BUY", comment="Opposite Signal + Profit")
+    buy_avg := na
+    buy_count := 0
+if is_imb_bull and strategy.position_size < 0 and close < sell_avg
+    strategy.close("IMB SELL", comment="Opposite Signal + Profit")
+    sell_avg := na
+    sell_count := 0
+while array.size(imbalanceLabels) > 1
+    label.delete(array.pop(imbalanceLabels))
+while array.size(imbalanceBoxes) > 1
+    box.delete(array.pop(imbalanceBoxes))
+alertcondition(is_imb_bull, title="Buy Alert", message="Buy Signal: {{close}}")
+alertcondition(is_imb_bear, title="Sell Alert", message="Sell Signal: {{close}}")
+
+View in Pine Editor・48 lines
+Use on chart
+8
+5
+1 492
+📊 Strategy Name: Imbalance No SL
+This strategy specially trades on price jumps (true imbalances) in the market, takes advantage of momentum only, and as soon as the opposite signal and profit is received, the trade is closed immediately.
+Imbalance No SL strategy specially generates buy and sell signals based on "Imbalance" logic, without any fixed Stop Loss.
+
+🔍 Core Logic
+
+Imbalance Detection
+
+Bullish Imbalance: When the low of the current candle is above the high of the previous candle.
+(i.e. a jump type gap occurred in the market – demand is high, price went straight up)
+Bearish Imbalance: When the high of the current candle is below the low of the previous candle.
+(i.e. the market suddenly fell down)
+
+Creating Visual Box and Label on Signal:
+As soon as bullish imbalance is found, green box & IMB BULL label is displayed on the chart.
+Bearish has red box & IMB BEAR label.
+
+Trade Entry Logic
+
+BUY on Bullish Imbalance: If there is already a buy or neutral position, then a new “BUY” signal will fire.
+SELL on Bearish Imbalance: If already in sell or neutral position, then new “SELL” signal will fire.
+
+You can set quantity/lot size from ‘qty’ input field.
+
+Trade Average Calculation
+
+Buy/Sell maintains average price and their count (so that if averaging is done then correct P&L is calculated).
+Trade Exit Logic (Profit Booking/Signal Reverse)
+If your buy is going on and bearish imbalance is formed + price is above your average, then buy will be closed (profit condition).
+If sell is going on and bullish imbalance is formed + price is below average, then sell will be closed.
+
+Chart Cleaning/Management
+Only keep the label and box of the latest signal on the chart, old boxes/labels are automatically deleted.
+Alert
+You can get alert on bullish or bearish signal (by using alert feature of TradingView).
+
+✅ Simple Explanation for User
+This strategy buys or sells directly at the gap (imbalance).
+Whenever there is a clear signal of momentum in the market (breakout of the gap), then the trade entry takes place.
+When there is an imbalance in the opposite direction and profit is made, the system closes the trade (closes).
+There is no fixed stop-loss, risk management is handled by trade averaging/close.
+You will know at every point on the visually chart that at which bar the buy, sell and exit took place.
+
+⚠️ What to remember?
+If the market is in trend then this script gives very good signals.
+In choppy/sideways market, some loss trades can also come because there is no SL.
+Big profit or big loss – both depend on the imbalance signal and market speed.

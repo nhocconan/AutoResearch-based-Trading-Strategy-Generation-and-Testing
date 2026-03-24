@@ -1,0 +1,43 @@
+//@version=6
+strategy("EMA Tutorial - 1")
+
+// === Inputs ===
+flength = input.int(50, "EMA Fast Length")
+slength = input.int(200, "EMA Slow Length")
+risk_percent = input.float(1.0, "Stop Loss %", step=0.1)  // e.g., 1% risk
+rr_ratio = input.float(2.0, "Risk:Reward Ratio")           // 2:1 RR
+
+// === Computation ===
+fastMA = ta.ema(close, flength)
+slowMA = ta.ema(close, slength)
+
+// === Conditions ===
+buy_condition  = close > slowMA and close > open
+sell_condition = close < slowMA and close < open
+
+// === Entries ===
+if (buy_condition)
+    strategy.entry("Long", strategy.long)
+
+if (sell_condition)
+    strategy.entry("Short", strategy.short)
+
+// === Exit Levels ===
+if (strategy.position_size > 0)  // Long position
+    long_sl = strategy.position_avg_price * (1 - risk_percent / 100)
+    long_tp = strategy.position_avg_price * (1 + (risk_percent * rr_ratio) / 100)
+    strategy.exit("Exit Long", "Long", stop=long_sl, limit=long_tp)
+
+if (strategy.position_size < 0)  // Short position
+    short_sl = strategy.position_avg_price * (1 + risk_percent / 100)
+    short_tp = strategy.position_avg_price * (1 - (risk_percent * rr_ratio) / 100)
+    strategy.exit("Exit Short", "Short", stop=short_sl, limit=short_tp)
+
+View in Pine Editor・34 lines
+Use on chart
+3
+477
+Buy when in downtrend and close above EMA_50
+Buy when in uptrend and below EMA_50
+
+adjust ema length and risk reward for other stocks. Works good with nifty. Need to perform stress test on it

@@ -1,0 +1,335 @@
+//@version=6
+//_______ <licence>
+strategy(title = "Bullish Reversal Bar Strategy [Skyrexio]", 
+         shorttitle = "Bullish Reveral Bar Strategy", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 1, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = false, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 50, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen               = color.new(#2ECD99, 0)
+var const color skyrexGray                = color.new(#F2F2F2, 0)
+var const color skyrexWhite               = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var int trend                             = 0
+var float upFractalLevel                  = na
+var float upFractalActivationLevel        = na
+var float downFractalLevel                = na
+var float downFractalActivationLevel      = na
+var bool isTrueBullishReversalBar         = false
+bool highCrossesUpfractalLevel            = ta.crossover(high, upFractalActivationLevel)
+bool lowCrossesDownFractalLevel           = ta.crossunder(low, downFractalActivationLevel)
+var float bullBarConfirmationLevel        = na
+var float bullBarInvalidationLevel        = na
+var float stopLossLevel                   = na 
+
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2026-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+enable_MFI               = input.bool(false, title = 'Enable MFI')
+enable_AO                = input.bool(false, title = 'Enable AO')
+
+//_______ <function_declarations>
+//@function       Used to calculate Simple moving average for Alligator
+//@param src      Sourse for smma Calculations
+//@param length   Number of bars to calculate smma
+//@returns        The calculated smma value 
+smma(src, length) =>
+    var float smma = na
+    sma_value = ta.sma(src, length)
+    smma := na(smma) ? sma_value : (smma * (length - 1) + src) / length
+    smma
+
+
+//@function       Used to define if the current bar is bullish reversal
+//@returns        True if bar is bullish reversal, False otherwise 
+isBullishReversalBar() =>
+    lowest = ta.lowest(7)
+    result = close > hl2 and lowest == low
+    result 
+//_______ <calculations>
+
+//Calculating MFI
+MFI      = 1000000000 * (high - low) / volume  
+PreMFI   = 1000000000 * (high[1] - low [1]) / volume[1]
+greenbar = (MFI > PreMFI) and (volume > volume[1])
+fadebar  = (MFI < PreMFI) and (volume < volume[1])
+fakebar  = (MFI > PreMFI) and (volume < volume[1])
+squatbar = (MFI < PreMFI) and (volume > volume[1])
+
+//Calculating Awesome Oscillator
+ao   = ta.sma(hl2,5) - ta.sma(hl2,34)
+diff = ao - ao[1]
+
+
+//Upfractal calculation 
+upFractalPrice = ta.pivothigh(2, 2)
+upFractal = not na(upFractalPrice) 
+
+
+//Downfractal calculation 
+downFractalPrice = ta.pivotlow(2, 2)
+downFractal = not na(downFractalPrice)
+
+
+//Calculating Alligator's teeth 
+jaw   = smma(hl2, 13)[8]
+teeth = smma(hl2, 8)[5]
+lips  = smma(hl2, 5)[3]
+
+
+//Calculating upfractal and downfractal levels
+if upFractal 
+    upFractalLevel := upFractalPrice
+else
+    upFractalLevel := upFractalLevel[1]
+
+
+if downFractal
+    downFractalLevel := downFractalPrice
+else
+    downFractalLevel := downFractalLevel[1]
+
+
+//Calculating upfractal activation level, downfractal activation level to approximate the trend and this current trend 
+if upFractalLevel > teeth
+    upFractalActivationLevel := upFractalLevel
+
+if highCrossesUpfractalLevel
+    trend := 1
+    upFractalActivationLevel := na 
+    downFractalActivationLevel := downFractalLevel
+
+
+if downFractalLevel < teeth
+    downFractalActivationLevel := downFractalLevel
+
+if lowCrossesDownFractalLevel
+    trend := -1
+    downFractalActivationLevel := na 
+    upFractalActivationLevel := upFractalLevel
+
+
+if trend == 1
+    upFractalActivationLevel := na
+
+if trend == -1
+    downFractalActivationLevel := na
+
+
+//Calculating the bullish reversal bars according to inputs
+if enable_AO and enable_MFI
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and diff < 0 and (squatbar or squatbar[1] or squatbar[2])
+
+if enable_AO and not enable_MFI
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and diff < 0
+
+if not enable_AO and enable_MFI 
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and (squatbar or squatbar[1] or squatbar[2])
+
+if not enable_AO and not enable_MFI
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips 
+
+
+//Calculating bullish reversal bar confirmation and invalidation level
+if isTrueBullishReversalBar
+    bullBarConfirmationLevel := high 
+    bullBarInvalidationLevel := low
+
+
+//Calculation stopLossLevel
+if strategy.opentrades > strategy.opentrades[1]
+    bullBarConfirmationLevel := na 
+    stopLossLevel := bullBarInvalidationLevel
+
+if trend[1] == -1 and trend == 1
+    stopLossLevel := na
+
+if strategy.opentrades == 0
+    stopLossLevel := na
+
+
+//Strategy entry
+if (isTrueBullishReversalBar and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long, stop = bullBarConfirmationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+strategy.exit(id = "entry1", stop=stopLossLevel , alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if strategy.opentrades == 1 and na(stopLossLevel) and trend[1] == 1 and trend == -1 
+    strategy.close_all()
+
+View in Pine Editor・187 lines
+Use on chart
+2
+8
+3
+1
+6 179
+Overview
+Bullish Reversal Bar Strategy [Skyrexio] leverages the combination of candlestick pattern Bullish Reversal Bar (description in Methodology and Justification of Methodology), Williams Alligator indicator and Williams Fractals to create the high probability setups. Candlestick pattern is used for the entering into trade, while the combination of Williams Alligator and Fractals is used for the trend approximation as close condition. Strategy uses only long trades.
+
+Unique Features
+
+No fixed stop-loss and take profit: Instead of fixed stop-loss level strategy utilizes technical condition obtained by Fractals and Alligator or the candlestick pattern invalidation to identify when current uptrend is likely to be over (more information in "Methodology" and "Justification of Methodology" paragraphs)
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Trend Trade Filter: strategy uses Alligator and Fractal combination as high probability trend filter.
+
+
+
+Methodology
+The strategy opens long trade when the following price met the conditions:
+
+1.Current candle's high shall be below the Williams Alligator's lines (Jaw, Lips, Teeth)(all details in "Justification of Methodology" paragraph)
+2.Price shall create the candlestick pattern "Bullish Reversal Bar". Optionally if MFI and AO filters are enabled current candle shall have the decreasing AO and at least one of three recent bars shall have the squat state on the MFI (all details in "Justification of Methodology" paragraph)
+3.If price breaks through the high of the candle marked as the "Bullish Reversal Bar" the long trade is open at the price one tick above the candle's high
+4.Initial stop loss is placed at the Bullish Reversal Bar's candle's low
+5.If price hit the Bullish Reversal Bar's low before hitting the entry price potential trade is cancelled
+6.If trade is active and initial stop loss has not been hit, trade is closed when the combination of Alligator and Williams Fractals shall consider current trend change from upward to downward.
+
+Strategy settings
+In the inputs window user can setup strategy setting:
+
+Enable MFI (if true trades are filtered using Market Facilitation Index (MFI) condition all details in "Justification of Methodology" paragraph), by default = false)
+
+Enable AO (if true trades are filtered using Awesome Oscillator (AO) condition all details in "Justification of Methodology" paragraph), by default = false)
+
+
+
+Justification of Methodology
+Let's explore the key concepts of this strategy and understand how they work together. The first and key concept is the Bullish Reversal Bar candlestick pattern. This is just the single bar pattern. The rules are simple:
+
+Candle shall be closed in it's upper half
+
+High of this candle shall be below all three Alligator's lines (Jaw, Lips, Teeth)
+
+
+
+Next, let’s discuss the short-term trend filter, which combines the Williams Alligator and Williams Fractals. Williams Alligator
+
+Developed by Bill Williams, the Alligator is a technical indicator that identifies trends and potential market reversals. It consists of three smoothed moving averages:
+
+Jaw (Blue Line): The slowest of the three, based on a 13-period smoothed moving average shifted 8 bars ahead.
+
+Teeth (Red Line): The medium-speed line, derived from an 8-period smoothed moving average shifted 5 bars forward.
+
+Lips (Green Line): The fastest line, calculated using a 5-period smoothed moving average shifted 3 bars forward.
+
+
+
+
+When the lines diverge and align in order, the "Alligator" is "awake," signaling a strong trend. When the lines overlap or intertwine, the "Alligator" is "asleep," indicating a range-bound or sideways market. This indicator helps traders determine when to enter or avoid trades.
+
+Fractals, another tool by Bill Williams, help identify potential reversal points on a price chart. A fractal forms over at least five consecutive bars, with the middle bar showing either:
+
+Up Fractal: Occurs when the middle bar has a higher high than the two preceding and two following bars, suggesting a potential downward reversal.
+
+Down Fractal: Happens when the middle bar shows a lower low than the surrounding two bars, hinting at a possible upward reversal.
+
+
+
+
+Traders often use fractals alongside other indicators to confirm trends or reversals, enhancing decision-making accuracy.
+
+How do these tools work together in this strategy? Let’s consider an example of an uptrend.
+
+When the price breaks above an up fractal, it signals a potential bullish trend. This occurs because the up fractal represents a shift in market behavior, where a temporary high was formed due to selling pressure. If the price revisits this level and breaks through, it suggests the market sentiment has turned bullish.
+
+The breakout must occur above the Alligator’s teeth line to confirm the trend. A breakout below the teeth is considered invalid, and the downtrend might still persist. Conversely, in a downtrend, the same logic applies with down fractals.
+
+How we can use all these indicators in this strategy? This strategy is a counter trend one. Candle's high shall be below all Alligator's lines. During this market stage the bullish reversal bar candlestick pattern shall be printed. This bar during the downtrend is a high probability setup for the potential reversal to the upside: bulls were able to close the price in the upper half of a candle. The breaking of its high is a high probability signal that trend change is confirmed and script opens long trade. If market continues going down and break down the bullish reversal bar's low potential trend change has been invalidated and strategy close long trade.
+
+If market really reversed and started moving to the upside strategy waits for the trend change form the downtrend to the uptrend according to approximation of Alligator and Fractals combination. If this change happens strategy close the trade. This approach helps to stay in the long trade while the uptrend continuation is likely and close it if there is a high probability of the uptrend finish.
+
+Optionally users can enable MFI and AO filters. First of all, let's briefly explain what are these two indicators. The Awesome Oscillator (AO), created by Bill Williams, is a momentum-based indicator that evaluates market momentum by comparing recent price activity to a broader historical context. It assists traders in identifying potential trend reversals and gauging trend strength.
+
+AO = SMA5(Median Price) − SMA34(Median Price)
+
+where:
+Median Price = (High + Low) / 2
+SMA5 = 5-period Simple Moving Average of the Median Price
+SMA 34 = 34-period Simple Moving Average of the Median Price
+
+This indicator is filtering signals in the following way: if current AO bar is decreasing this candle can be interpreted as a bullish reversal bar. This logic is applicable because initially this strategy is a trend reversal, it is searching for the high probability setup against the current trend. Decreasing AO is the additional high probability filter of a downtrend.
+
+Let's briefly look what is MFI. The Market Facilitation Index (MFI) is a technical indicator that measures the price movement per unit of volume, helping traders gauge the efficiency of price movement in relation to trading volume. Here's how you can calculate it:
+
+MFI = (High−Low)/Volume
+
+MFI can be used in combination with volume, so we can divide 4 states. Bill Williams introduced these to help traders interpret the interaction between volume and price movement. Here’s a quick summary:
+
+Green Window (Increased MFI & Increased Volume): Indicates strong momentum with both price and volume increasing. Often a sign of trend continuation, as both buying and selling interest are rising.
+
+Fake Window (Increased MFI & Decreased Volume): Shows that price is moving but with lower volume, suggesting weak support for the trend. This can signal a potential end of the current trend.
+
+Squat Window (Decreased MFI & Increased Volume): Shows high volume but little price movement, indicating a tug-of-war between buyers and sellers. This often precedes a breakout as the pressure builds.
+
+Fade Window (Decreased MFI & Decreased Volume): Indicates a lack of interest from both buyers and sellers, leading to lower momentum. This typically happens in range-bound markets and may signal consolidation before a new move.
+
+
+
+For our purposes we are interested in squat bars. This is the sign that volume cannot move the price easily. This type of bar increases the probability of trend reversal. In this indicator we added to enable the MFI filter of reversal bars. If potential reversal bar or two preceding bars have squat state this bar can be interpret as a reversal one.
+
+Backtest Results
+
+Operating window: Date range of backtests is 2023.01.01 - 2024.12.31. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 50%
+
+Maximum Single Position Loss: -5.29%
+
+Maximum Single Profit: +29.99%
+
+Net Profit: +5472.66 USDT (+54.73%)
+
+Total Trades: 103 (33.98% win rate)
+
+Profit Factor: 1.634
+
+Maximum Accumulated Loss: 1231.15 USDT (-8.32%)
+
+Average Profit per Trade: 53.13 USDT (+0.94%)
+
+Average Trade Duration: 76 hours
+
+
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 4h ETH/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.

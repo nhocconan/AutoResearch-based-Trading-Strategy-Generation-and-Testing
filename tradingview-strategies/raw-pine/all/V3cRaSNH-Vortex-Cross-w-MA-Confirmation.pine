@@ -1,0 +1,79 @@
+//@version=5
+strategy("Vortex + Moving Average Strategy", overlay=true, format=format.price, precision=2)
+
+//Vortex settings
+period_ = input.int(14, title="Vortex Length", minval=2)
+VMP = math.sum( math.abs( high - low[1]), period_ )
+VMM = math.sum( math.abs( low - high[1]), period_ )
+STR = math.sum( ta.atr(1), period_ )
+VIP = VMP / STR
+VIM = VMM / STR
+
+// MA Settings
+len = input.int(9, minval=1, title="SMA Length")
+src = input(close, title="Source")
+sma = ta.sma(src, len)
+
+ma(source, Length, type) =>
+    switch type
+        "SMA" => ta.sma(source, Length)
+        "EMA" => ta.ema(source, Length)
+        "RMA" => ta.rma(source, Length)
+        "WMA" => ta.wma(source, Length)
+        "VWMA" => ta.vwma(source, Length)
+        "ALMA" => ta.alma(source, Length, 0.85, 6)
+        "HMA" => ta.hma(source, Length)
+
+typeMA = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "RMA", "WMA", "VWMA", "ALMA", "HMA"], group = "SMA Smoothing")
+smoothingLength = input.int(title = "Length", defval = 1, minval = 1, maxval = 100, group="SMA Smoothing")
+
+smoothingLine = ma(sma, smoothingLength, typeMA)
+
+// Strategy Conditions
+longCondition = ta.crossover(VIP, VIM) and close > smoothingLine
+shortCondition = ta.crossunder(VIP, VIM) and close < smoothingLine
+upCondition = ta.crossunder(VIM, VIP)
+downCondition = ta.crossunder(VIP, VIM)
+
+// Strategy Logic and Plotting
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+plot(smoothingLine, title="Average", color=color.rgb(217, 217, 230, 40))
+
+bgcolor(downCondition ? color.rgb(239, 8, 93, 60) : na)
+bgcolor(upCondition ? color.rgb(30, 7, 235, 60) : na)
+
+//______ _________ 
+//___  //_/__  __ \
+//__  ,<  __  /_/ /
+//_  /| | _  ____/ 
+///_/ |_| /_/
+
+View in Pine Editor・56 lines
+Use on chart
+1
+0
+5
+1
+4 979
+Aug 6, 2023
+This script is a trading strategy that combines the Vortex Indicator and a Moving Average (MA) to generate potential entry signals for long and short positions.
+
+1. Vortex Indicator:
+The Vortex Indicator consists of two lines: Vortex Positive (VIP) and Vortex Negative (VIM). It is designed to identify trend direction and measure the strength of a trend.
+
+2. Moving Average (MA):
+The script uses a chosen type of Moving Average (SMA, EMA, SMMA, WMA, or VWMA) to smooth the price data. The smoothed line is referred to as the "Smoothing Line."
+
+3. Determine Long and Short Conditions:
+The script looks for potential long entry signals when VIP crosses above VIM, highlighting each crossover on the chart, and the closing price is above the Smoothing Line. It searches for short entry signals when VIM crosses above VIP, with the closing price is below the Smoothing Line. When the long or short conditions are met, the strategy enters either a long or short position accordingly.
+
+Potential Usage:
+The strategy can be utilized in trending markets, where the Vortex Indicator helps identify trend direction and strength, and the Moving Average smooths the price data to filter out some noise. It aims to capture trends and ride them while avoiding false signals during choppy or sideways markets.
+Sep 20, 2024
+Release Notes
+An early model still performing well, the vortex measures highs versus lows and weighs the current true range while the average functions as a filter. I've updated the script structure for clarity and added a few moving average options.

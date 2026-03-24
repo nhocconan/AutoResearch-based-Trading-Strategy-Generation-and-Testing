@@ -1,0 +1,227 @@
+//@version=5
+strategy("Enhanced OR Strategy (Futures + Breakeven + TV Position Box – History)",
+     overlay=true,
+     pyramiding=10,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     max_boxes_count=500,
+     max_lines_count=500)
+
+// =====================================================
+// TRADING DAYS
+// =====================================================
+tradeMonday    = input.bool(true,  "Trade Monday",    group="Trading Days")
+tradeTuesday   = input.bool(true,  "Trade Tuesday",   group="Trading Days")
+tradeWednesday = input.bool(true,  "Trade Wednesday", group="Trading Days")
+tradeThursday  = input.bool(true,  "Trade Thursday",  group="Trading Days")
+tradeFriday    = input.bool(true,  "Trade Friday",    group="Trading Days")
+
+dayAllowed =
+     (dayofweek == dayofweek.monday    and tradeMonday) or
+     (dayofweek == dayofweek.tuesday   and tradeTuesday) or
+     (dayofweek == dayofweek.wednesday and tradeWednesday) or
+     (dayofweek == dayofweek.thursday  and tradeThursday) or
+     (dayofweek == dayofweek.friday    and tradeFriday)
+
+// =====================================================
+// OPENING RANGE
+// =====================================================
+or_duration = input.string("15 Minutes", "Opening Range Duration",
+     options=["5 Minutes","15 Minutes","30 Minutes","45 Minutes","60 Minutes"],
+     group="Opening Range")
+
+breakout_candles = input.int(2, "Consecutive Candles", minval=1, group="Opening Range")
+
+// =====================================================
+// POSITION SIZING
+// =====================================================
+contracts = input.int(1, "Contracts", minval=1, group="Position Sizing")
+
+// =====================================================
+// RISK
+// =====================================================
+sl_type = input.string("ATR Multiple", "Stop Type",
+     options=["Range %","ATR Multiple","Fixed Points","Opposite Range"],
+     group="Risk")
+
+sl_value = input.float(2.0, "Stop Value", group="Risk")
+
+tp_type = input.string("Risk Reward", "TP Type",
+     options=["Risk Reward","Fixed Points","ATR Multiple"],
+     group="Risk")
+
+tp_value = input.float(2.0, "TP Value", group="Risk")
+
+atr = ta.atr(14)
+
+// =====================================================
+// OPENING RANGE SESSION
+// =====================================================
+session_end =
+     or_duration == "5 Minutes"  ? "0935" :
+     or_duration == "15 Minutes" ? "0945" :
+     or_duration == "30 Minutes" ? "1000" :
+     or_duration == "45 Minutes" ? "1015" : "1030"
+
+session_str = "0930-" + session_end
+in_session  = not na(time(timeframe.period, session_str, "America/New_York"))
+
+// =====================================================
+// VARIABLES
+// =====================================================
+var float session_high = na
+var float session_low  = na
+var float range_size   = na
+var bool  session_done = false
+var bool  traded_today = false
+var int   bull_count   = 0
+var int   bear_count   = 0
+
+// ---- HISTORY DRAWINGS ----
+var box[]  profit_boxes = array.new_box()
+var box[]  loss_boxes   = array.new_box()
+var line[] entry_lines  = array.new_line()
+
+// =====================================================
+// STOP & TARGET
+// =====================================================
+get_stop(entry, is_long) =>
+    switch sl_type
+        "Range %"      => is_long ? entry - range_size * sl_value / 100 : entry + range_size * sl_value / 100
+        "ATR Multiple" => is_long ? entry - atr * sl_value : entry + atr * sl_value
+        "Fixed Points" => is_long ? entry - sl_value : entry + sl_value
+        => is_long ? session_low : session_high
+
+get_tp(entry, sl, is_long) =>
+    risk = math.abs(entry - sl)
+    switch tp_type
+        "Risk Reward"  => is_long ? entry + risk * tp_value : entry - risk * tp_value
+        "ATR Multiple" => is_long ? entry + atr * tp_value : entry - atr * tp_value
+        => is_long ? entry + tp_value : entry - tp_value
+
+// =====================================================
+// BUILD OPENING RANGE
+// =====================================================
+if in_session and not in_session[1] and dayAllowed
+    session_high := high
+    session_low  := low
+    session_done := false
+    traded_today := false
+    bull_count := 0
+    bear_count := 0
+
+if in_session and dayAllowed
+    session_high := math.max(session_high, high)
+    session_low  := math.min(session_low, low)
+
+if in_session[1] and not in_session and dayAllowed
+    range_size  := session_high - session_low
+    session_done := true
+
+// =====================================================
+// BREAKOUT COUNT
+// =====================================================
+if session_done
+    if close > session_high
+        bull_count += 1
+        bear_count := 0
+    else if close < session_low
+        bear_count += 1
+        bull_count := 0
+    else
+        bull_count := 0
+        bear_count := 0
+
+// =====================================================
+// ENTRY + DRAWINGS (HISTORY KEPT)
+// =====================================================
+if session_done and not traded_today and dayAllowed
+
+    // ---------- LONG ----------
+    if bull_count >= breakout_candles
+        entry = session_high
+        sl = get_stop(entry, true)
+        tp = get_tp(entry, sl, true)
+
+        strategy.entry("Long", strategy.long, qty=contracts)
+        strategy.exit("Exit L", "Long", stop=sl, limit=tp)
+
+        pb = box.new(bar_index, tp, bar_index + 1, entry,
+             bgcolor=color.new(color.green, 80), border_color=color.green)
+
+        lb = box.new(bar_index, entry, bar_index + 1, sl,
+             bgcolor=color.new(color.red, 80), border_color=color.red)
+
+        el = line.new(bar_index, entry, bar_index + 1, entry,
+             color=color.gray, style=line.style_dashed)
+
+        array.push(profit_boxes, pb)
+        array.push(loss_boxes, lb)
+        array.push(entry_lines, el)
+
+        traded_today := true
+
+    // ---------- SHORT ----------
+    if bear_count >= breakout_candles
+        entry = session_low
+        sl = get_stop(entry, false)
+        tp = get_tp(entry, sl, false)
+
+        strategy.entry("Short", strategy.short, qty=contracts)
+        strategy.exit("Exit S", "Short", stop=sl, limit=tp)
+
+        pb = box.new(bar_index, entry, bar_index + 1, tp,
+             bgcolor=color.new(color.green, 80), border_color=color.green)
+
+        lb = box.new(bar_index, sl, bar_index + 1, entry,
+             bgcolor=color.new(color.red, 80), border_color=color.red)
+
+        el = line.new(bar_index, entry, bar_index + 1, entry,
+             color=color.gray, style=line.style_dashed)
+
+        array.push(profit_boxes, pb)
+        array.push(loss_boxes, lb)
+        array.push(entry_lines, el)
+
+        traded_today := true
+
+// =====================================================
+// EXTEND ONLY ACTIVE TRADE
+// =====================================================
+if strategy.position_size != 0 and array.size(profit_boxes) > 0
+    last = array.size(profit_boxes) - 1
+    box.set_right(array.get(profit_boxes, last), bar_index + 1)
+    box.set_right(array.get(loss_boxes, last), bar_index + 1)
+    line.set_x2(array.get(entry_lines, last), bar_index + 1)
+
+// =====================================================
+// END OF DAY CLOSE (NO DELETIONS)
+// =====================================================
+eod_ts = timestamp("GMT+2", year, month, dayofmonth, 22, 30)
+eod_trigger = time >= eod_ts and time[1] < eod_ts
+
+if eod_trigger and strategy.position_size != 0
+    strategy.close_all(comment="22:30 EOD Close")
+
+View in Pine Editor・204 lines
+Use on chart
+6
+8
+606
+This strategy uses the NY open range of 15m to look for long or short entries on the Nasdaq (NQ)
+
+It is created using a combination of a number of different examples of ORB strategies.
+
+It is also used specifically for "futures" trading as the amount of contracts used is also adjustable.
+
+The breakout confirmation is adjustable with the amount of candles to be deemed correct by the user. The timeframe makes a big difference to the breakout time.
+
+The most profitable settings was found to be on the 5 min time frame, with 2 candles used as confluence for a valid breakout.
+
+A SL of 60 points and a TP of 200 points is suggested.
+
+Long and short position boxes is also drawn to assist with SL and TP positioning.
+
+Please leave any comments or suggestions to enhance your experience?
+
+This strategy (indicator) is for educational purposes only.

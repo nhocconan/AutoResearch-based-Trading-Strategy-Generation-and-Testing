@@ -1,0 +1,75 @@
+//@version=3
+strategy("PC with ATR Strategy (by Zhipengcfel)", shorttitle="PC_ATR", pyramiding=1, overlay=true)
+
+// Zhipengcfel's Previous day's close with ATR Strategy
+//
+// Version 1.0
+// @copyright Idea by Zhipengcfel on June 29, 2017.
+
+//Previous day's close plus ATR strategy. 
+//Buy (if breaking PC+ATR*0.8) or sell (if breaking PC-0.8*ATR). 
+
+//This is just a demo vision and can not be used for real auto trading
+
+
+
+///////////// ATR value
+ATRlength = input(14, minval=1, title="lookback length of ATR")
+//ATR = atr(ATRlength)
+ATR = security(tickerid, 'D', atr(ATRlength))
+
+///////////// Entry levels and target levels
+entrbuy = input(0.85, step = 0.05, title="Entry level for buy")
+entrsell = input(0.55, step = 0.05, title="Entry level for sell")
+tpbuylevel = input(1.7, step = 0.05, title="Exit level for buy")
+tpselllevel = input(2.1, step = 0.05, title="Exit level for sell")
+yesterday = security(tickerid, 'D', close[1])
+dl = security(tickerid, 'D', low[1])
+dh = security(tickerid, 'D', high[1])
+TPup = yesterday+entrbuy*ATR
+TPdown = yesterday-entrsell*ATR
+profitlevelup = dl+tpbuylevel*ATR
+profitleveldown = dh-tpselllevel*ATR
+
+///////////// Stop loss level
+sllong = input( 0.3  , step = 0.05, title="Stop loss level for long") //82 for 2, 83 for 3 and more positions
+slup = yesterday+sllong*ATR
+slshort = input( -0.4  , step = 0.05, title="Stop loss level for short") //82 for 2, 83 for 3 and more positions
+sldown = yesterday-slshort*ATR
+
+///////////// Starting year to backtest
+yer = input( 2014  , title="Backtest Starting year")
+
+
+///////////// strategy: PC + ATR
+if (close > TPup) and (close < profitlevelup)
+    strategy.entry("LONG", strategy.long, comment="Buy", when = year > yer, oca_name="My oca", oca_type=strategy.oca.reduce)
+    strategy.exit("Stopped", "LONG",  stop = slup, limit= profitlevelup, oca_name="My oca")
+            
+
+if (close < TPdown) and (close > profitleveldown)
+    strategy.entry("SHORT", strategy.short, comment="Sell", when = year > yer, oca_name="My oca", oca_type=strategy.oca.reduce)
+    strategy.exit("Stopped", "SHORT", stop = sldown, limit= profitleveldown, oca_name="My oca")
+
+View in Pine Editor・52 lines
+Use on chart
+9
+6
+3
+3 315
+Jun 29, 2017
+This strategy came out with the request of SumitJain and helpful discussion with @Bonavest. The strategy link is here. prnt.sc/fpg0qm
+
+
+I changed a bit. DH and DL use the previous day's high and low to avoid repainting.
+
+The results are not too bad.
+
+But I still suggest not to be used for real auto trading.
+
+Jun 29, 2017
+Release Notes
+Separate the buy and sell triggered levels, stop loss and take profit levels. Deleted contract numbers in strategy. entry function.
+Jun 29, 2017
+Release Notes
+Optimise parameters for SPX500 daily chart to get best results.

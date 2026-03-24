@@ -1,0 +1,33 @@
+//@version=4
+strategy("MA Crossover", overlay = true)
+
+start = timestamp(2009,2,1,0,0)
+
+sma50 = sma(close, 50)
+sma40 = sma(close, 40)
+sma3 =  sma(close, 3)
+
+plot(sma50,title='50', color=#00ffaa, linewidth=2)
+plot(sma3,title='3', color=#2196F3, linewidth=2)
+
+long = crossover(sma3,sma50)
+neut = crossunder(close,sma50)
+short = crossunder(sma3,sma40)
+
+if time >= start
+    strategy.entry("Long", strategy.long, 10.0, when=long)
+
+
+strategy.close("Long", when = short)
+strategy.close("Long", when = neut)
+
+
+plot(close)
+
+View in Pine Editor・28 lines
+Use on chart
+7
+2
+2 984
+This is my example for the Moving Average Cross Strategy with early Closing. You can modify the strategy for your individual setup and market.
+I tested the strategy in DAX30 and SP55

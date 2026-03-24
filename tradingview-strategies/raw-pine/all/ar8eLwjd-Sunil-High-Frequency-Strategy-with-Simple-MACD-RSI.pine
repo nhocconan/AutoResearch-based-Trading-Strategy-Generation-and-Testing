@@ -1,0 +1,107 @@
+//@version=6
+strategy('Sunil High-Frequency Strategy with Simple MACD & RSI', overlay = true)
+
+// Define Parameters
+fastLength = input.int(6, title = 'MACD Fast Length') // Shorter MACD fast length
+slowLength = input.int(12, title = 'MACD Slow Length')
+signalSmoothing = input.int(9, title = 'MACD Signal Length')
+rsiLength = input.int(7, title = 'RSI Length') // Shorter RSI length
+rsiOverbought = input.int(70, title = 'RSI Overbought Level')
+rsiOversold = input.int(30, title = 'RSI Oversold Level')
+atrLength = input.int(14, title = 'ATR Length')
+atrMultiplierSL = input.float(0.5, title = 'Stop Loss Multiplier (ATR)', minval = 0.1) // Tighter Stop Loss
+atrMultiplierTP = input.float(1.5, title = 'Take Profit Multiplier (ATR)', minval = 0.1) // Moderate Take Profit
+atrMultiplierTrailingStop = input.float(0.5, title = 'Trailing Stop Multiplier (ATR)', minval = 0.1) // Trailing stop ATR multiplier
+
+// Calculate MACD
+[macdLine, signalLine, _] = ta.macd(close, fastLength, slowLength, signalSmoothing)
+
+// Calculate RSI
+rsiValue = ta.rsi(close, rsiLength)
+
+// Calculate ATR for dynamic SL/TP
+atr = ta.atr(atrLength)
+
+// Plot MACD and Signal Line
+plot(macdLine, color = color.blue, title = 'MACD Line')
+plot(signalLine, color = color.orange, title = 'Signal Line')
+hline(0, 'Zero Line', color = color.gray)
+
+// Entry Conditions
+longCondition = ta.crossover(macdLine, signalLine) and rsiValue < rsiOverbought
+shortCondition = ta.crossunder(macdLine, signalLine) and rsiValue > rsiOversold
+
+// Exit Conditions
+longStopLoss = close - atrMultiplierSL * atr
+longTakeProfit = close + atrMultiplierTP * atr
+shortStopLoss = close + atrMultiplierSL * atr
+shortTakeProfit = close - atrMultiplierTP * atr
+
+// Trailing Stop Logic
+longTrailingStop = strategy.position_avg_price + atrMultiplierTrailingStop * atr
+shortTrailingStop = strategy.position_avg_price - atrMultiplierTrailingStop * atr
+
+// Enter Long Position
+if longCondition
+    strategy.entry('Long', strategy.long)
+
+// Enter Short Position
+if shortCondition
+    strategy.entry('Short', strategy.short)
+
+// Exit Conditions: Based on stop loss, take profit, or trailing stop
+if strategy.position_size > 0
+    strategy.exit('Sell', 'Long', stop = longStopLoss, limit = longTakeProfit, trail_price = longTrailingStop, trail_offset = atrMultiplierTrailingStop * atr)
+
+if strategy.position_size < 0
+    strategy.exit('Cover', 'Short', stop = shortStopLoss, limit = shortTakeProfit, trail_price = shortTrailingStop, trail_offset = atrMultiplierTrailingStop * atr)
+
+// Plot Stop Loss and Take Profit levels
+plot(longStopLoss, color = color.red, title = 'Stop Loss', linewidth = 1, style = plot.style_line)
+plot(longTakeProfit, color = color.green, title = 'Take Profit', linewidth = 1, style = plot.style_line)
+plot(shortStopLoss, color = color.red, title = 'Short Stop Loss', linewidth = 1, style = plot.style_line)
+plot(shortTakeProfit, color = color.green, title = 'Short Take Profit', linewidth = 1, style = plot.style_line)
+
+// Plot Buy and Sell Signals
+plotshape(series = longCondition, location = location.belowbar, color = color.green, style = shape.labelup, title = 'Buy Signal')
+plotshape(series = shortCondition, location = location.abovebar, color = color.red, style = shape.labeldown, title = 'Sell Signal')
+
+View in Pine Editor・67 lines
+Use on chart
+1
+3
+4
+10
+4 047
+Sunil High-Frequency Strategy with Simple MACD & RSI
+This high-frequency trading strategy uses a combination of MACD and RSI to identify quick market opportunities. By leveraging these indicators, combined with dynamic risk management using ATR, it aims to capture small but frequent price movements while ensuring tight control over risk.
+
+Key Features:
+Indicators Used:
+
+MACD (Moving Average Convergence Divergence): The strategy uses a shorter MACD configuration (Fast Length of 6 and Slow Length of 12) to capture quick price momentum shifts. A MACD crossover above the signal line triggers a buy signal, while a crossover below the signal line triggers a sell signal.
+RSI (Relative Strength Index): A shorter RSI length of 7 is used to gauge overbought and oversold market conditions. The strategy looks for RSI confirmation, with a long trade initiated when RSI is below the overbought level (70) and a short trade initiated when RSI is above the oversold level (30).
+Risk Management:
+
+Dynamic Stop Loss and Take Profit: The strategy uses ATR (Average True Range) to calculate dynamic stop loss and take profit levels based on market volatility.
+Stop Loss is set at 0.5x ATR to limit risk.
+Take Profit is set at 1.5x ATR to capture reasonable price moves.
+Trailing Stop: As the market moves in the strategy’s favor, the position is protected by a trailing stop set at 0.5x ATR, allowing the strategy to lock in profits as the price moves further.
+Entry & Exit Signals:
+
+Long Entry: Triggered when the MACD crosses above the signal line (bullish crossover) and RSI is below the overbought level (70).
+Short Entry: Triggered when the MACD crosses below the signal line (bearish crossover) and RSI is above the oversold level (30).
+Exit Conditions: The strategy exits long or short positions based on the stop loss, take profit, or trailing stop activation.
+Frequent Trades:
+
+This strategy is designed for high-frequency trading, with trade signals occurring frequently as the MACD and RSI indicators react quickly to price movements. It works best on lower timeframes such as 1-minute, 5-minute, or 15-minute charts, but can be adjusted for different timeframes based on the asset’s volatility.
+Customizable Parameters:
+MACD Settings: Adjust the Fast Length, Slow Length, and Signal Length to tune the MACD’s sensitivity.
+RSI Settings: Customize the RSI Length, Overbought, and Oversold levels to better match your trading style.
+ATR Settings: Modify the ATR Length and multipliers for Stop Loss, Take Profit, and Trailing Stop to optimize risk management according to market volatility.
+Important Notes:
+Market Conditions: This strategy is designed to capture smaller, quicker moves in trending markets. It may not perform well during choppy or sideways markets.
+Optimizing for Asset Volatility: Adjust the ATR multipliers based on the asset’s volatility to suit the risk-reward profile that fits your trading goals.
+Backtesting: It's recommended to backtest the strategy on different assets and timeframes to ensure optimal performance.
+Summary:
+The Sunil High-Frequency Strategy leverages a simple combination of MACD and RSI with dynamic risk management (using ATR) to trade small but frequent price movements. The strategy ensures tight stop losses and reasonable take profits, with trailing stops to lock in profits as the price moves in favor of the trade. It is ideal for scalping or intraday trading on lower timeframes, aiming for quick entries and exits with controlled risk.

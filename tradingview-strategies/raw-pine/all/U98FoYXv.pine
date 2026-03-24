@@ -1,0 +1,129 @@
+//@version=5
+strategy("Vinicius Setup ATR", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ===== PARÂMETROS =====
+atrLength = input.int(10, title="ATR Length")
+factor = input.float(6.0, title="Multiplier", step=0.1)
+riskValue = input.float(1.0, title="Risk Value")
+rsiPeriod = input.int(14, title="RSI Period")
+minBodySize = input.float(1.0, title="Mínimo Tamanho do Corpo %")
+
+// ===== INDICADORES =====
+[supertrend, direction] = ta.supertrend(factor, atrLength)
+rsi = ta.rsi(close, rsiPeriod)
+avgVolume = ta.sma(volume, 20)
+candleBody = math.abs(close - open)
+isStrongCandle = candleBody > (ta.atr(atrLength) * minBodySize)
+isHighVolume = volume > avgVolume * 1.2
+
+// ===== ZONAS DE SUPORTE / RESISTÊNCIA (simples) =====
+pivotHigh = ta.pivothigh(high, 5, 5)
+pivotLow = ta.pivotlow(low, 5, 5)
+plotshape(pivotHigh, title="Resistência", location=location.abovebar, color=color.red, style=shape.labeldown, text="RES")
+plotshape(pivotLow, title="Suporte", location=location.belowbar, color=color.green, style=shape.labelup, text="SUP")
+
+// ===== SINAL DE COMPRA =====
+buySignal = direction == 1 and isStrongCandle and isHighVolume and rsi < 70
+if buySignal
+    strategy.entry("Compra", strategy.long)
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white)
+
+// ===== SINAL DE VENDA =====
+sellSignal = direction == -1 and isStrongCandle and isHighVolume and rsi > 30
+if sellSignal
+    strategy.entry("Venda", strategy.short)
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+// ===== SAÍDA =====
+strategy.close("Compra", when = sellSignal)
+strategy.close("Venda", when = buySignal)
+
+View in Pine Editor・39 lines
+Use on chart
+9
+6
+2 386
+Apr 19, 2025
+
+Description:
+This script is a strategy based on the Supertrend indicator combined with volume analysis, candle strength, and RSI. Its goal is to identify potential entry points for buy and sell trades based on technical criteria, without promising profitability or guaranteed results.
+
+Script Components:
+
+Supertrend: Used as the main trend compass. When the trend is positive (direction = 1), buy signals are considered; when negative (direction = -1), sell signals are considered.
+
+Volume: Entries are only validated if the volume is above the average of the last 20 candles, adjusted with a 1.2 multiplier.
+
+Candle Body: The candle body must be larger than a certain percentage of the ATR, ensuring sufficient strength and volatility.
+
+RSI: Used as a filter to avoid trades in extreme overbought or oversold zones.
+
+Support and Resistance: Identified based on simple pivots (5 periods before and after).
+
+Customizable Parameters:
+
+ATR Length and Multiplier: Controls the sensitivity of the Supertrend.
+
+RSI Period: Adjusts the relative strength filter.
+
+Minimum Volume and Candle Body: Settings to validate entry signals.
+
+Entry Conditions:
+
+Buy: Positive trend + strong candle + high volume + RSI below 70.
+
+Sell: Negative trend + strong candle + high volume + RSI above 30.
+
+Exit Conditions:
+
+The trade is closed upon the appearance of an opposite signal.
+
+Notes:
+
+This is a technical system with no profit guarantees.
+
+It is recommended to test with realistic capital values and parameters suited to your risk management.
+
+The script is not optimized for specific profitability, but rather to support study and the construction of setups with objective criteria.
+Apr 19, 2025
+Release Notes
+Description:
+This script is a strategy based on the Supertrend indicator combined with volume analysis, candle strength, and RSI. Its goal is to identify potential entry points for buy and sell trades based on technical criteria, without promising profitability or guaranteed results.
+
+Script Components:
+
+Supertrend: Used as the main trend compass. When the trend is positive (direction = 1), buy signals are considered; when negative (direction = -1), sell signals are considered.
+
+Volume: Entries are only validated if the volume is above the average of the last 20 candles, adjusted with a 1.2 multiplier.
+
+Candle Body: The candle body must be larger than a certain percentage of the ATR, ensuring sufficient strength and volatility.
+
+RSI: Used as a filter to avoid trades in extreme overbought or oversold zones.
+
+Support and Resistance: Identified based on simple pivots (5 periods before and after).
+
+Customizable Parameters:
+
+ATR Length and Multiplier: Controls the sensitivity of the Supertrend.
+
+RSI Period: Adjusts the relative strength filter.
+
+Minimum Volume and Candle Body: Settings to validate entry signals.
+
+Entry Conditions:
+
+Buy: Positive trend + strong candle + high volume + RSI below 70.
+
+Sell: Negative trend + strong candle + high volume + RSI above 30.
+
+Exit Conditions:
+
+The trade is closed upon the appearance of an opposite signal.
+
+Notes:
+
+This is a technical system with no profit guarantees.
+
+It is recommended to test with realistic capital values and parameters suited to your risk management.
+
+The script is not optimized for specific profitability, but rather to support study and the construction of setups with objective criteria.

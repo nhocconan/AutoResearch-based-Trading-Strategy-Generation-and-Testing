@@ -1,0 +1,173 @@
+//@version=5
+strategy("RSI Momentum Scalper", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, calc_on_order_fills=true)
+
+// Trading Mode Selection
+tradeMode = input.string("Both", title="Trade Mode", options=["Both", "Long Only", "Short Only"])
+
+// RSI Settings
+rsiLength = input.int(8, title="RSI Length", minval=2, maxval=30)
+rsiOverbought = input.int(90, title="RSI Overbought", minval=60, maxval=99)
+rsiOversold = input.int(10, title="RSI Oversold", minval=1, maxval=40)
+rsiMomentumThreshold = input.float(14, title="RSI Momentum Threshold", minval=1, maxval=15, step=0.5)
+
+// Volume Settings
+volMultiplier = input.float(1, title="Volume Multiplier", minval=1.0, maxval=3.0, step=0.1)
+volLookback = input.int(13, title="Volume MA Length", minval=5, maxval=50)
+
+// Exit Settings
+takeProfitPercent = input.float(4.15, title="Take Profit %", minval=0.1, maxval=10.0, step=0.1)
+stopLossPercent = input.float(1.85, title="Stop Loss %", minval=0.1, maxval=6.0, step=0.1)
+trailingStopPercent = input.float(2.55, title="Trailing Stop %", minval=0.1, maxval=4.0, step=0.05)
+
+// Calculate RSI
+rsi = ta.rsi(close, rsiLength)
+rsiMA = ta.sma(rsi, 3)
+
+// Calculate RSI Momentum
+rsiMomentum = rsi - rsi[1]
+
+// Volume Analysis
+volMA = ta.sma(volume, volLookback)
+highVolume = volume > volMA * volMultiplier
+
+// Entry Conditions - Long
+bullishMomentum = rsiMomentum > rsiMomentumThreshold
+oversoldBounce = rsi < rsiOversold and rsi > rsi[1]
+bullishCross = ta.crossover(rsi, rsiOversold)
+longCondition = (bullishMomentum or oversoldBounce or bullishCross) and highVolume and close > close[1]
+
+// Entry Conditions - Short
+bearishMomentum = rsiMomentum < -rsiMomentumThreshold
+overboughtReversal = rsi > rsiOverbought and rsi < rsi[1]
+bearishCross = ta.crossunder(rsi, rsiOverbought)
+shortCondition = (bearishMomentum or overboughtReversal or bearishCross) and highVolume and close < close[1]
+
+// Apply trade mode filter
+longEntry = longCondition and (tradeMode == "Both" or tradeMode == "Long Only")
+shortEntry = shortCondition and (tradeMode == "Both" or tradeMode == "Short Only")
+
+// Entry Logic
+strategy.entry("Long", strategy.long, when=longEntry and strategy.position_size == 0)
+strategy.entry("Short", strategy.short, when=shortEntry and strategy.position_size == 0)
+
+// Declare and initialize trailing variables
+var float highest_since_long = na
+var float lowest_since_short = na
+var float long_trailing_level = na
+var float short_trailing_level = na
+var float long_fixed_sl = na
+var float long_tp = na
+var float short_fixed_sl = na
+var float short_tp = na
+
+// Update trailing levels using ternary operators with math.max/min
+highest_since_long := strategy.position_size > 0 ? math.max(na(highest_since_long[1]) ? math.max(high, strategy.position_avg_price) : highest_since_long[1], high) : na
+lowest_since_short := strategy.position_size < 0 ? math.min(na(lowest_since_short[1]) ? math.min(low, strategy.position_avg_price) : lowest_since_short[1], low) : na
+
+// Calculate exit levels
+long_fixed_sl := strategy.position_size > 0 ? strategy.position_avg_price * (1 - stopLossPercent / 100) : na
+long_tp := strategy.position_size > 0 ? strategy.position_avg_price * (1 + takeProfitPercent / 100) : na
+long_trailing_level := strategy.position_size > 0 ? highest_since_long * (1 - trailingStopPercent / 100) : na
+short_fixed_sl := strategy.position_size < 0 ? strategy.position_avg_price * (1 + stopLossPercent / 100) : na
+short_tp := strategy.position_size < 0 ? strategy.position_avg_price * (1 - takeProfitPercent / 100) : na
+short_trailing_level := strategy.position_size < 0 ? lowest_since_short * (1 + trailingStopPercent / 100) : na
+
+// Effective stop loss levels
+effective_long_sl = strategy.position_size > 0 ? math.max(long_fixed_sl, long_trailing_level) : na
+effective_short_sl = strategy.position_size < 0 ? math.min(short_fixed_sl, short_trailing_level) : na
+
+// Exit Logic
+strategy.exit("Long Exit", "Long", limit=long_tp, stop=effective_long_sl, when=strategy.position_size > 0)
+strategy.exit("Short Exit", "Short", limit=short_tp, stop=effective_short_sl, when=strategy.position_size < 0)
+
+// Plot TP, fixed SL, and trailing SL levels on chart when in position
+plot(strategy.position_size > 0 ? long_tp : na, title="Long TP", color=color.green, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? long_fixed_sl : na, title="Long Fixed SL", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? long_trailing_level : na, title="Long Trailing SL", color=color.orange, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_tp : na, title="Short TP", color=color.green, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_fixed_sl : na, title="Short Fixed SL", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_trailing_level : na, title="Short Trailing SL", color=color.orange, style=plot.style_linebr)
+
+// Performance Table
+var table perfTable = table.new(position.top_right, 4, 4, bgcolor=color.new(color.black, 80))
+
+// Calculate metrics
+wins = strategy.wintrades
+losses = strategy.losstrades
+totalTrades = wins + losses
+winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0
+netProfit = strategy.netprofit
+
+// Update table
+table.cell(perfTable, 0, 0, "Metric", bgcolor=barstate.islast ? color.new(color.blue, 50) : na, text_color=color.white)
+table.cell(perfTable, 1, 0, "Value", bgcolor=barstate.islast ? color.new(color.blue, 50) : na, text_color=color.white)
+table.cell(perfTable, 0, 1, "Win %", text_color=barstate.islast ? color.white : na)
+table.cell(perfTable, 1, 1, barstate.islast ? str.tostring(winRate, "#.##") + "%" : na, text_color=winRate > 50 ? color.green : color.red)
+table.cell(perfTable, 0, 2, "Total Trades", text_color=barstate.islast ? color.white : na)
+table.cell(perfTable, 1, 2, barstate.islast ? str.tostring(totalTrades) : na, text_color=color.white)
+table.cell(perfTable, 0, 3, "Net P/L", text_color=barstate.islast ? color.white : na)
+table.cell(perfTable, 1, 3, barstate.islast ? "$" + str.tostring(netProfit, "#.##") : na, text_color=netProfit > 0 ? color.green : color.red)
+
+// Alerts
+alertcondition(longEntry, title="Long Entry Alert", message="RSI Momentum Long Signal")
+alertcondition(shortEntry, title="Short Entry Alert", message="RSI Momentum Short Signal")
+
+View in Pine Editor・116 lines
+Use on chart
+3
+4
+1 523
+Overview
+The "RSI Momentum Scalper" is a Pine Script v5 strategy crafted for trading highly volatile markets, with a special focus on newly listed cryptocurrencies. This strategy harnesses the Relative Strength Index (RSI) alongside volume analysis and momentum thresholds to pinpoint short-term trading opportunities. It supports both long and short trades, managed with customizable take profit, stop loss, and trailing stop levels, which are visually plotted on the chart for easy tracking.
+
+Why I Created This Strategy
+I developed the "RSI Momentum Scalper" because I was seeking a reliable trading strategy tailored to newly listed, highly volatile cryptocurrencies. These assets often experience rapid price fluctuations, rendering traditional strategies less effective. I aimed to create a tool that could exploit momentum and volume spikes while managing risk through adaptable exit parameters. This strategy is designed to address that need, offering a flexible approach for traders in dynamic crypto markets.
+
+How It Works
+The strategy utilizes RSI to identify momentum shifts, combined with volume confirmation, to trigger long or short entries. Trades are controlled with take profit, stop loss, and trailing stop levels, which adjust dynamically as the price moves in your favor. The trailing stop helps lock in profits, while the plotted exit levels provide clear visual cues for trade management.
+
+Customizable Settings
+The script is highly customizable, allowing you to adjust it to various market conditions and trading styles. Here’s a brief overview of the key settings:
+Trade Mode: Select "Both," "Long Only," or "Short Only" to determine the trade direction.
+(Default: Both)
+RSI Length: Sets the lookback period for the RSI calculation (2 to 30).
+(Default: 8)
+A shorter length increases RSI sensitivity, suitable for volatile assets.
+RSI Overbought: Defines the upper RSI threshold (60 to 99) for short entries.
+(Default: 90)
+Higher values signal stronger overbought conditions.
+RSI Oversold: Defines the lower RSI threshold (1 to 40) for long entries.
+(Default: 10)
+Lower values indicate stronger oversold conditions.
+RSI Momentum Threshold: Sets the minimum RSI momentum change (1 to 15) to trigger entries.
+(Default: 14)
+Adjusts the sensitivity to price momentum.
+Volume Multiplier: Multiplies the volume moving average to filter high-volume bars (1.0 to 3.0).
+(Default: 1)
+Higher values require stronger volume confirmation.
+Volume MA Length: Sets the lookback period for the volume moving average (5 to 50).
+(Default: 13)
+Influences the volume trend sensitivity.
+Take Profit %: Sets the profit target as a percentage of the entry price (0.1 to 10.0).
+(Default: 4.15)
+Determines when to close a winning trade.
+Stop Loss %: Sets the loss limit as a percentage of the entry price (0.1 to 6.0).
+(Default: 1.85)
+Protects against significant losses.
+Trailing Stop %: Sets the trailing stop distance as a percentage (0.1 to 4.0).
+(Default: 2.55)
+Locks in profits as the price moves favorably.
+
+Visual Features
+Exit Levels: Take profit (green), fixed stop loss (red), and trailing stop (orange) levels are plotted when in a position.
+Performance Table: Displays win rate, total trades, and net profit in the top-right corner.
+
+How to Use
+Add the strategy to your chart in TradingView.
+Adjust the input settings based on the cryptocurrency and timeframe you’re trading.
+Monitor the plotted exit levels for trade management.
+Use the performance table to assess the strategy’s performance over time.
+
+Notes
+Test the strategy on a demo account or with historical data before live trading.
+The strategy is optimized for short-term scalping; adjust settings for longer timeframes if needed.

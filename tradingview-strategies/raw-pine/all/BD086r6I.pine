@@ -1,0 +1,149 @@
+//@version=6
+strategy("Aggressive Strategy for High IV Market", overlay=true)
+
+// 用户输入
+ema_fast_length = input.int(10, title="Fast EMA Length")
+ema_slow_length = input.int(30, title="Slow EMA Length")
+atr_length = input.int(14, title="ATR Length")
+atr_mean_length = input.int(20, title="ATR Mean Length")
+atr_std_length = input.int(20, title="ATR Std Dev Length")
+risk_factor = input.float(0.01, title="Risk Factor")  // 单笔交易风险占账户资金的百分比
+slippage = input.float(0.001, title="Slippage") // 假设滑点
+
+// 计算EMA、ATR、均值、标准差
+ema_fast = ta.ema(close, ema_fast_length)
+ema_slow = ta.ema(close, ema_slow_length)
+atr_value = ta.atr(atr_length)
+atr_mean = ta.sma(atr_value, atr_mean_length)
+atr_std = ta.stdev(atr_value, atr_std_length)
+
+// 进场条件
+long_condition = ta.crossover(ema_fast, ema_slow) and atr_value > (atr_mean + atr_std)
+short_condition = ta.crossunder(ema_fast, ema_slow) and atr_value > (atr_mean + atr_std)
+
+// 止损与止盈设置
+long_stop_loss = close - 2 * atr_value  // 基于ATR的止损
+long_take_profit = close + 4 * atr_value  // 基于ATR的止盈
+short_stop_loss = close + 2 * atr_value  // 基于ATR的止损
+short_take_profit = close - 4 * atr_value  // 基于ATR的止盈
+
+// 动态仓位控制
+position_size_calc = (strategy.equity * risk_factor) / (2 * atr_value)
+position_size = math.min(position_size_calc, strategy.equity)  // 限制仓位不能大于账户总值
+
+// 进场与出场信号
+if (long_condition)
+    strategy.entry("Long", strategy.long, qty=position_size)
+
+if (short_condition)
+    strategy.entry("Short", strategy.short, qty=position_size)
+
+// 止损与止盈
+strategy.exit("Take Profit/Stop Loss Long", "Long", stop=long_stop_loss, limit=long_take_profit)
+strategy.exit("Take Profit/Stop Loss Short", "Short", stop=short_stop_loss, limit=short_take_profit)
+
+// 绘制图表
+plot(ema_fast, title="Fast EMA", color=color.blue, linewidth=2)
+plot(ema_slow, title="Slow EMA", color=color.orange, linewidth=2)
+plot(long_stop_loss, title="Long Stop Loss", color=color.red, linewidth=1, style=plot.style_line)
+plot(long_take_profit, title="Long Take Profit", color=color.green, linewidth=1, style=plot.style_line)
+plot(short_stop_loss, title="Short Stop Loss", color=color.red, linewidth=1, style=plot.style_line)
+plot(short_take_profit, title="Short Take Profit", color=color.green, linewidth=1, style=plot.style_line)
+
+// 显示信号
+bgcolor(long_condition ? color.new(color.green, 90) : na, title="Long Signal Background")
+bgcolor(short_condition ? color.new(color.red, 90) : na, title="Short Signal Background")
+
+View in Pine Editor・55 lines
+Use on chart
+2
+8
+1 334
+### Strategic background
+In a volatile high IV market, prices are volatile and market expectations of future uncertainty are high. This environment provides opportunities for aggressive trading strategies, but also comes with a high level of risk. In pursuit of a high Sharpe ratio (i.e., risk-adjusted return), we need to design a strategy that captures the benefits of market volatility while effectively controlling risk. Based on daily line cycles, I choose a combination of trend tracking and volatility filtering for highly volatile assets such as stocks, futures or cryptocurrencies.
+
+---
+
+### Strategy framework
+#### Data
+- Use daily data, including opening, closing, high and low prices.
+- Suitable for highly volatile markets such as technology stocks, cryptocurrencies or volatile index futures.
+
+#### Core indicators
+1. ** Trend Indicators ** :
+Fast Exponential Moving Average (EMA_fast) : 10-day EMA, used to capture short-term trends.
+- Slow Exponential Moving Average (EMA_slow) : 30-day EMA, used to determine the long-term trend.
+2. ** Volatility Indicators ** :
+Average true Volatility (ATR) : 14-day ATR, used to measure market volatility.
+- ATR mean (ATR_mean) : A simple moving average of the 20-day ATR that serves as a volatility benchmark.
+- ATR standard deviation (ATR_std) : The standard deviation of the 20-day ATR, which is used to judge extreme changes in volatility.
+
+#### Trading logic
+The strategy is based on a trend following approach of double moving averages and filters volatility through ATR indicators, ensuring that trading only in a high-volatility environment is in line with aggressive and high sharpe ratio goals.
+
+---
+
+### Entry and exit conditions
+#### Admission conditions
+- ** Multiple entry ** :
+- EMA_fast Crosses EMA_slow (gold cross), indicating that the short-term trend is turning upward.
+-ATR > ATR_mean + 1 * ATR_std indicates that the current volatility is above average and the market is in a state of high volatility.
+- ** Short Entry ** :
+- EMA_fast Crosses EMA_slow (dead cross) downward, indicating that the short-term trend turns downward.
+-ATR > ATR_mean + 1 * ATR_std, confirming high volatility.
+
+#### Appearance conditions
+- ** Long show ** :
+- EMA_fast Enters the EMA_slow (dead cross) downward, and the trend reverses.
+- or ATR < ATR_mean-1 * ATR_std, volatility decreases significantly and the market calms down.
+- ** Bear out ** :
+- EMA_fast Crosses the EMA_slow (gold cross) on the top, and the trend reverses.
+- or ATR < ATR_mean-1 * ATR_std, the volatility is reduced.
+
+---
+
+### Risk management
+To control the high risk associated with aggressive strategies, set up the following mechanisms:
+1. ** Stop loss ** :
+- Long: Entry price - 2 * ATR.
+- Short: Entry price + 2 * ATR.
+- Dynamic stop loss based on ATR can adapt to market volatility changes.
+2. ** Stop profit ** :
+- Fixed profit target can be selected (e.g. entry price ± 4 * ATR).
+- Or use trailing stop losses to lock in profits following price movements.
+3. ** Location Management ** :
+- Reduce positions appropriately in times of high volatility, such as dynamically adjusting position size according to ATR, ensuring that the risk of a single trade does not exceed 1%-2% of the account capital.
+
+---
+
+### Strategy features
+- ** Aggressiveness ** : By trading only in a high ATR environment, the strategy takes full advantage of market volatility and pursues greater returns.
+- ** High Sharpe ratio potential ** : Trend tracking combined with volatility filtering to avoid ineffective trades during periods of low volatility and improve the ratio of return to risk.
+- ** Daily line Cycle ** : Based on daily line data, suitable for traders who operate frequently but are not too complex.
+
+---
+
+### Implementation steps
+1. ** Data Preparation ** :
+- Get the daily data of the target asset.
+- Calculate EMA_fast (10 days), EMA_slow (30 days), ATR (14 days), ATR_mean (20 days), and ATR_std (20 days).
+2. ** Signal generation ** :
+- Check EMA cross signals and ATR conditions daily to generate long/short signals.
+3. ** Execute trades ** :
+- Enter according to the signal, set stop loss and profit.
+- Monitor exit conditions and close positions in time.
+4. ** Backtest and Optimization ** :
+- Use historical data to backtest strategies to evaluate Sharpe ratios, maximum retracements, and win rates.
+- Optimize parameters such as EMA period and ATR threshold to improve policy performance.
+
+---
+
+### Precautions
+- ** Trading costs ** : Highly volatile markets may result in frequent trading, and the impact of fees and slippage on earnings needs to be considered.
+- ** Risk Control ** : Aggressive strategies may face large retracements and need to strictly implement stop losses.
+- ** Scalability ** : Additional metrics (such as volume or VIX) can be added to enhance strategy robustness, or combined with machine learning to predict trends and volatility.
+
+---
+
+### Summary
+This is a trend following strategy based on dual moving averages and ATR, designed for volatile high IV markets. By entering into high volatility and exiting into low volatility, the strategy combines aggressive and risk-adjusted returns for traders seeking a high sharpe ratio. It is recommended to fully backtest before implementation and adjust the parameters according to the specific market.

@@ -1,0 +1,284 @@
+//@version=6
+strategy('Dynamic Swing Anchored VWAP STRATEGY (Zeiierman X PineIndicators)', overlay = true, max_bars_back = 5000, max_labels_count = 500, max_polylines_count = 100, initial_capital = 10000, commission_value = 0.01, margin_long = 0, margin_short = 0, slippage = 1)
+//~~}
+
+//ATTENTION: The original indicator is repainting. The labels don't occur in real time and are generated afterwards. Therefore it's not possible to enter and exit positions at these points!
+
+// ~~ Tooltips {
+var string t1 = "Number of bars used to detect swing highs and lows. Larger values identify bigger, more significant swings but react slower. Smaller values detect more frequent swings but may produce more noise."
+var string t2 = "Controls how quickly the VWAP adjusts to new price action. Lower values make the VWAP react faster (tighter to price), higher values make it smoother and slower to change."
+var string t3 = "When enabled, the VWAP reaction speed changes automatically based on market volatility. High volatility shortens the tracking period (more responsive), low volatility lengthens it (smoother)."
+var string t4 = "Controls how strongly volatility influences the VWAP reaction speed. Values above 1 increase the effect of volatility changes; values below 1 make it less sensitive to volatility."
+var string t5 = "Color used for swing high/low labels drawn on the chart to indicate pivot points."
+var string t6 = "Color used for swing low labels when marking pivot points."
+var string t7 = "Color used for VWAP lines when in an uptrend."
+var string t8 = "Color used for VWAP lines when in a downtrend."
+var string t9 = "Width of the VWAP lines drawn on the chart. Larger values make the lines thicker and more visible."
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Inputs {
+prd     = input.int(50, title='Swing Period', minval=2, group='Swing Points', tooltip=t1)
+baseAPT = input.float(20, 'Adaptive Price Tracking', minval=1, step=1, group='Swing Points', tooltip=t2)
+useAdapt = input.bool(false, 'Adapt APT by ATR ratio', group='Swing Points', tooltip=t3)
+volBias = input.float(10.0, 'Volatility Bias', minval=0.1, step=0.1, group='Swing Points', tooltip=t4)
+
+highS   = input.color(color.lime, title="Swing Labels", group="Style", inline="Swing", tooltip=t5)
+lowS    = input.color(color.red, title="", group="Style", inline="Swing", tooltip=t6)
+S       = input.color(color.lime, title="VWAP Lines", group="Style", inline="VWAP", tooltip=t7)
+R       = input.color(color.red,  title="", group="Style", inline="VWAP", tooltip=t8)
+xx      = input.int(2, minval=1, title="", group="Style", inline="VWAP", tooltip=t9)
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Global Variable {
+b = bar_index
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ PIVOTS Variables {
+var ph   = float(na)
+var pl   = float(na)
+var phL  = b
+var plL  = b
+var lab  = label(na)
+var prev = float(na)
+
+ph  := ta.highestbars(high, prd) == 0 ? high : ph
+pl  := ta.lowestbars(low,  prd) == 0 ? low  : pl
+phL := ta.highestbars(high, prd) == 0 ? b   : phL
+plL := ta.lowestbars(low,  prd) == 0 ? b    : plL
+dir = phL > plL ? 1 : -1
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Adaptation {
+atrLen = 50
+atr    = ta.atr(atrLen)
+atrAvg = ta.rma(atr, atrLen)
+ratio  = atrAvg > 0 ? atr / atrAvg : 1.0
+
+aptRaw     = useAdapt ? baseAPT / math.pow(ratio, volBias) : baseAPT
+aptClamped = math.max(5.0, math.min(300.0, aptRaw))
+aptSeries  = math.round(aptClamped)
+
+// alpha from APT (half-life -> EWMA alpha)
+alphaFromAPT(apt) =>
+    decay = math.exp(-math.log(2.0) / math.max(1.0, apt))
+    1.0 - decay
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ VWAP Variables {
+var p   = hlc3 * volume 
+var vol = volume      
+
+type dataPoints
+    array<chart.point> points
+    polyline poly = na
+
+var vwap = dataPoints.new(array.new<chart.point>())
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~}
+
+// ~~ Main {
+if dir != dir[1]
+    x   = dir > 0 ? plL : phL
+    y   = dir > 0 ? pl  : ph
+    loc = dir > 0 ? label.style_label_up : label.style_label_down
+    col = dir > 0 ?  highS : lowS
+    txt = dir > 0 and pl < prev ? 'LL' : dir > 0 and pl > prev ? 'HL' : dir < 0 and ph < prev ? 'LH' : dir < 0 and ph > prev ? 'HH' : ''
+    label.new(x, y, text=txt, style=loc, color=color.new(col, 20), textcolor=color.white)
+    prev := dir > 0 ? ph[1] : pl[1]
+
+    barsback = b - x
+    p   := y * volume[barsback]
+    vol := volume[barsback]
+    vap = p / vol
+
+    vwap.poly.delete()
+    polyline.new(vwap.points, false, false, line_color = dir < 0 ? R : S, line_width = xx)
+    vwap.points.clear()
+
+    for i = barsback to 0 by 1
+        apt_i = aptSeries[i]
+        alpha = alphaFromAPT(apt_i)
+
+        pxv   = hlc3[i] * volume[i]
+        v_i   = volume[i]
+
+        p     := (1.0 - alpha) * p + alpha * pxv
+        vol   := (1.0 - alpha) * vol + alpha * v_i
+        vappe = vol > 0 ? p / vol : na
+
+        vwap.points.push(chart.point.from_index(b - i, vappe))
+
+    vwap.poly := polyline.new(vwap.points, false, false, line_color = dir < 0 ? R : S, line_width = xx)
+
+else
+    apt_0 = aptSeries
+    alpha = alphaFromAPT(apt_0)
+
+    pxv = hlc3 * volume
+    v0  = volume
+
+    p   := (1.0 - alpha) * p + alpha * pxv
+    vol := (1.0 - alpha) * vol + alpha * v0
+    vap = vol > 0 ? p / vol : na
+
+    vwap.poly.delete()
+    vwap.points.push(chart.point.from_index(b, vap))
+    vwap.poly := polyline.new(vwap.points, false, false, line_color = dir > 0 ? R : S, line_width = xx)
+//~~ }
+
+qty = strategy.equity / close * 5
+
+if dir > 0
+    strategy.entry("L", strategy.long, qty=qty)
+
+if dir < 0
+    strategy.close("L")
+
+View in Pine Editor・138 lines
+Use on chart
+2.1 K
+9
+36 966
+Dynamic Swing Anchored VWAP STRATEGY — Zeiierman × PineIndicators (Pine Script v6)
+
+A pivot-to-pivot Anchored VWAP strategy that adapts to volatility, enters long on bullish structure, and closes on bearish structure. Built for TradingView in Pine Script v6.
+
+Full credits to zeiierman.
+
+
+Repainting notice: The original indicator logic is repainting. Swing labels (HH/HL/LH/LL) are finalized after enough bars have printed, so labels do not occur in real time. It is not possible to execute at historical label points. Treat results as educational and validate with Bar Replay and paper trading before considering any discretionary use.
+
+
+Concept
+
+The script identifies swing highs/lows over a user-defined lookback (Swing Period). When structure flips (most recent swing low is newer than the most recent swing high, or vice versa), a new regime begins.
+
+At each confirmed pivot, a fresh Anchored VWAP segment is started and updated bar-by-bar using an EWMA-style decay on price×volume and volume.
+
+Responsiveness is controlled by Adaptive Price Tracking (APT). Optionally, APT auto-adjusts with an ATR ratio so that high volatility accelerates responsiveness and low volatility smooths it.
+
+Longs are opened/held in bullish regimes and closed when the regime turns bearish. No short positions are taken by design.
+
+
+
+How it works (under the hood)
+
+Swing detection: Uses ta.highestbars/ta.lowestbars over prd to update swing highs (ph) and lows (pl), plus their bar indices (phL, plL).
+
+Regime logic: If phL > plL → bullish regime; else → bearish regime. A change in this condition triggers a re-anchor of the VWAP at the newest pivot.
+
+Adaptive VWAP math: APT is converted to an exponential decay factor (alphaFromAPT), then applied to running sums of price×volume and volume, producing the current VWAP estimate.
+
+Rendering: Each pivot-anchored VWAP segment is drawn as a polyline and color-coded by regime. Optional structure labels (HH/HL/LH/LL) annotate the swing character.
+
+Orders: On bullish flips, strategy.entry("L") opens/maintains a long; on bearish flips, strategy.close("L") exits.
+
+
+
+Inputs & controls
+
+Swing Period (prd) — Higher values identify larger, slower swings; lower values catch more frequent pivots but add noise.
+
+Adaptive Price Tracking (APT) — Governs the VWAP’s “half-life.” Smaller APT → faster/closer to price; larger APT → smoother/stabler.
+
+Adapt APT by ATR ratio — When enabled, APT scales with volatility so the VWAP speeds up in turbulent markets and slows down in quiet markets.
+
+Volatility Bias — Tunes the strength of APT’s response to volatility (above 1 = stronger effect; below 1 = milder).
+
+Style settings — Colors for swing labels and VWAP segments, plus line width for visibility.
+
+
+
+Trade logic summary
+
+Entry: Long when the swing structure turns bullish (latest swing low is more recent than the last swing high).
+
+Exit: Close the long when structure turns bearish.
+
+Position size:qty = strategy.equity / close × 5 (dynamic sizing; scales with account equity and instrument price). Consider reducing the multiplier for a more conservative profile.
+
+
+
+Recommended workflow
+
+Apply to instruments with reliable volume (equities, futures, crypto; FX tick volume can work but varies by broker).
+
+Start on your preferred timeframe. Intraday often benefits from smaller APT (more reactive); higher timeframes may prefer larger APT (smoother).
+
+Begin with defaults (prd=50, APT=20); then toggle “Adapt by ATR” and vary Volatility Bias to observe how segments tighten/loosen.
+
+Use Bar Replay to watch how pivots confirm and how the strategy re-anchors VWAP at those confirmations.
+
+Layer your own risk rules (stops/targets, max position cap, session filters) before any discretionary use.
+
+
+
+Practical tips
+
+Context filter: Consider combining with a higher-timeframe bias (e.g., daily trend) and using this strategy as an entry timing layer.
+
+First pivot preference: Some traders prefer only the first bullish pivot after a bearish regime (and vice versa) to reduce whipsaw in choppy ranges.
+
+Deviations: You can add VWAP deviation bands to pre-plan partial exits or re-entries on mean-reversion pulls.
+
+Sessions: Session-based filters (RTH vs. ETH) can materially change behavior on futures and equities.
+
+
+
+Extending the script (ideas)
+
+Add stops/targets (e.g., ATR stop below last swing low; partial profits at k×VWAP deviation).
+
+Introduce mirrored short logic for two-sided testing.
+
+Include alert conditions for regime flips or for price-VWAP interactions.
+
+Incorporate HTF confirmation (e.g., only long when daily VWAP slope ≥ 0).
+
+Throttle entries (e.g., once per regime flip) to avoid over-trading in ranges.
+
+
+
+Known limitations
+
+Repainting: Swing labels and pivot confirmations depend on future bars; historical labels can look “perfect.” Treat them as annotations, not executable signals.
+
+Execution realism: Strategy includes commission and slippage fields, yet actual fills differ by venue/liquidity.
+
+No guarantees: Past behavior does not imply future results. This publication is for research/education only and not financial advice.
+
+
+
+Defaults (backtest environment)
+
+Initial capital: 10,000
+
+Commission value: 0.01
+
+Slippage: 1
+
+Overlay: true
+
+Max bars back: 5000; Max labels/polylines set for deep swing histories
+
+
+
+Quick checklist
+
+Add to chart and verify that the instrument has volume.
+
+Use defaults, then tune APT and Volatility Bias with/without ATR adaptation.
+
+Observe how each pivot re-anchors VWAP and how regime flips drive entries/exits.
+
+Paper trade across several symbols/timeframes before any discretionary decisions.
+
+
+
+Attribution & license
+
+Original indicator concept and logic: Zeiierman — please credit the author.
+
+Strategy wrapper and publication: PineIndicators.
+
+License: CC BY-NC-SA 4.0 (Attribution-NonCommercial-ShareAlike). Respect the license when forking or publishing derivatives.
+

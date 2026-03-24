@@ -1,0 +1,66 @@
+//@version=5
+strategy("I11L - Better Buy Low Volatility or High Volatility?", overlay=false, pyramiding=1, default_qty_value=1000000, initial_capital=1000000, default_qty_type=strategy.cash,process_orders_on_close=false, calc_on_every_tick=false)
+
+mode = input.string("Buy low Volatility",options = ["Buy low Volatility","Buy high Volatility"])
+volatilityTargetRatio = input.float(1,minval = 0, maxval = 100,step=0.1, tooltip="1 equals the average atr for the security, a lower value means that the volatility is lower")
+atrLength = input.int(14)
+
+atr = ta.atr(atrLength) / close
+avg_atr = ta.sma(atr,atrLength*5)
+ratio = atr / avg_atr
+
+sellAfterNBarsLength = input.int(5, step=5, minval=0)
+
+
+var holdingBarsCounter = 0
+
+if(strategy.opentrades > 0)
+    holdingBarsCounter := holdingBarsCounter + 1
+
+
+isBuy = false
+
+if(mode == "Buy low Volatility")
+    isBuy := ratio < volatilityTargetRatio
+else
+    isBuy := ratio > volatilityTargetRatio
+
+isClose = holdingBarsCounter > sellAfterNBarsLength
+
+
+
+if(isBuy)
+    strategy.entry("Buy",strategy.long)
+
+if(isClose)
+    holdingBarsCounter := 0
+    strategy.exit("Close",limit=close)
+
+plot(ratio, color=isBuy[1] ? color.green : isClose[1] ? color.red : color.white)
+plot(1, color=color.white)
+View in Pine Editor・43 lines
+Use on chart
+1
+1
+4
+5 116
+This Pine Script code defines a TradingView strategy called "I11L - Better Buy Low Volatility or High Volatility?". The strategy aims to study the difference between buying when an asset's volatility is low and when it is high. It allows the user to select whether to buy during low or high volatility periods by changing the input variable mode.
+
+Here's a brief explanation of the System:
+
+The strategy is initialized with relevant settings such as overlay, pyramiding, default quantity type, initial capital, and others.
+The mode input allows the user to choose between "Buy low Volatility" and "Buy high Volatility" options.
+volatilityTargetRatio is the user-defined threshold to be used for making buy decisions. A value of 1 equals the average ATR (Average True Range) for the security. A lower value indicates lower volatility.
+atrLength is the number of periods to calculate the ATR.
+sellAfterNBarsLength sets the number of bars to hold the position before selling it.
+The script calculates the ATR using the ta.atr() function, and then divides it by the closing price to normalize the value. It also calculates the simple moving average (SMA) of the normalized ATR over a period of 5 times the ATR length, and then computes the ratio between the normalized ATR and its average.
+
+The script keeps track of the number of holding bars using the variable holdingBarsCounter. When there are open trades, the holding bars counter is incremented.
+
+The decision to buy is made based on the selected mode and whether the computed ratio is above or below the user-defined threshold.
+
+When the holding bars counter exceeds the user-defined limit, the position is closed.
+
+The script plots the computed ratio with different colors based on the buy and close conditions. The ratio is plotted in green when a buy signal is triggered, red when a close signal is triggered, and white in all other cases. The value of 1 (the reference for the average ATR) is also plotted on the chart in white color.
+
+This strategy helps traders study the difference between buying during low and high volatility periods and compare the performance of these conditions. It can be useful for analyzing the effectiveness of volatility-based trading strategies, such as entering positions when the market is calm or during periods of strong price movement.

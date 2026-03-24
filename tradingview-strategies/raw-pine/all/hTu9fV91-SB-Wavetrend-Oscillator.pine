@@ -1,0 +1,83 @@
+//@version=3
+//@author= SudeepBisht
+strategy("SB_Wavetrend_Oscillator", overlay=true)
+n1 = input(10, "Channel Length")
+n2 = input(21, "Average Length")
+
+obLevel1 = input(60, "Over Bought Level 1")
+obLevel2 = input(53, "Over Bought Level 2")
+osLevel1 = input(-60, "Over Sold Level 1")
+osLevel2 = input(-53, "Over Sold Level 2")
+
+switch = input(0, "mutex lock") 
+entry = input(0, "1 jump") 
+switch := nz(switch[1])
+entry := nz(entry[1])
+ap = hlc3 
+esa = ema(ap, n1)
+d = ema(abs(ap - esa), n1)
+ci = (ap - esa) / (0.015 * d)
+tci = ema(ci, n2)
+ 
+wt1 = tci
+wt2 = sma(wt1,4)
+
+//plot(0, color=gray)
+//plot(obLevel1, color=red)
+//plot(osLevel1, color=green)
+//plot(obLevel2, color=red, style=3)
+//plot(osLevel2, color=green, style=3)
+
+//plot(wt1, color=green)
+//plot(wt2, color=red, style=3)
+//plot(wt1-wt2, color=blue, style=area, transp=80)
+
+
+if (not (na(wt1) and na(wt2)))
+    if (crossover(wt1, wt2) and (wt1<osLevel2 and wt2<osLevel2))
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+        if(switch==1)
+            entry:=1
+        else
+            switch:=1
+    if (crossunder(wt1, wt2) and (wt1>obLevel2 and wt2>obLevel2))
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+        if(switch==-1)
+            entry:=-1
+        else
+            switch:=-1
+
+if(entry==1 and crossunder(wt1, wt2) and wt1>0 and wt2>0)
+    strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+    switch:=0
+    entry:=0
+    
+if(entry==-1 and crossover(wt1, wt2)and wt1<0 and wt2<0)
+    strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+    switch:=0
+    entry:=0
+    
+//plot(switch)
+/////////////////////////////////////////////////
+
+View in Pine Editor・61 lines
+Use on chart
+3
+1
+2
+2
+4 385
+A take on LazyBear's Wavetrend_Oscillator
+The idea is bit modified.
+
+Original Idea:
+When the oscillator is above the overbought band (red lines) and crosses down the signal (dotted line), it is usually a good SELL signal. Similarly, when the oscillator crosses above the signal when below the Oversold band (green lines), it is a good BUY signal.
+
+Modified Idea:
+Carrying the original idea, if the oscillator crosses the overbought band (red lines) and crosses down the signal (dotted line) twice without crossing the Oversold band (green lines) and crosses above the signal (dotted line), a buy or sell signal will take place when the oscillator crosses the dotted line and the value of oscillator is >0(if sell order is to be placed) and <0(if buy order is to be placed).
+
+For the original idea you can refer to:
+
+
+
+Let me know if any refinements could improve the oscillator.

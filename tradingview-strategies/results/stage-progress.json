@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-03-23T04:36:58.716871+00:00",
+  "stage_1_pine_cache": {
+    "total_items": 5403,
+    "cached_ok": 5036,
+    "pending": 0,
+    "errors": 367
+  },
+  "stage_2_conversion": {
+    "reports": 45,
+    "unsupported": 6,
+    "converted_import_ok": 39,
+    "convert_errors": 0
+  },
+  "stage_3_backtests": {
+    "bulk_result_rows": 82,
+    "bulk_strategy_files": 41,
+    "manual_supported": 6,
+    "manual_unsupported": 1
+  }
+}

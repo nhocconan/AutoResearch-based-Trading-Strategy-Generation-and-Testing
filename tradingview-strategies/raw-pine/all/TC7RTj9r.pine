@@ -1,0 +1,75 @@
+//@version=5
+strategy("US100 Liquidity Precision Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS === //
+emaFast = input.int(9, "EMA Fast")
+emaMid = input.int(20, "EMA Mid")
+emaTrend1 = input.int(50, "EMA Trend 1")
+emaTrend2 = input.int(200, "EMA Trend 2")
+sl_points = input.float(10.0, "Stop Loss (Points)", step=0.1)
+tp_points = input.float(15.0, "Take Profit (Points)", step=0.1)
+startHour = input.int(15, "Start Hour NY Session")
+endHour = input.int(23, "End Hour NY Session")
+maxTradesPerDay = input.int(3, "Max Trades per Day")
+
+// === TIME FILTER === //
+
+
+inSession = (hour >= startHour and hour < endHour)
+
+currentDay = dayofmonth + month * 100  // eindeutiger Tag
+
+var int tradeCount = 0
+var int lastDay = na
+
+if (na(lastDay) or currentDay != lastDay)
+    tradeCount := 0
+    lastDay := currentDay
+
+
+// === INDICATORS === //
+ema1 = ta.ema(close, emaFast)
+ema2 = ta.ema(close, emaMid)
+ema3 = ta.ema(close, emaTrend1)
+ema4 = ta.ema(close, emaTrend2)
+
+// === TREND FILTER === //
+bullTrend = close > ema3 and close > ema4 and ema1 > ema2
+bearTrend = close < ema3 and close < ema4 and ema1 < ema2
+
+// === ENTRY CONDITIONS === //
+longCondition = bullTrend and inSession and tradeCount < maxTradesPerDay and ta.crossover(ema1, ema2)
+shortCondition = bearTrend and inSession and tradeCount < maxTradesPerDay and ta.crossunder(ema1, ema2)
+
+// === TRADE EXECUTION === //
+price = close
+sl_long = price - sl_points
+tp_long = price + tp_points
+sl_short = price + sl_points
+tp_short = price - tp_points
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", from_entry="Long", stop=sl_long, limit=tp_long)
+    tradeCount := tradeCount + 1
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", from_entry="Short", stop=sl_short, limit=tp_short)
+    tradeCount := tradeCount + 1
+
+// === PLOT === //
+plot(ema1, color=color.orange, title="EMA 9")
+plot(ema2, color=color.blue, title="EMA 20")
+plot(ema3, color=color.green, title="EMA 50")
+plot(ema4, color=color.red, title="EMA 200")
+
+View in Pine Editor・65 lines
+Use on chart
+1
+0
+9
+1 846
+Scalping strategy 5-10 point sl / 17 points tp
+Automatic BE
+Consistent money over time

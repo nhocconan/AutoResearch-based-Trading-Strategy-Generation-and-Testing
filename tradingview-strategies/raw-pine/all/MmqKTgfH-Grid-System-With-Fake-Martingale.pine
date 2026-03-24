@@ -1,0 +1,104 @@
+//@version=4
+strategy("Grid System With Fake Martingale",process_orders_on_close=true)
+point = input(1.)
+os    = input(1,"Order Size")
+mf    = input(2.,"Martingale Multiplier")
+anti  = input(false,"Anti Martingale")
+//------------------------------------------------------------------------------
+baseline = 0.
+baseline := nz(close > baseline[1] + point or close < baseline[1] - point ? 
+  close : baseline[1],close)
+//------------------------------------------------------------------------------
+size = 0.
+loss = change(strategy.losstrades)
+win = change(strategy.wintrades)
+if anti
+    size := win ? size[1]*mf : loss ? 1 : nz(size[1],os)
+else
+    size := loss ? size[1]*mf : win ? 1 : nz(size[1],os)
+upper = baseline + point*size
+lower = baseline - point*size
+//------------------------------------------------------------------------------
+if baseline > baseline[1] and strategy.opentrades == 0
+    strategy.entry("Buy",strategy.long,qty=os)
+    strategy.exit("buy/tp/sl","Buy",stop=lower,limit=upper)
+if baseline < baseline[1] and strategy.opentrades == 0
+    strategy.entry("Sell",strategy.short,qty=os)
+    strategy.exit("sell/tp/sl","Sell",stop=upper,limit=lower)
+//------------------------------------------------------------------------------
+cap = strategy.initial_capital
+eq = strategy.equity
+rmax = 0.
+rmax := max(eq,nz(rmax[1]))
+//----
+css = eq > cap ? #0cb51a : #e65100
+a = plot(eq,"Equity",#2196f3,2,transp=0)
+b = plot(rmax,"Maximum",css,2,transp=0)
+fill(a,b,css,80)
+
+View in Pine Editor・40 lines
+Use on chart
+5
+2
+1
+9
+21 965
+Aug 22, 2020
+The proposed strategy is based on a grid system with a money management that tries to replicate the effect of a martingale without having to double your position size after each loss, hence the name "fake martingale". Note that a balance using this strategy is still subject to exponential decay, the risk is not minimized, as such, it would be dangerous to use this strategy.
+
+For more information on the martingale and grid systems see:
+
+
+
+
+Strategy Settings
+
+Point determines the "grid" size and should be adjusted accordingly to the scale of the security you are applying the strategy to. Higher value would require larger price movements in order to trigger a trade, generating fewer trades as a result.
+
+The order size determines the number of contracts/shares to purchase.
+
+The martingale multiplier determines the factor by which the position size is multiplied after a loss, using values higher to 2 will "squarify" your balance, while a value of 1 would use a constant position sizing.
+
+Finally, the anti-martingale parameter determines whether the strategy uses a reverse martingale or not, if set to true then the position size is multiplied after each win.
+
+How It Works
+
+Let's illustrate how we replicate a martingale without doubling our exposure with a simple casino example. Imagine you are playing roulette, and that you are betting on colors (black/red), your payout is 1 to 1, in the case you win, you will have your initial stake back plus a profit equal to your initial stake.
+
+If your strategy is to recover any previous losses, you can double your stake each time you lose, once you win you will get back the previous losses plus a profit equal to your original stake, this is the martingale system. So how can we win back previous losses without having to double our stake? We could do that by doubling the payout ratio after a loss, so after a loss, we must use a payout ratio of 2:1, if we lose once again we must use a payout of 4:1...etc, our payout ratio would be subject to exponential growth instead of our stake.
+
+Of course, the payout ratio is fixed with casino games, but in trading, we can manipulate the position of our take profit in order to replicate such effect, this is what this strategy is doing. So after a loss, we place our take profit such that a win recover our losses back plus generate a profit.
+
+Advantages
+
+The advantage of this approach is that unlike the martingale we don't double our position size, which instead can remain constant, this is a huge advantage as a martingale will require a significant capital in order to tank a series of losses.
+
+Disadvantages
+
+The main disadvantage of this method is that the price might never reach our take profit after a long losing streak, our balance would remain in the red and we couldn't do anything about it except reset the strategy.
+
+Frictional costs are still a disadvantage, as such, we would need to place our take profits in order to account for them, while this is still better than purchasing additional shares, it minimizes the chances of the price reaching the take profit.
+
+Conclusions
+
+An alternative money management system replicating the effect of a martingale as been presented, we can see that such a system is far from being perfect, and it would be foolish to use it, however, it stills offer a convenient alternative to less aggressive progressive position sizing systems.
+
+I have been receiving some messages from users criticizing me for exposing the martingale money management system, and I understand why but I can't agree, talking about it allow me to warn users against it, the grid-martingale methodology is will create more harm than anything else, the reward is only one side of the story and should always be compared against the risk, so always take a look at all the statics in a backtest.
+
+Thanks for reading!
+
+Shout-Out
+
+This post was made possible thanks to my patrons:
+
+Happymono, AmariMars, kkhaial, Nugehe, LucF, Nosmok, @iflostio, DankBeans, ecletv, Neverstorm, alex.crown.jr, uk503, xkingshotss, vsov, jbelka, yatrader2, hughza, ganh
+
+
+
+
+
+
+
+Aug 23, 2020
+Release Notes
+Added order size input

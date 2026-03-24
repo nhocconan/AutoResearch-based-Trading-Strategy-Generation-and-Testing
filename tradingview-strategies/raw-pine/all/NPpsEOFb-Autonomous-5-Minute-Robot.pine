@@ -1,0 +1,89 @@
+//@version=6
+//@version=6
+strategy("Autonomous 5-Minute Robot", overlay=true, fill_orders_on_standard_ohlc=true)
+
+// --- Inputs ---
+maLength = input.int(50, title="Trend MA Length")  // Moving average length for trend detection
+volumeLength = input.int(10, title="Volume Length") // Length for volume analysis
+stopLossPercent = input.float(3, title="Stop Loss (%)")  // 3% stop loss
+takeProfitPercent = input.float(29, title="Take Profit (%)")  // 29% take profit
+
+// --- Market Trend Detection ---
+ma = ta.sma(close, maLength)  // Simple moving average for trend direction
+isBullish = close > ma  // Market is bullish if the close is above the moving average
+isBearish = close < ma  // Market is bearish if the close is below the moving average
+
+// --- Volume Analysis ---
+buyVolume = (high != low) ? volume * (close - low) / (high - low) : 0
+sellVolume = (high != low) ? volume * (high - close) / (high - low) : 0
+totalVolume = volume
+
+// --- Define Market Direction over Last 30 Minutes (6 candles in 5-minute chart) ---
+lookback = 6  // 30 minutes / 5 minutes = 6 bars
+
+prevClose = close[lookback]  // Previous close 30 minutes ago
+currentClose = close  // Current close
+uptrend = currentClose > prevClose and isBullish  // Uptrend condition
+downtrend = currentClose < prevClose and isBearish  // Downtrend condition
+
+// --- Strategy Logic ---
+longCondition = uptrend and buyVolume > sellVolume  // Buy signal when trend is up and buy volume exceeds sell volume
+shortCondition = downtrend and sellVolume > buyVolume  // Sell signal when trend is down and sell volume exceeds buy volume
+
+// --- Entry and Exit Strategy ---
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// --- Exit Strategy based on Stop Loss and Take Profit ---
+strategy.exit("Exit Long", "Long", stop=close * (1 - stopLossPercent / 100), limit=close * (1 + takeProfitPercent / 100))
+strategy.exit("Exit Short", "Short", stop=close * (1 + stopLossPercent / 100), limit=close * (1 - takeProfitPercent / 100))
+
+// --- Plotting for Visualization ---
+plot(ma, color=color.blue, title="50-period MA")  // Trend line
+plotshape(longCondition, style=shape.labelup, location=location.belowbar, color=color.green, text="BUY")
+plotshape(shortCondition, style=shape.labeldown, location=location.abovebar, color=color.red, text="SELL")
+
+View in Pine Editor・50 lines
+Use on chart
+9
+2
+1
+3 058
+Key Components of the Strategy:
+Trend Detection:
+
+A 50-period simple moving average (SMA) is used to define the market trend. If the current close is above the SMA, the market is considered to be in an uptrend (bullish), and if it's below, it's considered a downtrend (bearish).
+The strategy also looks at the trend over the last 30 minutes (6 candles in a 5-minute chart). The strategy compares the previous close with the current close to detect an uptrend or downtrend.
+Volume Analysis:
+
+The strategy calculates buyVolume and sellVolume based on price movement within each candle.
+The condition for entering a long position is when the market is in an uptrend, and the buy volume is greater than the sell volume.
+The condition for entering a short position is when the market is in a downtrend, and the sell volume is greater than the buy volume.
+Trade Execution:
+
+The strategy enters a long position when the trend is up and the buy volume is higher than the sell volume.
+The strategy enters a short position when the trend is down and the sell volume is higher than the buy volume.
+Positions are closed based on stop-loss and take-profit conditions.
+Stop-loss is set at 3% below the entry price.
+Take-profit is set at 29% above the entry price.
+Exit Conditions:
+
+Long trades will be closed if the price falls 3% below the entry price or rises 29% above the entry price.
+Short trades will be closed if the price rises 3% above the entry price or falls 29% below the entry price.
+Visuals:
+
+The SMA (50-period) is plotted on the chart to show the trend.
+Buy and sell signals are marked with labels on the chart for easy identification.
+
+With this being said this algo is still being worked on to be autonomous
+
+Analyze the Market Direction: Determine whether the market is in an uptrend or downtrend over the past 30 minutes (using the last 6 candles in a 5-minute chart).
+
+Use Trend Indicators and Volume: Implement trend-following indicators like moving averages or the SMA/EMA crossover and consider volume to decide when to enter or exit a trade.
+
+Enter and Exit Trades: The robot will enter long positions when the trend is up and short positions when the trend is down. Additionally, it will close positions based on volume signals and price action (e.g., volume spikes, price reversals).
+
+

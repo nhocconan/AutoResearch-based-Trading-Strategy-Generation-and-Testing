@@ -1,0 +1,160 @@
+//@version=6
+strategy("ECV Strategy v2 – MGC1! Futures", overlay=true,
+     initial_capital=150000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=2,
+     max_labels_count=500,
+     max_lines_count=500)
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INPUTS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+sl_ticks      = input.int(50,  "Stop Loss (Ticks)",  group="Risk Management")
+tp1_ticks     = input.int(100, "TP1 (Ticks)",        group="Risk Management")
+tp2_ticks     = input.int(200, "TP2 (Ticks)",        group="Risk Management")
+ema_len       = input.int(50,  "EMA Length",         group="Trend Filter")
+atr_len       = input.int(14,  "ATR Length",         group="Volatility")
+cooldown_bars = input.int(15,  "Cooldown Bars",      group="Cooldown")
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CORE CALCULATIONS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+tick       = syminfo.mintick
+ema50      = ta.ema(close, ema_len)
+atr_val    = ta.atr(atr_len)
+trend_bull = close > ema50
+trend_bear = close < ema50
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SESSION — ASIA + NY ONLY (London excluded)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+et_hour    = hour(time, "America/New_York")
+et_mins    = et_hour * 60 + minute(time, "America/New_York")
+is_ny      = et_mins >= 570  and et_mins < 960
+is_asia    = et_mins >= 1200 or  et_mins < 180
+session_ok = is_asia or is_ny
+session_tag = is_asia ? "ASIA" : is_ny ? "NY" : "OFF"
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// COOLDOWN
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int bars_since_exit = 999
+bars_since_exit := strategy.position_size != 0 ? 0 : bars_since_exit + 1
+cooldown_ok = bars_since_exit >= cooldown_bars
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ECV SIGNALS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bull_candle = close > open and high >= high[1] and low <= low[1] and close > open[1]
+bear_candle = close < open and high >= high[1] and low <= low[1] and close < open[1]
+vol_ok      = volume > volume[1] * 1.3
+
+ecv_buy  = bull_candle and vol_ok and trend_bull and cooldown_ok and session_ok
+ecv_sell = bear_candle and vol_ok and trend_bear  and cooldown_ok and session_ok
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TRADE STATE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float  entry_p = na
+var float  sl_p    = na
+var float  tp1_p   = na
+var float  tp2_p   = na
+var float  be_p    = na
+var bool   is_buy  = false
+var string status  = "IDLE"
+var bool   tp1_hit = false
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENTRY
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if (ecv_buy or ecv_sell) and status == "IDLE" and barstate.isconfirmed
+    is_buy  := ecv_buy
+    entry_p := close
+    sl_p    := is_buy ? entry_p - sl_ticks  * tick : entry_p + sl_ticks  * tick
+    tp1_p   := is_buy ? entry_p + tp1_ticks * tick : entry_p - tp1_ticks * tick
+    tp2_p   := is_buy ? entry_p + tp2_ticks * tick : entry_p - tp2_ticks * tick
+    be_p    := is_buy ? entry_p + sl_ticks  * tick : entry_p - sl_ticks  * tick
+    status  := "IN_TRADE"
+    tp1_hit := false
+
+    strategy.entry("ECV", is_buy ? strategy.long : strategy.short, qty=2)
+    strategy.exit("SL_TP1", "ECV", qty=1, profit=tp1_ticks, loss=sl_ticks)
+    strategy.exit("SL_TP2", "ECV", qty=1, profit=tp2_ticks, loss=sl_ticks)
+
+    alert(
+         '{"symbol":"'     + syminfo.ticker +
+         '","direction":"' + (is_buy ? "LONG" : "SHORT") +
+         '","timeframe":"' + timeframe.period +
+         '","time":"'      + str.tostring(time, "yyyy-MM-dd HH:mm") +
+         '","entry":'      + str.tostring(math.round(entry_p, 2)) +
+         ',"stop":'        + str.tostring(math.round(sl_p,    2)) +
+         ',"tp1":'         + str.tostring(math.round(tp1_p,   2)) +
+         ',"tp2":'         + str.tostring(math.round(tp2_p,   2)) +
+         ',"session":"'    + session_tag + '"}',
+         alert.freq_once_per_bar_close)
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BREAKEVEN MANAGEMENT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if strategy.position_size != 0 and status == "IN_TRADE"
+    if is_buy and close >= be_p and not tp1_hit
+        tp1_hit := true
+        strategy.exit("BE", "ECV", qty=1, loss=0)
+    if not is_buy and close <= be_p and not tp1_hit
+        tp1_hit := true
+        strategy.exit("BE", "ECV", qty=1, loss=0)
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RESET WHEN FLAT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if strategy.position_size == 0 and status == "IN_TRADE"
+    status  := "IDLE"
+    entry_p := na
+    sl_p    := na
+    tp1_p   := na
+    tp2_p   := na
+    be_p    := na
+    tp1_hit := false
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// VISUALS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+plot(ema50, "EMA 50", color=color.new(color.orange, 0), linewidth=2)
+plotshape(ecv_buy,  title="ECV Buy",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small)
+plotshape(ecv_sell, title="ECV Sell", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small)
+plot(strategy.position_size != 0 ? sl_p    : na, "Stop",  color=color.red,    linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tp1_p   : na, "TP1",   color=color.yellow, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tp2_p   : na, "TP2",   color=color.lime,   linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? be_p    : na, "BE",    color=color.aqua,   linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? entry_p : na, "Entry", color=color.white,  linewidth=1, style=plot.style_linebr)
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INFO TABLE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var table info = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 60), border_color=color.gray, border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Symbol",   text_color=color.gray)
+    table.cell(info, 1, 0, syminfo.ticker, text_color=color.white)
+    table.cell(info, 0, 1, "Type",     text_color=color.gray)
+    table.cell(info, 1, 1, syminfo.type,   text_color=color.yellow)
+    table.cell(info, 0, 2, "Tick",     text_color=color.gray)
+    table.cell(info, 1, 2, str.tostring(tick), text_color=color.white)
+    table.cell(info, 0, 3, "ATR",      text_color=color.gray)
+    table.cell(info, 1, 3, str.tostring(math.round(atr_val / tick, 1)) + " ticks", text_color=color.white)
+    table.cell(info, 0, 4, "Cooldown", text_color=color.gray)
+    table.cell(info, 1, 4, str.tostring(bars_since_exit) + "/" + str.tostring(cooldown_bars),
+         text_color=cooldown_ok ? color.lime : color.red)
+    table.cell(info, 0, 5, "Session",  text_color=color.gray)
+    table.cell(info, 1, 5, session_tag, text_color=session_ok ? color.lime : color.red)
+    table.cell(info, 0, 6, "EMA",      text_color=color.gray)
+    table.cell(info, 1, 6, close > ema50 ? "BULL" : "BEAR",
+         text_color=close > ema50 ? color.lime : color.red)
+    table.cell(info, 0, 7, "Status",   text_color=color.gray)
+    table.cell(info, 1, 7, status,     text_color=status == "IDLE" ? color.aqua : color.orange)
+
+View in Pine Editor・154 lines
+Use on chart
+6
+376
+Engulfing candle / engulfing volume with EMA, session filter and candle volume indication. Meant for 5 min on MCG1!

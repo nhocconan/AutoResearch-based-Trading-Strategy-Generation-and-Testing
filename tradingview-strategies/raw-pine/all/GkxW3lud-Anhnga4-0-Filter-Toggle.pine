@@ -1,0 +1,161 @@
+//@version=5
+strategy(title="Anhnga4.0 - Filter Toggle", shorttitle="Anhnga4.0_Toggle", overlay=true, initial_capital=5000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// --- 1. INPUTS ---
+bb_mult        = input.float(1.5, "BB Stop Loss Multiplier", minval=0.1, step=0.1, group="Risk Management")
+rr_ratio       = input.float(2.0, "Risk:Reward Ratio", minval=0.1, step=0.1, group="Risk Management")
+
+use_breakeven  = input.bool(true, "Enable Breakeven?", group="Breakeven Settings")
+be_activation  = input.float(1.0, "Breakeven Trigger (RR)", minval=0.1, step=0.1, group="Breakeven Settings")
+
+lookback_window = input.int(4, "Signal Window (Bars)", minval=1, maxval=5, group="Strategy Logic")
+ma50_len       = input.int(50, "MA 50 Length", group="Strategy Logic")
+ma200_len      = input.int(200, "MA 200 Length", group="Strategy Logic")
+
+// --- TOGGLE FOR OVEREXTENSION ---
+use_overext_filt = input.bool(true, "Enable Overextension Filter?", tooltip="If checked, trades will be skipped if price is too far from MA 50", group="Strategy Logic")
+atr_limit        = input.float(4.0, "Overextension ATR Limit", minval=1.0, step=0.5, group="Strategy Logic")
+
+// --- 2. INDICATORS ---
+ma50  = ta.sma(close, ma50_len)
+ma200 = ta.sma(close, ma200_len)
+basis = ta.sma(close, 20) 
+atr   = ta.atr(14)
+dev   = bb_mult * ta.stdev(close, 20)
+lower_bb = basis - dev
+upper_bb = basis + dev
+
+// WaveTrend
+wt1 = ta.ema((hlc3 - ta.ema(hlc3, 10)) / (0.015 * ta.ema(math.abs(hlc3 - ta.ema(hlc3, 10)), 10)), 21)
+wt2 = ta.sma(wt1, 4)
+
+// --- 3. LOGIC ---
+cross_long  = ta.crossover(wt1, wt2) and wt1 < 0
+cross_short = ta.crossunder(wt1, wt2) and wt1 > 0
+
+var int last_traded_cross_idx = -1
+last_cross_long_idx = ta.valuewhen(cross_long, bar_index, 0)
+last_cross_short_idx = ta.valuewhen(cross_short, bar_index, 0)
+
+in_long_window  = (bar_index - last_cross_long_idx) <= lookback_window
+in_short_window = (bar_index - last_cross_short_idx) <= lookback_window
+
+// Trend Filters
+long_ma_filt  = (close > basis) and (close > ma50) and (close > ma200)
+short_ma_filt = (close < basis) and (close < ma50) and (close < ma200)
+
+// Calculate Overextension
+dist_from_ma = math.abs(close - ma50)
+is_overextended = dist_from_ma > (atr * atr_limit)
+
+// Filter Logic
+ext_check = use_overext_filt ? not is_overextended : true
+
+long_condition  = in_long_window and long_ma_filt and ext_check and last_traded_cross_idx != last_cross_long_idx
+short_condition = in_short_window and short_ma_filt and ext_check and last_traded_cross_idx != last_cross_short_idx
+
+// --- 4. PERSISTENT EXIT & BREAKEVEN LOGIC ---
+var float sl_price = na
+var float tp_price = na
+var float entry_risk = na
+var bool  is_breakeven = false
+
+if (long_condition or short_condition) and strategy.position_size == 0
+    last_traded_cross_idx := long_condition ? last_cross_long_idx : last_cross_short_idx
+    sl_price := long_condition ? lower_bb : upper_bb
+    entry_risk := math.abs(close - sl_price)
+    tp_price := long_condition ? close + (entry_risk * rr_ratio) : close - (entry_risk * rr_ratio)
+    is_breakeven := false 
+
+if strategy.position_size != 0 and use_breakeven and not is_breakeven
+    if strategy.position_size > 0 and (high - strategy.position_avg_price) / entry_risk >= be_activation
+        sl_price := strategy.position_avg_price
+        is_breakeven := true
+    else if strategy.position_size < 0 and (strategy.position_avg_price - low) / entry_risk >= be_activation
+        sl_price := strategy.position_avg_price
+        is_breakeven := true
+
+// --- 5. EXECUTION ---
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size != 0
+    strategy.exit("Exit", stop=sl_price, limit=tp_price, 
+         comment_loss=is_breakeven ? "BE Hit" : "SL Hit", 
+         comment_profit="TP Hit")
+
+// --- 6. VISUALS ---
+plot(strategy.position_size != 0 ? sl_price : na, "Stop Level", color=is_breakeven ? color.yellow : color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? tp_price : na, "Target Level", color=color.green, style=plot.style_linebr, linewidth=2)
+bgcolor(use_overext_filt and is_overextended ? color.new(color.purple, 90) : na)
+
+View in Pine Editor・92 lines
+Use on chart
+2
+6
+756
+INPUTS:
+1.5 0.8 (OR 1.6 0.5/0.6)
+BE=0.45
+1
+MAs: 35 135
+7
+
+This Pine Script code defines a trading strategy named **"Anhnga4.0 - Filter Toggle"**. It is a trend-following strategy that uses momentum oscillators and moving averages to identify entries, while featuring a specific "Overextension Filter" to avoid buying at the top or selling at the bottom.
+
+Here is a breakdown of how the script works:
+
+---
+
+## 1. Core Trading Logic (The Entry)
+
+The strategy looks for a "perfect storm" of three factors before entering a trade:
+
+* **Momentum (WaveTrend):** It uses the WaveTrend oscillator (`wt1` and `wt2`).
+* **Long:** A bullish crossover happens while the oscillator is below the zero line (oversold).
+* **Short:** A bearish crossunder happens while the oscillator is above the zero line (overbought).
+
+
+* **Trend Confirmation:** The price must be on the "correct" side of three different lines: the 20-period Moving Average (BB Basis), the 50-period SMA, and the 200-period SMA.
+* **The Window:** You don't have to enter exactly on the cross. The `Signal Window` allows the trade to trigger up to 4 bars after the momentum cross, provided the trend filters align.
+
+## 2. The "Overextension" Filter
+
+This is a unique feature of this script. It calculates the distance between the current price and the **50-period Moving Average**.
+
+* If the price is too far away from the MA (defined by the **ATR Limit**), the script assumes the move is "exhausted."
+* If `Enable Overextension Filter?` is on, the strategy will skip these trades to avoid "chasing the pump."
+* **Visual Cue:** The chart background turns **purple** when the price is considered overextended.
+
+---
+
+## 3. Risk Management & Exit Strategy
+
+The script manages trades dynamically using Bollinger Bands and Risk:Reward ratios:
+
+| Feature | Description |
+| --- | --- |
+| **Stop Loss (SL)** | Set at the **Lower Bollinger Band** for Longs and **Upper Band** for Shorts. |
+| **Take Profit (TP)** | Calculated based on your **RR Ratio** (default is 2.0). If your risk is $10, it sets the target at $20 profit. |
+| **Breakeven** | A "protection" feature. Once the price moves in your favor by a certain amount (the `Breakeven Trigger`), the script moves the Stop Loss to your entry price to ensure a "risk-free" trade. |
+
+---
+
+## 4. Visual Elements on the Chart
+
+* **Green Lines:** Your target price (TP).
+* **Red Lines:** Your initial Stop Loss.
+* **Yellow Lines:** Indicates the Stop Loss has been moved to **Breakeven**.
+* **Purple Background:** High alert—price is overextended; trades are likely being filtered out.
+
+---
+
+## Summary of Settings
+
+* **BB Multiplier:** Controls how wide your initial stop loss is.
+* **ATR Limit:** Controls how sensitive the "Overextension" filter is (higher = more trades allowed; lower = stricter filtering).
+* **Breakeven Trigger:** Set to 1.0 by default, meaning once you are "1R" (profit equals initial risk) in profit, the stop moves to entry.
+
+

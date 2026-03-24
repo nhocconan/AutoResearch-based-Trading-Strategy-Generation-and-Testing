@@ -1,0 +1,195 @@
+//@version=2
+//by Wugamlo
+//Strategy combining Stochastic Crosses in the Overbought/Oversold Area with a trend determined by two EMAs
+//Default setup seems to work best on 4HR timeframe for BTC 
+
+strategy(title = "Strategy Stoch/EMA Cross", shorttitle = "Strategy Stoch/EMA Cross", overlay = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, currency = currency.USD, commission_value=0.01,commission_type=strategy.commission.percent, initial_capital=1000)
+
+// === GENERAL INPUTS ===
+SectionInd      = input(defval = true ,title = "════════════ INDICATORS ════════════")
+maFastLength    = input(defval = 55,   title = "Fast MA Period", minval = 1)
+maSlowLength    = input(defval = 89,   title = "Slow MA Period", minval = 1)
+StochLength     = input(defval = 14,   title = "Stochastic Length", minval=1)
+smoothK         = input(defval = 6,    title = "%K Smooth", minval=1)
+smoothD         = input(defval = 3,    title = "%D Smooth", minval=1)
+overbought      = 80
+oversold        = 20
+HighlightOBOS   = input(defval = true, title = "Highlight Stoch Cross?")
+HighlightTrend  = input(defval = true ,title = "Highlight Trend?")
+
+//DATE AND TIME
+SectionFrom     = input(defval = true ,title = "═══════════════ FROM ═══════════════")
+fromDay         = input(defval = 01,   title = "From day", minval=1)
+fromMonth       = input(defval = 1,    title = "From month", minval=1)
+fromYear        = input(defval = 2019, title = "From year", minval=2014)
+SectionTo       = input(defval = true, title = "════════════════ TO ════════════════")
+toDay           = input(defval = 31,   title = "To day", minval=1)
+toMonth         = input(defval = 12,    title = "To month", minval=1)
+toYear          = input(defval = 2020, title = "To year", minval=2014)
+
+// === STRATEGY RELATED INPUTS ===
+SectionStra     = input(defval = true ,title = "═════════════ STRATEGY ═════════════")
+
+// Include Shorts or only trade Long Positions?
+includeShorts   = input(defval = true, title = "Include Short Positions?")
+
+
+// === RISK MANAGEMENT INPUTS ===
+
+inpTakeProfit   = input(defval = 8,     title = "Take Profit % (0 to deactivate)", minval = 0)
+inpStopLoss     = input(defval = 0,     title = "Stop Loss % (0 to deactivate)",   minval = 0)
+
+StopLossPerc    = inpStopLoss * 0.01
+TakeProfitPerc  = inpTakeProfit * 0.01
+
+StopLossV       = close * StopLossPerc / syminfo.mintick
+TakeProfitV     = close * TakeProfitPerc / syminfo.mintick
+
+// === RISK MANAGEMENT VALUE PREP ===
+// if an input is less than 1, assuming not wanted so we assign 'na' value to disable it.
+TakeProfitVal   = inpTakeProfit  >= 1 ? TakeProfitV  : na
+StopLossVal     = inpStopLoss    >= 1 ? StopLossV    : na
+
+
+// === EMA SERIES SETUP ===
+maFast = ema(close, maFastLength)
+maSlow = ema(close, maSlowLength)
+diff   = maFast - maSlow
+
+// === STOCHASTIC SETUP ===
+k      = sma(stoch(close, high, low, StochLength), smoothK)
+d      = sma(k, smoothD)
+
+// Stochastic Long/Short Entry determination
+stochLong  = crossover(k,d)  and (k < oversold)
+stochShort = crossunder(k,d) and (k > overbought)
+
+// Stochastic Long/Short Exit determination
+stochLongEx  = (crossover (d, overbought)) or (crossunder(maFast, maSlow))
+stochShortEx = (crossunder(d, oversold))   or (crossover (maFast, maSlow))
+
+
+// === PLOTTING EMAs ===
+fast = plot(maFast, title = "Fast MA", color = yellow, linewidth = 1, style = line, transp = 10)
+slow = plot(maSlow, title = "Slow MA", color = white,  linewidth = 1, style = line, transp = 10)
+
+
+// === Vertical Coloring for Crosses in Overbought/Oversold zone and for MA Trend Zones ===
+b_color = stochLong ? green : stochShort ? red : na
+bgcolor(HighlightOBOS ? b_color : na, title="Overbought / Oversold", transp=65)   //Highlight the Overbought/Oversold Stoch Crossings
+t_color = diff>=0 ? green : diff<0 ? red : na
+bgcolor(HighlightTrend ? t_color : na, title="Trend up / Trend down", transp=90)  //Highlight the EMA Trend
+
+// Show EMA Trend as symbols at the bottom
+bullTrend = diff>=0
+bearTrend = diff<0
+plotchar(bullTrend, title = "BullTrend", char="_", location = location.bottom, color=#0CAB07, transp = 0, size=size.tiny)
+plotchar(bearTrend, title = "BearTrend", char="_", location = location.bottom, color=#DE071C, transp = 0, size=size.tiny)
+
+// Show EMA Convergence/Divergence Trend as symbols at the top
+//bullTrendCD = (diff>=0 and diff>=diff[1]) or (diff<0  and diff>diff[1])
+//bearTrendCD = (diff<0  and diff<=diff[1]) or (diff>=0 and diff<diff[1])
+//plotchar(bullTrendCD, title = "BullTrend CD", char="o", location = location.top, color=#0CAB07, transp = 0, size=size.tiny)
+//plotchar(bearTrendCD, title = "BearTrend CD", char="x", location = location.top, color=#DE071C, transp = 0, size=size.tiny)
+
+// === STRATEGY LOGIC ===
+// Time Restriction
+timeInRange = (time > timestamp(fromYear, fromMonth, fromDay, 00, 00)) and (time < timestamp(toYear, toMonth, toDay, 23, 59))
+
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+if stochLong and (diff >=0) and timeInRange    //Open Long when Stoch crossing in Oversold area and EMA Trend is up
+    strategy.entry(id = "Long", long = true)
+if stochLongEx and timeInRange                 //Close Long when Stoch is getting Overbought or Trend changes to Bearish
+    strategy.close(id = "Long")
+
+
+// === STRATEGY - SHORT POSITION EXECUTION ===
+if stochShort and (diff <0) and timeInRange and includeShorts  //Open Short when Stoch crossing in Overbought area and EMA Trend is down
+    strategy.entry(id = "Short", long = false)
+if stochShortEx and timeInRange                                //Close Short when Stoch is getting Oversold or Trend changes to Bullish
+    strategy.close(id = "Short")
+
+        
+// === STRATEGY RISK MANAGEMENT EXECUTION ===
+strategy.exit("Exit Long",  from_entry = "Long",  profit = TakeProfitVal, loss = StopLossVal)
+strategy.exit("Exit Short", from_entry = "Short", profit = TakeProfitVal, loss = StopLossVal)
+
+View in Pine Editor・116 lines
+Use on chart
+1 K
+17
+24 976
+Apr 22, 2020
+This strategy is based on Stochastic Crosses happening in the Oversold/Overbought area, taken into account the current trend which is determined by an EMA pair.
+(Only Longs in uptrend / only Shorts in downtrend)
+
+- Long position is closed when Stochastic is entering Overbought area
+- Short position is closed when Stochastic is entering Overbought area
+
+Additionally a logic is implemented to close the position when another (subsequent) Buy or Sell Signal is given after the trend has changed (to avoid fake outs)
+
+- EMA and Stochastic settings can be changed in the settings
+- Take Profit / Stop Loss can be dynamically activated in the settings (by defaults only Take Profit is activated)
+- Short Position trading can be excluded in the settings (for people trading on platforms without the possibility to open Short Positions)
+- Strategy time frame can be entered in the settings
+
+Default setup seems to work well for BTC on 4HR timeframe.
+
+Good luck!
+
+As this is my first strategy, I am very happy for constructive feedback on how to improve this.
+
+
+
+
+
+
+Apr 22, 2020
+Release Notes
+This Update changes the logic how an Open Position is closed after a reversal of the underlying EMA trend.
+
+Before Update:
+Close open position when a new buy/sell condition is triggered by a Stochastic Cross
+--> Actually this does not really make much sense....
+
+After Update:
+Close open position immediately when underlying EMA trend is changing
+- Trend changes to bearish --> Open Long position get closed
+- Trend changes to bullish --> Open Short position get closed
+
+
+In backtesting this is beneficial.
+
+Cheers
+
+Apr 23, 2020
+Release Notes
+UPDATE:
+Actually there is no update to this stratey script, but I published a complementary indicator which can help to analyze when the Order Close condition is met (crossing of Overbought/Oversold line).
+
+
+Apr 25, 2020
+Release Notes
+UPDATE:
+
+After some testing I come to the conclusion that it is beneficial to change the condition for the Position Close.
+
+Previously the position was closed when the Stochastic K-line was crossing into Overbought (close longs) or Oversold (close shorts) areas.
+But when looking at the historical trades, I found that quite often positions were closed too early and additional potential profits were wasted.
+
+So in the new version the position is only closed when the Stochastic D-line is crossing into Overbought/Oversold. This has the effect, that the positions stay open longer as the D-line will reach the closing zone with a delay (in the default settings the D-line is a 3period SMA of the K-line). This has a chance to be beneficial as in trending markets the Stochastic can stay oversold/overbought for some time. As the positions are anyway only opened and staying open following the general trend (as determined by the EMAs), the downside risk of this adjustment should not be too high.
+
+Please check it out yourself - and let me know in case of additional improvement ideas - especially if anyone has an alternative idea for a more ideal position closing (trailing stop? etc.)
+
+
+PS. Yesterday with default settings (BTCUSD on 4 HR timeframe) the 7th trade of 2020 was closed in profit. That makes it 7 out of 7 in the green this year.
+
+
+
+May 5, 2020
+Release Notes
+UPDATE:
+In the previous version only either Take Profit or Stop Loss was working, not both combined.
+This is fixed - now both can be used in combination
+

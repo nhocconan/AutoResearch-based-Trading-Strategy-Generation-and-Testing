@@ -1,0 +1,420 @@
+//@version=6
+strategy("Trend Sniper Pro", shorttitle="Trend Sniper Pro", overlay=true, initial_capital = 2000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.cash_per_order, pyramiding = 1, commission_value = 2)
+
+// ==========================================
+// 🔹 STRATEGY INPUTS & SETTINGS
+// ==========================================
+
+// Group: Multipliers & Lengths
+grp_main = "Main Settings"
+SUPER_TREND_MULT = input.int(5, "SuperTrend Multiplier", group=grp_main, tooltip="Multiplier for the SuperTrend calculation.")
+SUPER_TREND_LEN  = input.int(22, "SuperTrend Length", group=grp_main)
+ATR_LEN          = input.int(22, "ATR Length", group=grp_main)
+VOLUME_LEN       = input.int(20, "Volume Length", group=grp_main)
+VOL_MA_TYPE      = input.string("sma", "Volume MA Type", options=["sma", "ema", "wma", "rma", "vwma"], group=grp_main)
+IS_CRYPTO        = input.bool(false, "Crypto Mode (Optimized Settings)", tooltip="Enables stricter volume and price filters for volatile markets.", group=grp_main)
+
+// Group: Breakout Settings
+grp_brk = "Breakout Parameters"
+TREND_VOL_MARKUP = input.float(0.0, "Trend Volume Markup %", group=grp_brk)
+REV_VOL_MARKUP   = input.float(0.0, "Reversal Volume Markup %", group=grp_brk)
+HIGH_VOL_MULT    = input.float(5, "High Volume Multiplier", group=grp_brk)
+TREND_TGT_MULT   = input.float(1.0, "Trend Target Multiplier", step=0.1, group=grp_brk)
+REV_TGT_MULT     = input.float(1.0, "Reversal Target Multiplier", step=0.1, group=grp_brk)
+HIGH_BREAK_MULT  = input.float(2.0, "High Breakout Multiplier", step=0.1, group=grp_brk)
+
+// Group: Targets & Stops
+grp_risk = "Risk Management"
+TREND_VAL_MARKUP   = input.float(0.0, "Trend Value Markup %", group=grp_risk)
+REV_VAL_MARKUP     = input.float(0.0, "Reversal Value Markup %", group=grp_risk)
+STOP_MULT_FACTOR   = input.float(1.0, "Stop Loss Factor", step=0.1, group=grp_risk)
+STOP_MULTIPLIER    = input.float(6.0, "Stop Multiplier (ATR)", step=0.1, group=grp_risk)
+COMPOUND_MULTIPLIER= input.float(1.0, "Compound Multiplier (ATR)", step=0.1, group=grp_risk)
+ALLOW_REDUCE_COMP  = input.bool(true, "Allow Compound Reduction", group=grp_risk)
+
+// Group: Advanced Filters
+grp_filt = "Advanced Filters"
+USE_YEARLY_HL    = input.bool(true, "Use Yearly High/Low Check", group=grp_filt)
+IGNORE_REV_BREAK = input.bool(true, "Ignore Reversal Breakout", group=grp_filt)
+USE_OPEN_CLOSE   = input.bool(false, "Use Open/Close for Breakout", group=grp_filt)
+USE_LONG_TERM_HL = input.bool(true, "Use Long Term H/L", group=grp_filt)
+SHORT_HL_PERIOD  = input.int(120, "Short H/L Period", group=grp_filt)
+LONG_HL_PERIOD   = input.int(180, "Long H/L Period", group=grp_filt)
+
+// Group: MA Alignment
+grp_ma = "Alignment & Filters"
+CHECK_MA_ALIGN   = input.bool(true, "Check MA Alignment", group=grp_ma)
+MA_ALIGN_TYPE    = input.string("sma", "Alignment MA Type", options=["sma", "ema"], group=grp_ma)
+ALIGN_LOOKBACK   = input.int(280, "Alignment Lookback", group=grp_ma)
+ALIGN_THRESH     = input.int(0, "Alignment Threshold", group=grp_ma)
+PARTIAL_ALIGN    = input.bool(true, "Allow Partial Alignment", group=grp_ma)
+
+CHECK_MA_ST      = input.bool(true, "Check SuperTrend MA", group=grp_ma)
+MA_ST_TYPE       = input.string("sma", "ST MA Type", options=["sma", "ema"], group=grp_ma)
+MA_ST_LEN        = input.int(10, "ST MA Length", group=grp_ma)
+ST_LEN_MA        = input.int(10, "ST Length for MA", group=grp_ma)
+ST_MULT_MA       = input.float(1.0, "ST Multiplier for MA", step=0.1, group=grp_ma)
+
+// Group: Strategy Execution
+grp_exec = "Execution & Display"
+exit_on_signal   = input.bool(false, "Exit On Opposing Signal", group=grp_exec)
+trade_dir        = input.string(title="Trade Direction", defval=strategy.direction.long, options=[strategy.direction.all, strategy.direction.long, strategy.direction.short], group=grp_exec)
+backtest_years   = input.int(5, "Backtest Years", minval=1, group=grp_exec)
+
+// Group: Visuals
+grp_vis = "Visual Settings"
+display_mode     = input.string(title="Display Mode", defval="Targets", options=["Targets", "Target Channel", "Target with Stops", "Up Channel", "Down Channel"], group=grp_vis)
+show_trailing    = input.bool(true, "Show Trailing Stop Lines", group=grp_vis)
+show_targets     = input.bool(true, "Show Targets", group=grp_vis)
+
+// ==========================================
+// 🔹 HELPER FUNCTIONS
+// ==========================================
+
+// Moving Average Wrapper
+get_ma(src, type, len) =>
+    ma = ta.sma(src, len)
+    if type == "ema"
+        ma := ta.ema(src, len)
+    else if type == "hma"
+        ma := ta.hma(src, len)
+    else if type == "rma"
+        ma := ta.rma(src, len)
+    else if type == "vwma"
+        ma := ta.vwma(src, len)
+    else if type == "wma"
+        ma := ta.wma(src, len)
+    ma
+
+// SuperTrend Calculation
+get_supertrend(mult, len) =>
+    [st, dir] = ta.supertrend(mult, len)
+    [st, dir]
+
+// SuperTrend on Custom Source (MA)
+get_supertrend_custom(src, ma_type, ma_len, st_len, st_mult) =>
+    dist = st_mult * ta.atr(st_len)
+    ma_val = get_ma(src, ma_type, ma_len)
+    
+    long_stop = ma_val - dist
+    prev_long = nz(long_stop[1], long_stop)
+    long_stop := ma_val > prev_long ? math.max(long_stop, prev_long) : long_stop
+    
+    short_stop = ma_val + dist
+    prev_short = nz(short_stop[1], short_stop)
+    short_stop := ma_val < prev_short ? math.min(short_stop, prev_short) : short_stop
+    
+    dir = 1
+    dir := nz(dir[1], dir)
+    dir := dir == -1 and ma_val > prev_short ? 1 : dir == 1 and ma_val < prev_long ? -1 : dir
+    st = dir == 1 ? long_stop : short_stop
+    [st, ma_val, dir]
+
+// Price Breakout Logic
+calc_price_breakout(atr_val, t_val, r_val) =>
+    is_trend = (math.abs(close[1] - close) > atr_val * TREND_TGT_MULT * (1 + t_val/100)) or (USE_OPEN_CLOSE and (high - low > 2 * atr_val * TREND_TGT_MULT))
+    is_reverse = (math.abs(close[1] - close) > atr_val * REV_TGT_MULT * (1 + r_val/100)) or (USE_OPEN_CLOSE and (high - low > 2 * atr_val * REV_TGT_MULT))
+    is_high = (math.abs(close[1] - close) > atr_val * HIGH_BREAK_MULT) or (USE_OPEN_CLOSE and (high - low > 2 * atr_val * HIGH_BREAK_MULT))
+    [is_trend, is_reverse, is_high]
+
+// Volume Breakout Logic
+calc_vol_breakout(vma_val, t_vol, r_vol) =>
+    vol_trend = (vma_val * (1 + t_vol/100)) < volume or na(volume)
+    vol_stop = (vma_val * (1 + r_vol/100)) < volume or na(volume)
+    vol_high = (vma_val * HIGH_VOL_MULT) < volume and not na(volume)
+    [vol_trend, vol_stop, vol_high]
+
+// Bar State Determination
+calc_bar_state(dir, p_break, r_break, h_break, v_break, rv_break, hv_break) =>
+    state = 0
+    bull_cond = (close > close[1]) and ((dir == -1 and p_break and v_break) or (dir == 1 and r_break and rv_break) or hv_break or h_break)
+    bear_cond = (close < close[1]) and ((dir == 1 and p_break and v_break) or (dir == -1 and r_break and rv_break) or hv_break or h_break)
+    if bull_cond
+        state := 1
+    if bear_cond
+        state := -1
+    state
+
+// MA Alignment Score
+calc_alignment() =>
+    score = 0
+    m5 = get_ma(close, MA_ALIGN_TYPE, 5)
+    m10 = get_ma(close, MA_ALIGN_TYPE, 10)
+    m20 = get_ma(close, MA_ALIGN_TYPE, 20)
+    m30 = get_ma(close, MA_ALIGN_TYPE, 30)
+    m50 = get_ma(close, MA_ALIGN_TYPE, 50)
+    m100 = get_ma(close, MA_ALIGN_TYPE, 100)
+    m200 = get_ma(close, MA_ALIGN_TYPE, 200)
+    
+    score += close > m5 ? 1 : 0
+    score += m5 > m10 ? 1 : 0
+    score += m10 > m20 ? 1 : 0
+    score += m20 > m30 ? 1 : 0
+    score += m30 > m50 ? 1 : 0
+    score += m50 > m100 ? 1 : 0
+    score += m100 > m200 ? 1 : 0
+    
+    strict_up = (score == 7)
+    strict_down = (close < m5 and m5 < m10 and m10 < m20 and m20 < m30 and m30 < m50 and m50 < m100 and m100 < m200)
+    
+    res = 0.0
+    if strict_up
+        res := 1.0
+    else if strict_down
+        res := -1.0
+    else if PARTIAL_ALIGN
+        res := score > 5 ? 0.5 : score < 2 ? -0.5 : score > 3 ? 0.25 : -0.25
+    res
+    
+// Yearly High/Low Check
+calc_yearly_check() =>
+    y_high = request.security(syminfo.tickerid, '12M', high[1])
+    y_low = request.security(syminfo.tickerid, '12M', low[1])
+    
+    // Previous years
+    y_h_1 = y_high[365], y_h_2 = y_high[730]
+    y_l_1 = y_low[365], y_l_2 = y_low[730]
+    
+    trend_up = na(y_high) ? true : na(y_h_1) ? close > y_high : na(y_h_2) ? close > math.max(y_high, y_h_1) : close > math.max(y_high, math.min(y_h_1, y_h_2))
+    cond_h = ((na(y_high) or na(y_h_1) ? true : y_high > y_h_1) and (na(y_high) or na(y_h_2) ? true : y_high > y_h_2)) or trend_up or not USE_YEARLY_HL
+    
+    trend_down = na(y_low) ? true : na(y_l_1) ? close < y_low : na(y_l_2) ? close < math.min(y_low, y_l_1) : close < math.min(y_low, math.max(y_l_1, y_l_2))
+    cond_l = ((na(y_low) or na(y_l_1) ? true : y_low < y_l_1) and (na(y_low) or na(y_l_2) ? true : y_low < y_l_2)) or trend_down or not USE_YEARLY_HL
+    [cond_h, cond_l]
+
+// ==========================================
+// 🔹 MAIN CALCULATION
+// ==========================================
+
+// Date Filter
+in_date = time >= timestamp(syminfo.timezone, year(timenow) - backtest_years, 01, 01, 0, 0)
+
+// Indicators
+vma = get_ma(volume, VOL_MA_TYPE, VOLUME_LEN)
+[st, st_dir] = get_supertrend(SUPER_TREND_MULT, SUPER_TREND_LEN)
+atr_val = ta.atr(ATR_LEN)
+
+// Breakout Calcs
+// Crypto Mode Override
+t_vol_mark_val = IS_CRYPTO ? 15.0 : TREND_VOL_MARKUP
+r_vol_mark_val = IS_CRYPTO ? 25.0 : REV_VOL_MARKUP
+t_val_mark_val = IS_CRYPTO ? 15.0 : TREND_VAL_MARKUP
+r_val_mark_val = IS_CRYPTO ? 30.0 : REV_VAL_MARKUP
+
+[p_trend, p_rev, p_high] = calc_price_breakout(atr_val, t_val_mark_val, r_val_mark_val)
+[v_trend, v_rev, v_high] = calc_vol_breakout(vma, t_vol_mark_val, r_vol_mark_val)
+
+// Bar State
+bar_state = calc_bar_state(st_dir, p_trend, p_rev, p_high, v_trend, v_rev, v_high)
+
+// Targets & Lines
+diff = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+
+var float up_line = na
+var float down_line = na
+var float stop_up = na
+var float stop_down = na
+var int last_break = 0
+
+if bar_state != 0
+    last_break := bar_state
+
+// Calculate current targets
+curr_up_tgt = bar_state == 1 ? (high + ((st_dir == -1 ? t_val_mark_val : r_val_mark_val)/100) * diff) : na
+curr_down_tgt = bar_state == -1 ? (low - ((st_dir == 1 ? t_val_mark_val : r_val_mark_val)/100) * diff) : na
+curr_stop_up = bar_state == 1 ? (low - atr_val * STOP_MULT_FACTOR) : na
+curr_stop_down = bar_state == -1 ? (high + atr_val * STOP_MULT_FACTOR) : na
+
+// Update Lines
+up_line := na(curr_up_tgt) ? nz(up_line[1], na) : curr_up_tgt
+down_line := na(curr_down_tgt) ? nz(down_line[1], na) : curr_down_tgt
+stop_up := na(curr_stop_up) ? nz(stop_up[1], na) : curr_stop_up
+stop_down := na(curr_stop_down) ? nz(stop_down[1], na) : curr_stop_down
+
+// Signals
+green_brk = last_break > 0 or IGNORE_REV_BREAK
+red_brk = last_break < 0 or IGNORE_REV_BREAK
+
+buy_sig = (ta.crossover(st_dir == -1 ? high : low, up_line[1]) and green_brk and close > down_line[1]) or 
+          (ta.crossover(st_dir == -1 ? high : low, stop_down[1]) and red_brk) or 
+          (bar_state == 1 and (st_dir == -1 ? high : low) > up_line[1])
+
+stop_buy_sig = ta.crossunder(st_dir == -1 ? close : low, down_line[1]) or ta.crossunder(st_dir == -1 ? close : low, stop_up[1])
+
+sell_sig = (ta.crossunder(st_dir == 1 ? low : high, down_line[1]) and red_brk and close < up_line[1]) or 
+           (ta.crossunder(st_dir == 1 ? low : high, stop_up[1]) and green_brk) or 
+           (bar_state == -1 and (st_dir == 1 ? low : high) < down_line[1])
+           
+stop_sell_sig = ta.crossover(st_dir == 1 ? close : high, up_line[1]) or ta.crossover(st_dir == 1 ? close : high, stop_down[1])
+
+// Filters
+[yearly_h, yearly_l] = calc_yearly_check()
+[st_ma, ma_val, ma_dir] = get_supertrend_custom(ohlc4, MA_ST_TYPE, MA_ST_LEN, ST_LEN_MA, ST_MULT_MA)
+
+align_score = calc_alignment()
+align_sum = math.sum(align_score, ALIGN_LOOKBACK)
+
+new_high = ta.highest(SHORT_HL_PERIOD) == ta.highest(LONG_HL_PERIOD) or not USE_LONG_TERM_HL
+new_low = ta.lowest(SHORT_HL_PERIOD) == ta.lowest(LONG_HL_PERIOD) or not USE_LONG_TERM_HL
+ma_high = align_sum > ALIGN_THRESH or not CHECK_MA_ALIGN
+ma_low = align_sum < -ALIGN_THRESH or not CHECK_MA_ALIGN
+rank = ta.percentrank(ohlc4, ALIGN_LOOKBACK)
+
+// Entry Conditions
+buy_entry = buy_sig and yearly_h and bar_state != -1 and in_date
+buy_entry := buy_entry and ((new_high and ma_high and (ma_dir == 1 or not CHECK_MA_ST) and rank > 70) or strategy.netprofit >= 0)
+
+sell_entry = sell_sig and yearly_l and bar_state != 1 and in_date
+sell_entry := sell_entry and ((new_low and ma_low and (ma_dir == -1 or not CHECK_MA_ST) and rank < 30) or strategy.netprofit >= 0)
+
+stop_buy_entry = stop_buy_sig and bar_state != 1 and in_date
+stop_sell_entry = stop_sell_sig and bar_state != -1 and in_date
+
+// Stops & Compound
+target_price = close
+buy_stop = target_price - (STOP_MULTIPLIER * atr_val)
+sell_stop = target_price + (STOP_MULTIPLIER * atr_val)
+
+if bar_state > 0 or strategy.position_size > 0
+    buy_stop := target_price - (STOP_MULTIPLIER * atr_val)
+    sell_stop := target_price + (COMPOUND_MULTIPLIER * atr_val)
+    buy_stop := (buy_stop < buy_stop[1] or close < sell_stop[1]) ? buy_stop[1] : buy_stop
+    sell_stop := (sell_stop < sell_stop[1] or close < sell_stop[1]) ? sell_stop[1] : sell_stop
+else if bar_state < 0 or strategy.position_size < 0
+    buy_stop := target_price - (COMPOUND_MULTIPLIER * atr_val)
+    sell_stop := target_price + (STOP_MULTIPLIER * atr_val)
+    sell_stop := (sell_stop > sell_stop[1] or close > buy_stop[1]) ? sell_stop[1] : sell_stop
+    buy_stop := (buy_stop > buy_stop[1] or close > buy_stop[1]) ? buy_stop[1] : buy_stop
+
+crossed_compound = (strategy.position_size > 0 ? close > sell_stop : strategy.position_size < 0 ? close < buy_stop : true) or false
+
+// ==========================================
+// 🔹 STRATEGY EXECUTION
+// ==========================================
+
+strategy.risk.allow_entry_in(trade_dir)
+
+if buy_entry and crossed_compound
+    strategy.entry("Long", strategy.long)
+
+if stop_buy_entry and exit_on_signal
+    strategy.close("Long")
+    
+strategy.exit("Exit Long", "Long", stop=buy_stop)
+
+if sell_entry and crossed_compound
+    strategy.entry("Short", strategy.short)
+
+if stop_sell_entry and exit_on_signal
+    strategy.close("Short")
+    
+strategy.exit("Exit Short", "Short", stop=sell_stop)
+
+// ==========================================
+// 🔹 VISUALIZATION
+// ==========================================
+
+// Teals & Reds for Professional Look
+c_bull = #089981
+c_bear = #F23645
+state_color = strategy.position_size != 0 ? color.new(c_bull, 0) : color.new(c_bear, 0)
+col_up = state_color
+col_down = state_color
+
+// Plot Channels
+plot(display_mode == "Target Channel" or display_mode == "Up Channel" ? up_line : na, "Up Line", col_up)
+plot(display_mode == "Target Channel" or display_mode == "Down Channel" ? down_line : na, "Down Line", col_down)
+
+// Trailing Stops
+plot(show_trailing ? buy_stop : na, "Long Stop", col_up, 2, plot.style_stepline)
+plot(show_trailing ? sell_stop : na, "Short Stop", col_down, 2, plot.style_stepline)
+
+// Bar Colors
+barcolor(bar_state == 1 ? c_bull : bar_state == -1 ? c_bear : na)
+
+// ==========================================
+// 🔹 RISK/REWARD BOXES (VISUALS)
+// ==========================================
+var box entry_box = box.new(na, na, na, na)
+var box stop_box = box.new(na, na, na, na)
+var box target_box = box.new(na, na, na, na)
+
+// Detect new entry
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entry_price = close
+    init_stop = strategy.position_size > 0 ? buy_stop : sell_stop
+    init_target = strategy.position_size > 0 ? sell_stop : buy_stop 
+    
+    // Target Box (Teal)
+    box.delete(target_box)
+    target_box := box.new(left=bar_index, top=strategy.position_size > 0 ? init_target : entry_price, bottom=strategy.position_size > 0 ? entry_price : init_target, right=bar_index + 10, bgcolor=color.new(c_bull, 85), border_color=c_bull)
+    
+    // Stop Box (Red)
+    box.delete(stop_box)
+    stop_box := box.new(left=bar_index, top=strategy.position_size > 0 ? entry_price : init_stop, bottom=strategy.position_size > 0 ? init_stop : entry_price, right=bar_index + 10, bgcolor=color.new(c_bear, 85), border_color=c_bear)
+
+// Update Boxes
+if strategy.position_size != 0
+    box.set_right(target_box, bar_index + 5)
+    box.set_right(stop_box, bar_index + 5)
+    
+    curr_stop = strategy.position_size > 0 ? buy_stop : sell_stop
+    curr_target = strategy.position_size > 0 ? sell_stop : buy_stop
+    
+    if strategy.position_size > 0
+        box.set_bottom(stop_box, curr_stop)
+        box.set_top(target_box, curr_target)
+    else
+        box.set_top(stop_box, curr_stop)
+        box.set_bottom(target_box, curr_target)
+
+// Close boxes on exit
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    box.set_right(target_box, bar_index)
+    box.set_right(stop_box, bar_index)
+
+View in Pine Editor・377 lines
+Use on chart
+3
+0
+9
+2
+4 624
+Trend Sniper Pro - Advanced Trend & Breakout Strategy
+
+## 🚀 Overview
+Trend Sniper Pro is not just another indicator; it is a professional trading system designed to filter out market noise and capture only high-probability moves. By combining **Price Action**, **Volume Confirmation**, and **Multi-Timeframe Analysis**, it operates with "sniper" precision.
+
+It avoids the trap of "overtrading"—a trader's worst enemy—by only pulling the trigger when conditions are perfect.
+
+💡 **IMPORTANT TIP:** This strategy yields the best results on **Stocks** (e.g., US Equities, BIST) on **DAILY** charts. It is optimized for patient investors looking to catch major trends.
+
+## 🔑 Key Features
+* **Dual-Layer Trend Filter**: Utilizes a modified SuperTrend alongside a robust Moving Average Alignment system to filter out false signals.
+* **Smart Volume Validation**: Rising prices without volume are often traps. Signals are only generated when accompanied by significant volume volume.
+* **Dynamic Risk Management**: Automatically plots **Risk/Reward Boxes** and **Trailing Stop Lines** (Teal for Bullish, Red for Bearish) upon entry.
+* **Yearly High/Low Filter**: A macro filter that prevents you from buying at historical tops or selling at historical bottoms.
+* **Compounding**: Automatically optimizes position size to compound gains during strong trends.
+
+## 🆕 Crypto Mode
+A special mode has been added for the more volatile Crypto markets. When you check the **"Crypto Mode"** box in the settings, the strategy applies much stricter filters to filter out "pump & dump" wicks and noise.
+
+## 🛠️ How It Works
+1. **Trend Alignment**: If the long-term trend is not in your favor, no trade is taken.
+2. **Breakout**: Detects a breakout when Volatility (ATR) and Volume thresholds are exceeded.
+3. **Entry Trigger**: A position is opened only when Price, Volume, and Trend align perfectly.
+4. **Exit**: Positions are closed via ATR-based Stop Loss or a profit-locking Trailing Stop.
+
+
+
+## ⚙️ Settings Guide
+* **Crypto Mode**: Check this box for Cryptocurrencies. Leave unchecked for Stocks.
+* **Main Settings**: Adjust SuperTrend sensitivity.
+* **Risk Management**: Personalize your Stop Loss multiplier and profit targets.
+* **Visual Settings**: Toggle target lines or boxes on/off.
+
+## ⚠️ Disclaimer
+This script is for educational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Always backtest strategies on your specific pairs and timeframes before live trading.
+
+---
+*Developed for professional traders looking for a systematic edge in trending markets.*

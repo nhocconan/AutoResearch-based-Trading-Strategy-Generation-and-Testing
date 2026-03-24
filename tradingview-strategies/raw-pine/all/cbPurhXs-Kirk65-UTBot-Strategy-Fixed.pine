@@ -1,0 +1,79 @@
+//@version=2
+strategy(title="UTBot Strategy", overlay = true, initial_capital = 300, pyramiding = 100, calc_on_order_fills = false, calc_on_every_tick = false,
+   default_qty_type = strategy.cash, default_qty_value = 1000, commission_value = 0.075)
+   
+// CREDITS to @HPotter for the orginal code. 
+// CREDITS to @Yo_adriiiiaan for recently publishing the UT Bot study based on the original code -
+// CREDITS to @TradersAITradingPlans for making this Strategy. 
+// Strategy fixed with Time period by Kirk65.
+// I am using this UT bot with 2 hours time frame with god resultss. Alert with "Once per bar" and stoploss 1.5%. If Alerts triggered and price goes against Alert. Stoploss will catch it. Wait until next Alert.
+// While @Yo_adriiiiaan mentions it works best on a 4-hour timeframe or above, witch is a lot less risky, but less profitable. 
+
+testStartYear = input(2019, "BACKTEST START YEAR", minval = 1980, maxval = 2222) 
+testStartMonth = input(01, "BACKTEST START MONTH", minval = 1, maxval = 12)
+testStartDay = input(01, "BACKTEST START DAY", minval = 1, maxval = 31)
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+testStopYear = input(2222, "BACKTEST STOP YEAR", minval=1980, maxval = 2222)
+testStopMonth = input(12, "BACKTEST STOP MONTH", minval=1, maxval=12)
+testStopDay = input(31, "BACKTEST STOP DAY", minval=1, maxval=31)
+testPeriodStop = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+
+testPeriod = time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+SOURCE = input(hlc3)
+RSILENGTH = input(14, title = "RSI LENGTH")
+RSICENTERLINE = input(52, title = "RSI CENTER LINE")
+MACDFASTLENGTH = input(7, title = "MACD FAST LENGTH")
+MACDSLOWLENGTH = input(12, title = "MACD SLOW LENGTH")
+MACDSIGNALSMOOTHING = input(12, title = "MACD SIGNAL SMOOTHING")
+a = input(10, title = "Key Vaule. 'This changes the sensitivity'") 
+SmoothK = input(3)
+SmoothD = input(3)
+LengthRSI = input(14)
+LengthStoch = input(14)
+RSISource = input(close) 
+c = input(10, title="ATR Period")
+xATR = atr(c)
+nLoss = a * xATR
+xATRTrailingStop = iff(close > nz(xATRTrailingStop[1], 0) and close[1] > nz(xATRTrailingStop[1], 0), max(nz(xATRTrailingStop[1]), close - nLoss),
+     iff(close < nz(xATRTrailingStop[1], 0) and close[1] < nz(xATRTrailingStop[1], 0), min(nz(xATRTrailingStop[1]), close + nLoss), 
+     iff(close > nz(xATRTrailingStop[1], 0), close - nLoss, close + nLoss)))
+pos =    iff(close[1] < nz(xATRTrailingStop[1], 0) and close > nz(xATRTrailingStop[1], 0), 1,
+     iff(close[1] > nz(xATRTrailingStop[1], 0) and close < nz(xATRTrailingStop[1], 0), -1, nz(pos[1], 0))) 
+color = pos == -1 ? red: pos == 1 ? green : blue 
+ema= ema(close,1)
+above = crossover(ema,xATRTrailingStop )
+below = crossover(xATRTrailingStop,ema)
+buy = close > xATRTrailingStop and above 
+sell = close < xATRTrailingStop and below
+barbuy = close > xATRTrailingStop 
+barsell = close < xATRTrailingStop 
+plotshape(buy, title = "Buy", text = 'Buy', style = shape.labelup, location = location.belowbar, color= green,textcolor = white, transp = 0, size = size.tiny)
+plotshape(sell, title = "Sell", text = 'Sell', style = shape.labeldown, location = location.abovebar, color= red,textcolor = white, transp = 0, size = size.tiny)
+barcolor(barbuy? green:na)
+barcolor(barsell? red:na)
+//alertcondition(buy, title='Buy', message='Buy')
+//alertcondition(sell, title='Sell', message='Sell')
+
+if (buy)
+    strategy.entry("UTBotBuy",strategy.long, when=testPeriod)
+if (sell)
+    strategy.entry("UTBotSell",strategy.short, when=testPeriod)
+
+View in Pine Editor・61 lines
+Use on chart
+1.2 K
+11
+36 279
+Credits to HPotter for the orginal code.
+Credits to Yo_adriiiiaan for recently publishing the UT Bot study based on the original code.
+Credits to @TradersAITradingPlans for making UT Bot strategy.
+
+Strategy fixed with time period by Kirk65.
+
+UT Bot works great with 2 hour time frame with Heikin Ashi, but riskier. Use "Once per bar" In alerts with 1.5% stoploss. If the price goes against Alerts, stoploss will save your assets. Wait until next Alert.
+4 hour time frame is less risky and less profitable.
+
+Happy trading..
+
+Kirk65

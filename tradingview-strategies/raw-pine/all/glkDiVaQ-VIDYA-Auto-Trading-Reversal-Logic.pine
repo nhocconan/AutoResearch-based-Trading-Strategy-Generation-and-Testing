@@ -1,0 +1,127 @@
+//@version=6
+strategy('VIDYA Auto-Trading(Reversal Logic)', overlay = true)
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+int vidya_length = input.int(10, 'VIDYA Length')
+int vidya_momentum = input.int(20, 'VIDYA Momentum')
+float band_distance = input.float(2, 'Distance factor for upper/lower bands', step = 0.1)
+float source = input.source(close, 'Source')
+color up_trend_color = input(#17dfad, '+')
+color down_trend_color = input(#dd326b, '-')
+bool shadow = input.bool(true, 'Shadow')
+
+// Define VIDYA (Variable Index Dynamic Average) function
+vidya_calc(src, vidya_length, vidya_momentum) =>
+    float momentum = ta.change(src)
+    float sum_pos_momentum = math.sum(momentum >= 0 ? momentum : 0.0, vidya_momentum)
+    float sum_neg_momentum = math.sum(momentum >= 0 ? 0.0 : -momentum, vidya_momentum)
+    float abs_cmo = math.abs(100 * (sum_pos_momentum - sum_neg_momentum) / (sum_pos_momentum + sum_neg_momentum))
+    float alpha = 2 / (vidya_length + 1)
+    var float vidya_value = 0.0
+    vidya_value := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_value[1])
+
+    ta.sma(vidya_value, 15)
+
+// Calculate VIDYA
+float vidya_value = vidya_calc(source, vidya_length, vidya_momentum)
+
+// Calculate upper and lower bands
+float atr_value = ta.atr(200)
+float upper_band = vidya_value + atr_value * band_distance
+float lower_band = vidya_value - atr_value * band_distance
+
+// Detect trend direction
+bool is_trend_up = false
+if ta.crossover(source, upper_band)
+    is_trend_up := true
+    is_trend_up
+if ta.crossunder(source, lower_band)
+    is_trend_up := false
+    is_trend_up
+
+// Smooth the trend line
+float smoothed_value = na
+if is_trend_up
+    smoothed_value := lower_band
+    smoothed_value
+if not is_trend_up
+    smoothed_value := upper_band
+    smoothed_value
+
+// Detect trend change
+bool trend_cross_up = ta.crossover(source, upper_band)
+bool trend_cross_down = ta.crossunder(source, lower_band)
+
+// ＥＮＴＲＹ ＆ ＥＸＩＴ ―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Long logic: Enter long when down arrow appears and exit when up arrow appears
+if trend_cross_up
+    strategy.close('Sell') // Close short position if any
+    strategy.entry('Buy', strategy.long)
+
+if trend_cross_down
+    strategy.close('Buy') // Close long position if any
+    strategy.entry('Sell', strategy.short)
+
+View in Pine Editor・66 lines
+Use on chart
+1
+2
+0
+4 007
+Overview
+This script is a dynamic trend-following strategy based on the Variable Index Dynamic Average (VIDYA). It adapts in real time to market volatility, aiming to enhance entry precision and optimize risk management.
+
+⚠️ This strategy is intended for educational and research purposes. Past performance does not guarantee future results. All results are based on historical simulations using fixed parameters.
+
+Strategy Objectives
+The objective of this strategy is to respond swiftly to sudden price movements and trend reversals, providing consistent and reliable trade signals under historical testing conditions. It is designed to be intuitive and efficient for traders of all levels.
+
+Key Features
+Momentum Sensitivity via VIDYA: Reacts quickly to momentum shifts, allowing for accurate trend-following entries.
+
+Volatility-Based ATR Bands: Automatically adjusts stop levels and entry conditions based on current market volatility.
+
+Intuitive Trend Visualization: Uptrends are marked with green zones, and downtrends with red zones, giving traders clear visual guidance.
+
+Trading Rules
+Long Entry: Triggered when price crosses above the upper band. Any existing short position is closed.
+
+Short Entry: Triggered when price crosses below the lower band. Any existing long position is closed.
+
+Exit Conditions: Positions are reversed based on signal changes, using a position reversal strategy.
+
+Risk Management Parameters
+Market: ETHUSD(5M)
+
+Account Size: $3,000 (reasonable approximation for individual traders)
+
+Commission: 0.02%
+
+Slippage: 2 pip
+
+Risk per Trade: 5% of account equity (adjusted to comply with TradingView guidelines for realistic risk levels)
+
+Number of Trades: 251 (based on backtest over the selected dataset)
+
+⚠️ The risk per trade and other values can be customized. Users are encouraged to adapt these to their individual needs and broker conditions.
+
+Trading Parameters & Considerations
+VIDYA Length: 10
+VIDYA Momentum: 20
+Distance factor for upper/lower bands: 2
+Source: close
+
+Visual Support
+Trend zones, entry points, and directional shifts are clearly plotted on the chart. These visual cues enhance the analytical experience and support faster decision-making.
+
+Visual elements are designed to improve interpretability and are not intended as financial advice or trade signals.
+
+Strategy Improvements & Uniqueness
+Inspired by the public work of BigBeluga, this script evolves the original concept with meaningful enhancements. By combining VIDYA and ATR bands, it offers greater adaptability and practical value compared to conventional trend-following strategies.
+
+This adaptation is original work and not a direct copy. Improvements are designed to enhance usability, risk control, and market responsiveness.
+
+Summary
+This strategy offers a responsive and adaptive approach to trend trading, built on momentum detection and volatility-adjusted risk management. It balances clarity, precision, and practicality—making it a powerful tool for traders seeking reliable trend signals.
+
+⚠️ All results are based on historical data and are subject to change under different market conditions. This script does not guarantee profit and should be used with caution and proper risk management.

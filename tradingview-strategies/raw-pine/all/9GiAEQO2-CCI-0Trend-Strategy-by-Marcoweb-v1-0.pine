@@ -1,0 +1,84 @@
+//@version=2
+strategy("CCI 0Trend Strategy (by Marcoweb) v1.0", shorttitle="CCI_0T_Strat_v1.0", overlay=true)
+
+///////////// CCI
+CCIlength = input(20, minval=1, title="CCI Period Length") 
+CCIoverSold = -100
+CCIoverBought = 100
+CCIzeroLine = 0
+CCI = cci(hlc3, CCIlength)
+price = hlc3
+vcci = cci(price, CCIlength)
+
+source = close
+buyEntry = crossover(source, CCIoverSold)
+sellEntry = crossunder(source, CCIoverBought)
+plot(CCI, color=black,title="CCI")
+p1 = plot(CCIoverSold, color=red,title="-100")
+p2 = plot(CCIoverBought, color=blue,title="100")
+p3 = plot(CCIzeroLine, color=orange,title="0")
+
+///////////// CCI 0Trend v1.0 Strategy 
+if (not na(vcci))
+
+    if (crossover(CCI, CCIoverSold))
+        strategy.entry("CCI_L", strategy.long, stop=CCIoverSold, oca_type=strategy.oca.cancel, comment="CCI_L")
+    else
+        strategy.cancel(id="CCI_L")
+        
+    if (crossunder(CCI, CCIoverBought))
+        strategy.entry("CCI_S", strategy.short, stop=CCIoverBought, oca_type=strategy.oca.cancel, comment="CCI_S")
+    else
+        strategy.cancel(id="CCI_S")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・34 lines
+Use on chart
+1
+2
+4
+4
+3 723
+Hi guys,
+
+I am trying to create a strategy that consists in the crossover/under of the 0 line of the Commodity Channel Index. Every time the price crosses over the 0 line in the CCI the strategy has to long getting short on the cross under and viceversa.
+
+I have published here another script strategy (consists in a crossover/under of the Overbought/Oversold levels of the CCI) that works so I could have the opportunity to share with you the main idea that as per now is mistaken:
+
+//version=2
+strategy(title="CCI 0Trend Strategy (by Marcoweb) v1.0", shorttitle="CCI_0T_Stra_v1.0", overlay=true)
+
+///////////// CCI
+length = input(20, minval=1)
+src = input(close, title="Source")
+ma = sma(src, length)
+cci = (src - ma) / (0.015 * dev(src, length))
+plot(cci, color=black)
+band1 = hline(100, color=blue, linestyle=solid)
+band0 = hline(-100, color=red, linestyle=solid)
+bandl = hline(0, color=orange, linestyle=solid)
+fill(band1, band0, color=olive)
+
+p1 = plot(band0, color=red,title="-100")
+p2 = plot(band1, color=blue,title="100")
+p3 = plot(bandl, color=orange,title="0")
+
+///////////// CCI 0Trend Strategy (by Marcoweb) v1.0 Strategy
+if (not na(cci))
+
+if (crossover(cci, bandl)
+strategy.entry("CCI_L", strategy.long, stop=bandl, oca_type=strategy.oca.cancel, comment="CCI_L")
+else
+strategy.cancel(id="CCI_L")
+
+if (crossunder(cci, bandl)
+strategy.entry("CCI_S", strategy.short, stop=bandl, oca_type=strategy.oca.cancel, comment="CCI_S")
+else
+strategy.cancel(id="CCI_S")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+With this coding I get the error : line 24 (if (crossover(cci, bandl): mismatched input '|E|' expecting RPAR
+
+Hope you like the idea ;)

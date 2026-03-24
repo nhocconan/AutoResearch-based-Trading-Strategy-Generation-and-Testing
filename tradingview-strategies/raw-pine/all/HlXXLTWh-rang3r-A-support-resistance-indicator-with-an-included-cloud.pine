@@ -1,0 +1,68 @@
+//@version=3
+strategy("[IND] rang3r", overlay=true)
+entP = input(50, "Entry Period: ")
+exP = input(25, "Exit period: ")
+sensitivity = input(0.9999, "Sensitivity")
+periodHigh = 0.0
+periodLow = 0.0
+epH = 0.0
+epL = 0.0
+
+    
+//Entry Trades
+for i = 1 to (entP+1)
+    if i == 1 
+        periodHigh:=high[i]
+    else
+        if periodHigh < high[i]
+            periodHigh:=high[i]
+    
+
+for i = 1 to (entP+1)
+    if i == 1 
+        periodLow:=low[i]
+    else
+        if periodLow > low[i]
+            periodLow:=low[i]
+                
+s = high[1] > periodHigh*sensitivity and open > close //and (close[1] > open[1] ? open[1] : close[1]) > close
+l = low[1] < periodLow*(1/sensitivity) and close > open //and (close[1] > open[1] ? close[1] : open[1]) < close
+
+//strategy.entry("long", strategy.long, when=s)
+//strategy.entry("short", strategy.short, when=l)
+
+bgcolor(l ? green : na)
+bgcolor(s ? red : na)
+
+periodCenter = (periodHigh+periodLow)/2
+period0618 = (periodLow)+(periodHigh-periodLow)*0.618
+period0382 = (periodLow)+(periodHigh-periodLow)*0.382
+
+cloud1 = plot(period0382, color=#494949)
+cloud2 = plot(period0618, color=#494949)
+
+fill(cloud1, cloud2, color=#d8d8d8)
+
+plot(periodHigh, color=#d81751)
+plot(periodLow, color=#0daa20)
+//plot(periodCenter, color=#494949)
+
+bc = close > period0618 ? white : (close < period0382 ? black : na)
+
+barcolor(bc)
+
+View in Pine Editor・52 lines
+Use on chart
+6
+2
+3
+2 984
+This indicator finds the minimum and maximum values within a set time period.
+Crosses of these minimum and maximum values are noted with the green/red background colours.
+
+The indicator also produces a "cloud", which is generated through the 0.382 and 0.612 points between the two maximum and minimum lines.
+
+Settings:
+Entry Period: Time period the indicator checks for min/max points.
+Exit Period: Currently Redundant, but may be updated.
+Sensitivity: Needed as a leeway for how close a value needs to be to a min/max for it to be considered a cross. I recommend keeping this at default.

@@ -1,0 +1,42 @@
+//@version=6
+strategy("SMA10 Cross Up +15 pkt", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=2)
+
+minPktOpen  = input.float(15.0, title="Min. punktów powyżej SMA10 — otwarcie",   minval=0.1, step=0.5)
+minPktClose = input.float(12.0, title="Min. punktów poniżej SMA10 — zamknięcie", minval=0.1, step=0.5)
+
+sma10 = ta.sma(close, 10)
+
+var bool watchingBuy = false
+
+if ta.crossover(close, sma10)
+    watchingBuy := true
+
+if ta.crossunder(close, sma10)
+    watchingBuy := false
+
+buySignal  = watchingBuy and (close - sma10) >= minPktOpen  and strategy.position_size == 0
+sellSignal = (sma10 - close) >= minPktClose and strategy.position_size > 0
+
+if buySignal
+    watchingBuy := false
+
+plotshape(buySignal,  title="BUY",  location=location.belowbar, color=color.lime, style=shape.triangleup,   size=size.normal, text="BUY",  textcolor=color.lime)
+plotshape(sellSignal, title="SELL", location=location.abovebar, color=color.red,  style=shape.triangledown, size=size.normal, text="SELL", textcolor=color.red)
+
+if buySignal
+    strategy.entry("Long", strategy.long,
+      alert_message='{"signal":"BUY","ticker":"{{ticker}}","interval":"{{interval}}","price":"{{close}}","time":"{{time}}"}')
+
+if sellSignal
+    strategy.close("Long", comment="SELL -12pkt",
+      alert_message='{"signal":"SELL","ticker":"{{ticker}}","interval":"{{interval}}","price":"{{close}}","time":"{{time}}"}')
+
+alertcondition(buySignal,  title="BUY Signal",  message='{"signal":"BUY","ticker":"{{ticker}}","interval":"{{interval}}","price":"{{close}}","time":"{{time}}"}')
+alertcondition(sellSignal, title="SELL Signal", message='{"signal":"SELL","ticker":"{{ticker}}","interval":"{{interval}}","price":"{{close}}","time":"{{time}}"}')
+
+View in Pine Editor・35 lines
+Use on chart
+2
+9
+678
+Opens a Long position when the price crosses above SMA10 and subsequently reaches at least 15 points above that average — confirming the strength of the upward move. Closes the position when the price drops at least 12 points below SMA10 — signaling a trend reversal. Both parameters (15 pts entry, 12 pts exit) are configurable in the indicator settings.

@@ -1,0 +1,127 @@
+//@version=5
+strategy("9 EMA Trend-Flow Strategy", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- 1. Inputs ---
+emaFastLength = input.int(9, title="Fast EMA Length (Trigger)", minval=1)
+emaSlowLength = input.int(20, title="Slow EMA Length (Filter)", minval=1)
+rsiLength = input.int(14, title="RSI Length")
+rsiLongThreshold = input.int(50, title="RSI Long Threshold (>X)")
+rsiShortThreshold = input.int(50, title="RSI Short Threshold (<X)")
+
+// Risk Management Inputs
+stopLossPct = input.float(1.5, title="Stop Loss %", step=0.1) / 100
+takeProfitPct = input.float(3.0, title="Take Profit %", step=0.1) / 100
+
+// Date Filter Inputs (To backtest specific periods)
+startDate = input.time(timestamp("2023-01-01 00:00"), title="Start Date")
+endDate = input.time(timestamp("2030-01-01 00:00"), title="End Date")
+
+// --- 2. Indicators ---
+emaFast = ta.ema(close, emaFastLength)
+emaSlow = ta.ema(close, emaSlowLength)
+rsi = ta.rsi(close, rsiLength)
+
+// --- 3. Trading Logic ---
+
+// Check if within date range
+inDateRange = time >= startDate and time <= endDate
+
+// Trend Definitions
+uptrend = emaFast > emaSlow
+downtrend = emaFast < emaSlow
+
+// Pullback & Trigger Conditions (Long)
+// 1. Trend is UP
+// 2. Previous Low touched or went below 9 EMA (The Dip)
+// 3. Current Close is back above 9 EMA (The Bounce)
+// 4. RSI is healthy (above 50)
+longPullback = low[1] <= emaFast[1] // Previous candle touched the line
+longTrigger = close > emaFast // Current candle closes above
+longCondition = uptrend and longPullback and longTrigger and (rsi > rsiLongThreshold) and inDateRange
+
+// Pullback & Trigger Conditions (Short)
+// 1. Trend is DOWN
+// 2. Previous High touched or went above 9 EMA (The Rally)
+// 3. Current Close is back below 9 EMA (The Rejection)
+// 4. RSI is bearish (below 50)
+shortPullback = high[1] >= emaFast[1]
+shortTrigger = close < emaFast
+shortCondition = downtrend and shortPullback and shortTrigger and (rsi < rsiShortThreshold) and inDateRange
+
+// --- 4. Execution ---
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    // Set Stop Loss and Take Profit
+    strategy.exit("Exit Long", "Long", stop=strategy.position_avg_price * (1 - stopLossPct), limit=strategy.position_avg_price * (1 + takeProfitPct))
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    // Set Stop Loss and Take Profit
+    strategy.exit("Exit Short", "Short", stop=strategy.position_avg_price * (1 + stopLossPct), limit=strategy.position_avg_price * (1 - takeProfitPct))
+
+// --- 5. Visualization ---
+
+// Plot EMAs
+plot(emaFast, color=color.new(color.blue, 0), title="EMA 9", linewidth=2)
+plot(emaSlow, color=color.new(color.yellow, 0), title="EMA 20", linewidth=2)
+
+// Plot Signals
+plotshape(series=longCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=shortCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// Background color to show trend (Optional visual aid)
+bgcolor(uptrend ? color.new(color.green, 90) : downtrend ? color.new(color.red, 90) : na)
+
+View in Pine Editor・74 lines
+Use on chart
+2
+2
+890
+This strategy avoids trading inside the noise and waits for Bitcoin to "coil up" before exploding.
+
+1. Chart Setup
+Timeframe: 5 Minutes
+
+Bollinger Bands: Length 20, Standard Deviation 2 (Default).
+
+RSI (Relative Strength Index): Length 14.
+
+EMA (Exponential Moving Average): Length 200 (Trend Filter).
+
+2. The Rules
+Long Setup (Buy)
+
+The Trend Filter: Price must be above the 200 EMA.
+
+The Squeeze: The Bollinger Bands must visually contract (narrow), indicating volatility is dying down.
+
+The Trigger: A 5m candle closes strongly above the Upper Bollinger Band.
+
+Confirmation: RSI must be rising and above 50 (but ideally not yet "pegged" at 90+).
+
+Short Setup (Sell)
+
+The Trend Filter: Price must be below the 200 EMA.
+
+The Squeeze: The Bollinger Bands contract.
+
+The Trigger: A 5m candle closes strongly below the Lower Bollinger Band.
+
+Confirmation: RSI must be falling and below 50.
+
+Execution Guide
+Entry Technique
+Don't enter immediately when the candle touches the band. Wait for the candle close.
+
+Why? Bitcoin frequently "wicks" through bands to trap traders (fakeouts) before reversing. A solid close outside the band confirms momentum.
+
+Exit Strategy (Take Profit)
+Target 1 (Conservative): Close 50% of the position when price expands to a fixed risk-reward ratio (e.g., 1.5R).
+
+Target 2 (Runner): Keep the remaining position open as long as price "walks the band" (stays outside or touching the outer band). Close the rest when a candle finally closes back inside the Bollinger Bands.
+
+Stop Loss
+Placement: Place your Stop Loss (SL) slightly below the Middle Band (the 20 SMA) at the time of entry.
+
+Trailing: As the price moves in your favor, move your SL to trail the Middle Band.

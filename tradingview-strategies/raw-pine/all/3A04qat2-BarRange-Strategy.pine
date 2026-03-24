@@ -1,0 +1,49 @@
+//@version=5
+strategy("BarRange Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// Define bar range (high - low for each bar).
+barRange = high[0] - low[0]
+
+// Define the lookback period.
+lookbackPeriod = 50
+
+// Define percent rank
+percentRank = ta.percentrank(barRange, lookbackPeriod)
+
+// Percent rank threshold
+highrange = percentRank >= 95
+
+longcondition = highrange and close[0] < open[0] // percent rank must be >= 95 and last bar must close down.
+//longcondition = highrange // enter long regardless, whether last bar closed up or down.
+
+exitcondition = bar_index[0] + 1 // exit after 1 bar, by adjusting "1", you can control after how many bars you can exit.
+//exitcondition = close[0] > high[1] // exit when current bar's close is higher than last bar's high.
+
+// Entry & exit.
+strategy.entry("long", strategy.long, when = longcondition) 
+strategy.close("long", when = exitcondition)
+
+// Display entry & exit arrows.
+bgcolor(longcondition ? color.new(color.green, 90) : na, transp=90)
+bgcolor(exitcondition ? color.new(color.red, 90) : na, transp=90)
+
+View in Pine Editor・28 lines
+Use on chart
+4
+0
+1 412
+Hello,
+
+This is a long-only, volatility-based strategy that analyzes the range of the previous bar (high - low).
+
+If the most recent bar’s range exceeds a threshold based on the last X bars, a trade is initiated.
+
+You can customize the lookback period, threshold value, and exit type.
+
+For exits, you can choose to exit after X bars or when the close price exceeds the previous bar’s high.
+
+The strategy is designed for instruments with a long-term upward-sloping curves, such as ES1! or NQ1!. It may not perform well on other instruments.
+
+Commissions are set to $2.50 per side ($5.00 per round trip).
+
+Recommended timeframes are 1h and higher. With adjustments to the lookback period and threshold, it could potentially achieve similar results on lower timeframes as well.

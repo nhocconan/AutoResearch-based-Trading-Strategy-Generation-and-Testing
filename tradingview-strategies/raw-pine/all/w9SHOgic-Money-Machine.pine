@@ -1,0 +1,467 @@
+//@version=5
+strategy("Money Machine", overlay=true, default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, 
+         commission_value=0.1, slippage=2, margin_long=5, margin_short=5,
+         process_orders_on_close=true, calc_on_every_tick=true, max_boxes_count=500, max_labels_count=500)
+
+//=============================================================================
+// MONEY MACHINE STRATEGY
+// Rules:
+// 1. Never buy when RSI > 70
+// 2. Never sell when RSI < 30
+// 3. Only buy when overall trend is bullish
+// 4. Only sell when overall trend is bearish
+// 5. Buy on MACD bullish crossover (signal crosses under MACD line)
+// 6. Sell on MACD bearish crossover (signal crosses over MACD line)
+// 7. Stay in position until opposite crossover
+// 8. Risk: 2% per trade, 1:1 RR, Leverage 1:20 (EU compliant)
+//=============================================================================
+
+//-----------------------------------------------------------------------------
+// INPUTS
+//-----------------------------------------------------------------------------
+
+// RSI Settings
+i_rsiLength     = input.int(14, "RSI Length", minval=1, group="RSI")
+i_rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=100, group="RSI")
+i_rsiOversold   = input.int(30, "RSI Oversold", minval=0, maxval=50, group="RSI")
+
+// MACD Settings
+i_macdFast      = input.int(12, "MACD Fast Length", minval=1, group="MACD")
+i_macdSlow      = input.int(26, "MACD Slow Length", minval=1, group="MACD")
+i_macdSignal    = input.int(9, "MACD Signal Length", minval=1, group="MACD")
+
+// Trend Settings
+i_trendFastLen  = input.int(20, "Trend Fast EMA", minval=5, group="Trend")
+i_trendSlowLen  = input.int(50, "Trend Slow EMA", minval=10, group="Trend")
+i_trendLongLen  = input.int(200, "Trend Long EMA", minval=50, group="Trend")
+
+// Risk Management
+i_riskPercent   = input.float(2.0, "Risk Per Trade %", minval=0.5, maxval=10, step=0.5, group="Risk Management")
+i_leverage      = input.float(20.0, "Leverage (EU Max 1:20)", minval=1, maxval=30, step=1, group="Risk Management")
+i_rrRatio       = input.float(1.0, "Risk:Reward Ratio", minval=0.5, maxval=5, step=0.5, group="Risk Management")
+i_useATRSL      = input.bool(true, "Use ATR for Stop Loss", group="Risk Management")
+i_atrMultSL     = input.float(1.5, "ATR Multiplier for SL", minval=0.5, maxval=5, step=0.5, group="Risk Management")
+i_fixedSLPips   = input.float(20, "Fixed SL (pips) if ATR disabled", minval=5, maxval=100, group="Risk Management")
+
+// Visual Settings
+i_showSignals   = input.bool(true, "Show Entry Signals", group="Visuals")
+i_showExits     = input.bool(true, "Show Exit Signals", group="Visuals")
+i_showTrendBG   = input.bool(true, "Show Trend Background", group="Visuals")
+i_showEMAs      = input.bool(true, "Show EMAs", group="Visuals")
+i_showPanel     = input.bool(true, "Show Info Panel", group="Visuals")
+i_showZones     = input.bool(true, "Show Buy/Sell Zones", group="Visuals")
+i_showRSI       = input.bool(true, "Show RSI Levels", group="Visuals")
+
+// Colors
+i_buyColor      = input.color(color.blue, "Buy Signal Color", group="Colors")
+i_sellColor     = input.color(color.red, "Sell Signal Color", group="Colors")
+i_exitColor     = input.color(color.orange, "Exit Signal Color", group="Colors")
+
+//-----------------------------------------------------------------------------
+// CALCULATIONS
+//-----------------------------------------------------------------------------
+
+// RSI Calculation
+rsiValue = ta.rsi(close, i_rsiLength)
+
+// MACD Calculation
+[macdLine, signalLine, histLine] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSignal)
+
+// MACD Crossovers
+// Bullish: Signal line crosses UNDER MACD line (MACD crosses ABOVE signal)
+// Bearish: Signal line crosses OVER MACD line (MACD crosses BELOW signal)
+macdBullishCross = ta.crossover(macdLine, signalLine)
+macdBearishCross = ta.crossunder(macdLine, signalLine)
+
+// Trend Calculation using EMAs
+emaFast = ta.ema(close, i_trendFastLen)
+emaSlow = ta.ema(close, i_trendSlowLen)
+emaLong = ta.ema(close, i_trendLongLen)
+
+// Bullish Trend: Price above all EMAs and EMAs properly stacked
+isBullishTrend = close > emaFast and emaFast > emaSlow and emaSlow > emaLong
+// Alternative less strict: just price above slow EMA
+isBullishTrendSimple = close > emaSlow and emaFast > emaSlow
+
+// Bearish Trend: Price below all EMAs and EMAs properly stacked
+isBearishTrend = close < emaFast and emaFast < emaSlow and emaSlow < emaLong
+// Alternative less strict: just price below slow EMA
+isBearishTrendSimple = close < emaSlow and emaFast < emaSlow
+
+// Use the simple trend for more signals
+bullTrend = isBullishTrendSimple
+bearTrend = isBearishTrendSimple
+
+// ATR for Stop Loss
+atrValue = ta.atr(14)
+
+//-----------------------------------------------------------------------------
+// BUY/SELL ZONE DETECTION
+//-----------------------------------------------------------------------------
+
+// Detect potential buy zones (when conditions are nearly met)
+// Buy Zone: Bullish trend + RSI not overbought + waiting for MACD cross
+inBuyZone = bullTrend and rsiValue < i_rsiOverbought and macdLine < signalLine and macdLine > macdLine[1]
+
+// Sell Zone: Bearish trend + RSI not oversold + waiting for MACD cross
+inSellZone = bearTrend and rsiValue > i_rsiOversold and macdLine > signalLine and macdLine < macdLine[1]
+
+// Track zone changes for box drawing
+var float buyZoneTop = na
+var float buyZoneBot = na
+var int buyZoneStart = na
+var bool inBuyZoneActive = false
+
+var float sellZoneTop = na
+var float sellZoneBot = na
+var int sellZoneStart = na
+var bool inSellZoneActive = false
+
+// Buy Zone Detection
+if inBuyZone and not inBuyZoneActive
+    buyZoneTop := high
+    buyZoneBot := low - (atrValue * 0.5)
+    buyZoneStart := bar_index
+    inBuyZoneActive := true
+else if inBuyZone and inBuyZoneActive
+    buyZoneTop := math.max(buyZoneTop, high)
+    buyZoneBot := math.min(buyZoneBot, low - (atrValue * 0.5))
+else if not inBuyZone
+    inBuyZoneActive := false
+
+// Sell Zone Detection
+if inSellZone and not inSellZoneActive
+    sellZoneTop := high + (atrValue * 0.5)
+    sellZoneBot := low
+    sellZoneStart := bar_index
+    inSellZoneActive := true
+else if inSellZone and inSellZoneActive
+    sellZoneTop := math.max(sellZoneTop, high + (atrValue * 0.5))
+    sellZoneBot := math.min(sellZoneBot, low)
+else if not inSellZone
+    inSellZoneActive := false
+
+// Draw Zone Boxes
+var box buyBox = na
+var box sellBox = na
+
+if i_showZones
+    // Buy Zone Box
+    if inBuyZone
+        if na(buyBox) or not inBuyZoneActive[1]
+            // Create new box
+            if not na(buyBox)
+                box.delete(buyBox)
+            buyBox := box.new(buyZoneStart, buyZoneTop, bar_index + 10, buyZoneBot,
+                             bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50),
+                             border_width=2, text="BUY ZONE", text_color=color.green, 
+                             text_size=size.normal, text_halign=text.align_center)
+        else
+            // Update existing box
+            box.set_top(buyBox, buyZoneTop)
+            box.set_bottom(buyBox, buyZoneBot)
+            box.set_right(buyBox, bar_index + 10)
+    
+    // Sell Zone Box
+    if inSellZone
+        if na(sellBox) or not inSellZoneActive[1]
+            // Create new box
+            if not na(sellBox)
+                box.delete(sellBox)
+            sellBox := box.new(sellZoneStart, sellZoneTop, bar_index + 10, sellZoneBot,
+                              bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50),
+                              border_width=2, text="SELL ZONE", text_color=color.red, 
+                              text_size=size.normal, text_halign=text.align_center)
+        else
+            // Update existing box
+            box.set_top(sellBox, sellZoneTop)
+            box.set_bottom(sellBox, sellZoneBot)
+            box.set_right(sellBox, bar_index + 10)
+
+//-----------------------------------------------------------------------------
+// ENTRY CONDITIONS
+//-----------------------------------------------------------------------------
+
+// RSI Conditions
+rsiAllowsBuy  = rsiValue < i_rsiOverbought  // RSI < 70 to buy
+rsiAllowsSell = rsiValue > i_rsiOversold    // RSI > 30 to sell
+
+// Buy Signal: MACD bullish crossover + Bullish trend + RSI allows
+buyCondition = macdBullishCross and bullTrend and rsiAllowsBuy
+
+// Sell Signal: MACD bearish crossover + Bearish trend + RSI allows
+sellCondition = macdBearishCross and bearTrend and rsiAllowsSell
+
+//-----------------------------------------------------------------------------
+// EXIT CONDITIONS
+//-----------------------------------------------------------------------------
+
+// Exit Long: MACD bearish crossover (signal goes over MACD line)
+exitLongCondition = macdBearishCross
+
+// Exit Short: MACD bullish crossover (signal goes under MACD line)
+exitShortCondition = macdBullishCross
+
+//-----------------------------------------------------------------------------
+// POSITION SIZING & RISK MANAGEMENT
+//-----------------------------------------------------------------------------
+
+// Calculate Stop Loss distance
+slDistance = i_useATRSL ? (atrValue * i_atrMultSL) : (i_fixedSLPips * syminfo.mintick * 10)
+
+// Calculate position size based on risk
+// Risk Amount = Account * Risk%
+// Position Size = Risk Amount / (SL Distance * Point Value)
+accountSize = strategy.equity
+riskAmount = accountSize * (i_riskPercent / 100)
+
+// Calculate SL and TP levels for current bar
+longSL = close - slDistance
+longTP = close + (slDistance * i_rrRatio)
+shortSL = close + slDistance
+shortTP = close - (slDistance * i_rrRatio)
+
+//-----------------------------------------------------------------------------
+// STRATEGY EXECUTION
+//-----------------------------------------------------------------------------
+
+// Track if we're in a position
+var bool inLongPosition = false
+var bool inShortPosition = false
+
+// Entry execution
+if buyCondition and not inLongPosition and not inShortPosition
+    strategy.entry("Long", strategy.long, comment="BUY")
+    inLongPosition := true
+    
+if sellCondition and not inShortPosition and not inLongPosition
+    strategy.entry("Short", strategy.short, comment="SELL")
+    inShortPosition := true
+
+// Exit execution
+if exitLongCondition and inLongPosition
+    strategy.close("Long", comment="EXIT LONG")
+    inLongPosition := false
+
+if exitShortCondition and inShortPosition
+    strategy.close("Short", comment="EXIT SHORT")
+    inShortPosition := false
+
+// Reset position tracking on strategy close
+if strategy.position_size == 0
+    inLongPosition := false
+    inShortPosition := false
+
+//-----------------------------------------------------------------------------
+// VISUAL ELEMENTS
+//-----------------------------------------------------------------------------
+
+// Trend Background
+bullBgColor = i_showTrendBG and bullTrend ? color.new(color.green, 92) : na
+bearBgColor = i_showTrendBG and bearTrend ? color.new(color.red, 92) : na
+bgcolor(bullBgColor, title="Bullish Trend BG")
+bgcolor(bearBgColor, title="Bearish Trend BG")
+
+// Plot EMAs
+plot(i_showEMAs ? emaFast : na, "Fast EMA", color.orange, 2)
+plot(i_showEMAs ? emaSlow : na, "Slow EMA", color.purple, 2)
+plot(i_showEMAs ? emaLong : na, "Long EMA", color.gray, 1)
+
+// Zone Markers
+plotshape(i_showZones and inBuyZone and not inBuyZone[1], "Buy Zone Start", 
+          shape.circle, location.belowbar, color.new(color.green, 30), size=size.tiny, 
+          text="BZ", textcolor=color.green)
+plotshape(i_showZones and inSellZone and not inSellZone[1], "Sell Zone Start", 
+          shape.circle, location.abovebar, color.new(color.red, 30), size=size.tiny, 
+          text="SZ", textcolor=color.red)
+
+// Entry Signals (larger arrows)
+plotshape(i_showSignals and buyCondition and not inLongPosition[1], "Buy Signal", 
+          shape.triangleup, location.belowbar, i_buyColor, size=size.large)
+plotshape(i_showSignals and sellCondition and not inShortPosition[1], "Sell Signal", 
+          shape.triangledown, location.abovebar, i_sellColor, size=size.large)
+
+// Exit Signals
+plotshape(i_showExits and exitLongCondition and inLongPosition[1], "Exit Long", 
+          shape.xcross, location.abovebar, i_exitColor, size=size.small)
+plotshape(i_showExits and exitShortCondition and inShortPosition[1], "Exit Short", 
+          shape.xcross, location.belowbar, i_exitColor, size=size.small)
+
+// Labels for entries
+if buyCondition and not inLongPosition[1] and i_showSignals
+    label.new(bar_index, low, "BUY\nSL: " + str.tostring(longSL, "#.#####") + 
+              "\nTP: " + str.tostring(longTP, "#.#####"),
+              style=label.style_label_up, color=color.new(i_buyColor, 20), 
+              textcolor=color.white, size=size.small)
+
+if sellCondition and not inShortPosition[1] and i_showSignals
+    label.new(bar_index, high, "SELL\nSL: " + str.tostring(shortSL, "#.#####") + 
+              "\nTP: " + str.tostring(shortTP, "#.#####"),
+              style=label.style_label_down, color=color.new(i_sellColor, 20), 
+              textcolor=color.white, size=size.small)
+
+//-----------------------------------------------------------------------------
+// INFO PANEL
+//-----------------------------------------------------------------------------
+
+var table panel = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast and i_showPanel
+    // Title
+    table.cell(panel, 0, 0, "MONEY MACHINE", text_color=color.yellow, text_size=size.normal)
+    table.cell(panel, 1, 0, "v2.0", text_color=color.gray, text_size=size.tiny)
+    
+    // RSI Status
+    string rsiStr = str.tostring(rsiValue, "#.##")
+    color rsiClr = rsiValue > i_rsiOverbought ? color.red : rsiValue < i_rsiOversold ? color.green : color.white
+    table.cell(panel, 0, 1, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 1, rsiStr, text_color=rsiClr, text_size=size.small)
+    
+    // MACD Status
+    string macdStr = macdLine > signalLine ? "BULL ↑" : "BEAR ↓"
+    color macdClr = macdLine > signalLine ? color.green : color.red
+    table.cell(panel, 0, 2, "MACD", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, macdStr, text_color=macdClr, text_size=size.small)
+    
+    // Trend Status
+    string trendStr = bullTrend ? "BULL ↑" : bearTrend ? "BEAR ↓" : "NEUTRAL"
+    color trendClr = bullTrend ? color.green : bearTrend ? color.red : color.gray
+    table.cell(panel, 0, 3, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 3, trendStr, text_color=trendClr, text_size=size.small)
+    
+    // Zone Status
+    string zoneStr = inBuyZone ? "BUY ZONE" : inSellZone ? "SELL ZONE" : "NO ZONE"
+    color zoneClr = inBuyZone ? color.green : inSellZone ? color.red : color.gray
+    table.cell(panel, 0, 4, "Zone", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 4, zoneStr, text_color=zoneClr, text_size=size.small)
+    
+    // Position Status
+    string posStr = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    color posClr = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(panel, 0, 5, "Position", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 5, posStr, text_color=posClr, text_size=size.small)
+    
+    // Risk Info
+    table.cell(panel, 0, 6, "Risk %", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 6, str.tostring(i_riskPercent) + "%", text_color=color.orange, text_size=size.small)
+    
+    // Leverage
+    table.cell(panel, 0, 7, "Leverage", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 7, "1:" + str.tostring(i_leverage, "#"), text_color=color.orange, text_size=size.small)
+    
+    // ATR Value
+    table.cell(panel, 0, 8, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 8, str.tostring(atrValue, "#.#####"), text_color=color.white, text_size=size.small)
+    
+    // Signal Status
+    string sigStr = buyCondition ? "🚀 BUY NOW" : sellCondition ? "🔻 SELL NOW" : inBuyZone ? "⏳ BUY ZONE" : inSellZone ? "⏳ SELL ZONE" : "WAIT"
+    color sigClr = buyCondition ? color.green : sellCondition ? color.red : inBuyZone ? color.new(color.green, 30) : inSellZone ? color.new(color.red, 30) : color.gray
+    table.cell(panel, 0, 9, "Signal", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 9, sigStr, text_color=sigClr, text_size=size.small)
+
+//-----------------------------------------------------------------------------
+// RSI INDICATOR DISPLAY
+//-----------------------------------------------------------------------------
+
+// Plot RSI levels on chart using price offset
+if i_showRSI and barstate.islast
+    // Calculate price range for positioning
+    priceRange = high - low
+    basePrice = low - (priceRange * 0.3)
+    
+    // Create RSI level labels
+    var label rsiLabel = na
+    var label rsiLevelLabel = na
+    var label overboughtLabel = na
+    var label oversoldLabel = na
+    
+    // Delete old labels
+    if not na(rsiLabel)
+        label.delete(rsiLabel)
+    if not na(rsiLevelLabel)
+        label.delete(rsiLevelLabel)
+    if not na(overboughtLabel)
+        label.delete(overboughtLabel)
+    if not na(oversoldLabel)
+        label.delete(oversoldLabel)
+    
+    // RSI Title
+    rsiLabel := label.new(bar_index - 10, basePrice, "RSI", 
+                         style=label.style_label_right, color=color.new(color.blue, 20),
+                         textcolor=color.white, size=size.normal)
+    
+    // RSI Value
+    color rsiColor = rsiValue > i_rsiOverbought ? color.red : rsiValue < i_rsiOversold ? color.green : color.yellow
+    rsiLevelLabel := label.new(bar_index - 3, basePrice, str.tostring(rsiValue, "#.#"), 
+                               style=label.style_label_right, color=color.new(rsiColor, 20),
+                               textcolor=color.white, size=size.large)
+    
+    // Overbought Line
+    overboughtLabel := label.new(bar_index + 2, basePrice + (priceRange * 0.05), "OB:70", 
+                                 style=label.style_label_left, color=color.new(color.red, 50),
+                                 textcolor=color.white, size=size.tiny)
+    
+    // Oversold Line
+    oversoldLabel := label.new(bar_index + 2, basePrice - (priceRange * 0.05), "OS:30", 
+                               style=label.style_label_left, color=color.new(color.green, 50),
+                               textcolor=color.white, size=size.tiny)
+
+// Plot RSI reference lines (horizontal)
+var line rsiMidLine = na
+if i_showRSI and barstate.islast
+    // Draw reference line at current price level showing RSI zone
+    if rsiValue > i_rsiOverbought
+        if not na(rsiMidLine)
+            line.delete(rsiMidLine)
+        rsiMidLine := line.new(bar_index - 20, high, bar_index, high, 
+                               color=color.new(color.red, 60), width=2, style=line.style_dashed)
+    else if rsiValue < i_rsiOversold
+        if not na(rsiMidLine)
+            line.delete(rsiMidLine)
+        rsiMidLine := line.new(bar_index - 20, low, bar_index, low, 
+                               color=color.new(color.green, 60), width=2, style=line.style_dashed)
+
+//-----------------------------------------------------------------------------
+// ALERTS
+//-----------------------------------------------------------------------------
+
+alertcondition(buyCondition, "Buy Signal", "Money Machine: BUY signal - MACD bullish crossover in uptrend")
+alertcondition(sellCondition, "Sell Signal", "Money Machine: SELL signal - MACD bearish crossover in downtrend")
+alertcondition(exitLongCondition, "Exit Long", "Money Machine: Exit LONG - MACD bearish crossover")
+alertcondition(exitShortCondition, "Exit Short", "Money Machine: Exit SHORT - MACD bullish crossover")
+alertcondition(inBuyZone, "Buy Zone Active", "Money Machine: Entered BUY ZONE - prepare for long entry")
+alertcondition(inSellZone, "Sell Zone Active", "Money Machine: Entered SELL ZONE - prepare for short entry")
+
+View in Pine Editor・434 lines
+Use on chart
+5
+6
+3
+4
+8 461
+💰 Money Machine Trading Strategy
+
+An advanced TradingView Pine Script strategy that combines RSI, MACD, and trend analysis with visual buy/sell zones for optimal trade entries and exits.
+
+🎯 Strategy Overview
+
+The Money Machine follows a strict set of rules to ensure high-probability trades:
+
+Entry Rules
+
+✅ BUY (Long) Conditions:
+
+1. MACD line crosses ABOVE signal line (bullish crossover)
+2. Overall trend is bullish (price above EMAs)
+3. RSI is below 70 (not overbought)
+
+✅ SELL (Short) Conditions:
+
+1. MACD line crosses BELOW signal line (bearish crossover)
+2. Overall trend is bearish (price below EMAs)
+3. RSI is above 30 (not oversold)
+Exit Rules
+
+🚪 Exit Long:MACD line crosses below signal line
+🚪 Exit Short:MACD line crosses above signal line

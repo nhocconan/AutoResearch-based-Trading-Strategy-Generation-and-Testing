@@ -1,0 +1,157 @@
+//@version=6
+strategy("DCA — Daily / Weekly / Monthly (with amount per buy)", overlay=true,
+     initial_capital=1000000, commission_type=strategy.commission.percent, commission_value=0.0,
+     pyramiding=100000, calc_on_every_tick=false, calc_on_order_fills=true, process_orders_on_close=true,
+     default_qty_type=strategy.cash, default_qty_value=250)
+
+// ===== Inputs (your defaults) =====
+freqOpt      = input.string("Weekly", "Buy Frequency", options=["Daily","Weekly","Monthly"])
+fiatPerBuy   = input.float(250.0, "Amount to Buy (in account currency)", step=1.0, minval=0.0)
+startDate    = input.time(timestamp("2019-09-08T00:00:00"), "Start Date (exchange time)")
+endDate      = input.time(timestamp("2099-12-31T23:59:59"), "End Date (exchange time)")
+
+// Flatten options (defaults ON)
+flattenAtLastBar = input.bool(true,  "Close All at Last Bar (today)")
+flattenAtEndDate = input.bool(true,  "Close All when End Date reached")
+
+// Weekly / Monthly defaults
+wDayOpt      = input.string("Monday", "Weekly: Day of Week",
+                 options=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])
+mDay         = input.int(1, "Monthly: Day of Month (1–28)", minval=1, maxval=28)
+
+// Safety
+skipIfZeroAmt = input.bool(true, "Skip if Amount is 0")
+
+// ===== Helpers =====
+dayOfWToEnum(s) =>
+    if s == "Monday"
+        dayofweek.monday
+    else if s == "Tuesday"
+        dayofweek.tuesday
+    else if s == "Wednesday"
+        dayofweek.wednesday
+    else if s == "Thursday"
+        dayofweek.thursday
+    else if s == "Friday"
+        dayofweek.friday
+    else if s == "Saturday"
+        dayofweek.saturday
+    else
+        dayofweek.sunday
+
+// Period-change detectors (BOOLs)
+newDay   = ta.change(time("D")) != 0
+newWeek  = ta.change(time("W")) != 0
+newMonth = ta.change(time("M")) != 0
+
+// Clock & date filters
+inDateRange = (time >= startDate) and (time <= endDate)
+
+// Triggers
+isWeeklyBuy  = newDay and dayofweek(time) == dayOfWToEnum(wDayOpt)
+isMonthlyBuy = newDay and dayofmonth(time) == mDay
+isDailyBuy   = newDay
+
+// Frequency gate (BOOL)
+doBuy =
+     (freqOpt == "Daily"   and isDailyBuy) or
+     (freqOpt == "Weekly"  and isWeeklyBuy) or
+     (freqOpt == "Monthly" and isMonthlyBuy)
+
+// ===== Order sizing =====
+qty = fiatPerBuy > 0 ? (fiatPerBuy / close) : 0.0
+
+// ===== Cumulative bookkeeping =====
+var float invested = 0.0
+willBuy = doBuy and inDateRange and (skipIfZeroAmt ? (fiatPerBuy > 0) : true)
+
+if willBuy
+    strategy.entry("DCA Long", strategy.long, qty=qty)
+    invested += fiatPerBuy
+
+// Current position value & ROI
+posValue = strategy.position_size * close
+roiPct   = invested > 0 ? (posValue - invested) / invested * 100.0 : na
+
+// Average Buy Price (cost basis)
+avgPrice = strategy.position_size != 0 ? strategy.position_avg_price : na
+plot(avgPrice, title="Average Buy Price", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
+
+// Keep last known values for post-flatten display
+var float lastPosValue = na
+var float lastAvgPrice = na
+lastPosValue := posValue
+lastAvgPrice := na(avgPrice) ? lastAvgPrice : avgPrice
+
+// ===== Flatten once at the end =====
+var bool flattened = false
+justCrossedEndDate = flattenAtEndDate and (time[1] < endDate) and (time >= endDate)
+isFinalBar = flattenAtLastBar and (barstate.islastconfirmedhistory or barstate.islast)
+
+if not flattened and (justCrossedEndDate or isFinalBar)
+    strategy.close_all(comment="Final Close")
+    flattened := true
+
+// Effective values for display after flatten
+effPosValue = strategy.position_size != 0 ? posValue : lastPosValue
+effAvgPrice = strategy.position_size != 0 ? avgPrice  : lastAvgPrice
+
+// ===== Plots =====
+plot(invested, title="Cumulative Invested (Account CCY)", color=color.new(color.blue, 0), linewidth=2)
+plot(effPosValue, title="Position Market Value", color=color.new(color.green, 0), linewidth=2)
+
+// ===== Summary Table =====
+var table t = table.new(position.top_right, 1, 5)
+if barstate.islast
+    table.cell(t, 0, 0, "DCA Summary", text_size=size.large, text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(t, 0, 1, "Invested: " + (invested > 0 ? str.tostring(invested, "#.00") : "—"), bgcolor=color.new(color.black, 20))
+    table.cell(t, 0, 2, "Position Value: " + (na(effPosValue) ? "—" : str.tostring(effPosValue, "#.00")), bgcolor=color.new(color.black, 20))
+    table.cell(t, 0, 3, "Avg Buy: " + (na(effAvgPrice) ? "—" : str.tostring(effAvgPrice, "#.00")), bgcolor=color.new(color.black, 20))
+    table.cell(t, 0, 4, "ROI: " + (na(roiPct) ? "—" : str.tostring(roiPct, "#.00") + "%"), bgcolor=color.new(color.black, 20))
+
+// ===== End-of-chart labels =====
+var label lEquity = na
+var label lAvg    = na
+var label lInv    = na
+
+if barstate.islast
+    if not na(lEquity)
+        label.delete(lEquity)
+    if not na(lAvg)
+        label.delete(lAvg)
+    if not na(lInv)
+        label.delete(lInv)
+
+    // Labels at last bar (offset a bit to avoid overlap)
+    if not na(effPosValue)
+        lEquity := label.new(bar_index + 2, effPosValue, "💰 Equity: " + str.tostring(effPosValue, "#.00"),
+             style=label.style_label_left, textcolor=color.white, color=color.new(color.green, 70), yloc=yloc.price)
+    if not na(effAvgPrice)
+        lAvg := label.new(bar_index + 2, effAvgPrice, "🧮 Avg Buy: " + str.tostring(effAvgPrice, "#.00"),
+             style=label.style_label_left, textcolor=color.white, color=color.new(color.orange, 70), yloc=yloc.price)
+    lInv := label.new(bar_index + 2, invested, "🏦 Invested: " + str.tostring(invested, "#.00"),
+         style=label.style_label_left, textcolor=color.white, color=color.new(color.blue, 70), yloc=yloc.price)
+
+// ===== Notes =====
+// • Defaults: Weekly, $250 buys, start 2019-09-08, end 2099-12-31, auto-flatten at last bar & end date ON.
+// • Initial Capital: 1,000,000; Order Size: 250 USDT (set via strategy() properties).
+// • Modify only if publishing a customizable version.
+
+View in Pine Editor・138 lines
+Use on chart
+4
+2
+941
+Oct 12, 2025
+1.Input daily, weekly or monthly preferance of DCA
+2.Select how much to DCA
+3.Use the slider on the indicator down to select from where to DCA
+
+Important: Don't use a higher timeframe chart than the desired DCA frequency, or all the DCA buys won't get executed.
+Oct 12, 2025
+Release Notes
+1.Input daily, weekly or monthly preferance of DCA
+2.Select how much to DCA
+3.Use the slider on the indicator down to select from where to DCA
+
+Important: Don't use a higher timeframe chart than the desired DCA frequency, or all the DCA buys won't get executed.

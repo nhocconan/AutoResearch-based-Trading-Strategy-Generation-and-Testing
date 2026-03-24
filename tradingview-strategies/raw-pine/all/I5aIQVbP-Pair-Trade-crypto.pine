@@ -1,0 +1,41 @@
+//@version=4
+strategy("Pair Trade", default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+length = input(42, "SMA length", input.integer)
+//
+x = log(security((input("100*ltcusd")), timeframe.period, close))
+y = log(security((input("xbtusd")), timeframe.period, close))
+x_ = sma(x, length)
+y_ = sma(y, length)
+mx = stdev(x, length)
+my = stdev(y, length)
+c = correlation(x, y, length)
+
+spread_entry = input(0.060, "Entry spread", input.float, step=0.005)
+spread_exit = input(0.055, "Exit spread", input.float, step=0.005)
+
+beta = c * (my / mx)
+alpha = y_ - beta * x_
+spread = y - (alpha + x * beta)
+
+//plot(alpha, color=color.white, transp=0)
+//plot(beta, color=color.blue, transp=0)
+//plot(c, color=color.blue, transp=0)
+plot(spread, color=color.red, transp=0)
+
+strategy.entry("SE", strategy.short, when=spread>spread_entry)
+strategy.close("SE", when=spread<spread_exit)
+strategy.entry("LE", strategy.long, when=spread<-spread_entry)
+strategy.close("LE", when=spread>-spread_exit)
+View in Pine Editor・32 lines
+Use on chart
+1
+1
+8
+7
+4 364
+Pair trade for crypto with inputs:
+* length of correlation and moving average
+* trade pair
+* spread threshold to enter long / short
+* spread threshold to exit long / short

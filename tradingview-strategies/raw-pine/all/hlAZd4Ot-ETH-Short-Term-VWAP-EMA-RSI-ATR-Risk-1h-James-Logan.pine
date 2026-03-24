@@ -1,0 +1,154 @@
+//@version=6
+strategy("ETH Short-Term VWAP+EMA/RSI (ATR Risk, <1h)",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true)
+
+//––––– Inputs
+tfInfo           = input.string("15m", "Chart Timeframe (info)", inline="tf")
+sessionFilterOn  = input.bool(false, "Use Trading Session Filter?", inline="sess")
+tradeSession     = input.session("0000-2359", "", inline="sess")
+
+useFixedUSD      = input.bool(true, "Size Using Fixed USD per Trade?")
+usdPerTrade      = input.float(1000, "USD per Trade", step=50.0)
+contractsFixed   = input.float(0.1, "Fixed Contracts (if not using USD)", step=0.01)
+maxOpenBars      = input.int(36, "Max Bars in Trade (time exit)", minval=1)
+
+atrLen           = input.int(14, "ATR Length")
+atrSLmult        = input.float(1.6, "Stop ATR Multiplier", step=0.1)
+atrTPmult        = input.float(2.2, "Take-Profit ATR Multiplier", step=0.1)
+trailOn          = input.bool(true, "Use ATR Trailing Stop?")
+trailMult        = input.float(2.0, "ATR Trail Multiplier", step=0.1)
+
+emaFastLen       = input.int(50, "Trend EMA Fast")
+emaSlowLen       = input.int(200, "Trend EMA Slow")
+emaPullLen       = input.int(21, "Pullback EMA")
+rsiLen           = input.int(14, "RSI Length")
+rsiLongThresh    = input.int(50, "RSI Long Cross Above")
+rsiShortThresh   = input.int(50, "RSI Short Cross Below")
+
+useVwap          = input.bool(true, "Require Price on Correct Side of VWAP?")
+usePullback      = input.bool(true, "Require Pullback to EMA21?")
+
+//––––– Calculations
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaPull = ta.ema(close, emaPullLen)
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+vwap    = ta.vwap(hlc3)
+
+trendUp   = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+onSession = not sessionFilterOn or not na(time(timeframe.period, tradeSession))
+
+vwapOKLong  = not useVwap or close > vwap
+vwapOKShort = not useVwap or close < vwap
+pullOKLong  = not usePullback or (close >= emaPull and low <= emaPull)
+pullOKShort = not usePullback or (close <= emaPull and high >= emaPull)
+
+longSignal  = onSession and trendUp   and vwapOKLong  and pullOKLong  and ta.crossover(rsi, rsiLongThresh)
+shortSignal = onSession and trendDown and vwapOKShort and pullOKShort and ta.crossunder(rsi, rsiShortThresh)
+
+qtyUSD  = math.max(usdPerTrade, 10)
+qty     = useFixedUSD ? qtyUSD / close : contractsFixed
+
+longStop  = close - atrSLmult * atr
+longTP    = close + atrTPmult * atr
+shortStop = close + atrSLmult * atr
+shortTP   = close - atrTPmult * atr
+
+//––––– Time-in-trade tracking
+var int entryBarIndex = na
+
+if strategy.position_size == 0 and (longSignal or shortSignal)
+    entryBarIndex := na
+
+if (longSignal and strategy.position_size <= 0)
+    if strategy.position_size < 0
+        strategy.close("Short")
+    strategy.entry("Long", strategy.long, qty=qty)
+    entryBarIndex := bar_index
+
+if (shortSignal and strategy.position_size >= 0)
+    if strategy.position_size > 0
+        strategy.close("Long")
+    strategy.entry("Short", strategy.short, qty=qty)
+    entryBarIndex := bar_index
+
+//––––– Stop & TP exits
+strategy.exit("L-Exit", "Long",  stop=longStop,  limit=longTP)
+strategy.exit("S-Exit", "Short", stop=shortStop, limit=shortTP)
+
+//––––– ATR Trailing Stop (working version)
+if trailOn
+    if strategy.position_size > 0
+        newTrailStop = close - trailMult * atr
+        if not na(strategy.position_avg_price)
+            newTrailStop := math.max(newTrailStop, longStop)  // don’t trail below base stop
+        strategy.exit("L-Trail", "Long", stop=newTrailStop)
+    if strategy.position_size < 0
+        newTrailStop = close + trailMult * atr
+        if not na(strategy.position_avg_price)
+            newTrailStop := math.min(newTrailStop, shortStop)
+        strategy.exit("S-Trail", "Short", stop=newTrailStop)
+
+//––––– Time-based exit
+barsInTrade = na(entryBarIndex) ? 0 : (bar_index - entryBarIndex)
+if strategy.position_size != 0 and barsInTrade >= maxOpenBars
+    if strategy.position_size > 0
+        strategy.close("Long",  comment="Time Exit")
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Time Exit")
+
+//––––– Visuals
+plot(emaFast, "EMA Fast", color=color.new(color.teal, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.purple, 0))
+plot(emaPull, "EMA Pullback", color=color.new(color.orange, 0))
+plot(vwap,    "VWAP", color=color.new(color.blue, 0), linewidth=2)
+
+bgcolor(trendUp ? color.new(color.green, 90) : trendDown ? color.new(color.red, 90) : na)
+
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   color=color.new(color.green, 0), location=location.belowbar, size=size.tiny, text="▲L")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, color=color.new(color.red, 0),   location=location.abovebar, size=size.tiny, text="▼S")
+
+//––––– Alerts
+alertcondition(longSignal,  "ETH Long Signal",  "ETH LONG: TrendUp+VWAP+RSI cross @ {{close}}")
+alertcondition(shortSignal, "ETH Short Signal", "ETH SHORT: TrendDown+VWAP+RSI cross @ {{close}}")
+
+View in Pine Editor・123 lines
+Use on chart
+8
+754
+ETH Short-Term VWAP + EMA / RSI Strategy (ATR-based Risk Control)
+
+A short-term (< 1 hour) ETH trading system designed for intraday scalps and momentum swings on 5- to 15-minute charts.
+It blends trend confirmation (EMA 50 / 200) with intrabar structure (EMA 21 pullback & VWAP filter) and RSI momentum triggers, managing exits dynamically through ATR-based stop, take-profit, and trailing stop targets.
+
+Core logic
+• Long when RSI crosses above the threshold within an up-trend (EMA 50 > EMA 200) and price is above VWAP.
+• Short when RSI crosses below threshold within a down-trend (EMA 50 < EMA 200) and price is below VWAP.
+• Optional pullback confirmation to the 21-EMA for cleaner entries.
+• Risk defined by ATR-multiples for stop-loss, take-profit, and an adaptive trailing stop.
+• Automatic flat-out exit after a set number of bars (time-based close).
+
+Best use
+• 5 min – 15 min ETH/USDT charts (Binance, Bybit, Coinbase, etc.)
+• Works with both spot and perpetual data.
+• Tune ATR and RSI thresholds per venue; defaults are balanced for 0.05 % per-side fees.
+
+Key parameters
+• ATR SL × 1.6 ATR TP × 2.2 ATR Trail × 2.0
+• RSI 50 cross | EMA 50/200 trend filter | VWAP confirmation
+• Default position sizing = USD-based (e.g. $1 000 per trade).
+
+Notes
+• All orders and exits are simulated at bar close; use 1-minute bar magnifier for finer fill modeling.
+• No repainting—uses only confirmed bar data.
+• Best validated with ≥ 200 trades and profit factor > 1.25 over multi-month backtests.

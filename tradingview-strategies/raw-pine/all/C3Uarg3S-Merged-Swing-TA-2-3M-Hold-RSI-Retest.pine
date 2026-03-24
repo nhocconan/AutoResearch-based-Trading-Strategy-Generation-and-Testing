@@ -1,0 +1,144 @@
+//@version=5
+strategy("Merged Swing TA - Ultra + High Conviction (2-3M Hold) + RSI Retest", 
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10)
+
+// === Inputs ===
+lookback   = input.int(7, "Lookback window (bars for signal sync)", minval=1)
+rsiRetestWindow = input.int(30, "Max bars to wait for RSI retest", minval=5)
+
+// --- Strategy A Params ---
+rsiLen_A     = input.int(14, "A: RSI Length")
+trailMult_A  = input.float(3.0, "A: ATR Trail Multiplier")
+maxBars_A    = input.int(90, "A: Max Holding Bars (~3m)")
+adxLen_A     = input.int(14, "A: ADX Length")
+adxThresh_A  = input.int(22, "A: ADX Threshold")
+rsiThresh_A  = input.int(62, "A: RSI Threshold")
+volFilter_A  = input.bool(true, "A: Enable Volume Filter")
+volMult_A    = input.float(1.2, "A: Volume Multiplier")
+
+// --- Strategy B Params ---
+trailMult_B  = input.float(3.2, "B: ATR Trail Multiplier")
+maxBars_B    = input.int(90, "B: Max Holding Bars (~3m)")
+breakLen_B   = input.int(20, "B: Breakout Lookback")
+rsiThresh_B  = input.int(62, "B: RSI Threshold")
+volFilter_B  = input.bool(true, "B: Enable Volume Filter")
+volMult_B    = input.float(1.5, "B: Volume Multiplier")
+
+// === Shared Indicators ===
+sma200   = ta.sma(close, 200)
+ema50    = ta.ema(close, 50)
+rsi_A    = ta.rsi(close, rsiLen_A)
+rsi_B    = ta.rsi(close, 14)
+atr      = ta.atr(14)
+avgVol   = ta.sma(volume, 20)
+[diPlus, diMinus, adx] = ta.dmi(adxLen_A, 14)
+
+// === Helper ===
+barsSinceSafe(cond) => cond ? 0 : nz(ta.barssince(cond), 999999)
+
+// === Strategy A Logic ===
+trendOk_A    = close > sma200
+momentumOk_A = close > ema50 and rsi_A > rsiThresh_A
+adxOk_A      = adx > adxThresh_A
+volOk_A      = not volFilter_A or volume > volMult_A * avgVol
+
+buyA = trendOk_A and momentumOk_A and adxOk_A and volOk_A
+trailingStop_A = strategy.position_size > 0 ? strategy.position_avg_price - trailMult_A * atr : na
+timeExit_A     = strategy.position_size > 0 and ta.barssince(strategy.position_size == 0) >= maxBars_A
+sellA = timeExit_A or (strategy.position_size > 0 and close < trailingStop_A)
+
+// === Strategy B Logic ===
+highestHigh_B = ta.highest(high, breakLen_B)
+barRange_B    = high - low
+
+macdLine_B   = ta.ema(close, 12) - ta.ema(close, 26)
+signalLine_B = ta.ema(macdLine_B, 9)
+macdHist_B   = macdLine_B - signalLine_B
+
+trendOk_B    = close > sma200
+momentumOk_B = rsi_B > rsiThresh_B and macdHist_B > 0 and close > ema50
+breakoutOk_B = close > highestHigh_B[1] * 1.02
+rangeOk_B    = barRange_B > atr
+volOk_B      = not volFilter_B or volume > volMult_B * avgVol
+
+buyB = (trendOk_B and momentumOk_B and rangeOk_B) or (breakoutOk_B and volOk_B)
+trailingStop_B = strategy.position_size > 0 ? strategy.position_avg_price - trailMult_B * atr : na
+timeExit_B     = strategy.position_size > 0 and ta.barssince(strategy.position_size == 0) >= maxBars_B
+sellB = timeExit_B or (strategy.position_size > 0 and close < trailingStop_B)
+
+// === Combined Buy Logic ===
+condA_recent = barsSinceSafe(buyA) <= (lookback - 1)
+condB_recent = barsSinceSafe(buyB) <= (lookback - 1)
+combinedBuyNow = condA_recent and condB_recent
+
+// === RSI Retest Logic ===
+var bool waitForRSILow = false
+var bool waitForRSIHigh = false
+var int  barsSinceSetup = na
+
+if combinedBuyNow and strategy.position_size == 0
+    waitForRSILow := true
+    waitForRSIHigh := false
+    barsSinceSetup := 0
+
+if not na(barsSinceSetup)
+    barsSinceSetup += 1
+
+// Step 1: RSI must fall below 50
+if waitForRSILow and rsi_B < 50
+    waitForRSILow := false
+    waitForRSIHigh := true
+    barsSinceSetup := 0  // reset counter for high phase
+
+// Step 2: RSI must cross back above 55 to confirm entry
+rsiCrossAbove55 = ta.crossover(rsi_B, 55)
+if waitForRSIHigh and rsiCrossAbove55
+    strategy.entry("COMBINED_LONG", strategy.long)
+    waitForRSIHigh := false
+    barsSinceSetup := na
+
+// Step 3: Reset if exit or timeout
+if (sellA or sellB or barsSinceSetup > rsiRetestWindow)
+    waitForRSILow := false
+    waitForRSIHigh := false
+    barsSinceSetup := na
+
+// === Exit Logic ===
+var bool warned = false
+warnSignal = false
+exitSignal = false
+
+if strategy.position_size > 0
+    if not warned and (sellA or sellB)
+        alert("Warning: First exit signal detected", alert.freq_once_per_bar_close)
+        warnSignal := true
+        warned := true
+    else if warned and (sellA or sellB)
+        strategy.close("COMBINED_LONG")
+        exitSignal := true
+        warned := false  
+
+if strategy.position_size == 0
+    warned := false
+
+// === Plot Markers ===
+plotshape(warnSignal, title="Warning Exit", style=shape.triangleup,
+          location=location.abovebar, color=color.orange, size=size.tiny, text="Warn")
+plotshape(exitSignal, title="Confirmed Exit", style=shape.triangledown,
+          location=location.abovebar, color=color.red, size=size.small, text="Exit")
+plotshape(waitForRSILow, title="Waiting RSI < 50", style=shape.circle,
+          location=location.belowbar, color=color.new(color.red, 60), size=size.tiny)
+plotshape(waitForRSIHigh, title="Waiting RSI > 55", style=shape.circle,
+          location=location.belowbar, color=color.new(color.green, 60), size=size.tiny)
+
+View in Pine Editor・135 lines
+Use on chart
+8
+370
+swing trading strategy
+accumulate in RSI retest phase, 100% entry at buy signal
+Holding period : 2 - 3 months
+works on mid cap and large cap and good volume small cap.
+1D candle chart.

@@ -1,0 +1,369 @@
+//@version=6
+strategy("Stark Midnight Reversion (NY Midnight Anchor) v2 — HIST + Center Labels",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true,
+     max_lines_count=500,
+     max_labels_count=500)
+
+//
+// USER INPUTS
+//
+stopPts      = input.float(20, "Stop Loss (points)", minval=1)
+contracts    = input.int(1, "Contracts", minval=1)
+maxTradesDay = input.int(1, "Max Trades Per Day", minval=1)
+
+// Keep history
+keepDays = input.int(12, "Keep last N days of session lines", minval=1, maxval=80)
+
+//
+// TIMEZONE (your time)
+//
+tz = "America/Los_Angeles"
+
+//
+// SESSIONS (PST)
+// Asia:   15:00 -> 00:00
+// Anchor: 21:00          (NY Midnight Open)
+// London: 00:00 -> 06:30
+// NY open: 06:30
+//
+asiaSess      = "1500-2359"
+anchorWindow  = "2100-2105"
+londonBuild   = "0000-0630"
+nyOpenWindow  = "0630-0635"
+londonOpenWin = "0000-0005"   // for freezing Asia at London open
+
+inAsia      = not na(time(timeframe.period, asiaSess, tz))
+inAnchor    = not na(time(timeframe.period, anchorWindow, tz))
+inLondon    = not na(time(timeframe.period, londonBuild, tz))
+isNYOpen    = not na(time(timeframe.period, nyOpenWindow, tz))
+isLondonOp  = not na(time(timeframe.period, londonOpenWin, tz))
+
+// New trading day = Asia opens (3:00pm PST)
+newTDay = inAsia and not inAsia[1]
+
+//
+// HISTORY STORAGE (so we can trim old objects)
+//
+var line[]  histLines  = array.new_line()
+var label[] histLabels = array.new_label()
+
+f_histPushLine(line l) =>
+    if not na(l)
+        array.push(histLines, l)
+
+f_histPushLabel(label lb) =>
+    if not na(lb)
+        array.push(histLabels, lb)
+
+f_trimHistory() =>
+    // Each day creates up to 5 lines + 5 labels.
+    maxLines  = keepDays * 5
+    maxLabels = keepDays * 5
+
+    while array.size(histLines) > maxLines
+        oldL = array.shift(histLines)
+        if not na(oldL)
+            line.delete(oldL)
+
+    while array.size(histLabels) > maxLabels
+        oldLb = array.shift(histLabels)
+        if not na(oldLb)
+            label.delete(oldLb)
+
+//
+// HELPERS
+//
+f_freezeLine(line l, int xEnd) =>
+    if not na(l)
+        line.set_extend(l, extend.none)
+        line.set_x2(l, xEnd)
+
+f_centerLabelOnLine(line l, label lb, string txt) =>
+    if not na(l) and not na(lb)
+        x1 = line.get_x1(l)
+        x2 = line.get_x2(l)
+        xm = int(math.round((x1 + x2) / 2.0))
+        y  = line.get_y1(l)
+        label.set_x(lb, xm)
+        label.set_y(lb, y)
+        label.set_text(lb, txt)
+
+//
+// LINE / LABEL HANDLES (CURRENT DAY ONLY)
+//
+var line  midnightLine   = na
+var line  asiaHighLine   = na
+var line  asiaLowLine    = na
+var line  londonHighLine = na
+var line  londonLowLine  = na
+
+var label labMidnight = na
+var label labAsiaH    = na
+var label labAsiaL    = na
+var label labLonH     = na
+var label labLonL     = na
+
+// Track each line’s start index so we can set nice x2 when updating
+var int midnightX1 = na
+var int asiaX1     = na
+var int londonX1   = na
+
+//
+// LEVEL STORAGE
+//
+var float midnightOpen = na
+
+var float asiaHigh = na
+var float asiaLow  = na
+var float asiaHighLvl = na
+var float asiaLowLvl  = na
+
+var float londonHigh = na
+var float londonLow  = na
+var float londonHighLvl = na
+var float londonLowLvl  = na
+
+//
+// TRADE STATE
+//
+var int  tradesToday   = 0
+var bool biasSet       = false
+var bool wantLong      = false
+var bool wantShort     = false
+var bool asiaFrozen    = false
+var bool londonFrozen  = false
+
+//
+// ✅ FINALIZE YESTERDAY WHEN NEW ASIA DAY STARTS
+// Instead of deleting, we freeze the prior day lines at the last bar before 15:00.
+// That’s typically your “1:59pm-ish” last print on CME instruments.
+//
+if newTDay
+    // Freeze at the last bar of the previous day
+    xEnd = bar_index - 1
+
+    // Freeze lines
+    f_freezeLine(midnightLine,   xEnd)
+    f_freezeLine(asiaHighLine,   xEnd)
+    f_freezeLine(asiaLowLine,    xEnd)
+    f_freezeLine(londonHighLine, xEnd)
+    f_freezeLine(londonLowLine,  xEnd)
+
+    // Center labels on the now-frozen lines
+    f_centerLabelOnLine(midnightLine,   labMidnight, "Midnight Open")
+    f_centerLabelOnLine(asiaHighLine,   labAsiaH,    "Asia High")
+    f_centerLabelOnLine(asiaLowLine,    labAsiaL,    "Asia Low")
+    f_centerLabelOnLine(londonHighLine, labLonH,     "London High")
+    f_centerLabelOnLine(londonLowLine,  labLonL,     "London Low")
+
+    // Move finished objects into history arrays so we can trim later
+    f_histPushLine(midnightLine)
+    f_histPushLine(asiaHighLine)
+    f_histPushLine(asiaLowLine)
+    f_histPushLine(londonHighLine)
+    f_histPushLine(londonLowLine)
+
+    f_histPushLabel(labMidnight)
+    f_histPushLabel(labAsiaH)
+    f_histPushLabel(labAsiaL)
+    f_histPushLabel(labLonH)
+    f_histPushLabel(labLonL)
+
+    f_trimHistory()
+
+    // Now reset only the “current day handles” (don’t delete)
+    midnightLine := na
+    asiaHighLine := na
+    asiaLowLine  := na
+    londonHighLine := na
+    londonLowLine  := na
+
+    labMidnight := na
+    labAsiaH := na
+    labAsiaL := na
+    labLonH := na
+    labLonL := na
+
+    midnightX1 := na
+    asiaX1 := na
+    londonX1 := na
+
+    // Reset trade/day state + ranges
+    tradesToday  := 0
+    biasSet      := false
+    wantLong     := false
+    wantShort    := false
+    asiaFrozen   := false
+    londonFrozen := false
+
+    midnightOpen := na
+    asiaHigh := na
+    asiaLow  := na
+    asiaHighLvl := na
+    asiaLowLvl  := na
+    londonHigh := na
+    londonLow  := na
+    londonHighLvl := na
+    londonLowLvl  := na
+
+canTrade = tradesToday < maxTradesDay
+
+//
+// 1) BUILD ASIA RANGE (15:00-23:59 PST)
+//
+if inAsia
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow  := na(asiaLow)  ? low  : math.min(asiaLow,  low)
+
+//
+// 2) SET “MIDNIGHT OPEN” ANCHOR AT 21:00 PST (NY Midnight)
+//
+anchorJustHit = inAnchor and not inAnchor[1]
+if anchorJustHit
+    midnightOpen := open
+    midnightX1 := bar_index
+
+    midnightLine := line.new(bar_index, midnightOpen, bar_index + 1, midnightOpen,
+        xloc=xloc.bar_index, extend=extend.right,
+        color=color.new(color.orange, 0), style=line.style_solid, width=2)
+
+    labMidnight := label.new(bar_index, midnightOpen, "Midnight Open",
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_center, textcolor=color.white,
+        color=color.new(color.black, 80), size=size.small)
+
+//
+// 3) FREEZE + DRAW ASIA AT LONDON OPEN (00:00 PST)
+//
+londonJustHit = isLondonOp and not isLondonOp[1]
+
+if londonJustHit and not asiaFrozen and not na(asiaHigh) and not na(asiaLow)
+    asiaFrozen := true
+    asiaHighLvl := asiaHigh
+    asiaLowLvl  := asiaLow
+    asiaX1 := bar_index
+
+    asiaHighLine := line.new(bar_index, asiaHighLvl, bar_index + 1, asiaHighLvl,
+        xloc=xloc.bar_index, extend=extend.right,
+        color=color.new(color.yellow, 0), style=line.style_dotted, width=2)
+
+    asiaLowLine := line.new(bar_index, asiaLowLvl, bar_index + 1, asiaLowLvl,
+        xloc=xloc.bar_index, extend=extend.right,
+        color=color.new(color.yellow, 0), style=line.style_dotted, width=2)
+
+    labAsiaH := label.new(bar_index, asiaHighLvl, "Asia High",
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_center, textcolor=color.white,
+        color=color.new(color.black, 80), size=size.small)
+
+    labAsiaL := label.new(bar_index, asiaLowLvl, "Asia Low",
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_center, textcolor=color.white,
+        color=color.new(color.black, 80), size=size.small)
+
+//
+// 4) BUILD LONDON RANGE (00:00-06:30 PST)
+//
+if inLondon
+    londonHigh := na(londonHigh) ? high : math.max(londonHigh, high)
+    londonLow  := na(londonLow)  ? low  : math.min(londonLow,  low)
+
+//
+// 5) FREEZE + DRAW LONDON AT NY OPEN (06:30 PST)
+//
+nyJustHit = isNYOpen and not isNYOpen[1]
+
+if nyJustHit and not londonFrozen and not na(londonHigh) and not na(londonLow)
+    londonFrozen := true
+    londonHighLvl := londonHigh
+    londonLowLvl  := londonLow
+    londonX1 := bar_index
+
+    londonHighLine := line.new(bar_index, londonHighLvl, bar_index + 1, londonHighLvl,
+        xloc=xloc.bar_index, extend=extend.right,
+        color=color.new(color.orange, 0), style=line.style_dotted, width=2)
+
+    londonLowLine := line.new(bar_index, londonLowLvl, bar_index + 1, londonLowLvl,
+        xloc=xloc.bar_index, extend=extend.right,
+        color=color.new(color.orange, 0), style=line.style_dotted, width=2)
+
+    labLonH := label.new(bar_index, londonHighLvl, "London High",
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_center, textcolor=color.white,
+        color=color.new(color.black, 80), size=size.small)
+
+    labLonL := label.new(bar_index, londonLowLvl, "London Low",
+        xloc=xloc.bar_index, yloc=yloc.price,
+        style=label.style_label_center, textcolor=color.white,
+        color=color.new(color.black, 80), size=size.small)
+
+//
+// ✅ KEEP LABELS CENTERED DURING THE DAY (while extend.right keeps moving)
+//
+if not na(midnightLine) and not na(labMidnight)
+    f_centerLabelOnLine(midnightLine, labMidnight, "Midnight Open")
+
+if not na(asiaHighLine) and not na(labAsiaH)
+    f_centerLabelOnLine(asiaHighLine, labAsiaH, "Asia High")
+if not na(asiaLowLine) and not na(labAsiaL)
+    f_centerLabelOnLine(asiaLowLine, labAsiaL, "Asia Low")
+
+if not na(londonHighLine) and not na(labLonH)
+    f_centerLabelOnLine(londonHighLine, labLonH, "London High")
+if not na(londonLowLine) and not na(labLonL)
+    f_centerLabelOnLine(londonLowLine, labLonL, "London Low")
+
+//
+// 6) NY OPEN BIAS (set once per day at 6:30am PST)
+//
+if nyJustHit and not biasSet and not na(midnightOpen)
+    biasSet := true
+    nyOpenPrice = open
+    wantShort := nyOpenPrice > midnightOpen
+    wantLong  := nyOpenPrice < midnightOpen
+
+//
+// 7) ENTRY TRIGGERS AFTER NY OPEN (liq taken)
+//
+afterNY = biasSet
+
+asiaLowTaken    = afterNY and not na(asiaLowLvl)     and low  < asiaLowLvl
+asiaHighTaken   = afterNY and not na(asiaHighLvl)    and high > asiaHighLvl
+londonLowTaken  = afterNY and not na(londonLowLvl)   and low  < londonLowLvl
+londonHighTaken = afterNY and not na(londonHighLvl)  and high > londonHighLvl
+
+liqLowTaken  = asiaLowTaken or londonLowTaken
+liqHighTaken = asiaHighTaken or londonHighTaken
+
+//
+// 8) ENTRIES — TP = Midnight Open, SL = fixed pts
+//
+longCond  = wantLong  and liqLowTaken  and strategy.position_size == 0 and canTrade and not na(midnightOpen)
+shortCond = wantShort and liqHighTaken and strategy.position_size == 0 and canTrade and not na(midnightOpen)
+
+if longCond
+    strategy.entry("Long", strategy.long, qty=contracts)
+    tradesToday += 1
+
+if shortCond
+    strategy.entry("Short", strategy.short, qty=contracts)
+    tradesToday += 1
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+        stop  = strategy.position_avg_price - stopPts,
+        limit = midnightOpen)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+        stop  = strategy.position_avg_price + stopPts,
+        limit = midnightOpen)
+
+View in Pine Editor・363 lines
+Use on chart
+2
+438
+draws out Asia/London overnight levels with midnight open

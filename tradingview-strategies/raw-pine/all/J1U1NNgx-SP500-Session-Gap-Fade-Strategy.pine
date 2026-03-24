@@ -1,0 +1,264 @@
+//@version=6
+strategy(     "SP500 Session Gap Fade Strategy",     shorttitle = "SPX Gap Fade",     overlay = true)
+
+//================= SESSION SETTINGS =================//
+group_sess      = "Session Settings"
+sess            = input.session("0830-1530", "Trading session (exchange time)", group = group_sess)
+flat_before_min = input.int(60, "Minutes before session end to force exit", minval = 1, maxval = 300, group = group_sess)
+
+// Parse "HHMM-HHMM" from sess (kept same logic as original)
+int colon_pos   = str.pos(sess, ":")
+string core     = na(colon_pos) ? sess : str.substring(sess, 0, colon_pos)
+
+int dash_pos     = str.pos(core, "-")
+string start_str = na(dash_pos) ? "0000" : str.substring(core, 0, dash_pos)
+string end_str   = na(dash_pos) ? "2359" : str.substring(core, dash_pos + 1, str.length(core))
+
+int start_hour  = int(str.tonumber(str.substring(start_str, 0, 2)))
+int start_min   = int(str.tonumber(str.substring(start_str, 2, 4)))
+int end_hour    = int(str.tonumber(str.substring(end_str,   0, 2)))
+int end_min     = int(str.tonumber(str.substring(end_str,   2, 4)))
+
+int sess_start_total = start_hour * 60 + start_min
+int sess_end_total   = end_hour   * 60 + end_min
+int sess_len_total   = sess_end_total - sess_start_total
+
+// clamp flat_before to session length
+int fb_minutes = flat_before_min > sess_len_total ? sess_len_total : flat_before_min
+int flat_total = sess_end_total - fb_minutes
+int flat_hour  = flat_total / 60
+int flat_min   = flat_total % 60
+
+//================= GAP RISK CONFIG =================//
+group_risk     = "Gap Risk"
+use_gap_risk   = input.bool(true,  "Enable gap based TP/SL",  group = group_risk)
+use_gap_tp     = input.bool(false, "Use TP limit from gap",   group = group_risk)
+use_gap_sl     = input.bool(true,  "Use SL stop from gap",    group = group_risk)
+tp_mult        = input.float(1.0, "TP multiplier of gap distance",  minval = 0.0, step = 0.1, group = group_risk)
+sl_mult        = input.float(1.0, "SL multiplier of gap distance",  minval = 0.0, step = 0.1, group = group_risk)
+
+//================= EXIT BEHAVIOR CONFIG =================//
+group_exit      = "Exit Controls"
+use_candle_exit = input.bool(false, "Exit with candle logic (strategy.close)", group = group_exit, tooltip = "If enabled, long closes on bearish bar and short closes on bullish bar.")
+use_forced_flat = input.bool(true,  "Force flat before session end",           group = group_exit, tooltip = "Close all positions at flat time and store reference close.")
+
+//================= GLOBAL TP/SL SERIES =================//
+var float long_tp_price  = na
+var float long_sl_price  = na
+var float short_tp_price = na
+var float short_sl_price = na
+
+// previous EOD reference close (at flat time)
+var float prev_eod_close = na
+
+//================= TIME STATE PER BAR =================//
+int cur_hour  = hour(time)
+int cur_min   = minute(time)
+int cur_total = cur_hour * 60 + cur_min
+
+bool in_session = cur_total >= sess_start_total and cur_total <= sess_end_total
+bool flat_bar   = in_session and cur_hour == flat_hour and cur_min == flat_min
+
+//================= GAP SIGNALS =================//
+bool gap_down_full = high < low[1]
+bool gap_up_full   = low  > high[1]
+bool bull_bar      = close > open
+bool bear_bar      = close < open
+
+bool long_cond  = in_session and gap_down_full     // and bull_bar
+bool short_cond = in_session and gap_up_full       // and bear_bar
+
+//================= ENTRY + GAP TP/SL (USING prev_eod_close) =================//
+// distance = |open - prev_eod_close|, TP and SL symmetric around entry
+
+if long_cond
+    if use_gap_risk and not na(prev_eod_close)
+        float gap_dist   = math.abs(open - prev_eod_close)
+        if gap_dist > 0
+            float entry_open = open
+            long_tp_price  := entry_open + gap_dist * tp_mult
+            long_sl_price  := entry_open - gap_dist * sl_mult
+            short_tp_price := na
+            short_sl_price := na
+    strategy.entry("long", strategy.long)
+
+if short_cond
+    if use_gap_risk and not na(prev_eod_close)
+        float gap_dist   = math.abs(open - prev_eod_close)
+        if gap_dist > 0
+            float entry_open = open
+            short_tp_price := entry_open - gap_dist * tp_mult
+            short_sl_price := entry_open + gap_dist * sl_mult
+            long_tp_price  := na
+            long_sl_price  := na
+    strategy.entry("short", strategy.short)
+
+//================= CANDLE-BASED CLOSE (OPTIONAL) =================//
+if use_candle_exit
+    if close > open
+        strategy.close("short")
+    if close < open
+        strategy.close("long")
+
+//================= FORCED FLAT AND EOD REFERENCE CLOSE =================//
+if flat_bar and use_forced_flat
+    prev_eod_close := close
+    strategy.close("long")
+    strategy.close("short")
+
+//================= APPLY TP/SL ORDERS =================//
+if use_gap_risk
+    bool has_tp = use_gap_tp
+    bool has_sl = use_gap_sl
+
+    // long side
+    if strategy.position_size > 0 and not na(long_tp_price) and not na(long_sl_price) and (has_tp or has_sl)
+        float tp_long = has_tp ? long_tp_price : na
+        float sl_long = has_sl ? long_sl_price : na
+        strategy.exit("long_gap", "long", stop = sl_long, limit = tp_long)
+
+    // short side
+    if strategy.position_size < 0 and not na(short_tp_price) and not na(short_sl_price) and (has_tp or has_sl)
+        float tp_short = has_tp ? short_tp_price : na
+        float sl_short = has_sl ? short_sl_price : na
+        strategy.exit("short_gap", "short", stop = sl_short, limit = tp_short)
+
+//================= RESET WHEN FLAT =================//
+bool flat_now  = strategy.position_size == 0
+bool flat_prev = strategy.position_size[1] != 0
+if flat_now and flat_prev
+    long_tp_price  := na
+    long_sl_price  := na
+    short_tp_price := na
+    short_sl_price := na
+
+//================= PLOTS (GLOBAL SCOPE) =================//
+plot(strategy.position_size > 0 ? long_tp_price  : na, "Long TP",  color = color.new(color.lime, 0),  style = plot.style_linebr)
+plot(strategy.position_size > 0 ? long_sl_price  : na, "Long SL",  color = color.new(color.red,  0),  style = plot.style_linebr)
+plot(strategy.position_size < 0 ? short_tp_price : na, "Short TP", color = color.new(color.lime, 60), style = plot.style_linebr)
+plot(strategy.position_size < 0 ? short_sl_price : na, "Short SL", color = color.new(color.red,  60), style = plot.style_linebr)
+
+View in Pine Editor・141 lines
+Use on chart
+8
+0
+2
+2 171
+Summary in one paragraph
+SPX Session Gap Fade is an intraday gap fade strategy for index futures, designed around regular cash sessions on five minute charts. It helps you participate only when there is a full overnight or pre session gap and a valid intraday session window, instead of trading every open. The original part is the gap distance engine which anchors both stop and optional target to the previous session reference close at a configurable flat time, so every trade’s risk scales with the actual gap size rather than a fixed tick stop.
+
+Scope and intent
+• Markets. Primarily index futures such as ES, NQ, YM, and liquid index CFDs that exhibit overnight gaps and regular cash hours.
+• Timeframes. Intraday timeframes from one minute to fifteen minutes. Default usage is five minute bars.
+• Default demo used in the publication. Symbol CME:ES1! on a five minute chart.
+• Purpose. Provide a simple, transparent way to trade opening gaps with a session anchored risk model and forced flat exit so you are not holding into the last part of the session.
+• Limits. This is a strategy. Orders are simulated on standard candles only.
+
+Originality and usefulness
+• Unique concept or fusion. The core novelty is the combination of a strict “full gap” entry condition with a session anchored reference close and a gap distance based TP and SL engine. The stop and optional target are symmetric multiples of the actual gap distance from the previous session’s flat close, rather than fixed ticks.
+• Failure mode it addresses. Fixed sized stops do not scale when gaps are unusually small or unusually large, which can either under risk or over risk the account. The session flat logic also reduces the chance of holding residual positions into late session liquidity and news.
+• Testability. All key pieces are explicit in the Inputs: session window, minutes before session end, whether to use gap exits, whether TP or SL are active, and whether to allow candle based closes and forced flat. You can toggle each component and see how it changes entries and exits.
+• Portable yardstick. The main unit is the absolute price gap between the entry bar open and the previous session reference close. tp_mult and sl_mult are multiples of that gap, which makes the risk model portable across contracts and volatility regimes.
+
+
+Method overview in plain language
+The strategy first defines a trading session using exchange time, for example 08:30 to 15:30 for ES day hours. It also defines a “flat” time a fixed number of minutes before session end. At the flat bar, any open position is closed and the bar’s close price is stored as the reference close for the next session. Inside the session, the strategy looks for a full gap bar relative to the prior bar: a gap down where today’s high is below yesterday’s low, or a gap up where today’s low is above yesterday’s high. A full gap down generates a long entry; a full gap up generates a short entry. If the gap risk engine is enabled and a valid reference close exists, the strategy measures the distance between the entry bar open and that reference close. It then sets a stop and optional target as configurable multiples of that gap distance and manages them with strategy.exit. Additional exits can be triggered by a candle color flip or by the forced flat time.
+
+Base measures
+• Range basis. The main unit is the absolute difference between the current entry bar open and the stored reference close from the previous session flat bar. That value is used as a “gap unit” and scaled by tp_mult and sl_mult to build the target and stop.
+
+Components
+• Component one: Gap Direction. Detects full gap up or full gap down by comparing the current high and low to the previous bar’s high and low. Gap down signals a long fade, gap up signals a short fade. There is no smoothing; it is a strict structural condition.
+• Component two: Session Window. Only allows entries when the current time is within the configured session window. It also defines a flat time before the session end where positions are forced flat and the reference close is updated.
+• Component three: Gap Distance Risk Engine. Computes the absolute distance between the entry open and the stored reference close. The stop and optional target are placed as entry ± gap_distance × multiplier so that risk scales with gap size.
+• Optional component: Candle Exit. If enabled, a bullish bar closes short positions and a bearish bar closes long positions, which can shorten holding time when price reverses quickly inside the session.
+• Session windows. Session logic uses the exchange time of the chart symbol. When changing symbols or venues, verify that the session time string still matches the new instrument’s cash hours.
+
+Fusion rule
+All gates are hard conditions rather than weighted scores. A trade can only open if the session window is active and the full gap condition is true. The gap distance engine only activates if a valid reference close exists and use_gap_risk is on. TP and SL are controlled by separate booleans so you can use SL only, TP only, or both. Long and short are symmetric by construction: long trades fade full gap downs, short trades fade full gap ups with mirrored TP and SL logic.
+
+Signal rule
+• Long entry. Inside the active session, when the current bar shows a full gap down relative to the previous bar (current high below prior low), the strategy opens a long position. If the gap risk engine is active, it places a gap based stop below the entry and an optional target above it.
+• Short entry. Inside the active session, when the current bar shows a full gap up relative to the previous bar (current low above prior high), the strategy opens a short position. If the gap risk engine is active, it places a gap based stop above the entry and an optional target below it.
+• Forced flat. At the configured flat time before session end, any open position is closed and the close price of that bar becomes the new reference close for the following session.
+• Candle based exit. If enabled, a bearish bar closes longs, and a bullish bar closes shorts, regardless of where TP or SL sit, as long as a position is open.
+
+What you will see on the chart
+• Markers on entry bars. Standard strategy entry markers labeled “long” and “short” on the gap bars where trades open.
+• Exit markers. Standard exit markers on bars where either the gap stop or target are hit, or where a candle exit or forced flat close occurs. Exit IDs “long_gap” and “short_gap” label gap based exits.
+• Reference levels. Horizontal lines for the current long TP, long SL, short TP, and short SL while a position is open and the gap engine is enabled. They update when a new trade opens and disappear when flat.
+• Session background. This version does not add background shading for the session; session logic runs internally based on time.
+• No on chart table. All decisions are visible through orders and exit levels. Use the Strategy Tester for performance metrics.
+
+
+Inputs with guidance
+
+Session Settings
+• Trading session (sess). Session window in exchange time. Typical value uses the regular cash session for each contract, for example “0830-1530” for ES. Adjust if your broker or symbol uses different hours.
+• Minutes before session end to force exit (flat_before_min). Minutes before the session end where positions are forced flat and the reference close is stored. Typical range is 15 to 120. Raising it closes trades earlier in the day; lowering it allows trades later in the session.
+
+Gap Risk
+• Enable gap based TP/SL (use_gap_risk). Master switch for the gap distance exit engine. Turning it off keeps entries and forced flat logic but removes automatic TP and SL placement.
+• Use TP limit from gap (use_gap_tp). Enables gap based profit targets. Typical values are true for structured exits or false if you want to manage exits manually and only keep a stop.
+• Use SL stop from gap (use_gap_sl). Enables gap based stop losses. This should normally remain true so that each trade has a defined initial risk in ticks.
+• TP multiplier of gap distance (tp_mult). Multiplier applied to the gap distance for the target. Typical range is 0.5 to 2.0. Raising it places the target further away and reduces hit frequency.
+• SL multiplier of gap distance (sl_mult). Multiplier applied to the gap distance for the stop. Typical range is 0.5 to 2.0. Raising it widens the stop and increases risk per trade; lowering it tightens the stop and may increase the number of small losses.
+
+Exit Controls
+• Exit with candle logic (use_candle_exit). If true, closes shorts on bullish candles and longs on bearish candles. Useful when you want to react to intraday reversal bars even if TP or SL have not been reached.
+• Force flat before session end (use_forced_flat). If true, guarantees you are flat by the configured flat time and updates the reference close. Turn this off only if you understand the impact on overnight risk.
+
+Filters
+There is no separate trend or volatility filter in this version. All trades depend on the presence of a full gap bar inside the session. If you need extra filtering such as ATR, volume, or higher timeframe bias, they should be added explicitly and documented in your own fork.
+
+
+Usage recipes
+
+Intraday conservative gap fade
+• Timeframe. Five minute chart on ES regular session.
+• Gap risk. use_gap_risk = true, use_gap_tp = true, use_gap_sl = true.
+• Multipliers. tp_mult around 0.7 to 1.0 and sl_mult around 1.0.
+• Exits. use_candle_exit = false, use_forced_flat = true. Focus on the structured TP and SL around the gap.
+
+Intraday aggressive gap fade
+• Timeframe. Five minute chart.
+• Gap risk. use_gap_risk = true, use_gap_tp = false, use_gap_sl = true.
+• Multipliers. sl_mult around 0.7 to 1.0.
+• Exits. use_candle_exit = true, use_forced_flat = true. Entries fade full gaps, stops are tight, and candle color flips flatten trades early.
+
+Higher timeframe gap tests
+• Timeframe. Fifteen minute or sixty minute charts on instruments with regular gaps.
+• Gap risk. Keep use_gap_risk = true. Consider slightly higher sl_mult if gaps are structurally wider on the higher timeframe.
+• Note. Expect fewer trades and be careful with sample size; multi year data is recommended.
+
+
+
+Properties visible in this publication
+• On average our risk for each position over the last 200 trades is 0.4% with a max intraday loss of 1.5% of the total equity in this case of 100k $ with 1 contract ES. For other assets, recalculations and customizations has to be applied.
+• Initial capital. 100 000.
+• Base currency. USD.
+• Default order size method. Fixed with size 1 contract.
+• Pyramiding. 0.
+• Commission. Flat 2 USD per order in the Strategy Tester Properties. (2$ buying + 2$selling)
+• Slippage. One tick in the Strategy Tester Properties.
+• Process orders on close. ON.
+
+
+Realism and responsible publication
+• No performance claims are made. Past results do not guarantee future outcomes.
+• Costs use a realistic flat commission and one tick of slippage per trade for ES class futures.
+• Default sizing with one contract on a 100 000 reference account targets modest per trade risk. In practice, extreme slippage or gap through events can exceed this, so treat the one and a half percent risk target as a design goal, not a guarantee.
+• All orders are simulated on standard candles. Shapes can move while a bar is forming and settle on bar close.
+
+Honest limitations and failure modes
+• Economic releases, thin liquidity, and limit conditions can break the assumptions behind the simple gap model and lead to slippage or skipped fills.
+• Symbols with very frequent or very large gaps may require adjusted multipliers or alternative risk handling, especially in high volatility regimes.
+• Very quiet periods without clean gaps will produce few or no trades. This is expected behavior, not a bug.
+• Session windows follow the exchange time of the chart. Always confirm that the configured session matches the symbol.
+• When both the stop and target lie inside the same bar’s range, the TradingView engine decides which is hit first based on its internal intrabar assumptions. Without bar magnifier, tie handling is approximate.
+
+
+Legal
+Education and research only. This strategy is not investment advice. You remain responsible for all trading decisions. Always test on historical data and in simulation with realistic costs before considering any live use.
+
+

@@ -1,0 +1,6 @@
+//@version=5
+basis=##input(defval='High Yield Spread',type='INPUT_STRING',##id='in_0')
+threshold=##input(defval=5.0,type='INPUT_FLOAT',##id='in_1')
+##root(root_metainfo,rm_0,((basis=='High Yield Spread')?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_1,((basis=='VIX')?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_2,threshold,input__float)

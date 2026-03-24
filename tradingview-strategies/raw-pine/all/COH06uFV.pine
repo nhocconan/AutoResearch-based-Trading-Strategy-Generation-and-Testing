@@ -1,0 +1,48 @@
+//@version=6
+strategy("Temporary Help Services Jobs - Trend Allocation Strategy", overlay=false, initial_capital=30000, pyramiding=0, commission_type=strategy.commission.cash_per_contract, commission_value=0.05, slippage=1)
+
+// --- Request FRED Data ---
+temphelps = request.security("FRED:TEMPHELPS", "M", close, lookahead=barmerge.lookahead_off)
+
+// Skip further calculations if data is missing
+if not na(temphelps)
+    // --- Calculate Trend ---
+    is_trend_up = temphelps > temphelps[1]  // TEMPHELPS is higher than the previous month
+    is_trend_down = temphelps < temphelps[1]  // TEMPHELPS is lower than the previous month
+
+    // --- Entry Condition ---
+    if (is_trend_up and strategy.position_size == 0)
+        strategy.entry("Long", strategy.long)
+
+    // --- Exit Condition ---
+    if (is_trend_down and strategy.position_size > 0)
+        strategy.close("Long", comment="Exit: Negative Trend")
+
+plot(temphelps, style=plot.style_linebr, color= color.green)
+
+View in Pine Editor・21 lines
+Use on chart
+3
+9
+1 544
+This strategy is designed to capitalize on the economic trends represented by the Temporary Help Services (TEMPHELPS) index, which is published by the Federal Reserve Economic Data (FRED). Temporary Help Services Jobs are often regarded as a leading indicator of labor market conditions, as changes in temporary employment levels frequently precede broader employment trends.
+
+Methodology:
+
+Data Source: The strategy uses the FRED dataset TEMPHELPS for monthly data on temporary help services.
+
+Trend Definition:
+
+Uptrend: When the current month's value is greater than the previous month's value.
+Downtrend: When the current month's value is less than the previous month's value.
+
+Entry Condition: A long position is opened when an uptrend is detected, provided no position is currently held.
+
+Exit Condition: The long position is closed when a downtrend is detected.
+
+Scientific Basis:
+
+The TEMPHELPS index serves as a leading economic indicator, as noted in studies analyzing labor market cyclicality (e.g., Katz & Krueger, 1999). Temporary employment is often considered a proxy for broader economic conditions, particularly in predicting recessions or recoveries. Incorporating this index into trading strategies allows for aligning trades with potential macroeconomic shifts, as suggested by research on employment trends and market performance (Autor, 2001; Valetta & Bengali, 2013).
+
+Usage:
+This strategy is best suited for long-term investors or macroeconomic trend followers who wish to leverage labor market signals for equity or futures trading. It operates exclusively on end-of-month data, ensuring minimal transaction costs and noise.

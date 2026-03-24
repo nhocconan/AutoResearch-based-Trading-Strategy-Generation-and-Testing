@@ -1,0 +1,176 @@
+//@version=5
+strategy("15-Min ORB Strategy for NQ - TP3 Runner", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, margin_long=100, margin_short=100)
+
+// ────────────────────────────────────────
+// Inputs
+// ────────────────────────────────────────
+qty        = input.int(3, "Total Contracts Qty", minval=1, group="Position Sizing", tooltip="Total contracts to split between TP1, TP2, and TP3.")
+tp1Percent = input.int(33, "TP1 %", minval=0, maxval=100, group="Exits")
+tp2Percent = input.int(33, "TP2 %", minval=0, maxval=100, group="Exits")
+tp3Percent = input.int(34, "TP3 %", minval=0, maxval=100, group="Exits")
+
+rr1        = input.float(1.0, "TP1 (RR)", minval=0.1, step=0.1, group="Exits")
+rr2        = input.float(2.0, "TP2 (RR)", minval=0.1, step=0.1, group="Exits")
+rr3        = input.float(4.0, "TP3 (RR)", minval=0.1, step=0.1, group="Exits")
+slBuffer   = input.float(0.0, "SL Buffer (Points)", step=0.25, group="Exits")
+
+// Breakeven Settings
+useBE      = input.bool(true, "Move SL to Breakeven after TP1?", group="Exits")
+beOffset   = input.float(0.0, "BE Offset (Points)", minval=0, group="Exits")
+
+// Trailing Settings
+useTrail   = input.bool(false, "Activate Trailing SL after TP1?", group="Trailing Stop (Post-TP1)")
+trailPts   = input.float(10.0, "Trailing Distance (Points)", minval=0.25, group="Trailing Stop (Post-TP1)")
+showTrailLine = input.bool(true, "Show Red Trailing Line?", group="Trailing Stop (Post-TP1)")
+
+// ────────────────────────────────────────
+// State Tracking
+// ────────────────────────────────────────
+var float orHigh = na
+var float orLow  = na
+var bool entryTaken = false
+var bool tp1Hit     = false
+var float trailPrice = na
+
+// Reset at start of day
+if ta.change(time("D", "America/New_York")) != 0
+    entryTaken := false
+    tp1Hit     := false
+    orHigh     := na
+    orLow      := na
+
+// Detect TP1 Fill (if current position is less than original qty)
+if strategy.position_size != 0 and math.abs(strategy.position_size) < qty
+    tp1Hit := true
+
+// ────────────────────────────────────────
+// Time & Session
+// ────────────────────────────────────────
+inORB = not na(time(timeframe.period, "0930-0945:1234567", "America/New_York"))
+isEOD = session.islastbar_regular or (hour(time, "America/New_York") == 15 and minute(time, "America/New_York") >= 55)
+
+if inORB
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow, low)
+
+// Breakout Logic
+breakoutUp   = not inORB and not entryTaken and not na(orHigh) and close > orHigh
+breakoutDown = not inORB and not entryTaken and not na(orLow)  and close < orLow
+
+// ────────────────────────────────────────
+// Entries
+// ────────────────────────────────────────
+if breakoutUp
+    strategy.entry("Long", strategy.long, qty=qty)
+    entryTaken := true
+    tp1Hit     := false
+    trailPrice := na
+
+if breakoutDown
+    strategy.entry("Short", strategy.short, qty=qty)
+    entryTaken := true
+    tp1Hit     := false
+    trailPrice := na
+
+// ────────────────────────────────────────
+// Exit Calculations
+// ────────────────────────────────────────
+
+// LONG EXIT LOGIC
+if strategy.position_size > 0
+    riskLong = strategy.position_avg_price - (orLow - slBuffer)
+    tp1Price = strategy.position_avg_price + (riskLong * rr1)
+    tp2Price = strategy.position_avg_price + (riskLong * rr2)
+    tp3Price = strategy.position_avg_price + (riskLong * rr3)
+    
+    float slLevel = orLow - slBuffer
+    
+    if useBE and tp1Hit
+        slLevel := strategy.position_avg_price + beOffset
+    
+    if useTrail and tp1Hit
+        trailPrice := na(trailPrice) ? high - trailPts : math.max(trailPrice, high - trailPts)
+        slLevel := math.max(slLevel, trailPrice)
+    
+    strategy.exit("L-TP1", "Long", qty_percent=tp1Percent, limit=tp1Price, stop=slLevel, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("L-TP2", "Long", qty_percent=tp2Percent, limit=tp2Price, stop=slLevel, comment_profit="TP2", comment_loss="SL")
+    strategy.exit("L-TP3", "Long", qty_percent=tp3Percent, limit=tp3Price, stop=slLevel, comment_profit="TP3", comment_loss=tp1Hit ? "Trail/BE" : "SL")
+    
+    if isEOD
+        strategy.close("Long", comment="EOD Close")
+
+// SHORT EXIT LOGIC
+if strategy.position_size < 0
+    riskShort = (orHigh + slBuffer) - strategy.position_avg_price
+    tp1PriceS = strategy.position_avg_price - (riskShort * rr1)
+    tp2PriceS = strategy.position_avg_price - (riskShort * rr2)
+    tp3PriceS = strategy.position_avg_price - (riskShort * rr3)
+    
+    float slLevelS = orHigh + slBuffer
+    
+    if useBE and tp1Hit
+        slLevelS := strategy.position_avg_price - beOffset
+        
+    if useTrail and tp1Hit
+        trailPrice := na(trailPrice) ? low + trailPts : math.min(trailPrice, low + trailPts)
+        slLevelS := math.min(slLevelS, trailPrice)
+
+    strategy.exit("S-TP1", "Short", qty_percent=tp1Percent, limit=tp1PriceS, stop=slLevelS, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("S-TP2", "Short", qty_percent=tp2Percent, limit=tp2PriceS, stop=slLevelS, comment_profit="TP2", comment_loss="SL")
+    strategy.exit("S-TP3", "Short", qty_percent=tp3Percent, limit=tp3PriceS, stop=slLevelS, comment_profit="TP3", comment_loss=tp1Hit ? "Trail/BE" : "SL")
+
+    if isEOD
+        strategy.close("Short", comment="EOD Close")
+
+if strategy.position_size == 0
+    trailPrice := na
+
+// ────────────────────────────────────────
+// Plots
+// ────────────────────────────────────────
+plot(orHigh, title="OR High", color=color.new(color.red, 30), linewidth=2, style=plot.style_linebr)
+plot(orLow,  title="OR Low",  color=color.new(color.green, 30), linewidth=2, style=plot.style_linebr)
+bgcolor(inORB ? color.new(color.yellow, 92) : na, title="ORB Period")
+
+plot(showTrailLine and strategy.position_size != 0 and tp1Hit and useTrail ? trailPrice : na, "Trail SL Level", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// Dashboard (Expanded for TP3)
+if barstate.islast
+    var table dashboard = table.new(position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 60), border_width=1, border_color=color.new(color.gray, 50), frame_width=1, frame_color=color.new(color.gray, 30))
+    table.cell(dashboard, 0, 0, "ORB TP3 Runner", text_color=color.white, bgcolor=#0d47a1)
+    table.cell(dashboard, 1, 0, "", bgcolor=#0d47a1)
+    table.cell(dashboard, 0, 1, "OR High", text_color=color.white, bgcolor=color.new(color.red, 70))
+    table.cell(dashboard, 1, 1, str.tostring(orHigh, "#.##"), text_color=color.red)
+    table.cell(dashboard, 0, 2, "OR Low", text_color=color.white, bgcolor=color.new(color.green, 70))
+    table.cell(dashboard, 1, 2, str.tostring(orLow, "#.##"), text_color=color.green)
+    table.cell(dashboard, 0, 3, "Contracts", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    table.cell(dashboard, 1, 3, str.tostring(qty), text_color=color.blue)
+    table.cell(dashboard, 0, 4, "TP1 RR", text_color=color.white, bgcolor=color.new(color.orange, 70))
+    table.cell(dashboard, 1, 4, str.tostring(rr1), text_color=color.orange)
+    table.cell(dashboard, 0, 5, "TP2 RR", text_color=color.white, bgcolor=color.new(color.purple, 70))
+    table.cell(dashboard, 1, 5, str.tostring(rr2), text_color=color.purple)
+    table.cell(dashboard, 0, 6, "TP3 RR", text_color=color.white, bgcolor=color.new(color.teal, 70))
+    table.cell(dashboard, 1, 6, str.tostring(rr3), text_color=color.teal)
+    table.cell(dashboard, 0, 7, "Entry Taken", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dashboard, 1, 7, entryTaken ? "Yes" : "No", text_color=entryTaken ? color.red : color.lime)
+
+View in Pine Editor・155 lines
+Use on chart
+6
+2
+1 390
+Feb 16
+Here I created a very simple 15M ORB strategy for NQ / MNQ.
+
+This strategy marks the high and low of the 15-Min opening candle for the New York session ( 0930 - 0945 ) and enters Long / Short based on where the 5 Minute candle closes if it closes above / below the 15 Minute range.
+
+It has a customisable RR for TP1 and TP2 and the amount of contracts you can use. Please bear in mind that this is a very basic strategy as it is my first time making a script for TradingView. I an open to any constructive criticism to help me improve my script.
+
+Thank you for taking the time to read this and I hope you guys enjoy my script!
+Feb 16
+Release Notes
+New features added :
+
+TP3 - Allow runners to run.
+Trailing stop loss added.
+Visual line for the Trailing Stop.

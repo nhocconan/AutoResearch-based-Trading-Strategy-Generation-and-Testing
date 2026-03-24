@@ -1,0 +1,37 @@
+//@version=3
+strategy(title="Cross Exchange Change", shorttitle="CEC", default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+threslong = input(0.3)
+thresshort = input(-0.2)
+TP = input(1500)
+SL = input(2000)
+
+pair1 = input(defval="BITFINEX:BTCUSD",title="Exchange Pair 1")
+pair2 = input(defval="COINBASE:BTCUSD",title="Exchange Pair 2")
+pair3 = input(defval="BITSTAMP:BTCUSD",title="Exchange Pair 3")
+
+pair(s)=>security(s,period,close)
+
+chg(c)=>((c[0]/c[1]-1)*100)
+
+dif(chgpair) => (chg(pair(pair1)) - chg(pair(chgpair)))
+
+longCond = ((dif(pair2) > threslong) or (dif(pair3) > threslong))
+shortCond = ((dif(pair2) < thresshort) or (dif(pair3) < thresshort))
+
+if longCond
+    strategy.entry('long', strategy.long)
+    strategy.exit('long', profit=TP, loss=SL)
+if shortCond
+    strategy.entry('short', strategy.short)
+    strategy.exit('short', profit=TP, loss=SL)
+
+plot(dif(pair2), color=yellow)
+plot(dif(pair3), color=blue)
+
+View in Pine Editor・30 lines
+Use on chart
+5
+8
+2 550
+The indicator itself looks at different Exchanges and compares the change in price of them. If one spikes up, we go long with it as we assume our Exchange will follow. Vice versa for short.

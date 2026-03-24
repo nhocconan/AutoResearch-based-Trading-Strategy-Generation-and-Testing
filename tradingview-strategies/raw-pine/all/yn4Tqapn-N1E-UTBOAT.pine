@@ -1,0 +1,67 @@
+//@version=5
+strategy("UT Bot Strategy (v5) — HeikinAshi fix", overlay=true)
+
+// Inputs
+a = input.float(1.0, title = "Key Value (Sensitivity)")
+c = input.int(10, title = "ATR Period")
+useHA = input.bool(false, title = "Use Heikin Ashi Source")
+
+// --- Heikin Ashi (computed locally) ---
+ha_close = (open + high + low + close) / 4.0
+ha_open  = float(na)
+ha_open  := nz(ha_open[1], (open + close) / 2.0)   // initialize from first bar
+ha_open  := (ha_open + ha_close[1]) / 2.0
+ha_high  = math.max(high, math.max(ha_open, ha_close))
+ha_low   = math.min(low,  math.min(ha_open, ha_close))
+
+src = useHA ? ha_close : close
+
+// ATR & trailing stop
+xATR  = ta.atr(c)
+nLoss = a * xATR
+
+var float xStop = na
+xStop := if src > nz(xStop[1], 0) and src[1] > nz(xStop[1], 0)
+    math.max(nz(xStop[1]), src - nLoss)
+else if src < nz(xStop[1], 0) and src[1] < nz(xStop[1], 0)
+    math.min(nz(xStop[1]), src + nLoss)
+else
+    src > nz(xStop[1], 0) ? src - nLoss : src + nLoss
+
+// Position detection (not strictly required but kept from original)
+var int pos = 0
+pos := src[1] < nz(xStop[1]) and src > nz(xStop[1]) ? 1 :
+       src[1] > nz(xStop[1]) and src < nz(xStop[1]) ? -1 : nz(pos[1], 0)
+
+// Signal logic
+ema1 = ta.ema(src, 1)
+above = ta.crossover(ema1, xStop)
+below = ta.crossover(xStop, ema1)
+
+buy  = src > xStop and above
+sell = src < xStop and below
+
+// Plotting / visuals
+plot(xStop, title="ATR Trailing Stop", linewidth=2, style=plot.style_line)
+plotshape(buy,  title="Buy",  text="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(sell, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.tiny)
+barcolor(src > xStop ? color.new(color.green, 0) : src < xStop ? color.new(color.red, 0) : na)
+
+// Entries
+strategy.entry("Long",  strategy.long,  when = buy)
+strategy.entry("Short", strategy.short, when = sell)
+
+View in Pine Editor・52 lines
+Use on chart
+2
+7
+1 427
+N1E_UTBOAT
+
+ATR trailing stop
+
+Optional Heikin Ashi source
+
+Buy/Sell signals based on a crossover of price vs ATR trailing stop
+
+Strategy long/short entries

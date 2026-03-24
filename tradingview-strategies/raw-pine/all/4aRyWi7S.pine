@@ -1,0 +1,5 @@
+//@version=6
+##root(root_metainfo,rm_0,'cash_per_contract',const__string,strategy,commission_type,'2_99_2_135')
+osc_threshold_long=##input(defval=-96.0,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth,'48_103_48_103')
+##root(root_metainfo,rm_2,osc_threshold_long,input__float)

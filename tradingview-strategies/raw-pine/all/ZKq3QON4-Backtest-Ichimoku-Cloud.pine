@@ -1,0 +1,63 @@
+//@version=6
+strategy(title = 'Backtest - Ichimoku Cloud', shorttitle = 'BT-Ichimoku', overlay = true, commission_type = strategy.commission.percent, commission_value = 0.005, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+conversionPeriods = input.int(9, minval = 1, title = 'Conversion Line Periods')
+basePeriods = input.int(26, minval = 1, title = 'Base Line Periods')
+laggingSpan2Periods = input.int(52, minval = 1, title = 'Lagging Span 2 Periods')
+displacement = input.int(26, minval = 0, title = 'Displacement')
+
+donchian(len) =>
+    math.avg(ta.lowest(len), ta.highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+plot(conversionLine, color = color.new(#0496ff, 0), title = 'Conversion Line')
+plot(baseLine, color = color.new(#991515, 0), title = 'Base Line')
+plot(close, offset = -displacement, color = color.new(#040b01, 0), title = 'Lagging Span')
+
+p1 = plot(leadLine1, offset = displacement, color = color.new(color.green, 0), title = 'Lead 1')
+p2 = plot(leadLine2, offset = displacement, color = color.new(color.red, 0), title = 'Lead 2')
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.rgb(67, 160, 71, 90) : color.rgb(244, 67, 54, 90))
+
+// 3. Define the strategy entry and exit conditions
+// Long Entry Conditions: 
+    // (1) Price closes above the Ichimoku cloud (Kumo)
+    // (2) Cloud 26 ticks ahead is green
+    // (3) Conversion is above base
+    // (4) lagging line is above cloud
+longCondition = leadLine1 >= leadLine2 and close > leadLine1[26] and close > leadLine2[26] and conversionLine > baseLine and close > leadLine1[1] and close > leadLine2[1]
+
+// Long Exit Condition (can be customized, e.g., price re-enters the cloud)
+// For this simple example, we will exit when the trend is no longer bullish
+shortCondition = leadLine1 < leadLine2 and close < leadLine1[26] and close < leadLine2[26] and conversionLine < baseLine and close < leadLine1[1] and close < leadLine2[1]
+//shortCondition = conversionLine < baseLine and close < leadLine1[1] and close < leadLine2[1]
+//shortCondition = close < leadLine1[1] and close < leadLine2[1]
+
+var int longCnt = 0
+var int shortCnt = 0
+
+// 4. Execute trades based on the conditions
+if longCondition
+    strategy.entry('Long', direction=strategy.long, alert_message ="Ichi alert Buy in"+syminfo.tickerid + " EP " + str.tostring(math.round(close,1)) + " T1 "+str.tostring(math.round(close *1.1,1)) + " SL "+str.tostring(math.round(close * 0.9,1)), comment = "EP " + str.tostring(math.round(close,1)) + "T1 "+str.tostring(math.round(close * 1.1,1)) +" SL "+str.tostring(math.round(close * 0.9 ,1)))
+    longCnt := longCondition ? nz(longCnt[1]) + 1 : 0
+    shortCnt := 0
+
+if shortCondition
+    strategy.close('Long')
+    shortCnt := shortCondition ? nz(shortCnt[1]) + 1 : 0
+    longCnt := 0
+
+plotshape(longCondition and (longCnt == 2), title='Long Entry', location=location.belowbar, color=color.new(#7daf4c, 10), style=shape.flag, size=size.large)
+plotshape(shortCondition and (shortCnt == 1), title='Short Entry', location=location.abovebar, color=color.new(color.red, 10), style=shape.xcross,size=size.large)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+2
+556
+This script find the entry position on a chart using Ichimoku clud conditions.
+
+and also exit condition based on base line & price close w.r.t to Ichi cloud.

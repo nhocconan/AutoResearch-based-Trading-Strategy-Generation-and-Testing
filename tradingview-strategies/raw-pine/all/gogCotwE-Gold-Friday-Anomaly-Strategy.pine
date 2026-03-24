@@ -1,0 +1,113 @@
+//@version=5
+strategy("Gold Friday Anomaly Strategy", 
+     default_qty_type=strategy.percent_of_equity,
+     slippage = 1, commission_value=0.0005,
+     process_orders_on_close = true,
+     initial_capital = 10000,
+     default_qty_value=10,
+     overlay = true)
+     
+
+/////////////////////////////////////////////////////////////////////////////////////
+//                                 . USER INPUTS .                                 //
+/////////////////////////////////////////////////////////////////////////////////////
+
+// Define backtest start and end dates
+st_yr_inp = input(defval=2000, title='Backtest Start Year')
+st_mn_inp = input(defval=01, title='Backtest Start Month')
+st_dy_inp = input(defval=01, title='Backtest Start Day')
+en_yr_inp = input(defval=2025, title='Backtest End Year')
+en_mn_inp = input(defval=01, title='Backtest End Month')
+en_dy_inp = input(defval=01, title='Backtest End Day')
+
+// Set start and end timestamps for backtesting
+start = timestamp(st_yr_inp, st_mn_inp, st_dy_inp, 00, 00)
+end = timestamp(en_yr_inp, en_mn_inp, en_dy_inp, 00, 00)
+
+/////////////////////////////////////////////////////////////////////////////////////
+//                              . STRATEGY LOGIC .                                 //
+/////////////////////////////////////////////////////////////////////////////////////
+
+// Check if the current day is Friday
+isFriday = (dayofweek == dayofweek.friday)
+
+// Initialize a candle counter
+var int barCounter = 0
+
+// Increment the candle counter on each new bar
+barCounter := barCounter + 1
+
+// Define trading session time ranges
+pre_mkt = time(timeframe.period, '0400-0800:23456')
+mkt_hrs = time(timeframe.period, '0800-1600:23456')
+eod = time(timeframe.period, '1200-1600:23456')
+
+/////////////////////////////////////////////////////////////////////////////////////
+//                          . STRATEGY ENTRY & EXIT .                              //
+/////////////////////////////////////////////////////////////////////////////////////
+
+// Enter a long position on the first candle of Friday within the backtest period
+if dayofweek == 4 and time >= start and time <= end
+    strategy.entry("BuyOnFriday", strategy.long)
+
+// Close the position after holding it for 4 candles
+if (barCounter % 1 == 0)
+    strategy.close("BuyOnFriday")
+
+View in Pine Editor・58 lines
+Use on chart
+1
+5
+6
+1
+4 415
+This script implements the "Gold Friday Anomaly Strategy," a well-known historical trading strategy that leverages the gold market's behavior from Thursday evening to Friday close. It is a backtesting-focused strategy designed to assess the historical performance of this pattern. Traders use this anomaly as it captures a recurring market tendency observed over the years.
+
+
+
+What It Does:
+
+
+Entry Condition: The strategy enters a long position at the beginning of the Friday trading session (Thursday evening close) within the defined backtesting period.
+
+Exit Condition: Friday evening close.
+
+Backtesting Controls: Allows users to set custom backtesting periods to evaluate strategy performance over specific date ranges.
+
+
+
+
+
+Key Features:
+
+
+Custom Backtest Periods: Easily configurable inputs to set the start and end date of the backtesting range.
+
+Fixed Slippage and Commission Settings: Ensures realistic simulation of trading conditions.
+
+Process Orders on Close: Backtesting is optimized by processing orders at the bar's close.
+
+
+
+
+
+Important Notes:
+
+
+Backtesting Only: This script is intended purely for backtesting purposes. Past performance is not indicative of future results.
+
+Live Trading Recommendations: For live trading, it is highly recommended to use limit orders instead of market orders, especially during evening sessions, as market order slippage can be significant.
+
+
+
+
+
+Default Settings:
+
+
+Entry size: 10% of equity per trade.
+
+Slippage: 1 tick.
+
+Commission: 0.05% per trade.
+

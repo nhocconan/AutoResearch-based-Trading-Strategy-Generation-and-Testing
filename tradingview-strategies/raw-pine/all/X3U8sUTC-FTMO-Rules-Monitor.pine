@@ -1,0 +1,105 @@
+//@version=5
+indicator("Supertrends", overlay=true)
+
+// Supertrend 1 Parameters
+var string ST1 = "Supertrend 1 Settings"
+st1_atrPeriod = input.int(10, "ATR Period", minval=1, maxval=50, group=ST1)
+st1_factor = input.float(2, "Factor", minval=0.5, maxval=10, step=0.5, group=ST1)
+
+// Supertrend 2 Parameters
+var string ST2 = "Supertrend 2 Settings"
+st2_atrPeriod = input.int(14, "ATR Period", minval=1, maxval=50, group=ST2)
+st2_factor = input.float(3, "Factor", minval=0.5, maxval=10, step=0.5, group=ST2)
+
+// Calculate Supertrends
+[supertrend1, direction1] = ta.supertrend(st1_factor, st1_atrPeriod)
+[supertrend2, direction2] = ta.supertrend(st2_factor, st2_atrPeriod)
+
+// Entry conditions
+longCondition = direction1 == -1 and direction2 == -1 and direction1[1] == 1
+shortCondition = direction1 == 1 and direction2 == 1 and direction1[1] == -1
+
+// Optional: Plot Supertrends
+plot(supertrend1, "Supertrend 1", color = direction1 == -1 ? color.green : color.red, linewidth=3)
+plot(supertrend2, "Supertrend 2", color = direction2 == -1 ? color.lime : color.maroon, linewidth=3)
+
+plotshape(series=longCondition, location=location.belowbar, color=color.green, style=shape.triangleup, title="Long")
+plotshape(series=shortCondition, location=location.abovebar, color=color.red, style=shape.triangledown, title="Short")
+
+signal = longCondition ? 1 : shortCondition ? -1 : na
+plot(signal, "Signal", display = display.data_window)
+
+Expand 25 lines
+
+
+To connect your indicator to this FTMO rules monitor template, please update it as follow
+
+
+Create a signal variable to store 1 for the long/buy signal or -1 for the short/sell signal
+
+Plot it in the display.data_window panel so that it doesn't clutter your chart
+
+
+
+
+Pine Script®
+signal = longCondition ? 1 : shortCondition ? -1 : na
+plot(signal, "Signal", display = display.data_window)
+
+
+
+In the FTMO Rules Monitor template, I'm capturing this external signal with this input.source variable
+
+
+Pine Script®
+entry_connector = input.source(close, "Entry Connector", group="Entry Connector")
+longCondition  = entry_connector == 1
+shortCondition = entry_connector == -1
+
+
+
+🔶 USAGE
+
+This indicator displays essential FTMO Challenge rules and tracks your progress toward meeting each one. Here’s what’s monitored:
+
+Max Daily Loss
+• 10k Account: $500
+• 25k Account: $1,250
+• 50k Account: $2,500
+• 100k Account: $5,000
+• 200k Account: $10,000
+
+Max Total Loss
+• 10k Account: $1,000
+• 25k Account: $2,500
+• 50k Account: $5,000
+• 100k Account: $10,000
+• 200k Account: $20,000
+
+Profit Target
+• 10k Account: $1,000
+• 25k Account: $2,500
+• 50k Account: $5,000
+• 100k Account: $10,000
+• 200k Account: $20,000
+
+Minimum Trading Days: 4 consecutive days for all account sizes
+
+🔹 Key Features
+
+1. Real-Time Compliance Check
+The FTMO Rules Monitor keeps track of your daily and total losses, profit targets, and trading days. Each metric updates in real-time, giving you peace of mind that you’re within FTMO’s rules.
+
+2. Color-Coded Visual Feedback
+Each rule’s status is shown clearly with a ✓ for compliance or ✗ if the limit is breached. When a rule is broken, the indicator highlights it in red, so there’s no confusion.
+
+3. Completion Notification
+Once all FTMO requirements are met, the indicator closes all open positions and displays a celebratory message on your chart, letting you know you’ve successfully completed the challenge.
+
+4. Easy-to-Read Table
+A table on your chart provides an overview of each rule, your target, current performance, and whether you’re meeting each goal. The table adjusts its color scheme based on your chart settings for optimal visibility.
+
+5. Dynamic Position Sizing
+Integrated ATR-based position sizing helps you manage risk and avoid large drawdowns, ensuring each trade aligns with FTMO’s risk management principles.
+
+Daveatt

@@ -1,0 +1,11 @@
+//@version=5
+oversold=##input(defval=30,type='INPUT_INTEGER',##id='in_1')
+overbought=##input(defval=70,type='INPUT_INTEGER',##id='in_2')
+##root(root_metainfo,rm_0,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_1,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_2,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_5,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_6,oversold,input__float)
+##root(root_metainfo,rm_7,overbought,input__float)

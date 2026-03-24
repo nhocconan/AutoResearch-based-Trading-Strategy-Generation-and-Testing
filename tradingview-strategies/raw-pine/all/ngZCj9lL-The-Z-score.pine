@@ -1,0 +1,100 @@
+//@version=5
+// Define the strategy settings
+strategy("The Z-score", shorttitle="TZS", overlay=true)
+
+// User can set the start date for the strategy
+startDate = timestamp("2023 06 01")
+
+// Heikin-Ashi Open, Close, High and Low calculation
+haClose = ohlc4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(nz(haOpen, high), nz(haClose, high), high)
+haLow = math.min(nz(haOpen, low), nz(haClose, low), low)
+
+// Function to calculate the Z-Score
+z_score(_series, _length) =>
+    _mean = ta.sma(_series, _length)
+    _stddev = ta.stdev(_series, _length)
+    (_series - _mean) / _stddev
+
+// Compute the score and its EMA
+score = z_score(ta.ema(haClose, 10), 25)
+emaScore = ta.ema(score, 20)
+
+// Calculate lower and upper thresholds using percentiles of EMA
+lowerBlue = ta.percentile_linear_interpolation(emaScore, 50, 10)
+upperBlue = ta.percentile_linear_interpolation(emaScore, 50, 90)
+
+// Calculate the middle line as 50th percentile
+middleLine = ta.percentile_linear_interpolation(emaScore, 50, 50) 
+
+// Plot the EMA of the score and the thresholds
+plot(emaScore,"The White Line", color=color.white, linewidth=2)
+plot(lowerBlue,"Lower Blue Line", linewidth=2)
+plot(upperBlue, "Upper Blue Line", linewidth=2)
+plot(middleLine, "Middle Yellow Line", linewidth=2, color=color.yellow)
+plot(score,"The Z-Score Mixed With EMA 10", color=color.green)
+
+// Calculate highest and lowest EMA score over 100 bars period
+highest = ta.highest(emaScore, 100)
+lowest = ta.lowest(emaScore, 100)
+
+// Plot highest and lowest EMA score lines 
+plot(highest, "Highest of emaScore", color=color.red, linewidth=2)
+plot(lowest, "Lowest of emaScore", color=color.red, linewidth=2)
+
+// Define entry and exit conditions for long and short positions
+longCon = ta.crossover(score, lowerBlue) or ta.crossover(emaScore, middleLine)
+addOn = ta.crossover(score, highest)
+shortCon = ta.crossunder(emaScore, upperBlue) or ta.crossunder(emaScore, lowerBlue) or ta.crossunder(emaScore, highest)
+
+// Execute trading logic based on conditions and after the start date
+if (time >= startDate)
+    if longCon
+        strategy.entry("Long", strategy.long)
+        if shortCon
+            strategy.close("Long")
+    if addOn
+        strategy.entry("LongNR2", strategy.long)
+        if shortCon
+            strategy.close("LongNR2")
+    
+    if shortCon
+        strategy.entry("Short", strategy.short)
+        if longCon
+            strategy.close("Short")
+
+View in Pine Editor・73 lines
+Use on chart
+1
+8
+2
+3
+6 820
+The Z-score, also known as the standard score, is a statistical measurement that describes a value's relationship to the mean of a group of values. It's measured in terms of standard deviations from the mean. If a Z-score is 0, it indicates that the data point's score is identical to the mean score. Z-scores may be positive or negative, with a positive value indicating the score is above the mean and a negative score indicating it is below the mean.
+
+The concept of Z-score was introduced by statistician Carl Friedrich Gauss as part of his "method of the least squares," which was an important step in the development of the normal distribution and Z-score tables. It's a key concept in statistics and is used in various statistical tests.
+
+In financial analysis, Z-scores are used to determine whether a data point is usual or unusual. You can think of it as a measure of how many standard deviations an element is from the mean. For instance, a Z-score of 1.0 would denote a value that is one standard deviation from the mean. Z-scores are also used to predict probabilities, with Z-scores having a distribution that is expected to be normal.
+
+In trading, a Z-score is used to determine how often a trading system may produce a string of winners or losers. It can help a trader to understand whether the losses or profits they see are something that the system would most likely produce, or if it's a once in a blue moon situation. This helps traders make decisions about when to start or stop a system.
+
+I just wanted to play a bit with the Z-score I guess.
+Feel free to share your findings if you discover additional applications for this strategy or identify timeframes where it appears to perform more optimally.
+
+How it works:
+
+This strategy is based on a statistical concept called Z-score, which measures the number of standard deviations a data point is from the mean. In other words, it helps determine how unusual or usual a data point is.
+
+In the context of this strategy, Z-score is applied to a 10-period EMA (Exponential Moving Average) of Heikin-Ashi candlestick close prices. The Z-score is calculated over a look-back period of 25 bars.
+
+The EMA of the Z-score is then calculated over a 20-bar period, and the upper and lower thresholds (bounds for buy and sell signals) are defined using the 90th and 10th percentiles of this EMA score.
+
+Long positions are taken when the Z-score crosses above the lower threshold or crosses above the mid-line (50th percentile). An additional long entry is made when the Z-score crosses above the highest value the EMA has been in the past 100 periods.
+
+Short positions are initiated when the EMA crosses below the upper threshold, lower threshold or the highest value the EMA has been in the past 100 periods.
+
+Positions are closed when opposing entry conditions are met, for example, a long position is closed when the short entry condition is true, and vice versa.
+
+Set your desired start date for the strategy. This can be modified in the timestamp("YYYY MM DD") function at the top of the script.

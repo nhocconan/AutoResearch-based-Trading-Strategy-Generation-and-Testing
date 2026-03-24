@@ -1,0 +1,109 @@
+//@version=6
+strategy("Supertrend + DEMA Strategy (Switchable, Fixed TP)", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=false)
+
+// ─── User Preference Switch ─────────────────────────────────────────────
+useNormalLogic = input.bool(true, "Use Normal Logic?", tooltip="If OFF, entries are reversed")
+
+// ─── Optimization Inputs ───────────────────────────────────────────────
+groupST   = "Supertrend Settings"
+groupEMA  = "DEMA Settings"
+groupRisk = "Profit Target Settings"
+
+atrPeriod    = input.int(10, "ATR Period", minval=1, maxval=500, step=1, group=groupST)
+atrMult      = input.float(3.0, "ATR Multiplier", minval=0.5, maxval=10, step=0.1, group=groupST)
+
+demaLength   = input.int(21, "DEMA Length", minval=5, maxval=300, step=1, group=groupEMA)
+
+profitTarget = input.float(1.5, "Profit Target (%)", minval=0.5, maxval=10, step=0.1, group=groupRisk)
+
+// ─── Supertrend Calculation ─────────────────────────────────────────────
+[supertrend, direction] = ta.supertrend(atrMult, atrPeriod)
+
+// ─── DEMA Function ─────────────────────────────────────────────────────
+dema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    2.0 * ema1 - ema2
+
+// ─── DEMA High & Low ────────────────────────────────────────────────────
+demaHigh = dema(high, demaLength)
+demaLow  = dema(low, demaLength)
+
+// ─── Entry Conditions ───────────────────────────────────────────────────
+longCondition  = ta.crossover(close, supertrend) and close > demaHigh and close > demaLow
+shortCondition = ta.crossunder(close, supertrend) and close < demaHigh and close < demaLow
+
+// ─── Exit Conditions ────────────────────────────────────────────────────
+longExitCondition  = close < supertrend and close < demaHigh and close < demaLow
+shortExitCondition = close > supertrend and close > demaHigh and close > demaLow
+
+// ─── Strategy Execution (Switchable) ────────────────────────────────────
+if useNormalLogic
+    if (longCondition)
+        strategy.entry("Long", strategy.long, comment="Normal Long")
+    if (shortCondition)
+        strategy.entry("Short", strategy.short, comment="Normal Short")
+else
+    if (longCondition)
+        strategy.entry("Short", strategy.short, comment="Reversed Short")
+    if (shortCondition)
+        strategy.entry("Long", strategy.long, comment="Reversed Long")
+
+// ─── Take Profit (Side-accurate, independent of mode) ──────────────────
+// Always compute TP from current position side and avg price.
+// This ensures correct TP even when entries are reversed.
+longTPPrice  = strategy.position_avg_price * (1 + profitTarget/100)
+shortTPPrice = strategy.position_avg_price * (1 - profitTarget/100)
+
+if (strategy.position_size > 0)
+    // We are in a long, TP must be above entry
+    strategy.exit(id="TP Long",  from_entry="Long",  limit=longTPPrice)
+
+if (strategy.position_size < 0)
+    // We are in a short, TP must be below entry
+    strategy.exit(id="TP Short", from_entry="Short", limit=shortTPPrice)
+
+// ─── Manual Exit Conditions (Switchable) ───────────────────────────────
+if useNormalLogic
+    if (longExitCondition and strategy.position_size > 0)
+        strategy.close("Long")
+    if (shortExitCondition and strategy.position_size < 0)
+        strategy.close("Short")
+else
+    if (longExitCondition and strategy.position_size < 0)
+        strategy.close("Short")
+    if (shortExitCondition and strategy.position_size > 0)
+        strategy.close("Long")
+
+// ─── Plotting (Realtime) ────────────────────────────────────────────────
+plot(supertrend, "Supertrend", color=color.orange, linewidth=2)
+plot(demaHigh, "DEMA High", color=color.green)
+plot(demaLow, "DEMA Low", color=color.red)
+plot(close, "Ongoing Candle Price", color=color.blue)
+
+// ─── Live Labels ────────────────────────────────────────────────────────
+var label liveLabel = na
+if barstate.islast
+    label.delete(liveLabel)
+    liveLabel := label.new(bar_index, close,
+      "Mode: " + (useNormalLogic ? "Normal" : "Reversed") +
+      "\nLive Price: " + str.tostring(close, format.mintick) +
+      "\nSupertrend: " + str.tostring(supertrend, format.mintick),
+      style=label.style_label_up, color=color.yellow, textcolor=color.black)
+
+View in Pine Editor・92 lines
+Use on chart
+5
+3
+1 141
+Supertrend line – a moving line that follows the price and shows whether the market is trending up or down.
+
+If the price goes above this line, it usually means the market is going up.
+
+If the price goes below, it usually means the market is going down.
+
+DEMA (Double Exponential Moving Average) – another line that smooths out price movements to spot trends more clearly.
+
+It calculates an average of prices but reacts faster than a normal moving average.
+
+

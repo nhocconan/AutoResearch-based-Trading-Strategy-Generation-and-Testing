@@ -1,0 +1,109 @@
+//@version=5
+strategy("Ichimoku Crosses_RSI_AIT", overlay=true)
+
+// 사용자 입력
+tenkanLength = input(21, title="Tenkan-sen 기간")
+kijunLength = input(120, title="Kijun-sen 기간")
+senkouBLength = input(52, title="Senkou Span B 기간")
+rsiLength = input(14, title="RSI 기간")
+rsiLongLevel = input(60, title="RSI 롱 진입 수준")
+rsiShortLevel = input(40, title="RSI 숏 진입 수준")
+
+// Ichimoku Cloud 계산
+tenkan = ta.sma(close, tenkanLength)
+kijun = ta.sma(close, kijunLength)
+senkouA = (tenkan + kijun) / 2
+senkouB = ta.sma(close, senkouBLength)
+chikou = close[26]
+
+// RSI 계산
+vrsi = ta.rsi(close, rsiLength)
+
+// 색상 설정
+redcolor = #D2042D
+orangecolor = #FF7900
+yellowcolor = #FFE812
+greencolor = #2DD204
+navybluecolor = #0088CC
+bluecolor = #0033A0
+purplecolor = #6524FF
+
+// 진입 조건
+longCondition = ta.crossover(tenkan, kijun) and vrsi >= rsiLongLevel
+shortCondition = ta.crossunder(tenkan, kijun) and vrsi <= rsiShortLevel
+
+// 청산 조건
+exitLongCondition = ta.crossunder(tenkan, kijun)
+exitShortCondition = ta.crossover(tenkan, kijun)
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+if (exitLongCondition)
+    strategy.close("Long")
+if (exitShortCondition)
+    strategy.close("Short")
+
+// 라인 표시
+plot(kijun, title="Kijun-sen", color=color.white, linewidth=1)
+plot(tenkan, title="Tenkan-sen", color=tenkan > kijun ? greencolor : redcolor, linewidth=2)
+
+// 포지션 진입 화살표 표시
+plotshape(series=longCondition, title="Long", location=location.belowbar, color=yellowcolor, style=shape.triangleup, size=size.tiny)
+plotshape(series=shortCondition, title="Short", location=location.abovebar, color=color.fuchsia, style=shape.triangledown, size=size.tiny)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+3
+3
+3 245
+Ichimoku Crosser_RSI_AIT
+Overview
+The "Ichimoku Cloud Crosses_AIT" strategy is a technical trading strategy that combines the Ichimoku Cloud components with the Relative Strength Index (RSI) to generate trade signals. This strategy leverages the crossovers of the Tenkan-sen and Kijun-sen lines of the Ichimoku Cloud, along with RSI levels, to identify potential entry and exit points for long and short trades. This guide explains the strategy components, conditions, and how to use it effectively in your trading.
+
+1. Strategy Parameters
+User Inputs
+Tenkan-sen Period (tenkanLength): Default value is 21. This is the period used to calculate the Tenkan-sen line (conversion line) of the Ichimoku Cloud.
+Kijun-sen Period (kijunLength): Default value is 120. This is the period used to calculate the Kijun-sen line (base line) of the Ichimoku Cloud.
+Senkou Span B Period (senkouBLength): Default value is 52. This is the period used to calculate the Senkou Span B line (leading span B) of the Ichimoku Cloud.
+RSI Period (rsiLength): Default value is 14. This period is used to calculate the Relative Strength Index (RSI).
+RSI Long Entry Level (rsiLongLevel): Default value is 60. This level indicates the minimum RSI value for a long entry signal.
+RSI Short Entry Level (rsiShortLevel): Default value is 40. This level indicates the maximum RSI value for a short entry signal.
+2. Strategy Components
+Ichimoku Cloud
+Tenkan-sen: A short-term trend indicator calculated as the simple moving average (SMA) of the highest high and the lowest low over the Tenkan-sen period.
+Kijun-sen: A medium-term trend indicator calculated as the SMA of the highest high and the lowest low over the Kijun-sen period.
+Senkou Span A: Calculated as the average of the Tenkan-sen and Kijun-sen, plotted 26 periods ahead.
+Senkou Span B: Calculated as the SMA of the highest high and lowest low over the Senkou Span B period, plotted 26 periods ahead.
+Chikou Span: The closing price plotted 26 periods behind.
+Relative Strength Index (RSI)
+RSI: A momentum oscillator that measures the speed and change of price movements. It ranges from 0 to 100 and is used to identify overbought or oversold conditions.
+3. Entry and Exit Conditions
+Entry Conditions
+Long Entry:
+The Tenkan-sen crosses above the Kijun-sen (bullish crossover).
+The RSI value is greater than or equal to the rsiLongLevel.
+Short Entry:
+The Tenkan-sen crosses below the Kijun-sen (bearish crossover).
+The RSI value is less than or equal to the rsiShortLevel.
+Exit Conditions
+Exit Long Position: The Tenkan-sen crosses below the Kijun-sen.
+Exit Short Position: The Tenkan-sen crosses above the Kijun-sen.
+4. Visual Representation
+Tenkan-sen Line: Plotted on the chart. The color changes based on its relation to the Kijun-sen (green if above, red if below) and is displayed with a line width of 2.
+Kijun-sen Line: Plotted as a white line with a line width of 1.
+Entry Arrows:
+Long Entry: Displayed as a yellow triangle below the bar.
+Short Entry: Displayed as a fuchsia triangle above the bar.
+5. How to Use
+Apply the Strategy: Apply the "Ichimoku Cloud Crosses_AIT" strategy to your chart in TradingView.
+Configure Parameters: Adjust the strategy parameters (Tenkan-sen, Kijun-sen, Senkou Span B, and RSI settings) according to your trading preferences.
+Interpret the Signals:
+Long Entry: A yellow triangle appears below the bar when a long entry signal is generated.
+Short Entry: A fuchsia triangle appears above the bar when a short entry signal is generated.
+Monitor Open Positions: The strategy automatically exits positions based on the defined conditions.
+Backtesting and Live Trading: Use the strategy for backtesting and live trading. Adjust risk management settings in the strategy properties as needed.
+Conclusion
+The "Ichimoku Cloud Crosses_AIT" strategy uses Ichimoku Cloud crossovers and RSI to generate trading signals. This strategy aims to capture market trends and potential reversals, providing a structured way to enter and exit trades. Make sure to backtest and optimize the strategy parameters to suit your trading style and market conditions before using it in a live trading environment.

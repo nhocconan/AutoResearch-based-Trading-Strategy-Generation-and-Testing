@@ -1,0 +1,74 @@
+//@version=3
+
+// To enable alerts: Change 'Strategy' to read 'Study' below  and you also need to comment out lines 43 and 47 - Strategy code
+
+strategy(title="Riz Coloured MACD", shorttitle="Riz MACD" , initial_capital=5000, default_qty_value=3  )
+//study(title="Riz Coloured MACD", shorttitle="Riz MACD")
+
+source = close
+fastLength = input(21, minval=1), slowLength=input(55,minval=1)
+signalLength=input(9,minval=1)
+MACDCandlesCheckedBack=input(6,minval=1)
+MACDTolerance=input(4,minval=1)
+
+fastMA = ema(source, fastLength)
+slowMA = ema(source, slowLength)
+macd = fastMA - slowMA
+signal = ema(macd, signalLength)
+hist = macd - signal
+
+// ====== BASIC COLOURING - IF HISTOGRAM IS HIGHER THAN PREVIOUS 2 CANDLES THEN WE ARE TICKING UP and VISA VERSA ============//
+
+isTickingUp = hist > hist[1] and hist > hist[2] //and hist > hist[3]
+isTickingDown = hist < hist[1] and hist < hist[2] // and hist < hist[3]
+
+
+// ======= MACD STRATEGY CODE ========== //
+
+// Check if MACD is ticking in the right direction to take a trade - adding 1 at the end means it starts at -1 so not to include the current candle
+MACDHistHighestHigh= highest(hist, MACDCandlesCheckedBack)[1]
+MACDHistLowestLow = lowest(hist, MACDCandlesCheckedBack)[1]
+
+MACDConfirmsLong() => (hist - MACDHistLowestLow) > MACDTolerance
+MACDConfirmsShort() => (MACDHistHighestHigh - hist) > MACDTolerance
+
+
+plot(macd,  title="MACD", color=blue, linewidth=3)
+plot(signal,  title="SIGNAL", color=orange, linewidth=3)
+
+// === SIMPLE COLOURING BASED ON LAST 2 CANDLES - EASY TO REFERENCE IN DAY TO DAY MACD USE ====//
+
+plot(hist, title="HIST", color=isTickingDown ? fuchsia : isTickingUp ? lime : green, linewidth=3, style=histogram)
+
+// ==== ALTERNATIVE COLOURING FOR PLOT BASED ON STRATEGY SETTINGS INSTEAD
+
+//plot(hist, title="HIST", color=MACDConfirmsLong() ? lime : MACDConfirmsShort() ? fuchsia : green, linewidth=3, style=histogram)
+
+
+// === STRATEGY - ENTER POSITIONS - COMMENT OUT TO ENABLE ALERTS === //
+
+strategy.entry(id = "Long", long = true, when = MACDConfirmsLong()) // use function to decide when to go long
+
+strategy.entry(id = "Short", long = false, when = MACDConfirmsShort())
+
+// === CREATE ALERT CONDITIONS === // 
+
+alertup = MACDConfirmsLong()
+alertdown = MACDConfirmsShort()
+
+alertcondition(alertup, title='MACD Long', message='Riz MACD says go LONG!')
+alertcondition(alertdown, title='MACD Short', message='Riz MACD says go SHORT!')
+
+View in Pine Editor・60 lines
+Use on chart
+8
+0
+1
+2 753
+This is a souped up common or garden MACD . The Histogram is coloured giving a clear visual representation of where we are UpTicking or DownTicking on the Histogram to help support trading decisions.
+
+When colour changes from pink to green market is bullish , and visa versa.
+
+Very useful as a supporting indicator to confirm other strategies, or even as a standalone strategy to some extent.
+
+Alerts are enabled by converting script from a Strategy to a Study, see comments in code.

@@ -1,0 +1,67 @@
+//@version=5
+strategy(title="Orderbug", overlay=true, shorttitle="RSI", pyramiding=10,  default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=20000)
+
+varip int orderNum=1
+
+if strategy.equity>1000 and year==2022 and month==1 and dayofmonth==5
+    if hour>=1 and hour<=10 and minute==0 and second==0
+        orderStr = str.tostring(orderNum)
+        name = "enter "+orderStr
+        strategy.entry(name , strategy.long)
+        strategy.exit("exit loss"+orderStr, from_entry=name, qty_percent=30, stop=close*0.98)
+        strategy.exit("exit profit"+orderStr, from_entry=name, qty_percent=30, limit=close*1.02)
+        orderNum := orderNum+1
+        
+    if hour == 23 and minute==0 and second==0
+        for i=1 to orderNum-1
+            orderStr = str.tostring(i)
+            name = "enter "+orderStr
+            strategy.close(name, qty_percent=100)
+
+View in Pine Editor・19 lines
+Use on chart
+2
+5
+1
+5 445
+This script demonstrate what I don't understand - according to documentation with order managements
+
+
+The from_entry parameter should execute the exit on this specified trade.
+
+The chart shows the right information, but the list of trades, in the Strategy tester panel doesn't make sense:
+
+This is an extract of the CSV file I got from this script:
+
+The enter1 is getting matched against 4 others entry names, each closing 30% of the position.
+
+
+10,Exit Long,exit loss2
+10,Entry Long,enter 3
+===================
+9,Exit Long,exit loss4
+9,Entry Long,enter 3
+==================
+8,Exit Long,exit loss4
+8,Entry Long,enter 2
+==================
+7,Exit Long,exit loss3
+7,Entry Long,enter 2
+===================
+6,Exit Long,exit loss8
+6,Entry Long,enter 2
+==================
+5,Exit Long,exit loss10
+5,Entry Long,enter 2
+==================
+4,Exit Long,exit loss10
+4,Entry Long,enter 1
+===================
+3,Exit Long,exit loss5
+3,Entry Long,enter 1
+===================
+2,Exit Long,exit loss9
+2,Entry Long,enter 1
+===================
+1,Exit Long,exit loss6
+1,Entry Long,enter 1

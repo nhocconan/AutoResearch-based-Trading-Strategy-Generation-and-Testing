@@ -1,0 +1,183 @@
+//@version=5
+strategy("DCA Strategy with Mean Reversion and Bollinger Band Three Combination", overlay=true, pyramiding= 1, default_qty_type = strategy.percent_of_equity,initial_capital=1200, default_qty_value=10 ,currency=currency.USD ,commission_type = strategy.commission.percent, commission_value = 0.2,slippage=300)
+
+// Inputs for investment amount, dates, and strategy mode
+investment_amount = input.float(10, title="Investment Amount (USD)", tooltip="Amount to be invested in each buy order (in USD)")
+open_date = input.time(timestamp("2018-01-01 00:00:00"), title="Open All Positions On", tooltip="Date when to start opening positions for DCA strategy")
+close_date = input.time(timestamp("2025-01-02 00:00:00"), title="Close All Positions On", tooltip="Date when to close all open positions for DCA strategy")
+strategy_mode = input.string("BB Mean Reversion", title="Strategy Mode", options=["BB Mean Reversion", "Monthly DCA", "Combined BB and Monthly DCA"], tooltip="Select the strategy mode: Bollinger Band Mean Reversion, Monthly DCA, or Combined")
+
+// Bollinger Band parameters
+source = input.source(title="Source", defval=close, group="Bollinger Band Parameter", tooltip="The price source to calculate the Bollinger Bands (e.g., closing price)")
+length = input.int(200, minval=1, title='Period', group="Bollinger Band Parameter", tooltip="Period for the Bollinger Band calculation (e.g., 200-period moving average)")
+mult = input.float(2, minval=0.1, maxval=50, step=0.1, title='Standard Deviation', group="Bollinger Band Parameter", tooltip="Multiplier for the standard deviation to define the upper and lower bands")
+tf = input.timeframe(title="Bollinger Band Timeframe", defval="240", group="Bollinger Band Parameter", tooltip="The timeframe used to calculate the Bollinger Bands (e.g., 4-hour chart)")
+
+// Calculate BB for the chosen timeframe using security
+[basis, bb_dev] = request.security(syminfo.tickerid, tf, [ta.ema(source, length), mult * ta.stdev(source, length)])
+upper = basis + bb_dev
+lower = basis - bb_dev
+
+// Plot Bollinger Bands
+plot(basis, color=color.red, title="Middle Band (EMA)")
+plot(upper, color=color.blue, title="Upper Band")
+plot(lower, color=color.blue, title="Lower Band")
+fill(plot(upper), plot(lower), color=color.blue, transp=90)
+
+// Define buy conditions
+// Condition 1: Bollinger Band Mean Reversion (price crosses under Lower Band)
+buy_condition_bb = ta.crossunder(source, lower)
+
+// Condition 2: Monthly DCA (buy on the 1st of each month)
+is_first_day = dayofmonth == 1 and ta.change(month) // Check if it's the 1st day of the month
+buy_condition_monthly = is_first_day
+
+// Condition 3: Combined BB Mean Reversion and Monthly DCA
+buy_condition_combined = buy_condition_bb or is_first_day
+
+// Select buy condition based on strategy mode
+var bool buy_condition = false
+if strategy_mode == "BB Mean Reversion"
+    buy_condition := buy_condition_bb
+else if strategy_mode == "Monthly DCA"
+    buy_condition := buy_condition_monthly
+else if strategy_mode == "Combined BB and Monthly DCA"
+    buy_condition := buy_condition_combined
+
+// Execute buy orders based on selected condition
+if (buy_condition and time >= open_date and time <= close_date)
+    strategy.order("DCA Buy", strategy.long, qty=investment_amount / close)
+
+// Close all positions on the specified date
+if (time >= close_date)
+    strategy.close_all()
+
+// Track and apply background color
+var color bgColor = na
+if close > upper
+    bgColor := color.red
+else if close < lower
+    bgColor := color.green
+bgcolor(bgColor, transp=90, title="Background Color Based on Bollinger Bands")
+
+// Postscript:
+
+// 1. Configuration of Initial Capital:
+//    - After setting the "Investment Amount (USD)" in the input box, proceed with additional configuration.
+//    - Navigate to the "Properties" section and adjust the "Initial Capital" value by calculating it as the product of "Total Closed Trades" and "Investment Amount (USD)".
+//    - This ensures that the backtest results accurately reflect the actual investment values.
+//    - Examples:
+//      - Investment Amount (USD) = 10 USD, Total Closed Trades = 10, Initial Capital = 10 × 10 = 100 USD
+//      - Investment Amount (USD) = 20 USD, Total Closed Trades = 24, Initial Capital = 24 × 20 = 480 USD
+
+// 2. Strategy Evaluation and Stop-Loss Approach:
+//    - This system utilizes a fundamentals-based stop-loss (Fundamentals Stoploss) instead of a technical stop-loss, focusing on underlying asset fundamentals rather than short-term price movements.
+//    - The performance evaluation is tailored to assess the effectiveness of the Dollar-Cost Averaging (DCA) accumulation process.
+//    - Consequently, traditional metrics such as Win Rate and Profit Factor hold less significance in this testing context.
+//    - The primary focus is on achieving long-term accumulation of assets at favorable average prices, aligning with the DCA philosophy of minimizing timing risk and building positions gradually over time.
+
+View in Pine Editor・77 lines
+Use on chart
+6
+2
+9
+2
+9 319
+Dec 10, 2024
+DCA Strategy with Mean Reversion and Bollinger Band
+
+The Dollar-Cost Averaging (DCA) Strategy with Mean Reversion and Bollinger Bands is a sophisticated trading strategy that combines the principles of DCA, mean reversion, and technical analysis using Bollinger Bands. This strategy aims to capitalize on market corrections by systematically entering positions during periods of price pullbacks and reversion to the mean.
+
+Key Concepts and Principles
+1. Dollar-Cost Averaging (DCA)
+DCA is an investment strategy that involves regularly purchasing a fixed dollar amount of an asset, regardless of its price. The idea behind DCA is that by spreading out investments over time, the impact of market volatility is reduced, and investors can avoid making large investments at inopportune times. The strategy reduces the risk of buying all at once during a market high and can smooth out the cost of purchasing assets over time.
+
+In the context of this strategy, the Investment Amount (USD) is set by the user and represents the amount of capital to be invested in each buy order. The strategy executes buy orders whenever the price crosses below the lower Bollinger Band, which suggests a potential market correction or pullback. This is an effective way to average the entry price and avoid the emotional pitfalls of trying to time the market perfectly.
+
+2. Mean Reversion
+Mean reversion is a concept that suggests prices will tend to return to their historical average or mean over time. In this strategy, mean reversion is implemented using the Bollinger Bands, which are based on a moving average and standard deviation. The lower band is considered a potential buy signal when the price crosses below it, indicating that the asset has become oversold or underpriced relative to its historical average. This triggers the DCA buy order.
+
+Mean reversion strategies are popular because they exploit the natural tendency of prices to revert to their mean after experiencing extreme deviations, such as during market corrections or panic selling.
+
+3. Bollinger Bands
+Bollinger Bands are a technical analysis tool that consists of three lines:
+
+Middle Band: The moving average, usually a 200-period Exponential Moving Average (EMA) in this strategy. This serves as the "mean" or baseline.
+Upper Band: The middle band plus a certain number of standard deviations (multiplier). The upper band is used to identify overbought conditions.
+Lower Band: The middle band minus a certain number of standard deviations (multiplier). The lower band is used to identify oversold conditions.
+In this strategy, the Bollinger Bands are used to identify potential entry points for DCA trades. When the price crosses below the lower band, this is seen as a potential opportunity for mean reversion, suggesting that the asset may be oversold and could reverse back toward the middle band (the EMA). Conversely, when the price crosses above the upper band, it indicates overbought conditions and signals potential market exhaustion.
+
+4. Time-Based Entry and Exit
+The strategy has specific entry and exit points defined by time parameters:
+
+Open Date: The date when the strategy begins opening positions.
+Close Date: The date when all positions are closed.
+This time-bound approach ensures that the strategy is active only during a specified window, which can be useful for testing specific market conditions or focusing on a particular time frame.
+
+5. Position Sizing
+Position sizing is determined by the Investment Amount (USD), which is the fixed amount to be invested in each buy order. The quantity of the asset to be purchased is calculated by dividing the investment amount by the current price of the asset (investment_amount / close). This ensures that the amount invested remains constant despite fluctuations in the asset's price.
+
+6. Closing All Positions
+The strategy includes an exit rule that closes all positions once the specified close date is reached. This allows for controlled exits and limits the exposure to market fluctuations beyond the strategy's timeframe.
+
+7. Background Color Based on Price Relative to Bollinger Bands
+The script uses the background color of the chart to provide visual feedback about the price's relationship with the Bollinger Bands:
+
+Red background indicates the price is above the upper band, signaling overbought conditions.
+Green background indicates the price is below the lower band, signaling oversold conditions.
+This provides an easy-to-interpret visual cue for traders to assess the current market environment.
+
+Postscript: Configuring Initial Capital for Backtesting
+To ensure the backtest results align with the actual investment scenario, users must adjust the Initial Capital in the TradingView strategy properties. This is done by calculating the Initial Capital as the product of the Total Closed Trades and the Investment Amount (USD). For instance:
+
+If the user is investing 100 USD per trade and has 10 closed trades, the Initial Capital should be set to 1,000 USD.
+Similarly, if the user is investing 200 USD per trade and has 24 closed trades, the Initial Capital should be set to 4,800 USD.
+This adjustment ensures that the backtesting results reflect the actual capital deployed in the strategy and provides an accurate representation of potential gains and losses.
+
+Conclusion
+The DCA strategy with Mean Reversion and Bollinger Bands is a systematic approach to investing that leverages the power of regular investments and technical analysis to reduce market timing risks. By combining DCA with the insights offered by Bollinger Bands and mean reversion, this strategy offers a structured way to navigate volatile markets while targeting favorable entry points. The clear entry and exit rules, coupled with time-based constraints, make it a robust and disciplined approach to long-term investing.
+Jul 4, 2025
+Release Notes
+DCA Strategy with Mean Reversion and Bollinger Band
+
+The "DCA Strategy with Mean Reversion and Bollinger Band" is a strategically designed investment system that integrates the concept of Dollar-Cost Averaging (DCA) with the mean reversion principle, utilizing Bollinger Bands and monthly accumulation strategies.
+
+The primary objective of this strategy is to cater to the needs of working professionals who aim to manage portfolio risks and gradually accumulate high-quality assets over the long term without requiring a large initial lump-sum investment. The strategy offers significant flexibility, allowing users to select from three operational modes:
+
+- Bollinger Band Mean Reversion
+- Monthly DCA
+- Combined BB and Monthly DCA
+
+Each mode employs a distinct approach to purchasing assets, as outlined below:
+
+Bollinger Band Mean Reversion Mode
+
+In the Bollinger Band Mean Reversion mode, the strategy focuses on purchasing assets when their price falls below the lower Bollinger Band, signaling that the price is below its typical average (mean) for the month and has a high likelihood of reverting to the mean in the future. Bollinger Bands are calculated using the Exponential Moving Average (EMA) and a standard deviation of ±2 (±2 S.D.) over a one-month period. Users can select the timeframe for calculation, such as a 4-hour (4h) timeframe. For example, with a Bollinger Band period of 200 bars on a 4-hour timeframe, the EMA reflects the exponential average over a one-month market period. Alternatively, a 30-bar period on a daily timeframe can achieve a similar reflection of the monthly exponential average. The lower Bollinger Band serves as an indicator of a potential reversal to the mean, as it represents an outlier at -2 S.D., outside the normal distribution. This mode is ideal for investors seeking to capitalize on price dips.
+
+Monthly DCA Mode
+
+In the Monthly DCA mode, the strategy emphasizes consistent accumulation by purchasing assets in equal monetary amounts on the 2nd of each month, regardless of the prevailing price level. This approach mitigates the impact of short-term price volatility through regular investment, enabling users to accumulate assets at a reasonable average price over the long term. This mode is well-suited for investors who prefer simplicity and wish to minimize timing risks associated with market fluctuations.
+
+Combined BB and Monthly DCA Mode
+
+The Combined BB and Monthly DCA mode integrates both approaches, purchasing assets when the price falls below the lower Bollinger Band (-2 S.D. in a one-month period), similar to the Bollinger Band Mean Reversion mode, while also executing a purchase on the 2nd of each month, akin to the Monthly DCA mode. This hybrid approach enhances opportunities to buy at prices below the monthly average while maintaining the consistency of monthly DCA investments. It is suitable for investors seeking both flexibility and continuity in their investment strategy.
+
+Strategy Testing
+
+To test the strategy, users can specify the start date for investments (Open Date) and the date to close all positions (Close Date) to evaluate the strategy’s profit and loss (PNL). Users can also define the investment amount per transaction (Investment Amount), such as $10 per purchase. Each time a buy signal is triggered according to the selected mode, the strategy allocates this fixed amount, ensuring an even distribution of capital. To ensure accurate backtesting results, users must set the Initial Capital in the "Properties" section, calculated by multiplying the total number of expected trades (Total Closed Trades) by the Investment Amount. For instance, if the Investment Amount is $10 and there are 24 trades, the Initial Capital should be set to $240. This setting ensures that backtesting outcomes align with the actual capital deployed.
+
+Visual Display
+
+The strategy displays Bollinger Bands on the price chart, consisting of three components:
+
+The Exponential Moving Average (Middle Band), calculated over a user-defined period (default: 200 bars on a 4-hour timeframe), representing the mean.
+
+The Upper Band, calculated at +2 S.D. from the EMA, indicating overbought conditions where the price may be considered too high.
+
+The Lower Band, calculated at -2 S.D. from the EMA, signaling oversold conditions and serving as a buy signal for the Mean Reversion mode.
+
+Additionally, the strategy uses background colors to indicate price conditions: green for prices below the lower band (indicating buying opportunities) and red for prices above the upper band (suggesting overpriced conditions). These visual cues assist users in analyzing and making informed decisions.
+
+Advantages of the Strategy
+
+This strategy is highly flexible, allowing users to select a mode that aligns with their investment style and market conditions, whether it’s timing the market with Bollinger Bands, maintaining consistent accumulation through Monthly DCA, or combining both approaches. By defining specific start and close dates, the strategy enables precise control over the investment period, reducing exposure to short-term volatility and enhancing opportunities to accumulate quality assets at favorable prices. This makes the strategy suitable for both novice and experienced investors seeking a clear, measurable, and efficient long-term investment system.

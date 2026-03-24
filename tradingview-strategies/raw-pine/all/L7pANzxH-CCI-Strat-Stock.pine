@@ -1,0 +1,20 @@
+//@version=4
+strategy("CCI_Strat_Stock", overlay=true)
+
+lookback = input(2,minval=1)
+
+longCondition = cci(close[lookback],6) > cci(close[lookback],14) and crossover(cci(close,14),-50)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = cci(close[lookback],6) < cci(close[lookback],14) and crossunder(cci(close,14),50)
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・12 lines
+Use on chart
+2
+7
+6
+4 490
+CCI_Strat_Stock

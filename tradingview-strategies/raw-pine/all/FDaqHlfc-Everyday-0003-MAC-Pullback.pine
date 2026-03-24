@@ -1,0 +1,82 @@
+//@version=2
+strategy("MAC Pullback", overlay=true)
+
+// Setting up timeperiod for testing
+startPeriodYear = input(2014, "Backtest Start Year")
+startPeriodMonth = input(1, "Backtest Start Month")
+startPeriodDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(startPeriodYear, startPeriodMonth, startPeriodDay, 0, 0)
+
+stopPeriodYear = input(2015, "Backtest Stop Year")
+stopPeriodMonth = input(12, "Backtest Stop Month")
+stopPeriodDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(stopPeriodYear, stopPeriodMonth, stopPeriodDay, 0, 0)
+
+// Moving Averages
+ema14 = ema(close, 14)
+ema28 = ema(close, 28)
+sma56 = sma(close, 56)
+
+// Plot
+plot(ema14, title="ema14", linewidth=2, color=green)
+plot(ema28, title="ema28", linewidth=2, color=red)
+plot(sma56, title="sma56", linewidth=3, color=blue)
+
+
+// Strategy
+goLong = cross(ema14, sma56) and ema14 > ema28
+goShort = cross(ema14, sma56) and ema14 < ema28
+
+
+// Locate Swing Lows
+leftBars = input(20)
+rightBars=input(20)
+swinglow = pivotlow(close, leftBars, rightBars)
+plot(swinglow, style=cross, linewidth=8, color=#00FF00, offset=-rightBars)
+
+if goLong == true and time >= testPeriodStart and time <= testPeriodStop
+    // We try to make sure that we're catching the first Pullback after the crossover
+    if ema14[12] < sma56[12] 
+        pivotpoint = lowest(40)[0] //lowest value of the month as our swing low
+        
+        // We calculate a Fib 1.272 extension (from the previous swing low to 
+        // the crossover long entry's open) and use this as our entry target to short the Pullback
+        extensiontarget = ((close[1] - pivotpoint) * 1.27) + pivotpoint
+        shorttarget = ((close[1] - pivotpoint) * 0.618) + pivotpoint        
+        
+        strategy.order("Pullback", strategy.short, 5.0, limit=extensiontarget)
+        // I would like to use a trailing stop but for know we just hope to get 
+        // filled if the pullback reaches all the way down to the 0.618.
+        // We also place a tight stop loss since we trying to short an uptrend
+        strategy.exit("Pullback Exit", "Pullback", limit=shorttarget, loss=400)
+
+View in Pine Editor・51 lines
+Use on chart
+4
+5
+3
+13
+13 862
+I recently posted a Moving Averge Crossover strategy for my Everyday project - a project I've given myself where I try to create one strategy everyday in between 15 minutes and 2 hours.
+
+In the comments of my last published idea, user SignalTradersUK was very kind and suggested I try the following in my next study:
+"i think your next study should be, to workout what to do after the Moving Average cross! If you look just on the chart you have posted, Price would appear to always come back to the levels where the 2 MA's cross and then go back in the direction of the crossing of the MA's. It's a great pull back strategy."
+
+I'm really just beginning to learn about coding strategies so I'm not 100% sure I correctly understood his suggestion.
+I admit I had difficulties wrapping my head around how to do this.
+Anyway, the result is a strategy which runs alongside the main Moving Average Crossover.
+
+'The Algorithm'
+When the fast and slow MA cross the strategy traces back 40 days to find a swing low.
+This swing low and the price at the MA cross is used to calculate a fib 1.272 extension.
+The price at this 1.272 extension is used to place a Pullback short order.
+Since we're shorting a bull trend, a tight stop is used.
+If the pullback reaches down to the fib 0.618 we take profit (close the short).
+
+Like I said, I don't know if I correctly understood SignalTradersUK feedback, but I really appreciate the
+feedback and advice!
+
+As always I'm hoping to learn from the community, so all feedback, corrections and advice is very welcome!
+Thanks!
+/pbergden
+

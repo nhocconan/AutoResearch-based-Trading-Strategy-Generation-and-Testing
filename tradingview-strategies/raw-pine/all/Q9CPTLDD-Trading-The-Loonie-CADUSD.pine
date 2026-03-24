@@ -1,0 +1,98 @@
+//@version=3
+//
+// A port of the trading strategy described at http://technical.traders.com/content/TTlink.asp?mo=12&yr=2015
+//
+// "In “Trading The Loonie,” which appeared in the December 2015 issue of STOCKS & COMMODITIES, author Markos Katsanos
+// explains the heavy correlation between the Canadian dollar and crude oil. He then goes on to describe how one could
+// trade this correlation. Using similar logic as that employed in Bollinger Bands, Katsanos has built a study to 
+// provide buy and sell signals for trading the Canadian dollar future."
+//
+//  See Also:
+//    - Backtesting and forwardtesting (of TradingView Strategies) <https://www.tradingview.com/wiki/Strategies#Backtesting_and_forwardtesting>
+//    - 9 Mistakes Quants Make that Cause Backtests to Lie (https://blog.quantopian.com/9-mistakes-quants-make-that-cause-backtests-to-lie-by-tucker-balch-ph-d/)
+//    - When Backtests Meet Reality (http://financial-hacker.com/Backtest.pdf)
+//    - Why MT4 backtesting does not work (http://www.stevehopwoodforex.com/phpBB3/viewtopic.php?f=28&t=4020)
+//
+// 
+// -----------------------------------------------------------------------------
+// Copyright 2018 sherwind
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// The GNU General Public License can be found here
+// <http://www.gnu.org/licenses/>.
+//
+// -----------------------------------------------------------------------------
+//
+
+strategy("Trading The Loonie (CADUSD)", overlay=true)
+
+input_sym    = input("TVC:USOIL", title="Secondary Symbol", type=symbol, confirm=true)
+input_length = input(20, title="BB Divergence Length", minval=1)
+
+
+bb(src, len) =>
+    dev = stdev(src, len)
+    1 + ((src - sma(src, len) + 2 * dev) / (4 * dev + 0.0001))
+
+bb_divergence(src_a, src_b, len) =>
+    bb_a = bb(src_a, len)
+    bb_b = bb(src_b, len)
+    (bb_a - bb_b)/bb_b * 100
+
+stoch_k(len, smooth_k) => sma(stoch(close, high, low, len), smooth_k)    
+
+sym_src = security(input_sym, period, close)
+bb_div = bb_divergence(sym_src, close, input_length)
+[the_macd, macd_signal, _] = macd(close, 12, 26, 9)
+
+buy = highest(bb_div, 3) > 20 and change(bb_div, 1) < 0 and
+  roc(close, 2) > 0 and change(sma(sym_src, 40), 2) > 0 and
+  correlation(close, sym_src, 20) > -0.4
+ 
+sell = (crossover(macd_signal, the_macd) and stoch_k(30, 3) > 85) or
+  (lowest(bb_div, 3) < -20 and roc(sym_src, 3) < -3) or
+  (close < lowest(low, 15)[1] and correlation(close, sym_src, 60) < -0.4)
+  
+short = lowest(bb_div, 3) < -20 and change(bb_div, 1) > 0 and
+  roc(close, 2) < 0 and change(sma(sym_src, 40), 2) < 0 and
+  correlation(close, sym_src, 20) > -0.4
+ 
+cover = (crossunder(macd_signal, the_macd) and stoch_k(30, 3) < 25 and sym_src >= (1 + 4/100) * lowest(sym_src, 4)) or
+  (highest(bb_div, 3) > 20 and roc(sym_src, 3) > 4.5) or
+  (close > highest(high, 15)[1] and correlation(close, sym_src, 60) < -0.4)
+
+
+strategy.entry("long", true, when = buy)
+strategy.close("long", when = sell)
+strategy.entry("short", false, when = short)
+strategy.close("short", when = cover)
+
+View in Pine Editor・77 lines
+Use on chart
+4
+2
+2 779
+A port of the trading strategy described at technical.traders.com/content/TTlink.asp?mo=12&yr=2015
+
+
+"In “Trading The Loonie,” which appeared in the December 2015 issue of STOCKS & COMMODITIES, author Markos Katsanos
+explains the heavy correlation between the Canadian dollar and crude oil. He then goes on to describe how one could
+trade this correlation. Using similar logic as that employed in Bollinger Bands, Katsanos has built a study to
+provide buy and sell signals for trading the Canadian dollar future."
+
+See Also:
+- Backtesting and forwardtesting (of TradingView Strategies) <tradingview.com/wiki/Strategies
+- 9 Mistakes Quants Make that Cause Backtests to Lie (blog.quantopian.com/9-mistakes-quants-make-that-cause-backtests-to-lie-by-tucker-balch-ph-d/)
+
+- When Backtests Meet Reality (financial-hacker.com/Backtest.pdf)
+
+- Why MT4 backtesting does not work (stevehopwoodforex.com/phpBB3/viewtopic.php?f=28&t=4020)

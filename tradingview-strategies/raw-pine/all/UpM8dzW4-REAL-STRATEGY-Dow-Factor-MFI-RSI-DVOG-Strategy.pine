@@ -1,0 +1,343 @@
+//@version=4
+
+//MIT License
+
+//Copyright (c) 2019 user-Noldo
+
+//Permission is hereby granted, free of charge, to any person obtaining a copy
+//of this software and associated documentation files (the "Software"), to deal
+//in the Software without restriction, including without limitation the rights
+//to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//copies of the Software, and to permit persons to whom the Software is
+//furnished to do so, subject to the following conditions:
+
+//The above copyright notice and this permission notice shall be included in all
+//copies or substantial portions of the Software.
+
+//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//SOFTWARE.
+
+
+strategy("Dow Factor RSI/MFI and Dependent Variable Odd Generator Strategy",shorttitle = "Dow_Factor RSI/MFI Strategy v2.0", overlay = false, default_qty_type=strategy.percent_of_equity,commission_type=strategy.commission.percent, commission_value=0.125, default_qty_value=100 )
+src = close 
+lights   = input(title="Barcolor I / 0 ? ", options=["ON", "OFF"], defval="OFF")
+method   = input(title="METHOD", options=["MFI", "RSI"], defval="RSI")
+adaptive = input(title="Market Type ", options=["MARKETS EXCLUDING USD/X", "FX USD/X",  "CRYPTOCURRENCIES"], defval="MARKETS EXCLUDING USD/X")
+
+length = input(14, minval=4,maxval = 14, title = "Strategy Period")
+
+// DEFINITION : INDEXES 
+
+// For Global Markets
+
+index = security('SP:SPX' , timeframe.period, close)
+
+// For Cryptocurrency
+
+crypto_index = security('CRYPTOINDEX:CIX100' , timeframe.period, close)
+
+
+// Switchable Index Selector : 
+
+float _index = na 
+
+
+if (adaptive=="MARKETS EXCLUDING USD/X")
+
+    _index:= index
+    
+if (adaptive=="FX USD/X")
+
+    _index:= -index 
+    
+if (adaptive=="CRYPTOCURRENCIES")
+
+    _index:= crypto_index
+
+
+// Essential Functions 
+
+// Function Sum 
+
+f_sum(_src , _length) => 
+
+    _output  = 0.00 
+    
+    _length_adjusted = _length < 1 ? 1 : _length
+    
+    for i = 0 to _length_adjusted-1
+        _output := _output + _src[i]
+
+
+f_sma(_src, _length)=>
+    _length_adjusted = _length < 1 ? 1 : _length
+    float _sum = 0
+    for _i = 0 to (_length_adjusted - 1)
+        _sum := _sum + _src[_i]
+    _return = _sum / _length_adjusted
+   
+
+// Unlocked Exponential Moving Average Function
+
+f_ema(_src, _length)=>
+    _length_adjusted = _length < 1 ? 1 : _length
+    _multiplier = 2 / (_length_adjusted + 1)
+    _return  = 0.00
+    _return := na(_return[1]) ? _src : ((_src - _return[1]) * _multiplier) + _return[1]
+
+
+// Function Standard Deviation
+
+f_stdev(_src,_length) =>
+
+    float _output = na 
+    _length_adjusted = _length < 2 ? 2 : _length
+    _avg  = f_ema(_src , _length_adjusted)
+    evar  = (_src - _avg) * (_src - _avg)
+    evar2 = ((f_sum(evar,_length_adjusted))/_length_adjusted)
+    
+    _output := sqrt(evar2)
+
+
+// Function Pearson Correlation
+
+f_pearson_corr(_src1, _src2, _length) =>
+
+    _length_adjusted = _length < 2 ? 2 : _length
+    _ema1 = f_sma(_src1, _length_adjusted)
+    _ema2 = f_sma(_src2, _length_adjusted)
+    isum = 0.0
+    for i = 0 to _length_adjusted - 1
+        isum := isum + (_src1[i] - _ema1) * (_src2[i] - _ema2)
+    isumsq1 = 0.0
+    for i = 0 to _length_adjusted - 1
+        isumsq1 := isumsq1 + pow(_src1[i] - _ema1, 2)
+    isumsq2 = 0.0
+    for i = 0 to _length_adjusted - 1
+        isumsq2 := isumsq2 + pow(_src2[i] - _ema2, 2)
+    pcc = isum/(sqrt(isumsq1*isumsq2))
+    pcc
+
+
+// Function Multiple Index Pearson Correlation (3 - way)
+// dep = dependent (z) ,  indep = independent variables (x , y)
+
+f_multiple_corr(_dep1,_indep1,_indep2 , _length) =>
+    _length_adjusted = _length < 2 ? 2 : _length 
+    float _output = na 
+    
+    r_xz = f_pearson_corr(_indep1 , _dep1   , _length_adjusted)
+    r_yz = f_pearson_corr(_indep2 , _dep1   , _length_adjusted)
+    r_xy = f_pearson_corr(_indep1 , _indep2 , _length_adjusted)
+    
+    _output := sqrt((pow(r_xz , 2) + pow(r_yz , 2) - 2 * r_xz * r_yz * r_xy) / (1 - pow(r_xy , 2)))
+    
+
+f_adjusted_r_squared(_dep1,_indep1,_indep2,_length) =>
+    _length_adjusted = _length < 2 ? 2 : _length 
+    float _output = na
+    
+    r_squared = f_multiple_corr(_dep1,_indep1,_indep2,_length_adjusted)
+    _output := 1 - (((1 - pow(r_squared,2)) * (_length_adjusted - 1)) / (_length_adjusted - 3))
+
+
+// Dow Theory Cycles 
+
+
+dow_coeff = f_adjusted_r_squared(src,volume,_index,length)
+
+dow_bull_factor = (1 + dow_coeff)
+dow_bear_factor = (1 - dow_coeff)
+
+
+// MONEY FLOW INDEX =====> FOR BULL OR BEAR MARKET (CLOSE)
+
+
+upper_s = f_sum(volume * (change(src) <= 0 ? 0 : src), length)
+lower_s = f_sum(volume * (change(src) >= 0 ? 0 : src), length)
+
+_market_index = rsi(upper_s, lower_s)
+
+
+// RSI (Close)
+
+// Function RMA 
+
+f_rma(_src, _length) =>
+    _length_adjusted = _length < 1 ? 1 : _length
+    alpha = _length_adjusted
+    sum = 0.0
+    sum := (_src + (alpha - 1) * nz(sum[1])) / alpha
+
+
+// Function Relative Strength Index (RSI)
+
+f_rsi(_src, _length) => 
+
+    _output = 0.00 
+    _length_adjusted = _length < 0 ? 0 : _length
+
+    u = _length_adjusted < 1 ? max(_src - _src[_length_adjusted], 0) : max(_src - _src[1] , 0) // upward change
+    d = _length_adjusted < 1 ? max(_src[_length_adjusted] - _src, 0) : max(_src[1] - _src , 0) // downward change
+    rs = f_rma(u, _length) / f_rma(d, _length)
+    res = 100 - 100 / (1 + rs)
+    res
+
+
+_rsi = f_rsi(src, length)
+
+
+// Switchable Method Codes 
+
+_method = 0.00 
+
+
+if (method=="MFI")
+
+    _method:= _market_index 
+    
+if (method=="RSI")
+
+    _method:= _rsi   
+    
+
+// Conditions  
+
+_bull_gross  = (_method )
+_bear_gross  = (100 - _method )
+
+
+// Market Types with Dow Factor
+
+_temp_bull_gross     =  _bull_gross     * (1 + dow_bull_factor)       
+
+_temp_bear_gross     =  _bear_gross     * (1 + dow_bear_factor) 
+
+
+// Addition : Odds with Stagnant Market 
+
+
+_coeff_normal = (_temp_bull_gross + _temp_bear_gross) / 100
+
+
+// ********* OUR RSI / MFI VALUE ***********
+
+_value        = _temp_bull_gross / _coeff_normal
+
+
+//----------------------------------------------------------------------
+// Strategy 
+
+if (_value > 50.00)
+    strategy.entry("Long", strategy.long, comment="Long")
+
+
+if (_value < 50.00)
+    strategy.entry("Short", strategy.short, comment="Short")
+
+//----------------------------------------------------------------------
+
+zero    = 0 
+hundred = 100
+
+color_dowrsi = _value > 50.00 ? color.new(color.green,0) : _value <= 50.00 ? color.new(color.red,0) : na
+color_hist   = _value > 50.00 ? color.new(color.teal,60) : _value <= 50.00 ? color.new(color.maroon,60) : na
+
+// Plot Data 
+
+// Plot DOW Factor RSI
+
+plot(_value ,style=plot.style_histogram,linewidth=2, color = color_hist, title = "Histogram")
+plot(_value ,color = color_dowrsi , linewidth = 2 , title = "DOW F-RSI" , transp = 0)
+
+// Plot border lines
+
+plot(zero     ,style = plot.style_line , color = color.new(color.silver,30) , linewidth = 1 ,editable = false)
+plot(hundred  ,style = plot.style_line , color = color.new(color.silver,30) , linewidth = 1 ,editable = false)
+
+
+// Switchable Barcolor ( On / Off)
+
+_lights = 0.00 
+
+
+if (lights=="ON")
+
+    _lights:= 1.00
+    
+if (lights=="OFF")
+
+    _lights:= -1.00   
+
+
+bcolor_on  = _lights ==  1.00
+bcolor_off = _lights == -1.00
+
+
+barcolor((_value > 50.00 and bcolor_on)    ? color.green : (_value < 50.00 and bcolor_on) ? color.red : na)
+
+
+// Alerts 
+
+alertcondition(_value > 50 , title='Long' , message=' Buy  Signal ')
+alertcondition(_value < 50 , title='Short', message=' Sell Signal ')
+
+View in Pine Editor・288 lines
+Use on chart
+8
+3
+5
+4
+23 977
+Oct 8, 2019
+I'm actually one of those who think it's more important to extract clues from indicators than strategy, but I wanted to test the data about the probability and dow factor I've shared for a long time.
+Usually, Bitcoin is used as an eye stain for strategy success, since the graph has increased significantly from the beginning.
+To prevent this, I used a commission and in the last lines of document I shared Bitmex's Bitcoin and Ethereum 1W test results.
+I don't think there's a factor to repaint. ( Warn me if u see or observe )
+I considered Bitcoin because I found working with liquid parities much more realistic.
+Ethereum and Bitmex have been featured as a spot and may soon find a place at the CME , so I've evaluated the Ethereum .
+But since the Ethereum Bitmex was also spot new, I deleted results that were less than 10 closed trades.
+Since the Dow Theory also looks at the harmony in the indices, just try it in the Cryptocurrency market.
+Use as indicator in other markets. Support with channels, trend lines with big periods and other supportive indicators.
+And my personal suggestion : Use this script and indicator TF : 4H and above.
+
+Specifications :
+Commission. ( % 0.125 )
+Switchable Methods ( Relative Strength Index / Money Flow Index )
+Alarms. (Buy / Sell )
+Position closure when horizontal market rates weighs.
+Progressive gradual buy/sell alarms.
+Clean code layout that will not cause repaint. (Caution : source = close )
+Switchable barcolor option (I / 0 )
+
+
+*****Test results :*****
+drive.google.com/file/d/1XsR1LjhNHwgIBOP3tsRUsW9IBuBnivT-/view
+
+
+Summary:
+It was a realistic test.
+It has achieved great success in some markets, but as I mentioned earlier, use it only to gain insight into the price movements of cryptos.
+Use as indicator in other markets.
+
+This code is open source under the MIT license. If you have any improvements or corrections to suggest, please send me a pull request via the github repository : github.com/user-Noldo
+
+
+Stay tuned ! Noldo.
+Oct 12, 2019
+Release Notes
+Update : Dow Factor MFI/RSI Strategy v2.0
+The index factor in the Dow theory was taken into account .
+It now takes into account the effect of volume and index - independent variable, the price(source-close) - dependent variable.
+Before starting the analysis, select the relevant market from the menu, the system will set the appropriate index itself.
+Factor loads were adjusted.Design changed.
+
+Now it's much more realistic.
+Results are given for Brent oil, as it contains more price data.
+Suitable for all instruments.
+Can be used to get ideas in analysis.

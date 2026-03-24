@@ -1,0 +1,553 @@
+//@version=6
+import Trendoscope/Drawing/4 as dr
+import Trendoscope/Zigzag/11 as zg
+import Trendoscope/oota/1 as eta
+strategy('Divergence Strategy [Trendoscope®]', 'DStr1.1[Trendoscope®]', overlay = false, max_lines_count = 500, max_labels_count = 500, max_polylines_count = 100, calc_bars_count = 5000,
+     dynamic_requests = true, initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=20, 
+     commission_type=strategy.commission.percent, pyramiding=4, commission_value=0.1, explicit_plot_zorder=true, 
+     margin_long=100.0, margin_short=100.0, max_bars_back=5000)
+import HeWhoMustNotBeNamed/strategy/5 as st
+
+oscillator(simple string type = 'rsi', simple int length = 14, float source = close, float highSource = high, float lowSource = low) =>
+    oscillator = switch type
+        'cci' => ta.cci(source, length)
+        'cmo' => ta.cmo(source, length)
+        'cog' => ta.cog(source, length)
+        'mfi' => ta.mfi(source, length)
+        'roc' => ta.roc(source, length)
+        'rsi' => ta.rsi(source, length)
+        'stoch' => ta.stoch(source, highSource, lowSource, length)
+        'wpr' => ta.wpr(length)
+        => ta.rsi(source, length)
+    oscillator
+
+enum TradeDirection
+    Long
+    Short
+
+enum TradeDivergence
+    Regular
+    Hidden
+    Both
+
+enum EntryType
+    Cautious
+    Confident
+    Mixed
+
+tradeDirection = input.enum(TradeDirection.Long, 'Direction', tooltip='Choose to trade only long or short positions. Simultaneous long and short trades are disabled to avoid conflicts.', group='Trade', display = display.none)
+tradeDivergence = input.enum(TradeDivergence.Both, 'Divergence', tooltip='Select to trade regular divergences (reversals), hidden divergences (continuations), or both.', group='Trade', display = display.none)
+entryType = input.enum(EntryType.Cautious, 'Entry/Exit Type', tooltip = 'Cautious: Conservative entry, quick exit. \nConfident: Aggressive entry, delayed exit. \nMixed: Conservative entry, delayed exit.', group='Trade', display=display.none)
+riskReward = input.float(2.0, 'Risk/Reward', tooltip = 'Define the profit target as a multiple of the risk (stop-loss distance) for each trade.', group = 'Trade', display = display.none)
+marketEntry = input.bool(false, 'Use Market Order', tooltip = 'Enable to execute trades at the current market price; disable for stop orders at specific price levels.', group='Trade', display=display.none)
+cancelPendingOrders = input.bool(true, 'Cancel On Break', 'If enabled, pending orders are canceled when price moves against the divergence. If disabled, orders remain active until entry is triggered', group='Trade', display=display.none)
+
+oscillatorType = input.string('rsi', 'Oscillator', ['rsi', 'cci', 'cmo', 'cog', 'mfi', 'roc', 'stoch', 'wpr'], inline = 'osc', group = 'Oscillator', display = display.none)
+length = input.int(14, '', group = 'Oscillator', inline = 'osc', tooltip = 'Select the oscillator type and period, or use an external oscillator for divergence calculations.', display = display.none)
+useExternalOscillator = input.bool(false, 'Use External Oscillator', inline = 'eosc', group = 'Oscillator', display = display.none)
+externalOscillator = input.source(close, '', 'Use external oscillator instead of the built ins', inline = 'eosc', group = 'Oscillator', display = display.none)
+
+rsiColor = color.blue
+
+trendTypeTooltip = 'Choose how trends are identified:\n' + '\tZigzag - HH, HL on the starting pivot of divergence line is considered as uptrend and LL, LH on the starting pivot of divergence line is considered as downtrend\n' + '\tMA Difference - Difference between moving average of divergence line pivot will define the trend\n' + '\tExternal - Use External Oscillator Input'
+trendMethod = input.string('Zigzag', 'Trend Detection Method', ['Zigzag', 'MA Difference', 'External'], group = 'Trend', display = display.none, tooltip = trendTypeTooltip)
+maType = input.enum(eta.CustomSeries.SMA, 'MA Filter', inline = 'ma', group = 'Trend', display = display.none)
+maLength = input.int(200, '', minval = 5, step = 50, inline = 'ma', group = 'Trend', display = display.none, tooltip = 'Moving Average to identify trend. Direction of moving average between the divergence pivots identify trend')
+externalTrendSignal = input.source(close, 'External Trend Signal', 'Use External trend signal instead of the built in. The external indicator should return positive value for uptrend and negative value for downtrend', group = 'Trend', display = display.none)
+
+zigzagLength = input.int(13, 'Length', group = 'Zigzag', tooltip = 'Set the zigzag length to adjust pivot detection sensitivity for divergence signals.', display = display.none)
+
+repaint = true
+textColor = chart.bg_color
+
+trendMethodInt = trendMethod == 'Zigzag' ? 1 : trendMethod == 'External' ? 3 : 2
+var map<int, float> priceMap = map.new<int, float>()
+var map<int, float> oscillatorMap = map.new<int, float>()
+priceMap.put(bar_index, close)
+
+enum DivergenceType
+    BullishDivergence = "Bullish Divergence"
+    BearishDivergence = "Bearish Divergence"
+    BullishHiddenDivergence = "Bullish Hidden Divergence"
+    BearishHiddenDivergence = "Bearish Hidden Divergence"
+    None = "None"
+
+type TradeDrawing
+    dr.Box targetBox
+    dr.Box stopBox
+    dr.Box progressBox
+
+type DivergenceObject
+    int id
+    dr.Line priceLine
+    dr.Line oscillatorLine
+    dr.Label priceLabel
+    dr.Label oscillatorLabel
+    chart.point pricePoint
+    chart.point pivotPoint
+    chart.point lastPoint
+    DivergenceType divergenceType
+    TradeDrawing trade
+    bool broken = false
+
+method delete(TradeDrawing this)=>
+    this.targetBox.delete()
+    this.stopBox.delete()
+
+method draw(TradeDrawing this)=>
+    this.targetBox.draw()
+    this.stopBox.draw()
+
+method delete(DivergenceObject this)=>
+    this.priceLine.delete()
+    this.oscillatorLine.delete()
+    this.priceLabel.delete()
+    this.oscillatorLabel.delete()
+    if not na(this.trade)
+        this.trade.delete()
+    this
+
+method draw(DivergenceObject this)=>
+    this.delete()
+    this.priceLine.draw()
+    this.oscillatorLine.draw()
+    this.priceLabel.draw()
+    this.oscillatorLabel.draw()
+    if not na(this.trade)
+        this.trade.draw()
+    this
+
+type ZigzagProperties
+    color textColor = color.black
+    int trendMethod = 1
+    bool repaint = false
+
+enum PivotDirection
+    HH = "Higher High"
+    LH = "Lower High"
+    HL = "Higher Low"
+    LL = "Lower Low"
+
+getDivergenceType(direction, divergence)=>
+    direction > 0?
+         (divergence > 0 ? DivergenceType.BearishDivergence : DivergenceType.BearishHiddenDivergence):
+         (divergence > 0 ? DivergenceType.BullishDivergence : DivergenceType.BullishHiddenDivergence)
+
+getPivotDirection(dir, ratio) =>
+    dir > 0 ? (ratio > 1 ? PivotDirection.HH : PivotDirection.LH) : ratio > 1 ? PivotDirection.LL : PivotDirection.HL
+
+getLinePropertiesMap(bool force_overlay=false)=>
+    linePropertiesMap = map.new<DivergenceType, dr.LineProperties>()
+    linePropertiesMap.put(DivergenceType.BullishDivergence, dr.LineProperties.new(xloc.bar_time, extend.none, color.green, line.style_solid, 1, force_overlay))
+    linePropertiesMap.put(DivergenceType.BearishDivergence, dr.LineProperties.new(xloc.bar_time, extend.none, color.red, line.style_solid, 1, force_overlay))
+    linePropertiesMap.put(DivergenceType.BullishHiddenDivergence, dr.LineProperties.new(xloc.bar_time, extend.none, color.lime, line.style_solid, 1, force_overlay))
+    linePropertiesMap.put(DivergenceType.BearishHiddenDivergence, dr.LineProperties.new(xloc.bar_time, extend.none, color.orange, line.style_solid, 1, force_overlay))
+    linePropertiesMap
+
+getLabelPropertiesMap(bool force_overlay=false)=>
+    labelPropertiesMap = map.new<DivergenceType, dr.LabelProperties>()
+    labelPropertiesMap.put(DivergenceType.BullishDivergence, dr.LabelProperties.new(xloc.bar_time, yloc.price, color.green, label.style_label_up, chart.bg_color, size.small, force_overlay = force_overlay))
+    labelPropertiesMap.put(DivergenceType.BearishDivergence, dr.LabelProperties.new(xloc.bar_time, yloc.price, color.red, label.style_label_down, chart.bg_color, size.small, force_overlay = force_overlay))
+    labelPropertiesMap.put(DivergenceType.BullishHiddenDivergence, dr.LabelProperties.new(xloc.bar_time, yloc.price, color.lime, label.style_label_up, chart.bg_color, size.small, force_overlay = force_overlay))
+    labelPropertiesMap.put(DivergenceType.BearishHiddenDivergence, dr.LabelProperties.new(xloc.bar_time, yloc.price, color.orange, label.style_label_down, chart.bg_color, size.small, force_overlay = force_overlay))
+    labelPropertiesMap
+
+getDeniedDivergenceTypes(TradeDirection direction = TradeDirection.Long, TradeDivergence divergence = TradeDivergence.Both)=>
+    array<DivergenceType> denyTrading = array.new<DivergenceType>()
+    if(direction == TradeDirection.Long)
+        denyTrading.push(DivergenceType.BearishDivergence)
+        denyTrading.push(DivergenceType.BearishHiddenDivergence)
+    if(direction == TradeDirection.Short)
+        denyTrading.push(DivergenceType.BullishDivergence)
+        denyTrading.push(DivergenceType.BullishHiddenDivergence)
+    if(divergence == TradeDivergence.Regular)
+        denyTrading.push(DivergenceType.BullishHiddenDivergence)
+        denyTrading.push(DivergenceType.BearishHiddenDivergence)
+    if(divergence == TradeDivergence.Hidden)
+        denyTrading.push(DivergenceType.BullishDivergence)
+        denyTrading.push(DivergenceType.BearishDivergence)
+    denyTrading
+
+const array<DivergenceType> denyTrading = getDeniedDivergenceTypes(tradeDirection, tradeDivergence)
+
+const map<DivergenceType, dr.LineProperties> priceLinePropertiesMap = getLinePropertiesMap(true)
+const map<DivergenceType, dr.LineProperties> oscillatorLinePropertiesMap = getLinePropertiesMap()
+
+const map<DivergenceType, dr.LabelProperties> priceLabelPropertiesMap = getLabelPropertiesMap(true)
+const map<DivergenceType, dr.LabelProperties> oscillatorLabelPropertiesMap = getLabelPropertiesMap()
+
+method createTradeDrawing(DivergenceObject object, float entry, float stop, float target, bool marketEntry)=>
+    newEntry = marketEntry? close : entry
+    entryPoint = chart.point.now(newEntry)
+    stopPoint = chart.point.from_index(bar_index+10, stop)
+    targetPoint = chart.point.from_index(bar_index+10, target)
+    dr.BoxProperties targetProps = dr.BoxProperties.new(color.blue, color.new(color.lime, 80), 0, line.style_dotted, extend.none, xloc.bar_index, true)
+    dr.BoxProperties stopProps = dr.BoxProperties.new(color.blue, color.new(color.orange, 80), 0, line.style_dotted, extend.none, xloc.bar_index, true)
+    object.trade := TradeDrawing.new(dr.Box.new(entryPoint, targetPoint, targetProps), dr.Box.new(entryPoint, stopPoint, stopProps))
+
+method trade(DivergenceObject object, array<DivergenceType> denyTrading, EntryType entryType, bool marketEntry, float riskReward = 2.0)=>
+
+    if(not denyTrading.includes(object.divergenceType))
+        if(object.divergenceType == DivergenceType.BullishHiddenDivergence or object.divergenceType == DivergenceType.BearishHiddenDivergence)
+            log.info('{0} Pivots : [{1}, {2}, {3}], Bars : [{4}, {5}, {6}]', object.id, object.pricePoint.price, object.pivotPoint.price, object.lastPoint.price, 
+                                                                                     object.pricePoint.index, object.pivotPoint.index, object.lastPoint.index)
+            entry = object.pivotPoint.price
+            exit = entryType == EntryType.Cautious and not marketEntry? object.pricePoint.price : object.lastPoint.price
+            target = entry + riskReward*(entry-exit)
+            st.bracketOrderWithoutLeverage(str.tostring(object.id), entry,  exit, target, marketEntry)
+            object.createTradeDrawing(entry,  exit, target, marketEntry)
+        if(object.divergenceType == DivergenceType.BullishDivergence or object.divergenceType == DivergenceType.BearishDivergence)
+            entry = entryType == EntryType.Confident? object.lastPoint.price : object.pivotPoint.price
+            exit = entryType == EntryType.Cautious or marketEntry? object.lastPoint.price : object.pricePoint.price
+            target = entry + riskReward*(entry-exit)
+            st.bracketOrderWithoutLeverage(str.tostring(object.id), entry,  exit, target, marketEntry)
+            object.createTradeDrawing(entry,  exit, target, marketEntry)
+    object
+
+method cancelTrade(DivergenceObject object)=>
+    if(cancelPendingOrders)
+        strategy.close(str.tostring(object.id))
+        strategy.cancel(str.tostring(object.id))
+method divergence(zg.Zigzag this, array<DivergenceObject> divergenceObjects, ZigzagProperties properties) =>
+    startIndex = properties.repaint ? 0 : 1
+    DivergenceType divergenceType = DivergenceType.None
+    if this.zigzagPivots.size() > 2 + startIndex
+        lastPivot = this.zigzagPivots.get(startIndex)
+        oppositePivot = this.zigzagPivots.get(startIndex+1)
+        llastPivot = this.zigzagPivots.get(startIndex + 2)
+        skip = false
+        if this.flags.updateLastPivot
+            if divergenceObjects.size() > 0
+                lastDivergence = divergenceObjects.last()
+                divergenceStartBar = lastDivergence.priceLine.start.index
+                llastPivotBar = llastPivot.point.index
+
+                divergenceEndBar = lastDivergence.priceLine.end.index
+                lastPivotBar = lastPivot.point.index
+                if llastPivotBar == divergenceStartBar and lastPivotBar > divergenceEndBar
+                    divergenceObjects.pop().delete().cancelTrade()
+                skip := llastPivotBar == divergenceStartBar and lastPivotBar == divergenceEndBar
+                skip
+
+        if this.flags.newPivot and not skip
+            dir = math.sign(lastPivot.dir)
+            lastOsc = lastPivot.point.price
+            lastPrice = lastPivot.indicatorValues.get(0)
+            oscRatio = lastPivot.ratio
+            priceRatio = lastPivot.indicatorRatios.get(0)
+
+            priceDirection = getPivotDirection(lastPivot.dir, priceRatio)
+            oscillatorDirection = getPivotDirection(lastPivot.dir, oscRatio)
+
+            lastTrend = lastPivot.indicatorValues.get(2)
+            lastMa = lastPivot.indicatorValues.get(1)
+
+            pricePoint = chart.point.new(lastPivot.point.time, lastPivot.point.index, lastPrice)
+            oscillatorPoint = chart.point.new(lastPivot.point.time, lastPivot.point.index, lastPivot.point.price)
+
+            if priceDirection != oscillatorDirection and llastPivot.indicatorRatios.size() > 0
+                midPrice = oppositePivot.indicatorValues.get(0)
+                llastPrice = llastPivot.indicatorValues.get(0)
+                llastRatio = llastPivot.indicatorRatios.get(0)
+                llastMa = llastPivot.indicatorValues.get(1)
+                lastPricePoint = chart.point.new(llastPivot.point.time, llastPivot.point.index, llastPrice)
+                pivotPoint = chart.point.new(oppositePivot.point.time, oppositePivot.point.index, midPrice)
+                llastOscillatorPoint = chart.point.new(llastPivot.point.time, llastPivot.point.index, llastPivot.point.price)
+
+                sentiment = math.sign(oscRatio - priceRatio)
+                trend = properties.trendMethod == 3 ? math.sign(lastTrend) : properties.trendMethod == 1 ? math.sign(dir * (llastRatio - 1)) : math.sign(llastMa - lastMa)
+                divergence = trend == dir and sentiment < 0 ? 1 : trend != dir and sentiment > 0 ? -1 : 0
+                if divergence != 0
+                    divergenceType := getDivergenceType(dir, divergence)
+                    priceDivergenceLine = dr.Line.new(lastPricePoint, pricePoint, priceLinePropertiesMap.get(divergenceType))
+                    oscillatorDivergenceLine = dr.Line.new(llastOscillatorPoint, oscillatorPoint, oscillatorLinePropertiesMap.get(divergenceType))
+
+                    validDivergence = true
+                    for bar = lastPricePoint.index + 1 to pricePoint.index - 1 by 1
+                        priceAtBar = priceMap.get(bar)
+                        oscillatorAtBar = oscillatorMap.get(bar)
+                        if priceAtBar * dir > priceDivergenceLine.get_price(bar) * dir or oscillatorAtBar * dir > oscillatorDivergenceLine.get_price(bar) * dir
+                            validDivergence := false
+                            break
+
+                    if validDivergence
+                        var id = 0
+                        priceLabelText = (divergenceType == DivergenceType.BullishDivergence or divergenceType == DivergenceType.BearishDivergence ? 'D' : 'H')+' : '+str.tostring(id)
+                        priceTooltipText = str.tostring(divergenceType) + ' ' + str.tostring(id) + '\nPrice : ' + str.tostring(lastPrice) + ' ( ' + str.tostring(priceRatio) + ' ) - ' +
+                                         str.tostring(priceDirection) + '\n' + 'Oscillator :' + str.tostring(lastMa) + ' ( ' + str.tostring(oscRatio) + ' ) - ' + str.tostring(oscillatorDirection)
+                        priceDivergenceLabel = dr.Label.new(pricePoint, priceLabelText, priceTooltipText, priceLabelPropertiesMap.get(divergenceType))
+                        oscillatorDivergenceLabel = dr.Label.new(oscillatorPoint, priceLabelText, priceTooltipText, oscillatorLabelPropertiesMap.get(divergenceType))
+                        divergenceObject = DivergenceObject.new(id, priceDivergenceLine, oscillatorDivergenceLine,priceDivergenceLabel, oscillatorDivergenceLabel, pricePoint, pivotPoint, lastPricePoint, divergenceType)
+                        id+=1
+                        divergenceObject.trade(denyTrading, entryType, marketEntry, riskReward)
+                        divergenceObjects.push(divergenceObject.draw())
+                        true
+                    else
+                        priceDivergenceLine.delete()
+                        false
+    divergenceType
+ma = maType.ma(maLength)
+oscillator = useExternalOscillator ? externalOscillator : oscillator(oscillatorType, length)
+plot(oscillator, 'Oscillator')
+
+oscillatorMap.put(bar_index, oscillator)
+indicators = matrix.new<float>()
+indicatorNames = array.from('Price', str.tostring(maType) +'-' +str.tostring(maLength), 'External Trend')
+
+indicators.add_row(0, array.from(close, close, close))
+indicators.add_row(1, array.from(ma, ma, ma))
+indicators.add_row(2, array.from(externalTrendSignal, externalTrendSignal, externalTrendSignal))
+
+var zg.Zigzag zigzag = zg.Zigzag.new(zigzagLength, 300, 0)
+var ZigzagProperties properties = ZigzagProperties.new(textColor, trendMethodInt, repaint)
+var divergenceObjects = array.new<DivergenceObject>()
+zigzag.calculate(array.from(oscillator), indicators, indicatorNames)
+currentDivergence = zigzag.divergence(divergenceObjects, properties)
+
+for divergence in divergenceObjects
+    direction = divergence.divergenceType == DivergenceType.BullishDivergence or divergence.divergenceType == DivergenceType.BullishHiddenDivergence ? 1 : -1
+    if(not divergence.broken and divergence.pricePoint.price*direction > close*direction)
+        divergence.broken := true
+        divergence.cancelTrade()
+
+View in Pine Editor・332 lines
+Use on chart
+1.1 K
+2
+14 088
+Jul 13, 2025
+🎲 Overview
+
+The Divergence Strategy [Trendoscope®] is a sophisticated TradingView strategy that enhances the Divergence Screener [Trendoscope®] by adding automated trade signal generation, risk management, and trade visualization. It leverages the screener’s robust divergence detection to identify bullish, bearish, regular, and hidden divergences, then executes trades with precise entry, stop-loss, and take-profit levels. Designed for traders seeking automated trading solutions, this strategy offers customizable trade parameters and visual feedback to optimize performance across various markets and timeframes.
+
+For core divergence detection features, including oscillator options, trend detection methods, zigzag pivot analysis, and visualization, refer to the Divergence Screener [Trendoscope®] documentation. This description focuses on the strategy-specific enhancements for automated trading and risk management.
+
+
+🎲 Strategy Features
+🎯Automated Trade Signal Generation
+
+Trade Direction Control: Restrict trades to long-only or short-only to align with market bias or strategy goals, preventing conflicting orders.
+
+Divergence Type Selection: Choose to trade regular divergences (bullish/bearish), hidden divergences, or both, targeting reversals or trend continuations.
+
+Entry Type Options:
+
+Cautious: Enters conservatively at pivot points and exits quickly to minimize risk exposure.
+Confident: Enters aggressively at the latest price and holds longer to capture larger moves.
+Mixed: Combines conservative entries with delayed exits for a balanced approach.
+Market vs. Stop Orders: Opt for market orders for instant execution or stop orders for precise price entry.
+
+
+🎯 Enhanced Risk Management
+
+Risk/Reward Ratio: Define a risk-reward ratio (default: 2.0) to set profit targets relative to stop-loss levels, ensuring consistent trade sizing.
+
+Bracket Orders: Trades include entry, stop-loss, and take-profit levels calculated from divergence pivot points, tailored to the entry type and risk-reward settings.
+
+Stop-Loss Placement: Stops are strategically set (e.g., at recent pivot or last price point) based on entry type, balancing risk and trade validity.
+
+Order Cancellation: Optionally cancel pending orders when a divergence is broken (e.g., price moves past the pivot in the wrong direction), reducing invalid trades. This feature is toggleable for flexibility.
+
+
+🎯 Trade Visualization
+
+Target and Stop Boxes: Displays take-profit (lime) and stop-loss (orange) levels as boxes on the price chart, extending 10 bars forward for clear visibility.
+
+Dynamic Trade Updates: Trade visualizations are added, updated, or removed as trades are executed, canceled, or invalidated, ensuring accurate feedback.
+
+Overlay Integration: Trade levels overlay the price chart, complementing the screener’s oscillator-based divergence lines and labels.
+
+
+🎯 Strategy Default Configuration
+
+Capital and Sizing: Set initial capital (default: $1,000,000) and position size (default: 20% of equity) for realistic backtesting.
+
+Pyramiding: Allows up to 4 concurrent trades, enabling multiple divergence-based entries in trending markets.
+
+Commission and Margin: Accounts for commission (default: 0.01%) and margin (100% for long/short) to reflect trading costs.
+
+Performance Optimization: Processes up to 5,000 bars dynamically, balancing historical analysis and real-time execution.
+
+
+🎲 Inputs and Configuration
+
+🎯Trade Settings
+
+Direction: Select Long or Short (default: Long).
+
+Divergence: Trade Regular, Hidden, or Both divergence types (default: Both).
+
+Entry/Exit Type: Choose Cautious, Confident, or Mixed (default: Cautious).
+
+Risk/Reward: Set the risk-reward ratio for profit targets (default: 2.0).
+
+Use Market Order: Enable market orders for immediate entry (default: false, uses limit orders).
+
+Cancel On Break: Cancel pending orders when divergence is broken (default: true).
+
+
+
+
+🎯Inherited Settings
+The strategy inherits all inputs from the Divergence Screener, including:
+
+Oscillator Settings: Oscillator type (e.g., RSI, CCI), length, and external oscillator option.
+
+Trend Settings: Trend detection method (Zigzag, MA Difference, External), MA type, and length.
+
+Zigzag Settings: Zigzag length (fixed repaint = true).
+
+
+
+
+🎲 Entry/Exit Types for Divergence Scenarios
+
+The Divergence Strategy [Trendoscope®] offers three Entry/Exit Type options—Cautious, Confident, and Mixed—which determine how trades are entered and exited based on divergence pivot points. This section explains how these settings apply to different divergence scenarios, with placeholders for screenshots to illustrate each case.
+The divergence pattern forms after 3 pivots. The stop and entry levels are formed on one of these levels based on Entry/Exit types.
+
+🎯Bullish Divergence (Reversal)
+
+A bullish divergence occurs when price forms a lower low, but the oscillator forms a higher low, signaling a potential upward reversal.
+
+💎 Cautious:
+
+Entry: At the pivot high point for a conservative entry.
+
+Exit: Stop-loss at the last pivot point (previous low that is higher than the current pivot low); take-profit at risk-reward ratio. Canceled if price breaks below the pivot (if Cancel On Break is enabled).
+
+Behavior: Enters after confirmation and exits quickly to limit downside risk.
+
+
+💎Confident:
+
+Entry: At the last pivot low, (previous low which is higher than the current pivot low) for an aggressive entry.
+
+Exit: Stop-loss at recent pivot low, which is the lowest point; take-profit at risk-reward ratio. Canceled if price breaks below the pivot. (lazy exit)
+
+Behavior: Enters early to capture trend continuation, holding longer for gains.
+
+
+💎Mixed:
+
+Entry: At the pivot high point (conservative).
+
+Exit: Stop-loss at the recent pivot point that has resulted in lower low (lazy exit). Canceled if price breaks below the pivot.
+
+Behavior: Balances entry caution with extended holding for trend continuation.
+
+
+
+
+🎯Bearish Divergence (Reversal)
+
+A bearish divergence occurs when price forms a higher high, but the oscillator forms a lower high, indicating a potential downward reversal.
+
+💎Cautious:
+
+Entry: At the pivot low point (lower high) for a conservative short entry.
+
+Exit: Stop-loss at the previous pivot high point (previous high); take-profit at risk-reward ratio. Canceled if price breaks above the pivot (if Cancel On Break is enabled).
+
+Behavior: Enters conservatively and exits quickly to minimize risk.
+
+
+💎Confident:
+
+Entry: At the last price point (previous high) for an aggressive short entry.
+
+Exit: Stop-loss at the pivot point; take-profit at risk-reward ratio. Canceled if price breaks above the pivot.
+
+Behavior: Enters early to maximize trend continuation, holding longer.
+
+
+💎Mixed:
+
+Entry: At the previous piot high point (conservative).
+
+Exit: Stop-loss at the last price point (delayed exit). Canceled if price breaks above the pivot.
+
+Behavior: Combines conservative entry with extended holding for downtrend gains.
+
+
+
+
+🎯Bullish Hidden Divergence (Continuation)
+
+A bullish hidden divergence occurs when price forms a higher low, but the oscillator forms a lower low, suggesting uptrend continuation. In case of Hidden bullish divergence, b]Entry is always on the previous pivot high (unless it is a market order)
+
+💎Cautious:
+
+Exit: Stop-loss at the recent pivot low point (higher than previous pivot low); take-profit at risk-reward ratio. Canceled if price breaks below the pivot (if Cancel On Break is enabled).
+
+Behavior: Enters after confirmation and exits quickly to limit downside risk.
+
+
+💎Confident:
+
+Exit: Stop-loss at previous pivot low, which is the lowest point; take-profit at risk-reward ratio. Canceled if price breaks below the pivot. (lazy exit)
+
+Behavior: Enters early to capture trend continuation, holding longer for gains.
+
+
+
+
+🎯Bearish Hidden Divergence (Continuation)
+
+A bearish hidden divergence occurs when price forms a lower high, but the oscillator forms a higher high, suggesting downtrend continuation. In case of Hidden Bearish divergence, b]Entry is always on the previous pivot low (unless it is a market order)
+
+💎Cautious:
+
+Exit: Stop-loss at the latest pivot high point (which is a lower high); take-profit at risk-reward ratio. Canceled if price breaks above the pivot (if Cancel On Break is enabled).
+
+Behavior: Enters conservatively and exits quickly to minimize risk.
+
+
+💎Confident/Mixed:
+
+Exit: Stop-loss at the previous pivot high point; take-profit at risk-reward ratio. Canceled if price breaks above the pivot.
+
+Behavior: Uses the late exit point to hold longer.
+
+
+
+
+🎲 Usage Instructions
+🎯Add to Chart:
+
+Add the Divergence Strategy [Trendoscope®] to your TradingView chart.
+
+The oscillator and divergence signals appear in a separate pane, with trade levels (target/stop boxes) overlaid on the price chart.
+
+
+🎯Configure Settings:
+
+Adjust trade settings (direction, divergence type, entry type, risk-reward, market orders, cancel on break).
+
+Modify inherited Divergence Screener settings (oscillator, trend method, zigzag length) as needed.
+
+Enable/disable alerts for divergence notifications.
+
+
+🎯Interpret Signals:
+
+Long Trades: Triggered on bullish or bullish hidden divergences (if allowed), shown with green/lime lines and labels.
+
+Short Trades: Triggered on bearish or bearish hidden divergences (if allowed), shown with red/orange lines and labels.
+
+Monitor lime (target) and orange (stop) boxes for trade levels.
+
+Review strategy performance metrics (e.g., profit/loss, win rate) in the strategy tester.
+
+
+🎯Backtest and Optimize:
+
+Use TradingView’s strategy tester to evaluate performance on historical data.
+
+Fine-tune risk-reward, entry type, position sizing, and cancellation settings to suit your market and timeframe.
+
+
+
+For questions, suggestions, or support, contact Trendoscope via TradingView or official support channels. Stay tuned for updates and enhancements to the Divergence Strategy!
+Aug 11, 2025
+Release Notes
+Update chart and backtest resutlts

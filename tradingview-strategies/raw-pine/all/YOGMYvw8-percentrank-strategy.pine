@@ -1,0 +1,42 @@
+//@version=4
+strategy(title="percentrank", shorttitle="percentrank")
+src = input(close, title="Source")
+len = input(title="lookback - Период сравнения", type=input.integer, defval=10, minval=2)
+scale = input(title="scale offset - смещение шкалы", type=input.integer, defval=50, minval=0, maxval=100)
+level_1 = input(title="sygnal line 1", type=input.integer, defval=30)
+level_2 = input(title="sygnal line 2", type=input.integer, defval=-30)
+
+prank = percentrank(src,len)-scale
+plot(prank, style = plot.style_columns)
+plot(level_2, style = plot.style_line, color = color.red)
+plot(level_1, style = plot.style_line, color = color.green)
+
+longCondition = (crossunder(level_1, prank) == true)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+longExitCondition = (crossover(level_2, prank) == true)
+if (longExitCondition)
+    strategy.close("Long")
+    
+shortCondition = (crossover(level_2, prank) == true)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+shortexitCondition = (crossunder(level_1, prank) == true)
+if (shortexitCondition)
+    strategy.close("Short")
+
+View in Pine Editor・29 lines
+Use on chart
+5
+3
+1 864
+Srategy for percentrank
+Percent rank is the percents of how many previous values was less than or equal to the current value of given series.
+long entry: intersection line 1 from bottom to top
+short entry: crossing line 2 from top to bottom
+
+Стратегия для индикатора percentrank
+Процентный рейтинг — это процент от количества предыдущих значений, которые были меньше или равны текущему значению данной серии.
+
+вход в лонг: пересечение line 1 снизу вверх
+вход в шорт: пересечение line 2 сверху вниз

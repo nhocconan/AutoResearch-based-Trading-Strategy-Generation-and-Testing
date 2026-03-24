@@ -1,0 +1,326 @@
+//@version=5
+strategy("Rasta",
+     overlay=true, max_lines_count=500,
+
+     // --- Defaults to match your screenshots
+     initial_capital = 100,
+     currency        = currency.USD,
+     default_qty_type= strategy.cash,     // order size in USD
+     default_qty_value=100,
+     pyramiding      = 0,
+     commission_type = strategy.commission.percent,
+     commission_value= 0.25,
+     slippage        = 0,
+     calc_on_every_tick = true,
+     calc_on_order_fills = true)
+
+/// ========= Inputs (same as indicator)
+groupInp   = "Inputs"
+emaLen     = input.int(5, "Length", minval=1, group=groupInp)
+src        = input.source(close, "Source", group=groupInp)
+offsetBars = input.int(0, "Offset", group=groupInp)
+
+groupSm    = "Smoothing"
+smType     = input.string("SMA", "Type",
+              options=["SMA","EMA","RMA","WMA","None"], group=groupSm)
+smLen      = input.int(5, "Length", minval=1, group=groupSm)
+
+groupViz   = "Visualization"
+showLabels = input.bool(true,  "Show Buy/Sell Labels", group=groupViz)
+showFog    = input.bool(true,  "Show Colored Fog Between Lines", group=groupViz)
+fogTransp  = input.int(55,     "Fog Opacity (0=solid, 100=hidden)", minval=0, maxval=100, group=groupViz)
+
+groupRung  = "DNA Rungs"
+showRungs  = input.bool(true,  "Show DNA Rungs (EMA ↔ Smoothed)", group=groupRung)
+rungWidth  = input.int(3,      "Rung Width", minval=1, maxval=5, group=groupRung)
+maxKeep    = input.int(420,    "Max Rungs to Keep (<= 450)", minval=100, maxval=450, step=10, group=groupRung)
+rungColorMode = input.string("Direction", "Rung Color",
+     options=["Fixed Green","Direction"], group=groupRung)
+rungFixedCol  = input.color(color.lime, "Fixed Rung Color", group=groupRung)
+
+/// ========== EMA 8/21 Filter (same behavior; exits never blocked)
+groupFilt        = "EMA 8/21 Filter"
+useEmaFilter     = input.bool(true,  "Enable EMA 8/21 Filter", group=groupFilt)
+emaFastLenSw     = input.int(8,      "Fast EMA",  minval=1, group=groupFilt)
+emaSlowLenSw     = input.int(21,     "Slow EMA",  minval=1, group=groupFilt)
+plotFilterEMAs   = input.bool(false, "Plot Filter EMAs", group=groupFilt)
+adaptiveOnFlip   = input.bool(true,  "Adaptive entry when filter flips ON", group=groupFilt)
+
+ema8  = ta.ema(close, emaFastLenSw)
+ema21 = ta.ema(close, emaSlowLenSw)
+upTrend       = ema8 > ema21
+filterFlipOn  = ta.crossover(ema8, ema21)
+
+/// ========== Fixed Stop-Loss (adjustable; default 13%)
+groupRisk   = "Risk"
+slPctInp    = input.float(13.0, "Fixed Stop Loss (%)", minval=0.1, step=0.1, group=groupRisk) / 100.0
+
+/// ========== Core calc
+emaLine = ta.ema(src, emaLen)
+f_smooth(series float s, string t, int l) =>
+    float out = switch t
+        "SMA"  => ta.sma(s, l)
+        "EMA"  => ta.ema(s, l)
+        "RMA"  => ta.rma(s, l)
+        "WMA"  => ta.wma(s, l)
+        => s
+    out
+smoothed = f_smooth(emaLine, smType, smLen)
+dirUp   = emaLine > smoothed
+
+/// ========== Tick-by-tick signals with per-bar lock (mirrors your indicator)
+var bool barLock = false
+if barstate.isnew
+    barLock := false
+
+buyRaw  = ta.crossover(emaLine, smoothed)
+sellRaw = ta.crossunder(emaLine, smoothed)
+
+buyFireBase  = buyRaw  and not barLock and strategy.position_size == 0
+sellFireBase = sellRaw and not barLock and strategy.position_size > 0
+
+// EMA 8/21 gating
+buyAllowed  = (not useEmaFilter) or upTrend
+sellAllowed = true
+
+// Adaptive entry
+adaptiveBuy = useEmaFilter and adaptiveOnFlip and filterFlipOn and strategy.position_size == 0 and not barLock and (emaLine > smoothed)
+
+// Final realtime fires
+buyFire  = ((buyFireBase and buyAllowed) or adaptiveBuy)
+sellFire =  (sellFireBase and sellAllowed)
+
+// Close-only backup (ungated)
+buyFireClose  = barstate.isconfirmed and ta.crossover(emaLine, smoothed) and strategy.position_size == 0 and buyAllowed
+sellFireClose = barstate.isconfirmed and ta.crossunder(emaLine, smoothed)  and strategy.position_size > 0
+
+// Lock for this bar when a realtime fire happens
+if buyFire or sellFire
+    barLock := true
+
+/// ========== Strategy orders
+// Entries (one position at a time)
+if (buyFire or buyFireClose) and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+
+// Manage fixed stop-loss every tick while in position
+if strategy.position_size > 0
+    stopPrice = strategy.position_avg_price * (1.0 - slPctInp)
+    // Re-issue/refresh the exit each bar so SL tracks avg fill
+    strategy.exit("SL", from_entry="LONG", stop=stopPrice)
+
+// Exit on SELL signals (market close of position)
+if (sellFire or sellFireClose) and strategy.position_size > 0
+    strategy.close("LONG")
+
+/// ========== Plots & labels (unchanged visuals)
+pEMA = plot(emaLine,  "EMA",      color=color.new(color.red,   0), offset=offsetBars, linewidth=2)
+pSM  = plot(smoothed, "Smoothed", color=color.new(color.yellow,0), offset=offsetBars, linewidth=2)
+
+plot(plotFilterEMAs ? ema8  : na, "EMA 8 (Filter)",  color=color.new(color.teal,  0), linewidth=1)
+plot(plotFilterEMAs ? ema21 : na, "EMA 21 (Filter)", color=color.new(color.orange,0), linewidth=1)
+
+if showLabels and buyFire
+    label.new(bar_index, low,  "Enter",  style=label.style_label_up,   textcolor=color.white, color=color.new(color.teal, 0))
+if showLabels and sellFire
+    label.new(bar_index, high, "Exit", style=label.style_label_down, textcolor=color.white, color=color.new(color.red,  0))
+if showLabels and buyFireClose
+    label.new(bar_index, low,  "Enter",  style=label.style_label_up,   textcolor=color.white, color=color.new(color.teal, 0))
+if showLabels and sellFireClose
+    label.new(bar_index, high, "Exit", style=label.style_label_down, textcolor=color.white, color=color.new(color.red,  0))
+
+// Directional fog
+colFog = showFog ? (dirUp ? color.new(color.lime, fogTransp) : color.new(color.red, fogTransp)) : na
+fill(pEMA, pSM, color=colFog)
+
+// FAT DNA rungs
+topR = math.max(emaLine, smoothed)
+botR = math.min(emaLine, smoothed)
+rungCol = rungColorMode == "Direction" ? (dirUp ? color.lime : color.red) : rungFixedCol
+var line   curRung = na
+var line[] rungBuf = array.new_line()
+if showRungs
+    if barstate.isnew
+        curRung := line.new(bar_index, botR, bar_index, topR,
+                             xloc=xloc.bar_index, extend=extend.none,
+                             color=rungCol, width=rungWidth)
+        array.push(rungBuf, curRung)
+        if array.size(rungBuf) > maxKeep
+            line.delete(array.shift(rungBuf))
+    if not na(curRung)
+        line.set_y1(curRung, botR)
+        line.set_y2(curRung, topR)
+        line.set_width(curRung, rungWidth)
+        line.set_color(curRung, rungCol)
+
+View in Pine Editor・154 lines
+Use on chart
+4
+4
+9
+5 955
+Rasta — Educational Strategy (Pine v5)
+
+Momentum · Smoothing · Trend Study
+
+Overview
+
+The Rasta Strategy is a visual and educational framework designed to help traders study momentum transitions using the interaction between a fast-reacting EMA line and a slower smoothed reference line.
+It is not a signal generator or profit system; it’s a learning tool for understanding how smoothing, crossovers, and filters interact under different market conditions.
+
+The script displays:
+
+A primary EMA line (the fast reactive wave).
+
+A Smoothed line (using your chosen smoothing method).
+
+Optional fog zones between them for quick visual context.
+
+Optional DNA rungs connecting both lines to illustrate volatility compression and expansion.
+
+Optional EMA 8 / EMA 21 trend filter to observe higher-time-frame alignment.
+
+Core Idea
+
+The Rasta model focuses on wave interaction. When the fast EMA crosses above the smoothed line, it reflects a shift in short-term momentum relative to background trend pressure. Cross-unders suggest weakening or reversal.
+Rather than treating this as a trading “signal,” use it to observe structure, study trend alignment, and test how smoothing type affects reaction speed.
+
+Smoothing Types Explained
+
+The script lets you experiment with multiple smoothing techniques:
+
+Type Description Use Case
+SMA (Simple Moving Average) Arithmetic mean of the last n values. Smooth and steady, but slower. Trend-following studies; filters noise on higher time frames.
+EMA (Exponential Moving Average) Weights recent data more. Responds faster to new price action. Momentum or reactive strategies; quick shifts and reversals.
+RMA (Relative Moving Average) Used internally by RSI; smooths exponentially but slower than EMA. Momentum confirmation; balanced response.
+WMA (Weighted Moving Average) Linear weights emphasizing the most recent data strongly. Intraday scalping; crisp but potentially noisy.
+None Disables smoothing; uses the EMA line alone. Raw comparison baseline.
+
+Each smoothing method changes how early or late the strategy reacts:
+
+Faster smoothing (EMA/WMA) = more responsive, good for scalping.
+
+Slower smoothing (SMA/RMA) = more stable, good for trend following.
+
+Modes of Study
+🔹 Scalper Mode
+
+Use short EMA lengths (e.g., 3–5) and fast smoothing (EMA or WMA).
+
+Focus on 1 min – 15 min charts.
+
+Watch how quick crossovers appear near local tops/bottoms.
+
+Fog and rung compression reveal volatility contraction before bursts.
+Goal: study short-term rhythm and liquidity pulses.
+
+🔹 Momentum Mode
+
+Use moderate EMA (5–9) and RMA smoothing.
+
+Ideal for 1 H–4 H charts.
+
+Observe how the fog color aligns with trend shifts.
+
+EMA 8 / 21 filter can act as macro bias; “Enter” labels will appear only in its direction when enabled.
+Goal: study sustained motion between pullbacks and acceleration waves.
+
+🔹 Trend-Follower Mode
+
+Use longer EMA (13–21) with SMA smoothing.
+
+Great for daily/weekly charts.
+
+Focus on periods where fog stays unbroken for long stretches — these illustrate clear trend dominance.
+
+Watch rung spacing: tight clusters often precede consolidations; wide rungs signal expanding volatility.
+Goal: visualize slow-motion trend transitions and filter whipsaw conditions.
+
+Components
+
+EMA Line (Red): Fast-reacting short-term direction.
+
+Smoothed Line (Yellow): Reference trend baseline.
+
+Fog Zone: Green when EMA > Smoothed (up-momentum), red when below.
+
+DNA Rungs: Thin connectors showing volatility structure.
+
+EMA 8 / 21 Filter (optional):
+
+When enabled, the strategy will only allow Enter events if EMA 8 > EMA 21.
+
+Use this to study higher-trend gating effects.
+
+Educational Applications
+
+Momentum Visualization: Observe how the fast EMA “breathes” around the smoothed baseline.
+
+Trend Transitions: Compare different smoothing types to see how early or late reversals are detected.
+
+Noise Filtering: Experiment with fog opacity and smoothing lengths to understand trade-off between responsiveness and stability.
+
+Risk Concept Simulation: Includes a simple fixed stop-loss parameter (default 13%) for educational demonstrations of position management in the Strategy Tester.
+
+How to Use
+
+Add to Chart → “Strategy.”
+Works on any timeframe and instrument.
+
+Adjust Parameters:
+
+Length: base EMA speed.
+
+Smoothing Type: choose SMA, EMA, RMA, or WMA.
+
+Smoothing Length: controls delay and smoothness.
+
+EMA 8 / 21 Filter: toggles trend gating.
+
+Fog & Rungs: visual study options only.
+
+Study Behavior:
+
+Use Strategy Tester → List of Trades for entry/exit context.
+
+Observe how different smoothing types affect early vs. late “Enter” points.
+
+Compare trend periods vs. ranging periods to evaluate efficiency.
+
+Combine with External Tools:
+
+Overlay RSI, MACD, or Volume for deeper correlation analysis.
+
+Use replay mode to visualize crossovers in live sequence.
+
+Interpreting the Labels
+
+Enter: Marks where fast EMA crosses above the smoothed line (or when filter flips positive).
+
+Exit: Marks where fast EMA crosses back below.
+These are purely analytical markers — they do not represent trade advice.
+
+Educational Value
+
+The Rasta framework helps learners explore:
+
+Reaction time differences between moving-average algorithms.
+
+Impact of smoothing on signal clarity.
+
+Interaction of local and global trends.
+
+Visualization of volatility contraction (tight DNA rungs) and expansion (wide fog zones).
+It’s a sandbox for studying price structure, not a promise of profit.
+
+Disclaimer
+
+This script is provided for educational and research purposes only.
+It does not constitute financial advice, trading signals, or performance guarantees. Past market behavior does not predict future outcomes.
+Users are encouraged to experiment responsibly, record observations, and develop their own understanding of price behavior.
+
+Author: Michael Culpepper (mikeyc747)
+License: Educational / Open for study and modification with credit.
+Philosophy:
+
+“Learning the rhythm of the market is more valuable than chasing its profits.” — Rasta

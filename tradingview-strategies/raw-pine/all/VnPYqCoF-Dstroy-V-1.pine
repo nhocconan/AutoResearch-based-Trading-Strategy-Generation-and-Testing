@@ -1,0 +1,117 @@
+//@version=5
+strategy("DSTROY V.1 ENTRIES", overlay=true, pyramiding=0)
+
+// ==============================
+// Inputs
+// ==============================
+qty = input.int(100000, title="Buy quantity")
+
+testStartYear  = input.int(2019, title="Backtest Start Year")
+testStartMonth = input.int(1, title="Backtest Start Month")
+testStartDay   = input.int(1, title="Backtest Start Day")
+testStartHour  = input.int(0, title="Backtest Start Hour")
+testStartMin   = input.int(0, title="Backtest Start Minute")
+
+testStopYear  = input.int(2099, title="Backtest Stop Year")
+// FIX: default to full-year so you don't accidentally block trades
+testStopMonth = input.int(12, title="Backtest Stop Month")
+testStopDay   = input.int(31, title="Backtest Stop Day")
+
+testPeriodBackground = input.bool(true, title="Color Background")
+
+ema1 = input.int(10, title="Select EMA 1")
+ema2 = input.int(20, title="Select EMA 2")
+
+// ==============================
+// DSTROY "Logo" Badge (text-based)
+// ==============================
+showLogo  = input.bool(true, title="Show DSTROY Logo")
+logoText  = input.string("DSTROY ⚡ V.1", title="Logo Text")
+logoPos   = input.string("Top Left", title="Logo Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
+logoSizeOpt  = input.string("Normal", title="Logo Size", options=["Tiny", "Small", "Normal", "Large"])
+logoColor = input.color(color.new(color.black, 0), title="Logo Background")
+logoTextColor = input.color(color.white, title="Logo Text Color")
+
+logoSize = logoSizeOpt == "Tiny" ? size.tiny : logoSizeOpt == "Small" ? size.small : logoSizeOpt == "Large" ? size.large : size.normal
+yPos = (logoPos == "Bottom Left" or logoPos == "Bottom Right") ? low : high
+logoStyle = (logoPos == "Top Left" or logoPos == "Bottom Left") ? label.style_label_left : label.style_label_right
+
+var label logo = na
+if showLogo and barstate.islast
+    label.delete(logo)
+    logo := label.new(bar_index, yPos, logoText, style=logoStyle, textcolor=logoTextColor, color=logoColor, size=logoSize)
+
+// ==============================
+// Time window logic
+// ==============================
+testPeriodStart = timestamp(testStartYear, testStartMonth, testStartDay, testStartHour, testStartMin)
+testPeriodStop  = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+
+inTestPeriod = time >= testPeriodStart and time <= testPeriodStop
+
+// ==============================
+// NY Session filter (9:30–11:00 ET)
+// ==============================
+useNYSession = input.bool(true, title="Trade only NY 9:30–11:00")
+nySession    = input.session("0930-1100", title="NY Session Window")
+nyTz         = input.string("America/New_York", title="NY Timezone")
+
+inNYSession = not na(time(timeframe.period, nySession, nyTz))
+allowedToTrade = inTestPeriod and (not useNYSession or inNYSession)
+
+// Optional: force close at session end so trades are guaranteed to close
+closeAtSessionEnd = input.bool(true, title="Close position at 11:00 ET")
+isSessionEnd = useNYSession and closeAtSessionEnd and (not inNYSession and inNYSession[1])
+
+if isSessionEnd
+    strategy.close_all(comment="NY Session End")
+
+// ==============================
+// Background coloring
+// ==============================
+bgColor = testPeriodBackground and allowedToTrade ? color.new(color.green, 85) : na
+bgcolor(bgColor)
+
+// ==============================
+// EMA calculations
+// ==============================
+expo = ta.ema(close, ema1)
+ma   = ta.ema(close, ema2)
+
+// ==============================
+// Plotting
+// ==============================
+p1 = plot(expo, color=color.new(#00FFFF, 0), linewidth=2)
+p2 = plot(ma,   color=color.new(color.orange, 0), linewidth=2)
+fill(p1, p2, color=color.new(color.white, 80))
+
+// ==============================
+// Trade conditions
+// ==============================
+longCondition  = ta.crossover(expo, ma)
+shortCondition = ta.crossunder(expo, ma)
+
+// ==============================
+// Strategy execution (FORCE CLOSES)
+// ==============================
+if allowedToTrade
+    if longCondition
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long, qty=qty)
+
+    if shortCondition
+        strategy.close("Long")
+        strategy.entry("Short", strategy.short, qty=qty)
+
+// ==============================
+// Buy / Sell labels
+// ==============================
+plotshape(allowedToTrade and longCondition,  title="Buy Signal",  text="BUY",  textcolor=color.white, style=shape.labelup,   size=size.normal, location=location.belowbar, color=color.new(color.green, 0))
+plotshape(allowedToTrade and shortCondition, title="Sell Signal", text="SELL", textcolor=color.white, style=shape.labeldown, size=size.normal, location=location.abovebar, color=color.new(color.red,   0))
+
+View in Pine Editor・110 lines
+Use on chart
+1
+0
+489
+use this indicator with our entry model on the 1 minute time frame

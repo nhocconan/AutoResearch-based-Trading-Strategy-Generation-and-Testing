@@ -1,0 +1,32 @@
+//@version=3
+strategy("55 EMA", overlay=true)
+// Inspired by Philakone's 55 EMA Swing Trading Strategy 
+
+src = close
+ma55 = ema(src, 55) 
+
+buy_cond = close > ma55 * 1.01
+sell_cond = close < ma55 * 0.99
+
+plot( ma55,  color =buy_cond ? green : red, style=line, title="55", linewidth=3)
+
+ 
+// if (buy_cond)
+//     strategy.entry("buy", strategy.long, comment="buy")
+
+// if (sell_cond)
+//     strategy.entry("sell", strategy.short, comment="sell")
+
+View in Pine Editor・18 lines
+Use on chart
+2
+6
+7
+5 127
+Simple indicator for strategy ...
+
+EMA 55 cross over/under
+
+I will use it in 30 min TF for Bitcoin
+
+https://www.tradingview.com/x/kHYkPlfF/

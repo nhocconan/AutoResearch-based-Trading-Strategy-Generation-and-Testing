@@ -1,0 +1,54 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 21/03/2018
+// Linear Regression Intercept is one of the indicators calculated by using the 
+// Linear Regression technique. Linear regression indicates the value of the Y 
+// (generally the price) when the value of X (the time series) is 0. Linear 
+// Regression Intercept is used along with the Linear Regression Slope to create 
+// the Linear Regression Line. The Linear Regression Intercept along with the Slope 
+// creates the Regression line.
+//
+// You can change long to short in the Input Settings
+// WARNING:
+//  - For purpose educate only
+//  - This script to change bars colors.
+////////////////////////////////////////////////////////////
+strategy(title="Line Regression Intercept Backtest", overlay = true)
+Length = input(14, minval=1)
+xSeria = input(title="Source", type=source, defval=close)
+reverse = input(false, title="Trade reverse")
+xX = Length * (Length - 1) * 0.5
+xDivisor = xX * xX - Length * Length * (Length - 1) * (2 * Length - 1) / 6
+xXY = 0
+for i = 0 to Length-1
+    xXY := xXY + (i * xSeria[i])
+xSlope = (Length * xXY - xX * sum(xSeria, Length)) / xDivisor
+xLRI = (sum(xSeria, Length) - xSlope * xX) / Length
+pos = iff(close > xLRI, 1,
+       iff(close < xLRI, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue ) 
+plot(xLRI, color=blue, title="LRI")
+
+View in Pine Editor・36 lines
+Use on chart
+1
+5
+2
+4 274
+Linear Regression Intercept is one of the indicators calculated by using the
+Linear Regression technique. Linear regression indicates the value of the Y
+(generally the price) when the value of X (the time series) is 0. Linear
+Regression Intercept is used along with the Linear Regression Slope to create
+the Linear Regression Line. The Linear Regression Intercept along with the Slope
+creates the Regression line.
+
+You can change long to short in the Input Settings
+WARNING:
+- For purpose educate only
+- This script to change bars colors.

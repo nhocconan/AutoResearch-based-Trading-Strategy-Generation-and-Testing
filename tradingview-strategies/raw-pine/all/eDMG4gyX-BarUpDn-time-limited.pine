@@ -1,0 +1,34 @@
+//@version=2
+strategy("BarUpDn time limited", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+//input boxes for the limit date
+yearLimit = input(2016,title="year") 
+monthLimit = input(1, title="month")
+dayLimit = input(1, title="day")
+
+//function that checks if the current date is more recent than the limit
+dateOk(yl,ml,dl) =>
+    ok = (year < yl) ? false : (yl == year and month < ml ) ? false : (yl == year and ml == month and dayofmonth < dl) ? false : true
+    ok
+    
+    
+//applies dumb prebuilt strat limited to the date
+if (dateOk(yearLimit,monthLimit,dayLimit) and (close > open and open > close[1]) )
+    strategy.entry("BarDn", strategy.short)
+if (dateOk(yearLimit,monthLimit,dayLimit) and (close < open and open < close[1]) )
+    strategy.entry("BarUp", strategy.long)
+
+View in Pine Editor・19 lines
+Use on chart
+1
+0
+8
+7
+8 349
+trying to understand strategies, it appears that there is a lot of black magic in how a strat works behind the scenes.
+anyway, it's hard to analyse what's all the data with one gazillion entries, and i wanted to know how we can manipulate/do stuff with a chart.
+
+so, i needed to know how to "give" the script my values to work on. bundled two wants/needs into one, and created a script that only applies a strategy from the date given onwards.
+
+how to use:
+at the chart, go to the "format" little button, then the input tab, and there is all the date fields i created. fun to set it to the current date, then start going backwards and see all the little arrows filing up the chart :)

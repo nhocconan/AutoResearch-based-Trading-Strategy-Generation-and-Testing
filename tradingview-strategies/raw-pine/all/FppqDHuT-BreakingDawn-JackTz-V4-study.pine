@@ -1,0 +1,60 @@
+//@version=4
+strategy("BreakingDawn [JackTz] V4 (study)", overlay = true)
+
+// WaveTrend [LazyBear]
+// ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+n1 = input(93, "Channel Length")
+n2 = input(63, "Average Length")
+ 
+WTfactor = input(4, title=" WTFactor")
+averageHlc3 = sum(hlc3, WTfactor) / WTfactor
+ap = averageHlc3 
+esa = ema(ap, n1)
+d = ema(abs(ap - esa), n1)
+ci = (ap - esa) / (0.015 * d)
+tci = ema(ci, n2)
+wt1 = tci
+wt2 = sma(wt1,4)
+wtAvg = wt1-wt2
+
+// BreakingDawn V4 [JackTz]
+// ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+WTAvgFactor = input(200, "WTAvg Factor")
+wtPeriodAvg = sum(wtAvg, WTAvgFactor) / WTAvgFactor
+
+hypotenuse = input(1.0, "Hypotenuse size")
+angle = atan((wtPeriodAvg - wtPeriodAvg[1]) / hypotenuse)
+
+secondAnglePeriod = input(4, "Angle of Angle period")
+wtSecondAngleAvg = sum(angle, secondAnglePeriod) / secondAnglePeriod
+secondAngle = atan((wtSecondAngleAvg - wtSecondAngleAvg[1]) / hypotenuse)
+
+thirdAnglePeriod = input(3, "Angle of Angle of Angle period")
+wtThirdAngleAvg = sum(secondAngle, thirdAnglePeriod) / thirdAnglePeriod
+thirdAngle = atan((wtThirdAngleAvg - wtThirdAngleAvg[1]) / hypotenuse)
+
+angleSell = thirdAngle < thirdAngle[1]
+angleBuy = thirdAngle > thirdAngle[1]
+
+wtPeriodAvgVal = thirdAngle * 200000 + averageHlc3
+wtPeriodAvg2Val = thirdAngle * 350000 + averageHlc3
+
+fillColor = angleBuy ? color.green : color.red
+control = plot(wtPeriodAvgVal, color = fillColor)
+signal = plot(wtPeriodAvg2Val, color = fillColor)
+fill(signal, control, color = fillColor)
+
+View in Pine Editor・47 lines
+Use on chart
+2
+0
+7
+4 465
+Another take on extending LazyBear's WaveTrend indicator. This one eliminates lots of the lost trades on the sudden drop of the price.
+Have a look at it and let me know your thoughts.
+
+[No repaint]
+[Designed for H4]
+[Works on multiple coins]

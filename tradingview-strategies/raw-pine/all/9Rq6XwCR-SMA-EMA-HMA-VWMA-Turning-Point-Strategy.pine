@@ -1,0 +1,62 @@
+//@version=3
+strategy("MA Turning Point Strategy", overlay=true)
+src = input(close, title="Source")
+
+price = security(tickerid, period, src)
+ma1 = input(25, title="1st MA Length")
+type1 = input("HMA", "1st MA Type", options=["SMA", "EMA", "HMA", "VWMA"])
+f_hma(_src, _length)=>
+    _return = wma((2*wma(_src, _length/2))-wma(_src, _length), round(sqrt(_length)))
+
+price1 = if (type1 == "SMA")
+    sma(price, ma1)
+else
+    if (type1 == "EMA")
+        ema(price, ma1)
+    else
+        if (type1 == "VWMA")
+            vwma(price, ma1)
+        else
+            f_hma(price, ma1)
+    
+plot(series=price1, style=line,  title="1st MA", color=blue, linewidth=2, transp=0)
+
+lookback1 = input(1, "Lookback 1")
+roc1 = roc(price1, lookback1)
+
+ma1up = false
+ma1down = false
+ma2up = false
+ma2down = false
+
+ma1up := nz(ma1up[1])
+ma1down := nz(ma1down[1])
+ma2up := nz(ma2up[1])
+ma2down := nz(ma2down[1])
+
+trendStrength1 = input(2.5, title="Minimum slope magnitude * 100", type=float) * 0.01
+
+if crossover(roc1, trendStrength1)
+    ma1up := true
+    ma1down := false
+    
+if crossunder(roc1, -trendStrength1) 
+    ma1up := false
+    ma1down := true
+
+longCondition = ma1up and ma1down[1]
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = ma1down and ma1up[1]
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・53 lines
+Use on chart
+1
+1
+7
+3
+4 551
+This strategy allows you to backtest entering and exiting a trade based on one definable SMA, EMA, HMA or VWMA changing direction.

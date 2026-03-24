@@ -1,0 +1,85 @@
+//@version=5
+strategy("G-Channel with EMA Strategy", overlay=true)
+
+// G-Channel Indicator
+length = input.int(100, title="G-Channel Length")
+src = input(close, title="Source")
+
+var float a = na
+var float b = na
+a := math.max(src, nz(a[1])) - (nz(a[1]) - nz(b[1])) / length
+b := math.min(src, nz(b[1])) + (nz(a[1]) - nz(b[1])) / length
+avg = (a + b) / 2
+
+// G-Channel buy/sell signals
+crossup = ta.crossover(close, b)
+crossdn = ta.crossunder(close, a)
+bullish = ta.barssince(crossdn) <= ta.barssince(crossup)
+
+// EMA Indicator
+emaLength = input.int(200, title="EMA Length")
+ema = ta.ema(close, emaLength)
+
+// Buy Condition: G-Channel gives a buy signal and price is below EMA
+buySignal = bullish and close < ema
+
+// Sell Condition: G-Channel gives a sell signal and price is above EMA
+sellSignal = not bullish and close > ema
+
+// Plotting the G-Channel and EMA
+plot(a, title="Upper", color=color.blue, linewidth=2, transp=100)
+plot(b, title="Lower", color=color.blue, linewidth=2, transp=100)
+plot(avg, title="Average", color=bullish ? color.lime : color.red, linewidth=1, transp=90)
+plot(ema, title="EMA", color=color.orange, linewidth=2)
+
+// Strategy Execution
+if (buySignal)
+    strategy.entry("Buy", strategy.long)
+
+if (sellSignal)
+    strategy.entry("Sell", strategy.short)
+
+// Plot Buy/Sell Signals
+plotshape(buySignal, location=location.belowbar, color=color.green, style=shape.labelup, text="Buy")
+plotshape(sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown, text="Sell")
+
+View in Pine Editor・44 lines
+Use on chart
+4
+3
+1 846
+The G-Channel is a custom channel with an upper (a), lower (b), and average (avg) line. These lines are dynamically calculated based on the current and previous closing prices, using the length input (default 100) to smooth the values:
+
+Upper Line (a): This is the maximum value of the current price or the previous upper value, adjusted by the difference between the upper and lower lines divided by the length.
+Lower Line (b): This is the minimum value of the current price or the previous lower value, similarly adjusted by the difference between the upper and lower lines.
+The average line (avg) is simply the midpoint between the upper and lower lines. The G-Channel signals trend direction:
+
+Bullish Condition: The system looks for the condition when the price crosses over the lower line (b), indicating a potential upward trend.
+Bearish Condition: When the price crosses under the upper line (a), it signals a potential downward trend.
+Exponential Moving Average (EMA)
+The strategy also incorporates an EMA with a default length of 200. The EMA serves as a trend filter to determine whether the market is trending upward or downward:
+
+Price below EMA: Indicates a bearish trend.
+Price above EMA: Indicates a bullish trend.
+Buy/Sell Conditions
+The strategy generates buy or sell signals based on the interaction between the G-Channel signals and the price relative to the EMA:
+
+Buy Signal: The strategy triggers a buy when:
+A bullish condition (recent crossover of price over the lower G-Channel line) is detected.
+The price is below the EMA, indicating that despite the recent bullish signal, the market might still be undervalued or in a temporary downturn.
+Sell Signal: The strategy triggers a sell when:
+A bearish condition (recent crossunder of price below the upper G-Channel line) is detected.
+The price is above the EMA, suggesting that the market might be overextended and poised for a downturn.
+Visualization
+The strategy plots:
+
+The upper, lower, and average lines of the G-Channel, with the average line colored based on bullish (green) or bearish (red) conditions.
+The EMA (orange) line to provide context on the general trend direction.
+Markers for Buy and Sell signals to visually indicate the strategy's entry points.
+Strategy Execution
+When a buy or sell signal is detected:
+
+Buy Entry: If the bullish condition and price < EMA condition are met, a long (buy) position is opened.
+Sell Entry: If the bearish condition and price > EMA condition are met, a short (sell) position is opened.
+Purpose
+This strategy aims to catch price reversals at critical points (when the price moves through the G-Channel) while filtering trades using the EMA to avoid entering during unfavorable market trends.

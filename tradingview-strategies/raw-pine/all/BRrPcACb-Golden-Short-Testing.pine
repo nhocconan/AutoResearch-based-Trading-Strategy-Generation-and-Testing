@@ -1,0 +1,59 @@
+//@version=3
+strategy("Golden Short Testing", "GSTesting", overlay=true, pyramiding=3, default_qty_type=strategy.fixed, default_qty_value=10000, currency="USD", initial_capital=5000)
+
+//Inputs
+step = input(0.0, title="Step", type=float, minval=0.0)
+candle_body = input(5, title="Body", type=integer, minval=1)
+
+//Variables
+entry = 0.0
+golden = 1.618
+stoploss = 0
+profit1 = 0
+profit2 = 0
+profit3 = 0
+
+//Entry evaluation value to compare with longs_pips
+shorts = round((open-close)/step)
+
+if(shorts==candle_body)
+    strategy.cancel("short1", true)
+    //strategy.cancel("short2", true)
+    //strategy.cancel("short3", true)
+    
+    // Longitude of body
+    body = shorts*step
+    entry := ((open+close)/2)-abs((close-open)*1.118)
+    // Stop Loss & Profits in ticks
+    stoploss := round(body*golden/syminfo.mintick)
+    profit1 := round(body/syminfo.mintick)
+    profit2 := round(body*2.612/syminfo.mintick)
+    profit3 := round(body*5.232/syminfo.mintick)
+    
+if(entry>0.0)
+    strategy.entry("short1", strategy.short, stop=entry, when=strategy.opentrades==0)
+    //strategy.entry("short2", strategy.short, stop=entry, when=strategy.opentrades==0)
+    //strategy.entry("short3", strategy.short, stop=entry, when=strategy.opentrades==0)
+    
+if(entry>0.0)
+    strategy.exit("exit1", "short1", loss=stoploss, profit=profit1)
+    //strategy.exit("exit2", "short2", loss=stoploss, profit=profit2, trail_points=profit1, trail_offset=profit1)
+    //strategy.exit("exit3", "short3", loss=stoploss, profit=profit3, trail_points=profit1, trail_offset=profit1)
+
+View in Pine Editor・41 lines
+Use on chart
+3
+1
+2 349
+Apr 21, 2018
+This scripts is based on the golden number theory and is for short entries. It has three parameters:
+
+1. Step of the body i.e: pip-0.0001, cents-0.01
+2. Number of steps of the body of the candle
+2. Number of contracts to put on 3 orders executed at the same time
+Apr 22, 2018
+Release Notes
+This script is based on the golden number theory and is for short entries. It has two parameters:
+
+1. Step of the body i.e: pip-0.0001, cents-0.01
+2. Number of steps of the body of the candle

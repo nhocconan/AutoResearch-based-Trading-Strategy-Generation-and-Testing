@@ -1,0 +1,344 @@
+//@version=6
+strategy("Stochastic Divergence Strategy", overlay=true,behind_chart = false,max_labels_count=500)
+
+periodK = input.int(12, title="Controlling %K Length", minval=1)
+smoothK = input.int(1, title="Controlling %K Smoothing", minval=1)
+periodD = input.int(1, title="Controlling %D Smoothing", minval=1)
+k = ta.sma(ta.stoch(close, high, low, periodK), smoothK)
+d = ta.sma(k, periodD)
+//plot(k, title="%K", color=#2962FF)
+plot(d, title="%D", color=#FF6D00)
+
+periodKmid = input.int(16, title="%K Length", minval=1)
+smoothKmid = input.int(1, title="%K Smoothing", minval=1)
+periodDmid = input.int(3, title="%D Smoothing", minval=1)
+kmid = ta.sma(ta.stoch(close, high, low, periodKmid), smoothKmid)
+dmid = ta.sma(kmid, periodDmid)
+//plot(k, title="%K", color=#2962FF)
+plot(dmid, title="%Dmid", color=color.rgb(223, 252, 3, 6))
+
+periodKold = input.int(40, title="%K Length", minval=1)
+smoothKold = input.int(1, title="%K Smoothing", minval=1)
+periodDold = input.int(4, title="%D Smoothing", minval=1)
+kold = ta.sma(ta.stoch(close, high, low, periodKold), smoothKold)
+dold = ta.sma(kold, periodDold)
+//plot(k, title="%K", color=#2962FF)
+plot(dold, title="%Dold", color=color.rgb(2, 253, 44))
+
+periodKoldest = input.int(60, title="%K Length", minval=1)
+smoothKoldest = input.int(1, title="%K Smoothing", minval=1)
+periodDoldest = input.int(10, title="%D Smoothing", minval=1)
+koldest = ta.sma(ta.stoch(close, high, low, periodKoldest), smoothKoldest)
+doldest = ta.sma(koldest, periodDoldest)
+//plot(k, title="%K", color=#2962FF)
+plot(doldest, title="%Doldest", color=color.rgb(47, 146, 245))
+
+
+
+shortsOn = input.bool(false,title="Turn Short buy and sell on")
+longsOn = input.bool(false,title="Turn Long buy and sell on")
+
+
+h0 = hline(80, "Upper Band", color=#787B86)
+hline(50, "Middle Band", color=color.new(#787B86, 50))
+h1 = hline(20, "Lower Band", color=#787B86)
+fill(h0, h1, color=color.rgb(33, 150, 243, 90), title="Background")
+
+longBuySignal = false
+shortBuySignal = false
+longSellSignal = false
+shortSellSignal = false
+
+minorDhigh = false
+minorDlow = false
+majorDhigh = false
+majorDlow = false
+
+var color bgColor = na
+dChange = d - d[1]
+if (dChange == 0 and d == 0) or (dChange == 0 and d == 100) 
+    dChange := dmid - dmid[1]
+
+priceChange = 25 * (close - close[1])
+var div = 0.00
+div := dChange - priceChange
+var col=float(0)
+var normalCandle = false
+normalCandle := false
+if div > 0 
+    col := int(div *5) + 100
+
+    // bgColor:=  color.rgb(0,col,0,0)
+else if div < 0
+    col := int(div *-5) + 100
+
+    // bgColor:=  color.rgb(col,0,0,0)
+if dChange < 0 and priceChange > 0 
+    majorDhigh := true
+    bgColor:=  color.rgb(col,0,0,0)
+    longSellSignal := true
+    shortBuySignal := true
+else if dChange < 0 and priceChange == 0
+    minorDhigh := true
+    bgColor:=  color.rgb(col,0,0,0)
+    longSellSignal := true
+    shortBuySignal := true
+else if dChange == 0 and priceChange > 0
+    minorDhigh := true
+    bgColor:=  color.rgb(col,0,0,0)
+    longSellSignal := true
+    shortBuySignal := true
+else if dChange == 0 and priceChange < 0
+    minorDlow := true
+    bgColor:=  color.rgb(0,col,0,0)
+    longBuySignal := true
+    shortSellSignal := true
+else if dChange > 0 and priceChange == 0
+    minorDlow := true
+    bgColor:=  color.rgb(0,col,0,0)
+    longBuySignal := true
+    shortSellSignal := true
+else if dChange > 0 and priceChange < 0
+    majorDlow := true
+    bgColor:=  color.rgb(0,col,0,0)
+    longBuySignal := true
+    shortSellSignal := true
+else if dChange > 0 and priceChange > 0
+    bgColor := color.new(color.black, 100) // 80% transparent black
+    normalCandle := true
+else if dChange == 0 and priceChange == 0
+    bgColor := color.new(color.black, 100) // 80% transparent black
+    normalCandle := true
+else if dChange < 0 and priceChange < 0
+    bgColor := color.new(color.black, 100) // 80% transparent black
+    normalCandle := true
+
+
+// label.new(bar_index, high, str.tostring(col), color=color.rgb(0,350,0,0))
+
+
+// if dChange < 0 and priceChange > 0 
+//     majorDhigh := true
+//     bgColor := color.new(color.red, 80) // 80% transparent red
+//     longSellSignal := true
+//     shortBuySignal := true
+// else if dChange < 0 and priceChange == 0
+//     minorDhigh := true
+//     bgColor := color.new(color.maroon, 80) // 80% transparent red
+//     longSellSignal := true
+//     shortBuySignal := true
+// else if dChange == 0 and priceChange > 0
+//     minorDhigh := true
+//     bgColor := color.new(color.maroon, 80) // 80% transparent red
+//     longSellSignal := true
+//     shortBuySignal := true
+// else if dChange == 0 and priceChange < 0
+//     minorDlow := true
+//     bgColor := color.new(color.teal, 80) // 80% transparent green
+//     longBuySignal := true
+//     shortSellSignal := true
+// else if dChange > 0 and priceChange == 0
+//     minorDlow := true
+//     bgColor := color.new(color.teal, 80) // 80% transparent green
+//     longBuySignal := true
+//     shortSellSignal := true
+// else if dChange > 0 and priceChange < 0
+//     majorDlow := true
+//     bgColor := color.new(color.green, 80) // 80% transparent green
+//     longBuySignal := true
+//     shortSellSignal := true
+// else if dChange > 0 and priceChange > 0
+//     bgColor := color.new(color.black, 100) // 80% transparent black
+// else if dChange == 0 and priceChange == 0
+//     bgColor := color.new(color.black, 100) // 80% transparent black
+// else if dChange < 0 and priceChange < 0
+//     bgColor := color.new(color.black, 100) // 80% transparent black
+
+
+var doubleDip = false
+doubleDip := false
+var buyDipD = close
+var buyDipP = close
+var freezeBuyDip = false
+
+if d>80
+    freezeBuyDip := false
+
+
+var buyDipCount = 0
+if d[2] > d[1] and d > d[1] and freezeBuyDip == false
+    buyDipD := d[1]
+    buyDipP := close[1]
+    buyDipCount := buyDipCount + 1
+if buyDipP - buyDipP[1] < 0 and buyDipD - buyDipD[1] > 0 and freezeBuyDip == false
+    if (buyDipCount - buyDipCount[1]) < 10
+        bgColor := color.rgb(0, 255, 0)
+        buyDipP := 0
+        longBuySignal := true
+        freezeBuyDip := true
+        normalCandle := false
+        doubleDip := true
+
+    else 
+        buyDipP:= 0 
+        freezeBuyDip := true
+
+var sellPeakD = close
+var sellPeakP = close
+var freezeSellPeak = false
+
+if d < 20
+    freezeSellPeak := false
+
+
+var sellPeakCount = 0
+if d[2] < d[1] and d < d[1] and freezeSellPeak == false
+    sellPeakD := d[1]
+    sellPeakP := close[1]
+    sellPeakCount := sellPeakCount + 1
+if sellPeakP - sellPeakP[1] > 0 and sellPeakD - sellPeakD[1] < 0 and freezeSellPeak == false
+    if (sellPeakCount - sellPeakCount[1]) < 10
+        bgColor := color.rgb(255, 0, 0)
+        sellPeakP := 0    
+        freezeSellPeak := true
+        normalCandle := false
+        doubleDip := true
+    else 
+        sellPeakP:= 0 
+        freezeSellPeak := true
+
+
+atr_value = ta.atr(periodK)
+// stoploss = close[1]
+// stoplossshort = close[1]
+stoploss = close - (atr_value * 1.5)
+stoplossshort = close + (atr_value * 1.5)
+// strategy.entry("Buy", strategy.long, when=longCond, qty=qty)
+// strategy.exit("Close Buy","Buy", limit=take, stop=stop)
+
+// if longBuySignal
+//     if dmid > 20 or d > 20 or dold > 20 or doldest > 35
+//         longBuySignal := false
+// if d[1] > 70 and d - d[1] < 0
+//     longSellSignal := true
+// if longSellSignal
+//     if dmid < 80 or d < 80 //or dold  80 or doldest < 80
+//         longSellSignal := false
+var float previousClosedTradesCount = 0
+currentClosedTradesCount = strategy.closedtrades
+
+justClosedTrade = currentClosedTradesCount > previousClosedTradesCount[1] ?
+                   currentClosedTradesCount - previousClosedTradesCount[1] > 0 : false
+
+// IMPORTANT: Update previous count for the next bar
+previousClosedTradesCount := currentClosedTradesCount
+
+
+// Check if the *last* closed trade (which just happened) was a stop loss exit
+// You need to ensure it's the specific stop loss ID you want to track
+isStopLossExit = justClosedTrade and strategy.closedtrades.exit_id(math.floor(strategy.closedtrades - 1.0)) == "Long SL"
+var bool cooldown = false
+// if isStopLossExit
+//     cooldown := true
+// if doldest < 10
+//     cooldown := true
+// if cooldown
+//     if dmid > 80 
+//         cooldown := false
+
+// if doldest > 75 and d < 25
+//     longBuySignal := true
+
+
+if longsOn
+    if longBuySignal == true and cooldown == false
+        strategy.entry("Long", strategy.long,limit = close ) // Enters a long position
+        // strategy.exit("Long SL", from_entry="Long", profit = close + atr_value * 1, stop = close - atr_value * 1)
+
+
+    // Long Exit (optional: can be based on a signal or risk management)
+    if longSellSignal == true
+        strategy.close("Long")
+
+if shortsOn
+    if shortBuySignal == true
+        strategy.entry("Short", strategy.short,limit = close ) // Enters a long position
+
+    // Long Exit (optional: can be based on a signal or risk management)
+    if shortSellSignal == true
+        strategy.close("Short")
+
+// bgcolor(bgColor)
+// barcolor(bgColor)
+// plotcandle(open, high, low, close, title="My Candle", color=color.white, bordercolor=bgColor, wickcolor=bgColor)
+// plotcandle(open, high, low, close, title = "My Candle",color = bgColor, bordercolor = bgColor)
+
+plotbar(
+   normalCandle == false ? open : na,
+   high,
+   low,
+   close,
+   color = bgColor,
+   editable = false,
+   display = display.pane,
+   force_overlay = true)
+
+plotcandle(
+   normalCandle == false ? open : na,
+   high,
+   low,
+   close,
+   color = bgColor,
+   bordercolor = doubleDip == true ? color.white :bgColor,
+   wickcolor = bgColor,
+   editable = false,
+   display = display.pane,
+   force_overlay = true)
+
+
+
+// barcolor(color.yellow, editable = false)
+
+View in Pine Editor・300 lines
+Use on chart
+2
+0
+975
+Sep 26, 2025
+Background bars:
+
+Bearish
+gradient from slightly bearish divergence to strong bearish divergence for red and a double bounce for pink
+
+Bullish
+gradient from slightly bearish divergence to strong bearish divergence for green and a double bounce for yellow
+
+removable buy and sell signals in options
+
+Sep 27, 2025
+Release Notes
+Color certain candles to have bearish or bullish divergence
+
+green gradient is bullish divergence.
+Yellow if double dip strong bullish divergence
+
+red gradient is bearish divergence
+pink if double tip strong bearish divergence
+
+
+Sep 27, 2025
+Release Notes
+Determines bullish and bearish divergence
+
+The brighter the red the stronger the bearish divergence - white order means double tip divergence
+
+The brighter the green the stronger the bullish divergence - white border means double dip divergence
+Sep 27, 2025
+Release Notes
+bullish and bearish divergence based on red and green candles. white box is super signal
+Sep 27, 2025
+Release Notes
+the brighter the color the stronger the divergence. white border is for double dip divergence - strong divergence
+Sep 27, 2025
+Release Notes
+Shows divergence by coloring candles. brighter color is stronger divergence. white border is a double dip divergence meaning strong divergence.

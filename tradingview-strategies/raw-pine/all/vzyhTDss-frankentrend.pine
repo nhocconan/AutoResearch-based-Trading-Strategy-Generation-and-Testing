@@ -1,0 +1,121 @@
+//@version=2
+//Strategy: jwilkinscb (@jwilkins on twitter)
+//Includes parts of indicators from: 
+//  Rajandran R (www.marketcalls.in)
+//  LazyBear
+//  ChrisMoody              
+strategy("frankentrend", overlay = false, 
+                         default_qty_type=strategy.fixed, 
+                         default_qty_value=10,
+                         currency="USD",
+                         pyramiding=2,
+                         calc_on_order_fills=true,
+                         calc_on_every_tick=true)
+                       
+coin_limit = input(50, minval=1)
+fastLength = input(1, minval=1)
+slowLength = input(4,minval=1)
+signalLength=input(6,minval=1)
+hline(0, color=purple, linestyle=dashed)
+fastMA = ema(close, fastLength)
+slowMA = ema(close, slowLength)
+macd = fastMA - slowMA
+signal = sma(macd, signalLength)
+pos = iff(signal < macd , 1, iff(signal > macd, -1, nz(pos[1], 0))) 
+barcolor(pos == -1 ? red: pos == 1 ? green : blue)
+//------------
+
+Factor=input(1, minval=1,maxval = 100)
+Pd=input(13, minval=1,maxval = 100)
+
+Up=hl2-(Factor*atr(Pd)) 
+Dn=hl2+(Factor*atr(Pd))
+
+TrendUp=close[1]>TrendUp[1]? max(Up,TrendUp[1]) : Up
+TrendDown=close[1]<TrendDown[1]? min(Dn,TrendDown[1]) : Dn
+
+Trend = close > TrendDown[1] ? 1: close< TrendUp[1]? -1: nz(Trend[1],1)
+Tsl = Trend==1? TrendUp: TrendDown
+
+trend_xup = barssince(cross(close, Tsl) and close>Tsl)
+trend_xdown = barssince(cross(close, Tsl) and close<Tsl)
+
+//------------
+// lazy bear wies wave volume indicator
+lbwwv_trendDetectionLength=1
+lbwwv_mov = close>close[1] ? 1 : close<close[1] ? -1 : 0
+
+lbwwv_trend = (lbwwv_mov != 0) and (lbwwv_mov != lbwwv_mov[1]) ? lbwwv_mov : nz(lbwwv_trend[1])
+lbwwv_isTrending = rising(close, lbwwv_trendDetectionLength) or falling(close, lbwwv_trendDetectionLength) //abs(close-close[1]) >= dif
+lbwwv_wave=(lbwwv_trend != nz(lbwwv_wave[1])) and lbwwv_isTrending ? lbwwv_trend : nz(lbwwv_wave[1])
+lbwwv_vol=lbwwv_wave==lbwwv_wave[1] ? (nz(lbwwv_vol[1])+volume) : volume
+lbwwv_up=lbwwv_wave == 1 ? lbwwv_vol : 0  
+lbwwv_dn=lbwwv_wave == 1 ? 0 : lbwwv_wave == -1 ? -lbwwv_vol : lbwwv_vol
+lbwwv_buy = (cross(lbwwv_up, lbwwv_dn) == 1 and (lbwwv_up > lbwwv_dn))
+lbwwv_sell = (cross(lbwwv_up, lbwwv_dn) == 1 )
+
+//-----------
+pnf_id = pointfigure(tickerid, "close", "Traditional", 0.5, 3)
+pnf_close_0 = security(pnf_id, period, close)
+pnf_close_1 = security(pnf_id, period, close[1])
+pnf_trend = pnf_close_0 > pnf_close_1 ? 1 : -1
+//-------------
+// Vix Fix (ChrisMoody)
+vf_pd = input(22, title="LookBack Period Standard Deviation High")
+vf_bbl = input(20, title="Bolinger Band Length")
+vf_mult = input(2.0    , minval=1, maxval=5, title="Bollinger Band Standard Devaition Up")
+vf_lb = input(50  , title="Look Back Period Percentile High")
+vf_ph = input(.85, title="Highest Percentile - 0.90=90%, 0.95=95%, 0.99=99%")
+vf_pl = input(1.01, title="Lowest Percentile - 1.10=90%, 1.05=95%, 1.01=99%")
+vf_hp = input(false, title="Show High Range - Based on Percentile and LookBack Period?")
+vf_sd = input(false, title="Show Standard Deviation Line?")
+
+vf_wvf = ((highest(close, vf_pd)-low)/(highest(close, vf_pd)))*100
+
+vf_sDev = vf_mult * stdev(vf_wvf, vf_bbl)
+vf_midLine = sma(vf_wvf, vf_bbl)
+vf_lowerBand = vf_midLine - vf_sDev
+vf_upperBand = vf_midLine + vf_sDev
+
+vf_rangeHigh = (highest(vf_wvf, vf_lb)) * vf_ph
+vf_rangeLow = (lowest(vf_wvf, vf_lb)) * vf_pl
+
+
+vf_buy = vf_wvf >= vf_upperBand or vf_wvf >= vf_rangeHigh ? true : false
+
+
+//-------------
+
+linecolor = Trend == 1 ? green : red
+
+open_delta = strategy.openprofit[1] - strategy.openprofit
+opd_pc = (open_delta/strategy.openprofit[1]) * 100
+under_limit = strategy.position_size < coin_limit
+
+if (trend_xup == trend_xdown and close > Tsl )
+    trend_xdown = trend_xdown + 1
+
+
+recent_avg = vwma(ohlc4, 7)
+
+// Trade logic
+enter_long = (trend_xup < trend_xdown and under_limit == true and vf_buy == true)
+//exit_all = (vf_buy == false and (((high < high[1]) and (((high[1]-high)) > 0.25) and (low < low[1])) or close+0.25 < low[1]))  // $934 
+//exit_all = (vf_buy == false and (((high < high[1]) and (low < low[1])) or close < low[1]))  // ** Best $1351
+exit_all = (vf_buy == false and (((high < high[1]) and (low < low[1])) or close < low[1]))  // ** Best
+
+strategy.order("trend", strategy.long, 10, when=enter_long == true)
+strategy.order("macd", strategy.long, 5, when=trend_xup < trend_xdown and cross(macd, signal) and macd > signal and vf_buy == true and close < (recent_avg-1))
+
+strategy.close_all(when=(exit_all == true)) 
+strategy.close_all(when=strategy.openprofit < -50)
+strategy.close_all(when=pnf_trend < 0)
+
+View in Pine Editor・112 lines
+Use on chart
+5
+4
+2 062
+Works well on 
+BTCUSD
+ with a Heikin Ashi chart.

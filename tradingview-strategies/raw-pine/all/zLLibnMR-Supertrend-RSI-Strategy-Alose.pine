@@ -1,0 +1,87 @@
+//@version=5
+strategy("Supertrend + RSI Strategy [Alose]", overlay=true, pyramiding=0, currency=currency.USD, default_qty_type=strategy.percent_of_equity, initial_capital=1000, default_qty_value=20, commission_type=strategy.commission.percent, commission_value=0.01)
+
+stGroup = 'Supertrend'
+atrPeriod = input(10, "ATR Length", group=stGroup)
+factor = input.float(3.0, "Factor", step = 0.01, group=stGroup)
+
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+// RSI
+rsiGroup = 'RSI'
+src = input(title='Source', defval=close, group=rsiGroup)
+lenRSI = input.int(14, title='Length', minval=1, group=rsiGroup)
+RSI = ta.rsi(src, lenRSI)
+
+// Strategy Conditions
+stratGroup = 'Strategy'
+showLong = input.bool(true, title='Long entries', group=stratGroup)
+showShort = input.bool(false, title='Short entries', group=stratGroup)
+RSIoverbought = input.int(72, title='Exit Long', minval=1, group=stratGroup, tooltip='The trade will close when the RSI crosses up this point.')
+RSIoversold = input.int(28, title='Exit Short', minval=1, group=stratGroup, tooltip='The trade will close when the RSI crosses below this point.')
+
+
+entryLong = ta.change(direction) < 0
+exitLong = RSI > RSIoverbought or ta.change(direction) > 0
+
+entryShort = ta.change(direction) > 0
+exitShort = RSI < RSIoversold or ta.change(direction) < 0
+
+if showLong
+    strategy.entry("Long", strategy.long, when=entryLong)
+    strategy.close("Long", when=exitLong)
+
+if showShort
+    strategy.entry("Short", strategy.short, when=entryShort)
+    strategy.close("Short", when=exitShort)
+
+View in Pine Editor・39 lines
+Use on chart
+5
+9
+1
+3
+16 419
+This strategy combines the best of both indicators (Supertrend & RSI).
+
+As we know, Supertrend is excellent at finding changes in the market trend and thus finding the best entries, however in my opinion it has a great weakness and it is that it does not know how to find the best exit point.
+
+For this reason I decided to combine it with the RSI that we know usually knows the highest and lowest rebound points of the price, thus managing to find the best exit point for the strategy.
+
+The best thing about combining these 2 indicators is that our trades will obtain better profits in less time.
+
+
+LONG ENTRY
+
+When SuperTrend changes its direction and it is less than 0.
+
+
+
+LONG EXIT
+There are two ways to close the trade:
+
+When RSI is overbought, you can choose the "Overbought Level " inside the strategy settings (Default: 72).
+
+When SuperTrend changes its direction and it is grater than 0.
+
+
+
+
+SHORT ENTRY (You can enable short entries in strategy settings)
+
+When SuperTrend changes its direction and it is grater than 0.
+
+
+
+LONG EXIT
+There are two ways to close the trade:
+
+When RSI is oversold, you can choose the "Oversold Level " inside the strategy settings (Default: 28).
+
+When SuperTrend changes its direction and it is less than 0.
+
+
+
+
+
+

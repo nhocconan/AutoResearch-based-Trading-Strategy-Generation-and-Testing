@@ -1,0 +1,494 @@
+//@version=4
+// ||<=====================================================================================================================================================================================================>||
+// || Pine Script Strategy -written by serialhenry
+// ||  Writing Pine scripts since September 2019
+// ||       all rights reserved copyright November 2019
+// ||
+// ||   5min EMA with 1H EMA anchor chart filter - Trend following strategy
+// ||   
+// ||   Designed to work with FOREX pairs that tend to trend, eg, AUDUSD, EURUSD, USDJPY. Seems to do well in XAUUSD so long as you change stopPips to = 250.  
+// ||   Seems to perform dismally on FOREX pairs that mean revert. 
+// ||
+// ||   Published for DEMO TRADING ONLY. I do not advise or recommend using it with real money. Use at your own discretion. You alone are responsible for any outcome.
+// ||   Strategy rules - credit to ForexSignalsTV
+// ||   ___________________________________________________________________________________________________________________________________________________________________________________________________>
+// ||   1. Check for anchor chart EMA conditions. EMAH1 > EMAH2 is longAnchor, EMAH1<EMAH2 is shortAnchor. Furthermore, price should be over/under EMAH1 for the last 2 or 3 bars (ie last 2 or 3 hours)
+// ||   2. check 5min EMA ribbons are all lined up. These will be our 5min EMA Signals
+// ||   3. Entry signal bar is when price dips below EMA1 but closes above EMA1 for long, and price pierces above EMA1 but closes under it for short
+// ||   4. Set a window of validity for the signals. Cancel limit order when the window is closed: 
+// ||       a) Price must not close below/above EMA3 for buy/sell 
+// ||       b) Price must stay above/below EMAH1 for buy/sell
+// ||       c) consider using strategy.close_all() function for this task
+// ||   5. Trade Entry triggers - longTrigger and shortTrigger occurs when the price crosses LEPrice SEPrice, and only when tWindow is valid. 
+// ||   6. Set Stop limit orders at the signal bar. Limit order entry - 
+// ||       Buy Stop order at 5 bar high from signal bar plus 3pips. = save to variable LEPrice
+// ||       sell stop order at 5 bar low from signal bar plus 3 pips = save to variable SEPrice
+// ||   7. Set stop loss    
+// ||       a) buy stop loss at signal bar low less 3 pips = save to variable buySL
+// ||       b) sell stop loss at signal bar high plus 3 pips = save to variable sellSL
+// ||   8. Set lot size
+// ||       LER1 (or SER1) = buyPrice - buySL. LPosSize (or SPosSize) = RiskEquity / (LER1 / syminfo.pointvalue) returns number of contracts to trade. See line 204
+// ||   9.TP levels
+// ||       a) buyTP1 = buyPrice + buyPip; buyTP2 = buyPrice + 2 * buyPip
+// ||       b) sellTP1 = sellPrice - sellPip; sellTP2 = sellPrice - 2 * sellPip
+// ||   10. Order management - Enter trade when longTrigger or shortTrigger, with buySL sellSL and buyTP sellTP. Future edit will incorporate 2 TP points and a move SL to BE routine.
+// ||   11. Trade alert - alert condition with message
+// ||       a) instrument Symbol 
+// ||       b) Direction (long or short) 
+// ||       c) Limit Entry price 
+// ||       d) Position Size 
+// ||       e) TP 
+// ||       f) SL
+// ||
+// ||   FUTURE RULES 
+// ||   Try out an automatic exit after 12 hours (144 bars). This is just an observation and hypothesis - that a trend will start to reverse after 12 hours.
+// ||   Improvements to the TP exit (eg having an exit at TP1, moving SL to break even, and a trailing stop on the remaining 1/2 position.) This may increase the win rate. Bit of complex coding there though.
+// ||<=====================================================================================================================================================================================================>||
+    
+    
+// ||<=====================================================================================================================================================================================================>||
+// ||   Log of optimisations
+// || 18/11/19 - XAUUSD - Min pip distance of 250 and R multiple of 1.95 yields a really nice result! it cuts down the number of trades to 17, and increases the win rate to 64%. Result 13%
+// || 18/11/19 - AUDUSD - R multiple of 1.9 gets best results 48% win 11.85% return 35 trades . But other values result in sharp fall in overall returns. 
+
+strategy("5min with 1H filter trend strategy",
+     shorttitle="5min Strategy",
+     overlay=true,initial_capital=10000,
+     pyramiding=0, max_bars_back = 5000)
+//11/11/19: this strategy doesnt run if max_bars_back >5000. Not sure why
+
+// === BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2019, title = "From Year", minval = 2000)
+ToMonth   = input(defval = 12, title = "To Month", minval = 1)
+ToDay     = input(defval = 1, title = "To Day", minval = 1)
+ToYear    = input(defval = 2019, title = "To Year", minval = 2000)
+
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+
+//User Inputs
+EMALen1     =   input(defval=8,title="8 EMA",type=input.integer)
+EMALen2     =   input(defval=13,title="13 EMA",type=input.integer)
+EMALen3     =   input(defval=21,title="21 EMA",type=input.integer)
+EMALen1H    =   input(defval=8,title="1H EMA8",type=input.integer) * 11                             //multiplier of length to translate into equivalent 1H length. ie 60/5 - 1 = 11
+EMALen2H    =   input(defval=21,title="1H EMA21",type=input.integer) * 11
+src         =   close 
+srcAnchor   =   security(syminfo.tickerid,"60",close)
+atrLen      =   input(title="ATR Length", type=input.integer, defval=14)                            //ATR isnt used in this script for now. I just put it in here in case i want to amend the PosSize to an ATR based sizing method.
+atrMultiple =   input(title="ATR multiple for SL",type=input.integer,defval=1)                      //ATR multiple.. again, not used in this script... 
+UsePosSize  =   input(title="Use Position Sizing?",type=input.bool,defval=true)
+RiskPerC    =   input(title="Risk %",type=input.float,defval=1,step=0.25)
+stopPips    =   input(defval=3.0,title="number of pips to add to stop levels",type=input.float)
+stopPoints  =   stopPips * syminfo.mintick * 10                                                     //multiply mintick by 10 to convert to pips. As TV displays 5 digits (except JPY pairs, 3 digits).        
+stopLen     =   input(defval=5,title="number of bars back from trigger for entry price",type=input.integer)
+rMultiple   =   input(defval = 2.0, title = "TP R multiple", type = input.float)                    //Take profit R multiple, where R is the Risked pips, determined by distance between entry price and SL. 
+
+//calculate EMA values
+EMA1 = ema(src,EMALen1)
+EMA2 = ema(src,EMALen2)
+EMA3 = ema(src,EMALen3)
+EMAH1 = ema(srcAnchor,EMALen1H)
+EMAH2 = ema(srcAnchor,EMALen2H)
+//EMA plots
+EMA1plot = plot(EMA1,title="EMA1",color=color.lime)
+EMA2plot = plot(EMA2,title="EMA2",color=color.navy)
+EMA3plot = plot(EMA3,title="EMA3",color=color.red)
+EMAH1plot = plot(EMAH1,title="EMA H1 fast",color=color.silver, linewidth = 1, style = plot.style_circles)
+EMAH2plot = plot(EMAH2,title="EMA H1 slow",color=color.black, linewidth = 1, style = plot.style_circles)
+fillColorH = EMAH1 >= EMAH2 ? color.green : EMAH1 < EMAH2 ? color.red : na
+fill(EMAH1plot, EMAH2plot, fillColorH, transp = 85) 
+
+//custom function f_highest and f_lowest, as built in highest() and lowest() functions do not accept series integers in the length argument. credit to Ricardo Santos
+f_highest(_src, _length)=>
+    _adjusted_length = _length < 1 ? 1 : _length
+    _value = _src
+    for _i = 0 to (_adjusted_length-1)
+        _value := _src[_i] >= _value ? _src[_i] : _value
+    _return = _value
+
+f_lowest(_src, _length)=>
+    _adjusted_length = _length < 1 ? 1 : _length
+    _value = _src
+    for _i = 0 to (_adjusted_length-1)
+        _value := _src[_i] <= _value ? _src[_i] : _value
+    _return = _value
+
+//1. Anchor Signals 
+//      price is above EMAH1 in last 1, 2 or 3 H1 bars, and price below EMAH1 in last 1, 2 or 3 bars. Alternatively try EMAH2
+//      use for loop to cycle back to the defined number of bars in hLength. it represents the number of H1 bars. Convert to equivalent 5min bars by multiplying by 12 (60/5)
+hLength = input(defval = 1, title = "H1 lookback length", type = input.integer) * 11 //input number of H1 bars to look back. multiply by 11 rather than 12, so you dont get a delay.
+longAnchor = false
+for i = 0 to hLength 
+    if low[i] > EMAH2[i] and EMAH1[i] > EMAH2[i]
+        longAnchor := true 
+    else 
+        longAnchor := false
+        break
+        longAnchor
+        
+shortAnchor = false
+for i = 0 to hLength
+    if high[i] < EMAH2[i] and EMAH1[i] < EMAH2[i]
+        shortAnchor := true 
+    else 
+        shortAnchor := false
+        break
+        shortAnchor
+        
+//debug to check correct behaviour - 11/11/19 - Checked this and looks like the code is behaving like I want it to.
+//plotshape(longAnchor, style=shape.flag, size = size.tiny, color = color.green, location = location.abovebar)
+//plotshape(shortAnchor, style=shape.flag, size = size.tiny, color = color.red, location = location.belowbar)
+
+//2. 5min EMA signals
+longEMA = EMA1 >= EMA3
+shortEMA = EMA1 <= EMA3
+//Alternative EMA signals:
+//  longEMA = EMA1 >= EMA2 and EMA2> EMA3
+//  shortEMA = EMA1 <= EMA2 and EMA2< EMA3
+//  Why dont I use these? because i found this criteria to make me miss out on entering some nice trends. This tends to happen very near the start of a trend. Missing the start of some trends makes me miss the whole move, as no other opportunity arises to renter. 
+
+//3. Signal Bar
+//      Signal bar occurs when the anchor signal is true, and the EMA on 5m charts are true. Signal bar occurs when price touches and retraces back in the direction of the trend
+//      Signal bar opens a window, to allow for trade when price crosses over the stop limit price
+//      stop price levels are set at the Signal bar
+// FUTURE EDIT = I want only 1 signalLong or 1 signalShort per tWindowLong / tWindowShort. The problem is that it is the signalLong/Short that is the condition to open a window, and yet it is the window that i need as a condition to stop any further signals within a window.
+
+tWindowLong = false //edit 15/11 trying out new condition of tWindowLong[1] == false for the signals and added strategy.position_size ==0 to try and stop new signals appearing when another window appears.
+tWindowShort = false
+
+signalLimitBars = input(defval = 12, title = "max bars for trigger validity") //18/11/19 - i changed this from 24 (120min/2h to 12 - 60min/1h. This seems to improve the performance)
+signalLong = strategy.position_size ==0 and tWindowLong[1] == false and longEMA and longAnchor and (close >= EMA1 and low <= EMA1) ? true : false  //trying to stop signals happening if already in a position by adding strategy.position_size==0? . Result - EURUSD loses by like -17%, down from 4% before. 
+signalShort = strategy.position_size == 0 and tWindowShort[1] == false and shortEMA and shortAnchor and (close <= EMA1 and high >= EMA1) ? true : false 
+//store the number of bars since a signal bar, so we can use it as a history reference to get the high or low price at the signal bar moment.
+sinceSignalLong = barssince(signalLong)
+sinceSignalShort = barssince(signalShort)
+//debug signalLong/Short
+//FUTURE EDIT : I want the Signal bar shapes to not plot if there is already a long or a short before. 
+// plotshape(signalLong, style=shape.arrowup, size = size.huge, color = color.green, location = location.abovebar)
+// plotshape(signalShort, style=shape.arrowdown, size = size.huge, color = color.red, location = location.belowbar)
+
+//Entry price LEPrice and SEPrice- determined at the signal bar
+longEntryPrice = f_highest(high,sinceSignalLong + stopLen) + stopPoints// using _length = sinceTriggerLong + stopLen is supposed to provide hist ref index number to run for loop, but it could return a higher high than the 5 bars behind the trigger, if there are any HH after the trigger bar.
+shortEntryPrice =f_lowest(low,sinceSignalShort + stopLen) -  stopPoints
+LEPrice = valuewhen(signalLong,longEntryPrice,0) // storing the longEntryPrice at the triggerLong event allows me to keep the entry prices constant, and avoid returning a HH after the trigger bar. 
+SEPrice = valuewhen(signalShort,shortEntryPrice,0)
+
+//4. signal bar windows
+//  The idea of creating a 'window' is to provide a limited window of opportunity for the price to trigger
+//  signal window opens from the firing of signalLong/Short - 13/11 but i am thinking of decoupling signal from the window opening... as I want to use the window as a criteria for determining a signal. ie, i want signal to occur when not window....
+//  close t window when:
+//      passed the signalLimitBars
+//      an opposing signal bar is detected
+//      price closes under EMAH1 (long) or closes above EMAH1 (short). Alternatively closes under/above EMA3 (EMA21 5min)
+//      longAnchor not true any more
+//      longEMA not true any more
+
+tWindowLong :=
+  sinceSignalLong > signalLimitBars ? false :
+  sinceSignalLong > sinceSignalShort ? false :
+  close < EMAH1 ? false :
+  not longAnchor ? false :
+  not longEMA ? false:
+  longEMA ? true : tWindowLong[1] //tried changing from signalLong ? to longEMA? in an attempt to decouple the tWindow from signal. As I want a signal condition to depend on a window
+tWindowShort :=
+  sinceSignalShort > signalLimitBars ? false :
+  sinceSignalShort > sinceSignalLong ? false :
+  close > EMAH1 ? false :
+  not shortAnchor ? false :
+  not shortEMA ? false :
+  shortEMA ? true : tWindowShort[1]
+
+// 15/11/19 Im going to try out creating a new variable where signalLong/Short and tWindowLong/Short are both true. 
+// keySignal = 0
+// keySignal := tWindowLong? 1 : tWindowShort? -1 : nz(keySignal[1])
+// keySignalColor = tWindowLong ? color.green : tWindowShort ? color.red : na
+//debug
+// plotshape(keySignal, style=shape.flag, size = size.small, color = keySignalColor, location = location.abovebar)
+
+// 5. Entry Triggers - entering the trade
+//  Trigger conditions
+//  1. Trigger can only happen when tWindows are valid
+//  2. Store Trigger conditions in variables : longTrigger, shortTrigger
+//  3. Trigger occurs when price crosses over LEPrice for longTrigger, under for shortTrigger. Question is which price series do we use? open, high, low, close, OHLC.. 1min Open?, each tick?
+triggerSrc  =   security(syminfo.tickerid,"1",open)  //trigger price source chosen as the open of the 1 min candle... not so sure if i should use it... 
+longPriceCross = crossover(triggerSrc, LEPrice) 
+shortPriceCross = crossunder(triggerSrc, SEPrice) 
+longTrigger = tWindowLong and longPriceCross ? true : false
+shortTrigger = tWindowShort and shortPriceCross ? true : false
+//debug the triggers
+// plotshape(longTrigger, style = shape.triangleup, location = location.abovebar, color = color.green, size = size.small)
+// plotshape(shortTrigger, style = shape.triangledown, location = location.belowbar, color = color.red, size = size.small)
+
+//debug with bgcolor for the windows
+windowColor = tWindowLong ? color.green : tWindowShort ? color.red : na
+bgcolor(windowColor, transp = 95)
+//debugging the entry price algorithms
+showLESE = input(defval = true, title = "show LE and SE line?", type = input.bool)
+plot(showLESE and tWindowLong? LEPrice : na, title = "long entry price",linewidth = 1, style = plot.style_linebr, color = tWindowLong? color.green : na) 
+plot(showLESE and tWindowShort? SEPrice : na, title = "short entry price",linewidth = 1, style = plot.style_linebr, color = tWindowShort? color.red : na)
+
+//stop loss and take profit
+//Stop Loss price
+LESL = f_lowest(low,sinceSignalLong) - stopPoints
+SESL = f_highest(high, sinceSignalShort) + stopPoints
+buySL = valuewhen(signalLong, LESL, 0) 
+sellSL = valuewhen(signalShort, SESL, 0)
+//Determine 1R
+LER1 = LEPrice - buySL
+SER1 = sellSL - SEPrice
+//Take profit price
+buyTP1 = LEPrice + LER1
+buyTP2 = LEPrice + (rMultiple * LER1)
+sellTP1 = SEPrice - SER1
+sellTP2 = SEPrice - (rMultiple * SER1) 
+//debug SL and TP levels
+showLongSLTP = input(true, "show Long SL TP levels")
+showShortSLTP = input(true, "show Short SL TP levels")
+
+//PosSize
+RiskEquity  =   (RiskPerC/100)*strategy.equity
+ATRCurrency =   (atr(atrLen)*syminfo.pointvalue) 
+LPosSize = RiskEquity / (LER1 * syminfo.pointvalue)
+SPosSize = RiskEquity / (SER1 * syminfo.pointvalue)
+
+//Order placement
+//place a market order entry when trigger is true
+if longTrigger and window()
+    strategy.entry("LE", strategy.long, qty = LPosSize) 
+    // a market order will be placed for each longTrigger within the tWindowLong period
+    // this can cause more than 1 market order to initiate within a window. It appears the SL's for these multiple entries are the same price, but the entry prices differ as new longTriggers are made
+
+longPosSize = longTrigger and window() ? strategy.position_size : na
+
+if shortTrigger and window()
+    strategy.entry("SE",strategy.short, qty = SPosSize)
+
+shortPosSize = shortTrigger and window() ? strategy.position_size : na
+
+strategy.exit("LE eX", "LE", stop = buySL, limit = buyTP2) 
+strategy.exit("SE eX", "SE", stop = sellSL, limit = sellTP2)
+
+//NOTE!!! BUG FIX NEEDED - SL levels move every time there is a new signalLong/Short - IDEA - change to valuewhen a trigger happens 
+//Answer - Line 139 and 140 - adding strategy.position_size ==0 eliminates additional signalLong/Short after a trade is entered into. 
+//this will need to be changed should i want to change the strategy to be able to pyramid
+
+//12/11/19 16:00 - the code snip below tries to do multiple TPs. However, it returns "The study references too many candles in history (5001)"
+//strategy.exit("LE eX SL", "LE", stop = buySL, qty_percent = 100) 
+//strategy.exit("LE ex TP1", "LE", limit = buyTP1, qty_percent = 50)
+//strategy.exit("LE ex TP2", "LE", limit = buyTP2, qty_percent = 50)
+//strategy.exit("SE eX SL", "SE", stop = sellSL, qty_percent = 100)
+//strategy.exit("SE ex TP1", "SE", limit = sellTP1, qty_percent = 50)
+//strategy.exit("SE ex TP2", "SE", limit = sellTP1, qty_percent = 50)
+
+//This code also returns the same error above
+//strategy.exit("LE eX SL", "LE", stop = buySL) //qty_percent = float 0-100 returns error "the study references too many candles in history(5001)"
+//strategy.exit("LE ex TP2", "LE", limit = buyTP2)
+//strategy.exit("SE eX SL", "SE", stop = sellSL)
+//strategy.exit("SE ex TP2", "SE", limit = sellTP2)
+
+//This code below returns normal results
+//strategy.exit("LE eX", "LE", stop = buySL, limit = buyTP2) //qty_percent = float 0-100 returns error "the study references too many candles in history(5001)"
+//strategy.exit("SE eX", "SE", stop = sellSL, limit = sellTP2)
+
+// Plotting the TP and SL levels. I want to modify this part so that the TP and SLs plot out only from the entry to the exit of a trade. 
+// I guess that would be another window, where a window is opened when strategy.position_size==0, and closed when !=0
+buyTPColor = strategy.position_entry_name == "LE" ? color.olive : na
+buySLColor = strategy.position_entry_name == "LE" ? color.orange : na
+sellTPColor = strategy.position_entry_name == "SE"? color.olive : na
+sellSLColor = strategy.position_entry_name == "SE" ? color.orange : na
+plot(showLongSLTP ? buyTP1 : na, linewidth = 1, style = plot.style_linebr, color = buyTPColor)
+d = plot(showLongSLTP ? buyTP2 : na, linewidth = 5, style = plot.style_linebr, color = buyTPColor)
+a = plot(showLongSLTP ? buySL : na , linewidth = 5,  style = plot.style_linebr, color = buySLColor)
+plot(showShortSLTP ? sellTP1 : na, linewidth = 1,  style = plot.style_linebr, color = sellTPColor)
+c = plot(showShortSLTP ? sellTP2 : na, linewidth = 5,  style = plot.style_linebr, color = sellTPColor)
+b = plot(showShortSLTP ? sellSL : na, linewidth = 5,  style = plot.style_linebr, color = sellSLColor)
+e = plot(strategy.position_entry_name == "LE" ? LEPrice : na, linewidth = 5, style = plot.style_linebr, color = color.green)
+f = plot(strategy.position_entry_name == "SE" ? SEPrice : na, linewidth = 5, style = plot.style_linebr, color = color.red)
+// POSITION SHADING
+fill(b, f, color = color.red, transp = 85)
+fill(f, c, color = color.green, transp = 85)
+fill(a, e, color = color.red, transp = 85)
+fill(e, d, color = color.green, transp = 85)
+
+// Add labels showing 
+// instrument symbol
+// Direction of trade (+ value for strategy.position_size is long, - value is short)
+// Entry Price LEPrice or SEPrice
+// Stop Loss
+// Take profit
+// Position Size in lots (longPosSize and shortPosSize)
+// Print at signal bar occurence
+// delete any previous label
+
+// disp_labels = input(true, title="Display info panels?")
+// label_off = input(0, title="linear label offset")
+// label_size = input(size.normal, options=[size.tiny, size.small, size.normal, size.large, size.huge], title="linear label size")
+// label_x = timenow + round(change(time)*label_off)
+// text1 = "Direction  : " + (strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : na) 
+// text2 = "Entry Price: " + tostring(LEPrice)
+// text3 = "Stop Loss  : " + tostring(buySL)
+// text4 = "Take Profit: " + tostring(buyTP2)
+// text5 = "Lots: " +tostring(strategy.position_size)
+// text6 = "Entry Price: " + tostring(SEPrice)
+// text7 = "Stop Loss  : " + tostring(sellSL)
+// text8 = "Take Profit: " + tostring(sellTP2)
+
+//label for long and for short
+//19/11/19 - BUG - the labels code below cause an error - "the study references too many candles in history" (10288 in EURUSD, 10047 in XAUUSD)
+
+// if strategy.position_size > 0
+//     tradeLabelLong = disp_labels ? label.new(x= longTrigger? barssince(strategy.position_size > 0) : na, y= buySL, text=(text1 + "\n" + text2 + "\n" + text3 + "\n" + text4 + "\n" + text5), 
+//       xloc=xloc.bar_index, yloc=yloc.price, 
+//       color=color.lime, style=label.style_labelup, 
+//       textcolor=color.black, size=label_size) : na
+//     label.delete(tradeLabelLong[1])
+
+// if strategy.position_size < 0
+//     tradeLabelShort = disp_labels ? label.new(x= shortTrigger? barssince(strategy.position_size < 0) : na, y= sellSL, text=(text1 + "\n" + text6 + "\n" + text7 + "\n" + text8 + "\n" + text5), 
+//       xloc=xloc.bar_index, yloc=yloc.price, 
+//       color=#e9a196, style=label.style_labeldown, 
+//       textcolor=color.black, size=label_size) : na
+//     label.delete(tradeLabelShort[1])
+
+//  ALERTS
+//19/11/19 - The alert codes below won't work for a strategy
+// per TV - https://www.tradingview.com/pine-script-docs/en/v4/annotations/Alert_conditions.html
+// this strategy must be converted to a study for the alerts to work.
+// however, my alerts rely on a condition that looks up the strategy.position_size, which won't work in a study.... :( I may need to create another window between the Trigger to the point where the SL or TP2 is hit.
+// i will have to copy parts of this strategy and create it as a study, for the purposes of getting alerts..
+
+// alertcondition(longTrigger, title = "long alert", message = "5min Long Entry")
+// alertcondition(shortTrigger, title = "short alert", message = "5min Short Entry")
+// longTP1Alert = strategy.position_size > 0 and crossover(triggerSrc, buyTP1) ? true : false
+// alertcondition(longTP1Alert, title = "Long TP1 alert", message = "5min Long TP1 reached")
+// shortTP1Alert = strategy.position_size < 0 and crossunder(triggerSrc, sellTP1) ? true : false
+// alertcondition(shortTP1Alert, title = "Short TP1 alert", message = "5min Short TP1 reached")
+// longTP2Alert = strategy.position_size > 0 and crossover(triggerSrc, buyTP2) ? true : false
+// alertcondition(longTP1Alert, title = "Long TP1 alert", message = "5min Long TP1 reached")
+// shortTP2Alert = strategy.position_size < 0 and crossunder(triggerSrc, sellTP2) ? true : false
+// alertcondition(shortTP1Alert, title = "Short TP1 alert", message = "5min Short TP1 reached")
+// longSLAlert = strategy.position_size > 0 and crossunder(triggerSrc, buySL) ? true : false
+// alertcondition(longSLAlert, title = "Long SL alert", message = "5min Long Stop loss hit")
+// shortSLAlert = strategy.position_size < 0 and crossover(triggerSrc, sellSL) ? true : false
+// alertcondition(shortSLAlert, title = "Short SL alert", message = "5min Short Stop loss hit")
+
+//REFERENCES
+//  1.  https://kodify.net/tradingview/strategy-settings/pyramiding-strategy-order/
+//  2.  https://kodify.net/tradingview/strategy-settings/pyramiding-entry-orders/
+//  3.  https://backtest-rookies.com/2018/08/17/tradingview-pyramiding/     - example script intended to demonstrate how pyramiding can be used to average down a position.
+//  4.  https://backtest-rookies.com/2018/10/26/tradingview-opening-a-window/ 
+//  5.  https://www.youtube.com/watch?v=zhEukjCzXwM
+//  6.  https://backtest-rookies.com/2017/11/21/tradingview-creating-alerts/
+//  7.  https://www.tradingview.com/wiki/FAQ#How_much_history_is_available_on_a_chart.3F
+//  8.  https://www.hexcolortool.com/   - for colour hex codes
+
+
+//-------------------------------------------------------------------
+
+//Some other nice plots that are not part of the strategy.
+
+//plot yesterday's high and low, and today's open as a horizontal line with crosses
+daily_high = security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+daily_low = security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+daily_open = security(syminfo.tickerid,"D",open,lookahead=barmerge.lookahead_on)
+
+showHighLow = input(true, "show Daily H L plot line?")
+plot(showHighLow? daily_high : na, style=plot.style_stepline, color=color.green, linewidth = 3)
+plot(showHighLow? daily_low : na, style=plot.style_stepline, color=color.red, linewidth = 3)
+plot(showHighLow? daily_open : na,style=plot.style_circles,color=color.silver)
+
+//plot Day of week labels at 0700 AEST
+session = input(defval="1600-1601",type=input.session) // 1700 in the exchange time zone(EST NY UTC-5) seems to return 0800 AEST. The adjustment from EST to AEST is EST+15, conversely, AEST = EST - 15
+t=time(timeframe.period,session)
+
+labelText = dayofweek==dayofweek.monday ? "Tue" 
+     : dayofweek==dayofweek.tuesday? "Wed"
+     : dayofweek==dayofweek.wednesday? "Thur"
+     : dayofweek==dayofweek.thursday? "Fri"
+     : dayofweek==dayofweek.friday? "Mon"
+     : na
+//I notice the above will return the day of week at 1700 EST.Hence I made some adjustments so that the label returns at 7am of AEST day of week     
+
+session_open=na(t)? false : true
+if session_open 
+    label.new(bar_index,na,labelText,color=color.green,textcolor=color.white,style=label.style_labeldown,yloc=yloc.abovebar)
+else
+    na
+
+View in Pine Editor・420 lines
+Use on chart
+3
+3
+7
+20 825
+Nov 6, 2019
+This is my first attempt at producing a strategy in Pine Script.
+
+I am NOT a professional coder. I'm not even a good coder at that. I've only started Pine Script coding since September 2019. I am teaching myself.
+
+This script is far from finished. I need to tweak a number of things about this script. Namely:
+
+Add a validity window to the 'trigger bar' condition. Ie, I want to shut down the condition when the price closes above EMA21
+
+Change the order entry so they are stop orders, using the stop entry price derived from the signals
+
+Make changes to lot sizing
+
+Add a trailing stop condition
+
+Comments welcome, but do not expect me to reply to any questions or requests. In fact, don't expect any replies from me. I consider myself notoriously bad at replies.
+
+I do welcome any feedback from any seasoned coders out there, as I am still a novice coder, and have so much to learn!
+
+As to anyone who wants to criticise me - constructive and helpful criticism are most welcome, criticism to make yourself feel superior to me - you kind can eat a dk.
+
+For the strategy rules, google the user ForexSignals TV account and look for the video "SIMPLE and PROFITABLE Forex Scalping Strategy".
+
+Share, learn, prosper
+
+Peace to y'all
+
+Serialhenry
+6/11/19
+Nov 12, 2019
+Release Notes
+12/11/19 - I have cleaned up the script.
+improvements:
+
+included a validity window for the signals
+added a position sizing script, based on % equity risked per trade
+cleaned up the script
+
+more improvements needed before I consider it finished are:
+
+1. Refine how the SL and TP lines are plotted. I want them to only plot inside a trade. This would make it visually appealing to review the start and finish of a trade, and to look at the SL and TP and entry price of that trade
+2. Figure out how to pyramid trades. Ie, enter into another valid signal whilst there is an open trade.
+3. I notice that the SL and TP levels change as subsequent signal bars are detected after a trade is under way. This has the effect of unstabilizing the SL and TP levels. Hence I can't fully trust the back test results as the trade is not behaving the way i want it to
+4. Figure out a trailing stop method. ie figure out a criteria for the TS, and to combine it with a revised exit method. (see below).
+5. Figure out how to partially exit the position as the trade goes my way. the original forexsignalsTV exit rules are - exit 1/2 of the position upon reaching 1R, then move SL to Break Even. Ie, the first TP of the first 1/2 is at 1R, whereas the TP of the second 1/2 of the position is either 2R, or a trailing stop according to point 4.
+
+Anyone with tips on improving this script, please feel free to comment
+
+thanks
+serialhenry
+
+share, learn, and earn
+Nov 12, 2019
+Release Notes
+spelling mistakes fixed... :D
+Nov 19, 2019
+Release Notes
+I've managed to complete the strategy to a state where it is now functional
+I would have liked to set up alerts when a trade is active, but Tradingview doesn't allow alerts from a strategy and must be done from a study.
+
+The only last improvement would be in tweaking the order management side of the script - where there is an option to dynamically change the SL level to break even once TP1 is reached. And to add a trailing TP for TP2.
+I would like to ride a trend beyond a 2R, once I lock in a 1R return. As they say - ride the winners and cut the losers.
+
+I think however I will give this strategy a rest and move onto the next project!
+
+It's been fun to complete my first script, from start to finish - two weeks spent to complete it.
+

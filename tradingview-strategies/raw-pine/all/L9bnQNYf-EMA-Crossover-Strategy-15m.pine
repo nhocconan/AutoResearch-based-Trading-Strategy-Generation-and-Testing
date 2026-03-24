@@ -1,0 +1,38 @@
+//@version=6
+strategy('EMA Crossover Strategy (15m)', overlay = true)
+
+// --- EMAs from the 15-minute timeframe ---
+ema50_15 = request.security(syminfo.tickerid, '15', ta.ema(close, 50), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+ema200_15 = request.security(syminfo.tickerid, '15', ta.ema(close, 200), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+ema800_15 = request.security(syminfo.tickerid, '15', ta.ema(close, 800), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// --- Plot EMAs ---
+plot(ema50_15, color = color.teal, title = '50 EMA (15m)', linewidth = 2)
+plot(ema200_15, color = color.white, title = '200 EMA (15m)', linewidth = 2)
+plot(ema800_15, color = color.blue, title = '800 EMA (15m)', linewidth = 2)
+
+// --- Define Crossover Conditions ---
+bullishCrossover = ta.crossover(ema50_15, ema200_15)
+bearishCrossover = ta.crossunder(ema50_15, ema200_15)
+
+// --- Strategy Entry Conditions (Optional for backtesting) ---
+if bullishCrossover
+    strategy.entry('Long', strategy.long)
+
+if bearishCrossover
+    strategy.entry('Short', strategy.short)
+
+// --- Plot Signals on Chart ---
+plotshape(bullishCrossover, title = 'Golden Cross', style = shape.labelup, location = location.belowbar, color = color.green, text = 'BUY')
+plotshape(bearishCrossover, title = 'Death Cross', style = shape.labeldown, location = location.abovebar, color = color.red, text = 'SELL')
+
+// --- Alerts ---
+alertcondition(bullishCrossover, title = 'Golden Cross Alert', message = '50 EMA has crossed ABOVE 200 EMA. Consider a long position.')
+alertcondition(bearishCrossover, title = 'Death Cross Alert', message = '50 EMA has crossed BELOW 200 EMA. Consider a short position.')
+
+View in Pine Editor・31 lines
+Use on chart
+1
+9
+954
+50 and 200 ema crossing when leaving anchor. when 50 and 200 crosses will give you direction of where market is going. wait for a pull back and take trade. sl on highest or lowest point of apex tp open . when you see multiple equal ( low or High) get put of trade.

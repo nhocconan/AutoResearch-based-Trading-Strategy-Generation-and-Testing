@@ -1,0 +1,88 @@
+//@version=5
+strategy("ICT Gap Strategy [Swing SL + Sessions]", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------
+gapType     = input.string('NDOG', 'Gap Type' , options = ['NWOG', 'NDOG'])
+trailTicks  = input.int(40, 'Trailing Stop (Ticks)', minval = 1, group="Risk Management")
+slOffset    = input.int(2, 'Stop Loss Offset (Ticks)', minval = 0, group="Risk Management")
+
+// Session Toggles
+useLondon   = input.bool(true, "Trade London Session?", group="Sessions")
+londonTime  = input.session("0300-0500", "London Time (EST)", group="Sessions")
+useNY       = input.bool(true, "Trade NY Silver Bullet?", group="Sessions")
+nyTime      = input.session("1000-1100", "NY Time (EST)", group="Sessions")
+
+//-----------------------------------------------------------------------------
+// Session & Gap Detection
+//-----------------------------------------------------------------------------
+isInSession = (useLondon and not na(time(timeframe.period, londonTime, "America/New_York"))) or 
+              (useNY and not na(time(timeframe.period, nyTime, "America/New_York")))
+
+var float gapTop = na
+var float gapBtm = na
+var bool tradeTakenToday = false
+var float swingPoint = na // To track the SL level
+
+tf = gapType == 'NWOG' ? 'W' : 'D'
+isNewPeriod = timeframe.change(tf)
+isNewDay    = timeframe.change("D")
+
+if isNewDay
+    tradeTakenToday := false
+
+if isNewPeriod
+    gapTop := math.max(close[1], open)
+    gapBtm := math.min(close[1], open)
+    box.new(left = bar_index, top = gapTop, right = bar_index + 1, bottom = gapBtm, 
+         bgcolor = color.new(color.blue, 90), border_color = color.new(color.blue, 50), extend = extend.right)
+
+//-----------------------------------------------------------------------------
+// Entry Logic (Confirmed Close)
+//-----------------------------------------------------------------------------
+canTrade = not tradeTakenToday and not na(gapTop) and strategy.position_size == 0 and isInSession
+
+// Logic: Check if price is currently inside the gap and track the extreme point
+priceInGap = high >= gapBtm and low <= gapTop
+
+if priceInGap and canTrade
+    // Track the lowest point reached while in the gap for Longs, Highest for Shorts
+    swingPoint := na(swingPoint) ? (close > gapTop ? low : high) : (close > gapTop ? math.min(swingPoint, low) : math.max(swingPoint, high))
+
+// Long: Price was in gap, closes ABOVE gapTop
+longCondition = canTrade and not na(swingPoint) and close > gapTop and low[1] <= gapTop
+
+// Short: Price was in gap, closes BELOW gapBtm
+shortCondition = canTrade and not na(swingPoint) and close < gapBtm and high[1] >= gapBtm
+
+if longCondition
+    slPrice = swingPoint - (slOffset * syminfo.mintick)
+    strategy.entry("Long", strategy.long, comment="ICT Long")
+    strategy.exit("Long Exit", "Long", stop = slPrice, trail_points = trailTicks)
+    tradeTakenToday := true
+    swingPoint := na // Reset
+
+if shortCondition
+    slPrice = swingPoint + (slOffset * syminfo.mintick)
+    strategy.entry("Short", strategy.short, comment="ICT Short")
+    strategy.exit("Short Exit", "Short", stop = slPrice, trail_points = trailTicks)
+    tradeTakenToday := true
+    swingPoint := na // Reset
+
+// Reset swingPoint if session ends without entry
+if not isInSession
+    swingPoint := na
+
+//-----------------------------------------------------------------------------
+// Visuals
+//-----------------------------------------------------------------------------
+bgcolor(isInSession ? color.new(color.green, 95) : na)
+plot(strategy.position_size != 0 ? strategy.position_avg_price : na, "Entry Price", color.white, style=plot.style_linebr)
+
+View in Pine Editor・81 lines
+Use on chart
+1
+7
+623
+Retest opening gap strategy with London and New York Sessions

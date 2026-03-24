@@ -1,0 +1,25 @@
+//@version=3
+strategy("Picking Tops And Bottoms", overlay = true)
+
+ma730 = sma(close, 730)
+ma350 = sma(close, 350)
+ma111 = sma(close, 111)
+ma700 = ma350 * 2
+
+
+entry() => crossover(open, ma730)
+exit() => crossunder(ma700, ma111)
+
+strategy.entry(id = "long_ma", long = true, when = entry ())
+strategy.close(id = "long_ma", when = exit())
+
+plot(ma700, color = orange, transp=0)
+plot(ma111, color = purple, transp=0)
+plot(ma730, color = blue, transp=0)
+
+View in Pine Editor・18 lines
+Use on chart
+6
+2
+6 041
+Used to pick the BTC high.

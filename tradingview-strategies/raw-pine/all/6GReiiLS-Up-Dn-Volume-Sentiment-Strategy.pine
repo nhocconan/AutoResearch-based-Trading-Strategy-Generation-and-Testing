@@ -1,0 +1,114 @@
+//@version=5
+strategy(title='Up/Dn Volume Sentiment R Strategy', shorttitle='UD Vol R Strat', precision=1)
+
+//============================
+// USER INPUTS
+//============================
+maLength = input.int(50, minval=1, title='Up/Dn Vol Length')
+normLookback = input.int(756, minval=50, title='Normalization Lookback')
+
+// Entry levels
+longLevel  = input.int(10, title='Long Entry Level (≤)')
+shortLevel = input.int(90, title='Short Entry Level (≥)')
+
+// Risk settings
+stopPercent = input.float(5.0, title='Stop Loss %') / 100
+rTarget = input.float(2.0, title='Profit Target (R Multiple)')
+
+//============================
+// UP / DOWN VOLUME
+//============================
+upVol = close > close[1] ? volume : 0
+dnVol = close < close[1] ? volume : 0
+
+sumUp = ta.sma(upVol, maLength)
+sumDn = ta.sma(dnVol, maLength)
+
+upDnVolRatio = sumDn == 0 ? na : sumUp / sumDn
+
+//============================
+// NORMALIZATION
+//============================
+lowestRatio  = ta.lowest(upDnVolRatio, normLookback)
+highestRatio = ta.highest(upDnVolRatio, normLookback)
+
+sentimentOsc = (upDnVolRatio - lowestRatio) / (highestRatio - lowestRatio) * 100
+
+//============================
+// ENTRY CONDITIONS
+//============================
+longCondition  = sentimentOsc <= longLevel
+shortCondition = sentimentOsc >= shortLevel
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+//============================
+// R-BASED STOPS AND TARGETS
+//============================
+longStop = strategy.position_avg_price * (1 - stopPercent)
+shortStop = strategy.position_avg_price * (1 + stopPercent)
+
+longTarget = strategy.position_avg_price * (1 + stopPercent * rTarget)
+shortTarget = strategy.position_avg_price * (1 - stopPercent * rTarget)
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+//============================
+// PLOTS
+//============================
+plot(sentimentOsc, title='Sentiment Oscillator', color=color.orange)
+
+hline(longLevel,  "Long Entry",  color=color.green)
+hline(shortLevel, "Short Entry", color=color.red)
+hline(50, "Neutral", color=color.gray)
+
+View in Pine Editor・68 lines
+Use on chart
+4
+207
+**Volume Sentiment Oscillator Strategy (Up/Down Volume, Mean Reversion, R-Multiple Risk Management)**
+
+This strategy converts the Up/Down Volume Ratio into a normalized sentiment oscillator designed to identify potential exhaustion in buying or selling pressure. The idea is that when trading volume becomes heavily skewed toward one side of the market, sentiment may be reaching an extreme that can lead to a reversal or mean-reversion move.
+
+The script calculates buying pressure as the volume occurring on bars that close higher than the previous bar, and selling pressure as the volume occurring on bars that close lower. These values are smoothed and converted into an Up/Down Volume Ratio. That ratio is then normalized over a configurable historical range (default: three years) to produce a **0–100 sentiment oscillator**.
+
+This normalization allows traders to quickly see when the current level of buying or selling pressure is historically extreme.
+
+**Strategy logic**
+
+• Long positions open when the sentiment oscillator drops below a configurable oversold threshold (default: 10).
+• Short positions open when the oscillator rises above a configurable overbought threshold (default: 90).
+
+These thresholds represent situations where participation becomes heavily one-sided.
+
+**Risk management**
+
+Risk is defined as a percentage distance from the entry price (default: 5%).
+Profit targets are expressed in **R multiples**, where:
+
+• 1R = the distance from entry to stop loss
+• 2R = twice the stop distance
+• 3R = three times the stop distance
+
+Using R-based exits allows traders to experiment with different reward-to-risk profiles and analyze how exit logic affects the system's expectancy.
+
+**Configurable inputs**
+
+• Up/Down volume smoothing length
+• Normalization lookback period
+• Long entry threshold
+• Short entry threshold
+• Stop-loss percentage
+• Profit target (R multiple)
+
+**Use cases**
+
+This strategy can be used as a research tool to study how extreme participation levels influence price behavior. It may be applied across stocks, indexes, and other liquid markets to evaluate mean-reversion tendencies driven by volume imbalance.
+
+As with any systematic model, traders should test across multiple markets and timeframes to understand its strengths and limitations.
+

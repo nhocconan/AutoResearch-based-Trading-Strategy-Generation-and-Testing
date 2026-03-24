@@ -1,0 +1,11 @@
+//@version=5
+color profitcolor=##input(defval=#80dfec30,type='INPUT_COLOR',##id='in_38')
+color socolor=##input(defval=#80313154,type='INPUT_COLOR',##id='in_39')
+color avgcolor=##input(defval=#f8f8f8db,type='INPUT_COLOR',##id='in_40')
+color profitcolor2=##input(defval=#80dfec30,type='INPUT_COLOR',##id='in_41')
+color socolor2=##input(defval=#172b4dff,type='INPUT_COLOR',##id='in_42')
+##root(root_metainfo,fill_0_0,profitcolor,input__color)
+##root(root_metainfo,fill_2_0,socolor,input__color)
+##root(root_metainfo,fill_3_0,profitcolor2,input__color)
+##root(root_metainfo,fill_4_0,socolor2,input__color)
+##root(root_metainfo,rm_ic_0,avgcolor,input__color)

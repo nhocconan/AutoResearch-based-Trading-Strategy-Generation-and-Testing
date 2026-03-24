@@ -1,0 +1,142 @@
+//@version=4
+strategy("[VJ]Thor for MFI", overlay=true, calc_on_every_tick = false,pyramiding=0)
+
+// ********** Strategy inputs - Start **********
+
+// Used for intraday handling
+// Session value should be from market start to the time you want to square-off 
+// your intraday strategy
+// Important: The end time should be at least 2 minutes before the intraday
+// square-off time set by your broker
+var i_marketSession = input(title="Market session", type=input.session, 
+     defval="0915-1455", confirm=true)
+
+// Make inputs that set the take profit % (optional)
+longProfitPerc = input(title="Long Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+
+shortProfitPerc = input(title="Short Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+     
+// Set stop loss level with input options (optional)
+longLossPerc = input(title="Long Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01
+
+shortLossPerc = input(title="Short Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01    
+
+i_MFI = input(3, title="MFI Length")
+OB=input(100, title="Overbought Level")
+OS=input(0, title="Oversold Level")
+barsizeThreshold=input(.5, step=.05, minval=.1, maxval=1, title="Bar Body Size, 1=No Wicks")
+i_MAFilter = input(true, title="Use MA Trend Filter")
+i_MALen = input(80, title="MA Length")
+// ********** Strategy inputs - End **********
+
+
+// ********** Supporting functions - Start **********
+
+// A function to check whether the bar or period is in intraday session
+barInSession(sess) => time(timeframe.period, sess) != 0
+// Figure out take profit price
+longExitPrice  = strategy.position_avg_price * (1 + longProfitPerc)
+shortExitPrice = strategy.position_avg_price * (1 - shortProfitPerc)
+
+// Determine stop loss price
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+
+// ********** Supporting functions - End **********
+
+
+// ********** Strategy - Start **********
+// See if intraday session is active
+bool intradaySession = barInSession(i_marketSession)
+
+// Trade only if intraday session is active
+
+//=================Strategy logic goes in here===========================
+ 
+
+MFI=mfi(close,i_MFI)
+barsize=high-low
+barbodysize=close>open?(open-close)*-1:(open-close)
+shortwicksbar=barbodysize>barsize*barsizeThreshold
+SMA=sma(close, i_MALen)
+MAFilter=close > SMA
+
+
+
+BUY = MFI[1] == OB and close > open and shortwicksbar and (i_MAFilter ? MAFilter : true)
+
+SELL = MFI[1] == OS and close < open and shortwicksbar and (i_MAFilter ? not MAFilter : true) 
+
+//Final Long/Short Condition
+longCondition = BUY
+shortCondition = SELL
+ 
+//Long Strategy - buy condition and exits with Take profit and SL
+if (longCondition and intradaySession)
+    stop_level = longStopPrice
+    profit_level = longExitPrice
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("TP/SL", "Buy", stop=stop_level, limit=profit_level)
+
+
+//Short Strategy - sell condition and exits with Take profit and SL
+if (shortCondition and intradaySession)
+    stop_level = shortStopPrice
+    profit_level = shortExitPrice
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("TP/SL", "Sell", stop=stop_level, limit=profit_level)
+ 
+ 
+// Square-off position (when session is over and position is open)
+squareOff = (not intradaySession) and (strategy.position_size != 0)
+strategy.close_all(when = squareOff, comment = "Square-off")
+
+// ********** Strategy - End **********
+
+View in Pine Editor・102 lines
+Use on chart
+7
+8
+1
+3 311
+This is a simple intraday strategy for working on Stocks or commodities . You can modify the start time and end time based on your timezones. Session value should be from market start to the time you want to square-off
+
+Important: The end time should be at least 2 minutes before the intraday square-off time set by your broker
+
+Comment below if you get good returns
+
+Strategy:
+Indicators used :
+
+Moving average (MA) is a widely used technical indicator that smooths out price trends by filtering out the “noise” from random short-term price fluctuations. Here moving averages are used to identify trend direction and to determine support and resistance levels. Overbought and oversold regions are also taken into consideration
+
+The Money Flow Index ( MFI ) is a momentum indicator that measures the flow of money into and out of a security over a specified period of time. It is related to the Relative Strength Index ( RSI ) but incorporates volume , whereas the RSI only considers price. The MFI is calculated by accumulating positive and negative Money Flow values (see Money Flow ), then creating a Money Ratio. The Money Ratio is then normalized into the MFI oscillator form.
+
+Using the combination of Overbought and Oversold values and varying MFI and using the MA filter to ensure the direction , we can buy/sell when conditions are met
+
+Buying with MFI
+
+1. MFI drops below 20 and enters inside oversold zone.
+2. MFI bounces back above 20.
+3. MFI pulls back but remains above 20.
+4. A MFI break out above its previous high is a good buy signal.
+
+Selling with MFI
+1. MFI rises above 80 and enters inside overbought zone.
+2. MFI drops back below 80.
+3. MFI rises slightly but remains below 80.
+4. MFI drops lower than its previous low is a signal to short sell or profit booking
+
+Usage & Best setting :
+Choose a good volatile stock and a time frame - 5m.
+MFI factor : 3
+Moving Average : 80
+Overbought & Oversold - can be varied as per user
+There is stop loss and take profit that can be used to optimise your trade
+
+The template also includes daily square off based on your time.

@@ -1,0 +1,11 @@
+//@version=3
+width=##input(defval=2,type='INPUT_INTEGER',##id='in_0')
+##root(root_metainfo,rm_0,width)
+##root(root_metainfo,rm_1,width)
+##root(root_metainfo,rm_2,width)
+##root(root_metainfo,rm_3,width)
+##root(root_metainfo,rm_4,width)
+##root(root_metainfo,rm_5,width)
+##root(root_metainfo,rm_6,width)
+##root(root_metainfo,rm_7,width)
+##root(root_metainfo,rm_8,width)

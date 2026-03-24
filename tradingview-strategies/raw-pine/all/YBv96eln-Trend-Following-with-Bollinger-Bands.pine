@@ -1,0 +1,8 @@
+//@version=5
+maColorFast=##input(defval=#FF5252ff,type='INPUT_COLOR',##id='in_8')
+maColorSlow=##input(defval=#9C27B0ff,type='INPUT_COLOR',##id='in_9')
+##var_0=##input(defval=2,type='INPUT_INTEGER',##id='in_16')
+##root(root_metainfo,rm_0,##var_0,input__integer)
+##root(root_metainfo,rm_1,plot.style_circles,cb__plot_style__integer,plot,style)
+##root(root_metainfo,plot_3_0,maColorFast,input__color)
+##root(root_metainfo,plot_4_0,maColorSlow,input__color)

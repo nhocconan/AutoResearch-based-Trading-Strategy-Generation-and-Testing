@@ -1,0 +1,20 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+
+BuyCondition = crossover(ema(close, 26), ema(close,12))
+SellCondition = crossunder(ema(close, 26), ema(close, 12))
+plot(ema(close,26),color=blue)
+plot(ema(close,12), color=red)
+if (BuyCondition)
+    strategy.entry("Buy", strategy.long)
+
+if (SellCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・12 lines
+Use on chart
+8
+5
+2
+6 080
+BACKTEST TRADING-BOT

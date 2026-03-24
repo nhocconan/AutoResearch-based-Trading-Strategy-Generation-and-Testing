@@ -1,0 +1,104 @@
+//@version=4
+strategy("Donchian Channel Strategy [for free bot]", overlay=true, default_qty_type= strategy.percent_of_equity, initial_capital = 1000, default_qty_value = 20, commission_type=strategy.commission.percent, commission_value=0.036)
+
+//Long optopns
+buyPeriodEnter = input(10, "Channel Period for Long enter position")
+buyPeriodExit = input(10, "Channel Period for Long exit position")
+isMiddleBuy = input(true, "Is exit on Base Line? If 'no' - exit on bottom line")
+takeProfitBuy = input(2.5, "Take Profit (%) for Long position")
+isBuy = input(true, "Allow Long?")
+
+//Short Options
+sellPeriodEnter = input(20, "Channel Period for Short enter position")
+sellPeriodExit = input(20, "Channel Period for Short exit position")
+isMiddleSell = input(true, "Is exit on Base Line? If 'no' - exit on upper line")
+takeProfitSell = input(2.5, "Take Profit (%) for Short position")
+isSell = input(true, "Allow Short?")
+
+// Test Start
+startYear = input(2005, "Test Start Year")
+startMonth = input(1, "Test Start Month")
+startDay = input(1, "Test Start Day")
+startTest = timestamp(startYear,startMonth,startDay,0,0)
+
+//Test End
+endYear = input(2050, "Test End Year")
+endMonth = input(12, "Test End Month")
+endDay = input(30, "Test End Day")
+endTest = timestamp(endYear,endMonth,endDay,23,59)
+
+timeRange = time > startTest and time < endTest ? true : false
+
+// Long&Short Levels
+BuyEnter = highest(buyPeriodEnter)
+BuyExit = isMiddleBuy ? ((highest(buyPeriodExit) + lowest(buyPeriodExit)) / 2): lowest(buyPeriodExit)
+
+SellEnter = lowest(sellPeriodEnter)
+SellExit = isMiddleSell ? ((highest(sellPeriodExit) + lowest(sellPeriodExit)) / 2): highest(sellPeriodExit)
+
+// Plot Data
+plot(BuyEnter, style=plot.style_line, linewidth=2, color=color.blue, title="Buy Enter")
+plot(BuyExit, style=plot.style_line, linewidth=1, color=color.blue, title="Buy Exit", transp=50)
+plot(SellEnter, style=plot.style_line, linewidth=2, color=color.red, title="Sell Enter")
+plot(SellExit, style=plot.style_line, linewidth=1, color=color.red, title="Sell Exit", transp=50)
+
+// Calc Take Profits
+TakeProfitBuy = 0.0
+TakeProfitSell = 0.0
+if strategy.position_size > 0
+    TakeProfitBuy := strategy.position_avg_price*(1 + takeProfitBuy/100)
+    
+if strategy.position_size < 0
+    TakeProfitSell := strategy.position_avg_price*(1 - takeProfitSell/100)
+
+// Long Position    
+if isBuy and timeRange
+    strategy.entry("Long", strategy.long, stop = BuyEnter, when = strategy.position_size == 0) 
+    
+strategy.exit("Long Exit", "Long", stop=BuyExit, limit = TakeProfitBuy, when = strategy.position_size > 0)
+
+// Short Position
+if isSell and timeRange
+    strategy.entry("Short", strategy.short, stop = SellEnter, when = strategy.position_size == 0) 
+    
+strategy.exit("Short Exit", "Short", stop=SellExit, limit = TakeProfitSell, when = strategy.position_size < 0)
+
+// Close & Cancel when over End of the Test
+if time > endTest
+    strategy.close_all()
+    strategy.cancel_all()
+
+View in Pine Editor・73 lines
+Use on chart
+1.3 K
+19
+42 752
+Aug 8, 2020
+
+I present to you a script for testing the Donchian channel breakout strategy for the Binance_exchange.
+This strategy is trending, and is especially effective for trading cryptocurrency futures.
+
+This strategy is very flexible, and you can configure virtually all possible parameters, moreover, separately for longs and separately for shorts.
+In the script, you can configure the parameters of the channel for entry and exit, the exit method, enable or disable purchases / sales, specify take profit and stop loss, and more.
+
+On the example of optimization, only 20% of the deposit is used. This is done for diversification, since there are 37 contracts on binance_futures (at the time of writing the script description). That is, by optimizing the parameters for different currencies, you can very well reduce risks.
+
+
+
+Представляю Вам скрипт для тестирования стратегии пробоя канала Дончиана для биржи Бинанс.
+Данная стратегия относится к трендовым, и особенно эффективная на торговли криптовалютных фьючерсов.
+
+Данная стратегия очень гибкая, и можно настроить фактически все возможные параметры, при чем, отдельно для покупок и отдельно для продаж.
+В скрипте можно настроить параметры канала на вход и на выход, метод выхода, разрешить или запретить покупки/проаджи, указать тейк-профит и стоп-лосс и другое.
+
+На примере оптимизации используется всего 20% от депозита. Это сделано для диверсификации, так как на фьючерсах бинансе присутсвует 37 контрактов (на момент написания описания скрипта). Т.е., оптимизировав параметры под разные валюты, можно очень хорошо снизить риски.
+Aug 9, 2020
+Release Notes
+Corrected logic - now it works out the exit on the same candlestick on which the entry was
+
+Поправлена логика - теперь отрабатывает выход на той же свече, на которой был вход
+Aug 9, 2020
+Release Notes
+Fixed performance
+
+Поправлена работоспособность

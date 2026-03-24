@@ -1,0 +1,225 @@
+//@version=5
+
+//_______ <declaration_statement>
+strategy(title = "Fractal Breakout Trend Following Strategy", 
+         shorttitle = "Fractal Strategy", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 1, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = true, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 30, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen       = color.new(#2ECD99, 0)
+var const color skyrexGray        = color.new(#F2F2F2, 0)
+var const color skyrexWhite       = color.new(#FFFFFF, 0)
+var const int atrLen              = 13
+var const int atrLookback         = 52
+
+
+//________<variables declarations>
+var color barcolor                    = na
+var float stopLossLevel               = na
+var int skip_count                    = 0
+var float upFractalLevel              = na
+var float upFractalActivationLevel    = na
+var float downFractalLevel            = na
+var float downFractalActivationLevel  = na
+bool highCrossesUpfractalLevel        = ta.crossover(high, upFractalLevel)
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2025-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+stopLossPercent          = input.float(defval = 0.03, title = "Stop loss", step = 0.005, group = "📈Strategy settings📈")
+atrThreshold              = input.int(defval=50, minval=0, maxval=100, step=1, title = "ATR Threshold value", group = "📈Strategy settings📈")
+atrPeriod                = input.int(defval=5, minval=1, maxval=30, title='ATR Period', group = "📈Strategy settings📈")
+
+//_______ <function_declarations>
+//@function       Used to calculate Simple moving average for Alligator
+//@param src      Sourse for smma Calculations
+//@param length   Number of bars to calculate smma
+//@returns        The calculated smma value 
+smma(src, length) =>
+    var float smma = na
+    sma_value = ta.sma(src, length)
+    smma := na(smma) ? sma_value : (smma * (length - 1) + src) / length
+    smma
+
+//_______ <calculations>
+
+//Upfractal calculation 
+upFractalPrice = ta.pivothigh(2, 2)
+upFractal = not na(upFractalPrice) 
+
+
+//Downfractal calculation 
+downFractalPrice = ta.pivotlow(2, 2)
+downFractal = not na(downFractalPrice)
+
+
+//Calculating ATR and ATR normalized 
+atrValue = ta.atr(atrLen)
+atrNormalized = ta.percentrank(atrValue, atrLookback)
+
+
+//Calculating average ATR for ATR period number of bars
+var atrValues = array.new<float>(size = atrPeriod, initial_value = 0)
+array.push(atrValues, atrNormalized) 
+array.remove(atrValues, 0)
+atrAvg = array.avg(atrValues)
+
+
+//Calculating chart's time frame Alligator's teeth line
+teeth = smma(hl2, 8)[5]
+
+
+//Calculating upfractal level
+if upFractal 
+    upFractalLevel := upFractalPrice
+else if highCrossesUpfractalLevel 
+    upFractalLevel := na
+else
+    upFractalLevel := upFractalLevel[1]
+
+
+//Calculating upfractal activation level, taking into account the Alligator teeth line 
+if upFractalLevel >= teeth
+    upFractalActivationLevel := upFractalLevel
+else
+    upFractalActivationLevel := na
+
+
+//Calculating down fractal level
+if downFractal
+    downFractalLevel := downFractalPrice
+else
+    downFractalLevel := downFractalLevel[1]
+
+
+//Calculating down fractal activation level, taking into account the Alligator teeth line 
+if downFractalLevel <= teeth
+    downFractalActivationLevel := downFractalLevel
+else
+    downFractalActivationLevel := downFractalActivationLevel
+
+
+//Calculating dynamic stop loss level: script chooses the higher value: user-given stop loss percent or down fractal
+stopLossLevel := strategy.position_avg_price*(1-stopLossPercent) > downFractalActivationLevel ? strategy.position_avg_price*(1-stopLossPercent) : downFractalActivationLevel
+
+
+//_______ <strategy_calls>
+
+//defining long condition: 
+//1)Script defines if current upfractal activetion level is not na
+//2)Average value for normalized ATR for last atrPeriod number of bars shall be lower than user-defined trashold value
+longCondition = not na(upFractalActivationLevel) and atrAvg <= atrThreshold
+
+
+//Strategy entry
+//Scrip places the stop order at the upFractalActivationLevel if longCondition is true
+if (longCondition and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long, stop=upFractalActivationLevel, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+strategy.exit(id = "entry1", stop=stopLossLevel, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+
+//_______ <alerts>
+
+View in Pine Editor・152 lines
+Use on chart
+2
+0
+5
+1
+7 106
+Overview
+The Fractal Breakout Trend Following Strategy is a trend-following system which utilizes the Willams Fractals and Alligator to execute the long trades on the fractal's breakouts which have a high probability to be the new uptrend phase beginning. This system also uses the normalized Average True Range indicator to filter trades after a large moves, because it's more likely to see the trend continuation after a consolidation period. Strategy can execute only long trades.
+
+Unique Features
+
+Trend and volatility filtering system: Strategy uses Williams Alligator to filter the counter-trend fractals breakouts and normalized Average True Range to avoid the trades after large moves, when volatility is high
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Flexible Risk Management: Users can choose the stop-loss percent (by default = 3%) for trades, but strategy also has the dynamic stop-loss level using down fractals.
+
+
+
+
+Methodology
+The strategy places stop order at the last valid fractal breakout level. Validity of this fractal is defined by the Williams Alligator indicator. If at the moment of time when price breaking the last fractal price is higher than Alligator's teeth line (8 period SMA shifted 5 bars in the future) this is a valid breakout. Moreover strategy has the additional volatility filtering system using normalized ATR. It calculates the average normalized ATR for last user-defined number of bars and if this value lower than the user-defined threshold value the long trade is executed.
+
+When trade is opened, script places the stop loss at the price higher of two levels: user defined stop-loss from the position entry price or down fractal validation level. The down fractal is valid with the rule, opposite as the up fractal validation. Price shall break to the downside the last down fractal below the Willians Alligator's teeth line.
+
+Strategy has no fixed take profit. Exit level changes with the down fractal validation level. If price is in strong uptrend trade is going to be active until last down fractal is not valid. Strategy closes trade when price hits the down fractal validation level.
+
+Risk Management
+The strategy employs a combined approach to risk management:
+It allows positions to ride the trend as long as the price continues to move favorably, aiming to capture significant price movements. It features a user-defined stop-loss parameter to mitigate risks based on individual risk tolerance. By default, this stop-loss is set to a 3% drop from the entry point, but it can be adjusted according to the trader's preferences.
+
+Justification of Methodology
+This strategy leverages Williams Fractals to open long trade when price has broken the key resistance level to the upside. This resistance level is the last up fractal and is shall be broken above the Williams Alligator's teeth line to be qualified as the valid breakout according to this strategy. The Alligator filtering increases the probability to avoid the false breakouts against the current trend.
+
+Moreover strategy has an additional filter using Average True Range(ATR) indicator. If average value of ATR for the last user-defined number of bars is lower than user-defined threshold strategy can open the long trade according to open trade condition above. The logic here is following: we want to open trades after period of price consolidation inside the range because before and after a big move price is more likely to be in sideways, but we need a trend move to have a profit.
+
+Another one important feature is how the exit condition is defined. On the one hand, strategy has the user-defined stop-loss (3% below the entry price by default). It's made to give users the opportunity to restrict their losses according to their risk-tolerance. On the other hand, strategy utilizes the dynamic exit level which is defined by down fractal activation. If we assume the breaking up fractal is the beginning of the uptrend, breaking down fractal can be the start of downtrend phase. We don't want to be in long trade if there is a high probability of reversal to the downside. This approach helps to not keep open trade if trend is not developing and hold it if price continues going up.
+
+
+Backtest Results
+
+Operating window: Date range of backtests is 2023.01.01 - 2024.05.01. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 30%
+
+Maximum Single Position Loss: -3.19%
+
+Maximum Single Profit: +24.97%
+
+Net Profit: +3036.90 USDT (+30.37%)
+
+Total Trades: 83 (28.92% win rate)
+
+Profit Factor: 1.953
+
+Maximum Accumulated Loss: 963.98 USDT (-8.29%)
+
+Average Profit per Trade: 36.59 USDT (+1.12%)
+
+Average Trade Duration: 72 hours
+
+
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 4h and higher time frames and the BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation

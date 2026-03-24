@@ -1,0 +1,39 @@
+//@version=5
+strategy("EMA Crossover Strategy", overlay=true)
+
+// --- Input Parameters ---
+fastLength = input.int(9, title="Fast EMA Length")
+slowLength = input.int(21, title="Slow EMA Length")
+targetPercentage = input.int(1, title="Target Percentage (%)", minval=0)
+stopLossPercentage = input.int(1, title="Stop Loss Percentage (%)", minval=0)
+
+// --- Calculate EMAs ---
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+
+// --- Plot EMAs ---
+plot(fastEMA, color=color.blue, title="Fast EMA")
+plot(slowEMA, color=color.red, title="Slow EMA")
+
+// --- Define Entry Conditions ---
+longCondition = ta.crossover(fastEMA, slowEMA)
+shortCondition = ta.crossunder(fastEMA, slowEMA)
+
+// --- Execute Trades ---
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    targetPriceLong = close + (close * targetPercentage / 100)
+    stopLossPriceLong = close - (close * stopLossPercentage / 100)
+    strategy.exit("Long Exit", "Long", limit=targetPriceLong, stop=stopLossPriceLong)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    targetPriceShort = close - (close * targetPercentage / 100)
+    stopLossPriceShort = close + (close * stopLossPercentage / 100)
+    strategy.exit("Short Exit", "Short", limit=targetPriceShort, stop=stopLossPriceShort)
+
+View in Pine Editor・33 lines
+Use on chart
+5
+602
+Backtesting an EMA crossover strategy for 13/34 EMA Crossover daily

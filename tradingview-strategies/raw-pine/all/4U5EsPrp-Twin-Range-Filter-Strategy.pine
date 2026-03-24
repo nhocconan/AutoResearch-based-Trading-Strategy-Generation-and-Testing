@@ -1,0 +1,85 @@
+//@version=5
+strategy("Twin Range Filter Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// Input parameters
+source = input(close, title="Source")
+per1 = input.int(27, minval=1, title="Fast period")
+mult1 = input.float(1.6, minval=0.1, title="Fast range")
+per2 = input.int(55, minval=1, title="Slow period")
+mult2 = input.float(2.0, minval=0.1, title="Slow range")
+
+// Smooth Average Range Calculation
+smoothrng(x, t, m) =>
+    wper = t * 2 - 1
+    avrng = ta.ema(math.abs(x - x[1]), t)
+    smoothrng = ta.ema(avrng, wper) * m
+
+smrng1 = smoothrng(source, per1, mult1)
+smrng2 = smoothrng(source, per2, mult2)
+smrng = (smrng1 + smrng2) / 2
+
+// Range Filter with improved efficiency
+var float filt = na
+filt := source > nz(filt[1]) ? 
+   math.max(nz(filt[1]), source - smrng) : 
+   math.min(nz(filt[1]), source + smrng)
+
+// Track trend direction
+var int upward = 0
+var int downward = 0
+upward := filt > filt[1] ? upward + 1 : filt < filt[1] ? 0 : upward
+downward := filt < filt[1] ? downward + 1 : filt > filt[1] ? 0 : downward
+
+// Signal Conditions
+var int CondIni = 0
+longCond = source > filt and (source > source[1] or source < source[1]) and upward > 0
+shortCond = source < filt and (source < source[1] or source > source[1]) and downward > 0
+
+CondIni := longCond ? 1 : shortCond ? -1 : CondIni
+
+bool longSignal = longCond and CondIni[1] == -1
+bool shortSignal = shortCond and CondIni[1] == 1
+
+// Strategy Execution
+if longSignal
+    strategy.entry("Long", strategy.long)
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+// Plotting
+plot(filt, color=color.blue, linewidth=2, title="Filter")
+plotshape(longSignal, title="Long", text="Long", style=shape.labelup, 
+     textcolor=color.black, size=size.small, location=location.belowbar, 
+     color=color.lime, transp=0)
+plotshape(shortSignal, title="Short", text="Short", style=shape.labeldown, 
+     textcolor=color.white, size=size.small, location=location.abovebar, 
+     color=color.red, transp=0)
+
+View in Pine Editor・56 lines
+Use on chart
+7
+1
+2 521
+Clarity Over Confusion: See price action through a全新的 lens. Watch as erratic, choppy movements are smoothed into a clear, actionable trajectory. The path of least resistance becomes obvious.
+
+Confidence Over Hesitation: Receive high-probability entry and exit signals with a proven logic that waits for the market to commit before you do. No more second-guessing.
+
+Discipline Over Emotion: Our algorithm enforces a systematic approach, helping you avoid emotional FOMO chasing and panic selling. Stick to the plan and execute with precision.
+
+What Can You Expect?
+
+Dynamic Adaptability: Unlike static indicators, [Indicator Name] continuously adapts to volatility. It widens its filter in turbulent markets to avoid whipsaws and tightens it in trending markets to capture more of the move.
+
+The Power of Two: By synthesizing data from two distinct market perspectives, it confirms strength and filters out weakness, providing a confluence that standalone indicators simply cannot match.
+
+Clean, Unambiguous Signals: We’ve eliminated the clutter. The software provides clear visual alerts (<span style="color:green;">Green Arrows</span> for Long, <span style="color:red;">Red Arrows</span> for Short) right on your chart, telling you exactly when the equilibrium has shifted.
+
+Who is this for?
+
+Swing Traders looking to capture the heart of a trend and avoid false breakouts.
+
+Day Traders needing a reliable filter to navigate volatile intraday action.
+
+Systematic Traders seeking a robust logic layer to add to their automated strategy.
+
+Anyone overwhelmed by indicator overload and craving a single, trusted source of truth on their chart

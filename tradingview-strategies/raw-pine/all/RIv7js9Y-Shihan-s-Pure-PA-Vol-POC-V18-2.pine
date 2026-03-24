@@ -1,0 +1,132 @@
+//@version=5
+// Simulated environment: 20x leverage with 5000 AUD initial capital
+strategy("Shihan's Pure PA + Vol + POC (V18.2)", overlay=true, initial_capital=5000, currency=currency.AUD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, margin_long=5, margin_short=5)
+
+// ==========================================
+// 1. Core Trading Mode Selection
+// ==========================================
+grp_mode = "--- 1. Core Trading Mode Selection ---"
+tradeMode = input.string("3. PA + POC (Dual Mode)", "Select Mode", options=["1. PA Mode (Hammer/Star)", "2. POC Mode (Doji Balance)", "3. PA + POC (Dual Mode)"], group=grp_mode)
+enablePA  = (tradeMode == "1. PA Mode (Hammer/Star)") or (tradeMode == "3. PA + POC (Dual Mode)")
+enablePOC = (tradeMode == "2. POC Mode (Doji Balance)") or (tradeMode == "3. PA + POC (Dual Mode)")
+
+// ==========================================
+// 2. Anatomy & Hyperparameter Adjustment
+// ==========================================
+grp_pa = "--- 2. Pattern Anatomy & Hyperparameters ---"
+volMult       = input.float(1.1, "Volume Threshold (volMult)", step=0.1, group=grp_pa)
+hamWickRatio  = input.float(2.0, "Hammer: Min Lower Wick/Body Ratio", step=0.1, group=grp_pa)
+hamHeadRatio  = input.float(1.2, "Hammer: Max Upper Wick/Body Ratio", step=0.1, group=grp_pa)
+starWickRatio = input.float(2.0, "Star: Min Upper Wick/Body Ratio", step=0.1, group=grp_pa)
+starHeadRatio = input.float(1.2, "Star: Max Lower Wick/Body Ratio", step=0.1, group=grp_pa)
+pocWickRatio  = input.float(1.5, "Micro POC: Min Wick/Body Ratio", step=0.1, group=grp_pa)
+pocSymRatio   = input.float(0.6, "Micro POC: Symmetry Requirement (0.1-1.0)", step=0.1, group=grp_pa)
+minRRFilter   = input.float(1.2, "Minimum Risk/Reward Filter (RR)", step=0.1, group=grp_pa)
+
+// ==========================================
+// 3. Intra-day Session Indicators (AEDT)
+// ==========================================
+grp_sess = "--- 3. Intra-day Session Indicators (AEDT) ---"
+asiaSess = input.session("1000-2000", "Asia Session", group=grp_sess)
+lonSess  = input.session("1900-0300", "Europe Session", group=grp_sess)
+nySess   = input.session("0000-0900", "US Session", group=grp_sess)
+timezone = input.string("GMT+11", "Current Timezone", group=grp_sess)
+
+// Internal POC logic (Visual indicators only - non-participating in trade signals)
+in_s(s) => not na(time(timeframe.period, s, timezone))
+var float t_asia_poc = na, var float t_lon_poc = na, var float t_ny_poc = na
+var float a_vwp = 0.0, var float a_vol = 0.0
+var float l_vwp = 0.0, var float l_vol = 0.0
+var float n_vwp = 0.0, var float n_vol = 0.0
+
+if in_s(asiaSess) and not in_s(asiaSess)[1]
+    a_vwp := 0.0, a_vol := 0.0, t_asia_poc := na
+if in_s(asiaSess)
+    a_vwp += hlc3 * volume, a_vol += volume
+if not in_s(asiaSess) and in_s(asiaSess)[1]
+    t_asia_poc := a_vol > 0 ? a_vwp / a_vol : na
+
+if in_s(lonSess) and not in_s(lonSess)[1]
+    l_vwp := 0.0, l_vol := 0.0, t_lon_poc := na
+if in_s(lonSess)
+    l_vwp += hlc3 * volume, l_vol += volume
+if not in_s(lonSess) and in_s(lonSess)[1]
+    t_lon_poc := l_vol > 0 ? l_vwp / l_vol : na
+
+if in_s(nySess) and not in_s(nySess)[1]
+    n_vwp := 0.0, n_vol := 0.0, t_ny_poc := na
+if in_s(nySess)
+    n_vwp += hlc3 * volume, n_vol += volume
+if not in_s(nySess) and in_s(nySess)[1]
+    t_ny_poc := n_vol > 0 ? n_vwp / n_vol : na
+
+plot(t_asia_poc, "Today's Asia POC", color=color.new(color.blue, 30), style=plot.style_linebr, linewidth=2)
+plot(t_lon_poc,  "Today's Europe POC", color=color.new(color.purple, 30), style=plot.style_linebr, linewidth=2)
+plot(t_ny_poc,   "Today's US POC", color=color.new(color.orange, 30), style=plot.style_linebr, linewidth=2)
+
+// ==========================================
+// 4. Pure PA Detection (Pattern + 2nd Candle Confirmation)
+// ==========================================
+pOpen = open[1], pClose = close[1], pHigh = high[1], pLow = low[1], pVol = volume[1]
+pBody = math.abs(pClose - pOpen)
+pUpper = pHigh - math.max(pOpen, pClose)
+pLower = pLow < math.min(pOpen, pClose) ? math.min(pOpen, pClose) - pLow : 0
+volBase = ta.sma(volume, 50)[1]
+
+// Hammer/Star Detection (Color Independent)
+isHammer = (pLower >= pBody * hamWickRatio) and (pUpper <= pBody * hamHeadRatio) and (pBody > 0)
+isStar   = (pUpper >= pBody * starWickRatio) and (pLower <= pBody * starHeadRatio) and (pBody > 0)
+
+// Micro POC Detection (Doji/Balance)
+symmetry = math.min(pUpper, pLower) / math.max(pUpper, pLower, 0.0001)
+isPOC    = (pUpper >= pBody * pocWickRatio) and (pLower >= pBody * pocWickRatio) and (symmetry >= pocSymRatio) and (pBody > 0)
+
+// Signal Trigger Logic
+// 1. PA Long: Hammer + 2nd Candle Upward Confirmation
+paBuy  = enablePA and isHammer and (close > pClose) and (pVol > volBase * volMult)
+// 2. PA Short: Star + 2nd Candle Downward Confirmation
+paSell = enablePA and isStar   and (close < pClose) and (pVol > volBase * volMult)
+// 3. POC Trigger: Micro POC + Price Breakout of Previous Candle Range
+pocBuy  = enablePOC and isPOC and (pVol > volBase * volMult) and (close > pHigh)
+pocSell = enablePOC and isPOC and (pVol > volBase * volMult) and (close < pLow)
+
+validBuy  = paBuy or pocBuy
+validSell = paSell or pocSell
+
+// ==========================================
+// 5. Visualization & Strategy Execution
+// ==========================================
+plotshape(validBuy,  "BUY SIGNAL",  text="BUY",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(validSell, "SELL SIGNAL", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.small)
+
+if validBuy
+    sl = pLow - 5 * syminfo.mintick
+    tp = close + (close - sl) * 1.5
+    if (tp - close) / (close - sl) >= minRRFilter
+        strategy.entry("Long", strategy.long), strategy.exit("ExL", "Long", limit=tp, stop=sl)
+
+if validSell
+    sl = pHigh + 5 * syminfo.mintick
+    tp = close - (sl - close) * 1.5
+    if (close - tp) / (sl - close) >= minRRFilter
+        strategy.entry("Short", strategy.short), strategy.exit("ExS", "Short", limit=tp, stop=sl)
+
+View in Pine Editor・112 lines
+Use on chart
+2
+6
+653
+Mar 2
+
+
+Three Switchable Modes: Includes PA, POC, and Hybrid modes, ensuring the script is adaptable to diverse market phases.
+
+Session-Based Visual POC: Tracks Asia, Europe, and US POC lines that update at each session's end, providing real-time institutional context without interfering with trade signals.
+
+Advanced PA Logic: Identifies Hammer and Shooting Star patterns requiring only a directional confirmation candle, independent of the pattern candle's color.
+
+Granular Control: Features a comprehensive suite of adjustable hyperparameters for volume and wick ratios, delivering the scientific rigor required for professional-grade analysis.
+
+Mar 3
+Release Notes
+Update for english version

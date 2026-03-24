@@ -1,0 +1,305 @@
+//@version=6
+strategy(
+     title             = "JadeCap ICT Silver Bullet Strategy [PickMyTrade] v2.0",
+     overlay           = true,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     pyramiding        = 0,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 5)
+
+// INPUTS
+float rrTarget = input.float(2.0,  "Risk : Reward Target", minval = 0.5, step = 0.5)
+bool  useAM    = input.bool(true,  "Trade 10–11 AM Window")
+bool  usePM    = input.bool(true,  "Trade 2–3 PM Window")
+bool  showRng  = input.bool(true,  "Show Asian / London Ranges")
+bool  show9AM  = input.bool(true,  "Show 9 AM Candle Levels")
+bool  showLabels = input.bool(true, "Show Price Labels")
+bool  eodClose = input.bool(true,  "Force Close at 4 PM EST")
+
+group_colors = "Color Settings"
+color colorAsianHigh = input(color.new(#FFD700, 0), "Asian High", group=group_colors)
+color colorAsianLow  = input(color.new(#FFA500, 0), "Asian Low", group=group_colors)
+color colorLonHigh   = input(color.new(#FF6B5B, 0), "London High", group=group_colors)
+color colorLonLow    = input(color.new(#FF8C42, 0), "London Low", group=group_colors)
+color color9AMHi     = input(color.new(#00D9FF, 0), "9AM High", group=group_colors)
+color color9AMLo     = input(color.new(#00B4D8, 0), "9AM Low", group=group_colors)
+color colorBear      = input(color.new(#FF1744, 0), "Bearish FVG", group=group_colors)
+color colorBull      = input(color.new(#00E676, 0), "Bullish FVG", group=group_colors)
+
+// TIME HELPERS
+string TZ = "America/New_York"
+int h  = hour(time, TZ)
+int mn = minute(time, TZ)
+int tM = h * 60 + mn
+
+int T_ASIAN_START  = 20 * 60
+int T_LONDON_START =  2 * 60
+int T_LONDON_END   =  5 * 60
+int T_NINE_AM      =  9 * 60
+int T_AM_OPEN      = 10 * 60
+int T_AM_CLOSE     = 11 * 60
+int T_PM_OPEN      = 14 * 60
+int T_PM_CLOSE     = 15 * 60
+int T_EOD          = 16 * 60
+
+// RANGE VARIABLES
+var float asHigh = na
+var float asLow  = na
+var float lnHigh = na
+var float lnLow  = na
+var float n9H    = na
+var float n9L    = na
+
+// LABEL STORAGE (fix spam)
+var label lab_asHigh = na
+var label lab_asLow  = na
+var label lab_lnHigh = na
+var label lab_lnLow  = na
+var label lab_n9H    = na
+var label lab_n9L    = na
+
+// ASIAN RANGE
+bool inAsian = tM >= T_ASIAN_START
+bool startAs = tM == T_ASIAN_START
+
+if startAs
+    asHigh := high
+    asLow  := low
+else if inAsian and not na(asHigh)
+    asHigh := math.max(asHigh, high)
+    asLow  := math.min(asLow, low)
+
+// LONDON RANGE
+bool inLondon = tM >= T_LONDON_START and tM < T_LONDON_END
+bool startLn  = tM == T_LONDON_START
+
+if startLn
+    lnHigh := high
+    lnLow  := low
+else if inLondon and not na(lnHigh)
+    lnHigh := math.max(lnHigh, high)
+    lnLow  := math.min(lnLow, low)
+
+// 9AM
+if tM == T_NINE_AM
+    n9H := high
+    n9L := low
+
+// RESET
+bool isNewDay = tM == 0
+
+var bool highSwept = false
+var bool lowSwept  = false
+var bool amDone    = false
+var bool pmDone    = false
+
+if isNewDay
+    lnHigh := na
+    lnLow  := na
+    n9H    := na
+    n9L    := na
+    highSwept := false
+    lowSwept  := false
+    amDone := false
+    pmDone := false
+
+// SWEEP DETECTION
+bool daytime = tM < T_ASIAN_START
+
+if daytime
+    if not na(asHigh) and high > asHigh
+        highSwept := true
+    if not na(lnHigh) and high > lnHigh
+        highSwept := true
+    if not na(n9H) and high > n9H
+        highSwept := true
+    if not na(asLow) and low < asLow
+        lowSwept := true
+    if not na(lnLow) and low < lnLow
+        lowSwept := true
+    if not na(n9L) and low < n9L
+        lowSwept := true
+
+// FVG
+bool bearFVG = low[2] > high
+bool bullFVG = high[2] < low
+
+float bEntryPx = low[2]
+float bSL      = high[2]
+float lEntryPx = high[2]
+float lSL      = low[2]
+
+// ENTRY WINDOWS
+bool inAMWin = useAM and tM >= T_AM_OPEN and tM < T_AM_CLOSE
+bool inPMWin = usePM and tM >= T_PM_OPEN and tM < T_PM_CLOSE
+bool inWin   = inAMWin or inPMWin
+bool noPos   = strategy.position_size == 0
+
+bool doBear = inWin and bearFVG and highSwept and noPos
+bool doBull = inWin and bullFVG and lowSwept and noPos
+
+if doBear
+    slDist = bSL - bEntryPx
+    tp = bEntryPx - slDist * rrTarget
+    strategy.entry("SB Short", strategy.short, limit = bEntryPx)
+    strategy.exit("SB Short X", from_entry="SB Short", stop=bSL, limit=tp)
+
+if doBull
+    slDist = lEntryPx - lSL
+    tp = lEntryPx + slDist * rrTarget
+    strategy.entry("SB Long", strategy.long, limit=lEntryPx)
+    strategy.exit("SB Long X", from_entry="SB Long", stop=lSL, limit=tp)
+
+// VISUALS
+plot(showRng and daytime ? asHigh : na, "Asian High", color=colorAsianHigh, style=plot.style_stepline)
+plot(showRng and daytime ? asLow  : na, "Asian Low",  color=colorAsianLow,  style=plot.style_stepline)
+plot(showRng ? lnHigh : na, "London High", color=colorLonHigh)
+plot(showRng ? lnLow  : na, "London Low",  color=colorLonLow)
+plot(show9AM ? n9H : na, "9AM High", color=color9AMHi)
+plot(show9AM ? n9L : na, "9AM Low",  color=color9AMLo)
+
+// LABEL UPDATE (single label per level)
+
+if showLabels and not na(asHigh)
+    if na(lab_asHigh)
+        lab_asHigh := label.new(bar_index, asHigh, str.tostring(asHigh, format.price), style=label.style_label_down, color=colorAsianHigh)
+    else
+        label.set_xy(lab_asHigh, bar_index, asHigh)
+        label.set_text(lab_asHigh, str.tostring(asHigh, format.price))
+
+if showLabels and not na(asLow)
+    if na(lab_asLow)
+        lab_asLow := label.new(bar_index, asLow, str.tostring(asLow, format.price), style=label.style_label_up, color=colorAsianLow)
+    else
+        label.set_xy(lab_asLow, bar_index, asLow)
+        label.set_text(lab_asLow, str.tostring(asLow, format.price))
+
+if showLabels and not na(lnHigh)
+    if na(lab_lnHigh)
+        lab_lnHigh := label.new(bar_index, lnHigh, str.tostring(lnHigh, format.price), style=label.style_label_down, color=colorLonHigh)
+    else
+        label.set_xy(lab_lnHigh, bar_index, lnHigh)
+        label.set_text(lab_lnHigh, str.tostring(lnHigh, format.price))
+
+if showLabels and not na(lnLow)
+    if na(lab_lnLow)
+        lab_lnLow := label.new(bar_index, lnLow, str.tostring(lnLow, format.price), style=label.style_label_up, color=colorLonLow)
+    else
+        label.set_xy(lab_lnLow, bar_index, lnLow)
+        label.set_text(lab_lnLow, str.tostring(lnLow, format.price))
+
+if showLabels and not na(n9H)
+    if na(lab_n9H)
+        lab_n9H := label.new(bar_index, n9H, str.tostring(n9H, format.price), style=label.style_label_down, color=color9AMHi)
+    else
+        label.set_xy(lab_n9H, bar_index, n9H)
+        label.set_text(lab_n9H, str.tostring(n9H, format.price))
+
+if showLabels and not na(n9L)
+    if na(lab_n9L)
+        lab_n9L := label.new(bar_index, n9L, str.tostring(n9L, format.price), style=label.style_label_up, color=color9AMLo)
+    else
+        label.set_xy(lab_n9L, bar_index, n9L)
+        label.set_text(lab_n9L, str.tostring(n9L, format.price))
+
+View in Pine Editor・204 lines
+Use on chart
+1
+4
+844
+Feb 23
+Inspired by the ICT Silver Bullet methodology as publicly discussed by Kyle Ng (JadeCapFX), this strategy provides an educational, rule-based implementation of liquidity sweep and Fair Value Gap (FVG) concepts for TradingView users.
+
+This script is designed to demonstrate how time-based liquidity and price displacement ideas can be structured into a systematic trading framework. It is not affiliated with or endorsed by ICT, Michael Huddleston, Kyle Ng, or JadeCapFX.
+
+CORE METHODOLOGY
+This strategy is based on commonly taught ICT concepts that focus on liquidity behavior and price displacement, rather than traditional indicators.
+
+Key ideas implemented in this script include:
+
+Liquidity Pools: Prior session highs and lows (Asian, London, and New York reference levels) are used as potential areas where liquidity may reside.
+Liquidity Sweeps: Trades are only considered after price has taken one or more of these reference highs or lows.
+Fair Value Gaps (FVGs): A three-candle price pattern is used to approximate displacement and identify potential execution zones.
+Time-Based Execution: Trades are restricted to specific intraday windows to align with periods of increased market activity.
+
+The goal is to participate in directional moves after liquidity has been engaged, rather than attempting to predict market direction.
+
+TRADE SETUPS & EXECUTION LOGIC
+Liquidity Conditions
+Asian session high / low
+London session high / low
+9 AM New York candle high / low
+At least one of these levels must be swept before a trade can be taken.
+
+Execution Windows
+AM Window: 10:00 – 11:00 (New York time)
+PM Window: 14:00 – 15:00 (New York time)
+Only the first valid Fair Value Gap appearing during an active window is eligible.
+
+Directional Rules
+Bearish FVGs require a prior high sweep
+Bullish FVGs require a prior low sweep
+
+Trade Management
+Entry: Limit order at the Fair Value Gap
+Stop Loss: Behind Candle 1 of the FVG
+Take Profit: Fixed Risk-to-Reward multiple (default 2R)
+One trade per execution window
+Optional forced close at 4 PM New York time
+
+KEY FEATURES
+Automated plotting of Asian and London session ranges
+Liquidity sweep detection across multiple reference levels
+Fair Value Gap identification using a three-candle model
+Configurable AM and PM execution windows
+Fixed risk-to-reward trade management
+Optional end-of-day position closure
+Clear visual markers for ranges, execution windows, and FVG zones
+
+IMPORTANT NOTES
+Not True Order Flow
+This strategy does not use bid/ask or tick-by-tick order flow data. Liquidity sweeps and Fair Value Gaps are approximated using standard OHLC price data available on TradingView.
+
+Performance Sensitivity
+Strategy results are highly sensitive to:
+instrument selection
+timeframe
+volatility conditions
+commission, fees, and slippage assumptions
+execution quality
+Users should configure realistic trading costs in the Strategy Properties tab before evaluating results.
+
+Market Dependence
+Performance may vary significantly across different markets (indices, commodities, crypto) and across different timeframes. Time-based execution windows are evaluated using the America/New_York timezone.
+
+EDUCATIONAL DISCLAIMER
+This script is provided for educational and research purposes only. It is not financial advice. Past performance does not guarantee future results.
+
+Users are solely responsible for their own testing, risk management, and trading decisions. Always forward-test thoroughly on a paper or simulated account before considering live trading.
+Mar 2
+Release Notes
+VERSION 2.0 UPDATE
+
+This version includes the following improvements:
+- Added price label display on all key levels (Asian, London, 9AM ranges)
+- Added customizable colors for better chart organization
+- Enhanced FVG box visualization with better color options
+- All original trading logic and strategy conditions remain unchanged
+
+The core strategy functionality is identical to version 1.0. This update only improves the visual presentation and makes the script more customizable.
+
+HOW TO USE
+Go to the script settings and look for "Color Settings" to customize the colors for Asian high/low, London high/low, 9AM high/low, and FVG signals.
+
+You can also toggle "Show Price Labels" to display or hide the price values on the key levels.
+Mar 2
+Release Notes
+This update improves the price label system and fixes a visual issue from the previous version.
+
+Changes:
+Fixed repeated price label issue that could display multiple labels across the chart
+Optimized label handling so levels update instead of creating new labels each bar
+Improved chart performance and visual clarity
+Strategy logic and trading rules remain unchanged
+This update focuses only on improving the visual behavior of price labels while keeping the core strategy identical.

@@ -1,0 +1,1242 @@
+//@version=5
+// 백휘선물장기홀딩스크립트 (Fix v2)
+// ✅ ATH(HIGH) 기준 -50%, -72.5% 구간에서 각각 1회씩만 진입 (새 ATH 갱신 시 리셋)
+// ✅ 실시간에서 low<=trigger “계속 true”로 재진입하는 문제 방지: 최저점(lowestLowSinceATH) ‘관통(cross)’ 이벤트로 1회만
+// ✅ Last Fill Price = 최근 “추가로 체결된 구간의 평균 체결가(역산 추정)”
+// ✅ Liq Price(Approx) = (평단 - 담보/수량) / (1 - MMR)  (거래소 1:1은 아님, 근사)
+//    - 담보 기준은 선택 가능: Wallet(실현) or Equity(미실현 포함)
+
+strategy("백휘선물장기홀딩스크립트 (Fix v2)",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     pyramiding=200,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true,
+     process_orders_on_close=false,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     max_labels_count=500)
+
+//──────────────────────────────────────
+// Inputs
+//──────────────────────────────────────
+leverageInput = input.int(1, "Leverage (Sizing Multiplier)", minval=1)
+
+drawdownBuy1  = input.float(50.0, "Buy %-from-ATH (first)",  minval=0.1, maxval=99.9)
+drawdownBuy2  = input.float(72.5, "Buy %-from-ATH (second)", minval=0.1, maxval=99.9)
+
+buy1Pct       = input.float(10.0,  "Buy % on first drop (when NOT first position)",  minval=0.1, maxval=400.0)
+buy2Pct       = input.float(300.0, "Buy % on second drop (when NOT first position)", minval=0.1, maxval=400.0)
+
+// 첫 포지션(맨 처음 진입)일 때의 베이스/하이 퍼센트 (기존 100/300을 입력으로 분리)
+firstEntryHighDD   = input.float(72.5, "First Entry High DD %", minval=0.0, maxval=99.9,
+     tooltip="첫 포지션 진입 시, ATH 대비 하락률이 이 값 이상이면 High%로 진입")
+firstEntryBasePct  = input.float(100.0, "First Entry Base %", minval=0.1, maxval=400.0)
+firstEntryHighPct  = input.float(300.0, "First Entry High %", minval=0.1, maxval=400.0)
+
+// 추가매수 금액 산정 기준
+sizingBaseOpt = input.string("Position Value", "Sizing Base",
+     options=["Position Value", "Equity"],
+     tooltip="추가매수 금액 산정 기준.\n- Position Value: 현재 포지션 가치(수량*현재가) 기준\n- Equity: strategy.equity 기준(미실현 포함)\n※ 첫 진입은 항상 Equity 기준으로 계산됩니다.")
+
+// 청산가 근사용 유지증거금률
+mmrInput = input.float(0.005, "Maintenance Margin Rate (MMR)", minval=0.0, maxval=0.2, step=0.0001)
+
+// 청산가 계산에서 담보로 무엇을 볼지
+liqMarginBaseOpt = input.string("Wallet (Realized)", "Liq Margin Base",
+     options=["Wallet (Realized)", "Equity (Including PnL)"],
+     tooltip="청산가 근사 계산에서 담보로 보는 값.\n- Wallet(Realized): 초기자본+실현손익(보수적)\n- Equity(Including PnL): 미실현손익 포함(크로스 느낌)")
+
+// (선택) 청산가 터치 시 전략에서 강제청산 시뮬레이션
+simulateLiquidation = input.bool(false, "Simulate Liquidation? (close if low <= liq)", tooltip="ON이면 low가 Liq Price(Approx) 이하로 내려가면 strategy.close_all로 강제청산 시뮬레이션")
+
+// 라벨
+labelPosOpt = input.string("Below Bar", "Entry Label Position",
+     options=["Below Bar", "Above Bar", "At Price"])
+entryLabelYloc = labelPosOpt == "Below Bar" ? yloc.belowbar :
+     labelPosOpt == "Above Bar" ? yloc.abovebar : yloc.price
+showEntryLabels = input.bool(true, "Show Entry Labels? (Buy/Lev)")
+
+// Kill switch
+forceCloseAll = input.bool(false, "Force Close All Positions (Kill Switch)",
+     tooltip="ON이면 마지막 바에서 포지션 청산 + 미체결 주문 취소 후 신규 진입 차단")
+
+// Date filter
+useDateFilter = input.bool(false, "Limit Strategy to Date Range?")
+startTime     = input.time(timestamp("01 Jan 2020 00:00 +0000"), "Start Date/Time")
+endTime       = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End Date/Time")
+inTradeWindow = not useDateFilter or (time >= startTime and time <= endTime)
+
+killActiveThisBar = forceCloseAll and barstate.islast
+
+//──────────────────────────────────────
+// Account values
+//──────────────────────────────────────
+float equityNow = strategy.equity
+float walletNow = strategy.initial_capital + strategy.netprofit
+walletNow := math.max(walletNow, 0.0)
+
+float marginForLiq = liqMarginBaseOpt == "Equity (Including PnL)" ? equityNow : walletNow
+marginForLiq := math.max(marginForLiq, 0.0)
+
+//──────────────────────────────────────
+// ✅ Real-time safe states (varip)
+//──────────────────────────────────────
+varip bool buy1Done = false
+varip bool buy2Done = false
+varip int  lastBuy1Bar = na
+varip int  lastBuy2Bar = na
+
+// same-bar 계산용
+varip float posSizeBeforeBar  = na
+varip float newLongQtyThisBar = 0.0
+
+if barstate.isnew
+    posSizeBeforeBar  := math.abs(strategy.position_size)
+    newLongQtyThisBar := 0.0
+
+//──────────────────────────────────────
+// Track ATH + Lowest Low since ATH
+//──────────────────────────────────────
+varip float ath       = na
+varip float prevAth   = na
+varip int   athBarIdx = na
+
+prevAth := ath
+ath     := na(ath) ? high : math.max(ath, high)
+
+bool newATH = not na(prevAth) and ath > prevAth
+if newATH
+    athBarIdx := bar_index
+
+bool isAthBarRealtime = barstate.isrealtime and not na(athBarIdx) and athBarIdx == bar_index
+float lowSample = isAthBarRealtime ? close : low
+
+varip float lowestLowSinceATH = na
+float prevLowest = lowestLowSinceATH
+
+if newATH
+    // ✅ 새 ATH 나오면 사이클 리셋
+    buy1Done    := false
+    buy2Done    := false
+    lastBuy1Bar := na
+    lastBuy2Bar := na
+
+    // ✅ 이전 사이클 미체결 주문이 남아있을 수 있으니 취소
+    strategy.cancel("Buy_1")
+    strategy.cancel("Buy_2")
+
+    // 최저점 리셋
+    lowestLowSinceATH := lowSample
+else
+    if na(lowestLowSinceATH)
+        lowestLowSinceATH := lowSample
+    else
+        lowestLowSinceATH := math.min(lowestLowSinceATH, lowSample)
+
+// Drawdown
+float percentFromATHNow = (close / ath - 1.0) * 100.0
+
+// Trigger prices
+float triggerPrice1 = ath * (1.0 - drawdownBuy1 / 100.0)
+float triggerPrice2 = ath * (1.0 - drawdownBuy2 / 100.0)
+
+// ✅ “최저점이 트리거를 처음 관통하는 순간”만 true
+bool crossed1 = not na(lowestLowSinceATH) and lowestLowSinceATH <= triggerPrice1 and (na(prevLowest) or prevLowest > triggerPrice1)
+bool crossed2 = not na(lowestLowSinceATH) and lowestLowSinceATH <= triggerPrice2 and (na(prevLowest) or prevLowest > triggerPrice2)
+
+bool firstBuyCond  = (not buy1Done) and crossed1 and (na(lastBuy1Bar) or lastBuy1Bar != bar_index)
+bool secondBuyCond = (not buy2Done) and crossed2 and (na(lastBuy2Bar) or lastBuy2Bar != bar_index)
+
+//──────────────────────────────────────
+// Position sizing
+//──────────────────────────────────────
+float posQtyNow    = strategy.position_size
+float posQtyAbsNow = math.abs(posQtyNow)
+float posValueNow  = posQtyAbsNow * close
+
+// ✅ 추가매수 베이스
+float sizingBase = equityNow
+if posQtyAbsNow > 0 and sizingBaseOpt == "Position Value"
+    sizingBase := posValueNow
+else if sizingBaseOpt == "Equity"
+    sizingBase := equityNow
+else
+    sizingBase := equityNow
+
+// 첫 진입은 항상 Equity 기준
+if posQtyAbsNow == 0
+    sizingBase := equityNow
+
+float orderValue1 = sizingBase * (buy1Pct / 100.0) * leverageInput
+float orderValue2 = sizingBase * (buy2Pct / 100.0) * leverageInput
+
+float effectiveBuy1Qty = triggerPrice1 > 0 ? orderValue1 / triggerPrice1 : 0.0
+float effectiveBuy2Qty = triggerPrice2 > 0 ? orderValue2 / triggerPrice2 : 0.0
+
+//──────────────────────────────────────
+// Equity MDD (참고용)
+//──────────────────────────────────────
+varip float equityPeak = na
+varip float maxDDPerc  = 0.0
+
+equityPeak := na(equityPeak) ? equityNow : math.max(equityPeak, equityNow)
+float ddNowEquity = equityPeak != 0.0 ? (equityNow / equityPeak - 1.0) * 100.0 : 0.0
+maxDDPerc := math.min(maxDDPerc, ddNowEquity)
+
+//──────────────────────────────────────
+// Kill / Date filter : 미체결 주문 취소
+//──────────────────────────────────────
+if killActiveThisBar
+    strategy.cancel("Buy_1")
+    strategy.cancel("Buy_2")
+    if strategy.position_size != 0
+        strategy.close_all(comment="Force Close All (Kill Switch)")
+
+if not inTradeWindow
+    strategy.cancel("Buy_1")
+    strategy.cancel("Buy_2")
+
+//──────────────────────────────────────
+// Entries
+//──────────────────────────────────────
+if not killActiveThisBar and inTradeWindow and equityNow > 0
+    // 1차(-50%)
+    if firstBuyCond
+        bool  isFirstPosEntry = (posSizeBeforeBar == 0) and (newLongQtyThisBar == 0)
+        float usedQty = 0.0
+        float usedPct = na
+
+        if isFirstPosEntry
+            float ddForRule = (lowSample / ath - 1.0) * 100.0
+            float firstPct  = ddForRule <= -firstEntryHighDD ? firstEntryHighPct : firstEntryBasePct
+            float firstVal  = equityNow * (firstPct / 100.0) * leverageInput
+            usedQty := triggerPrice1 > 0 ? firstVal / triggerPrice1 : 0.0
+            usedPct := firstPct
+        else
+            usedQty := effectiveBuy1Qty
+            usedPct := buy1Pct
+
+        if usedQty > 0
+            buy1Done    := true
+            lastBuy1Bar := bar_index
+
+            newLongQtyThisBar += usedQty
+
+            float posValAfter = (posSizeBeforeBar + newLongQtyThisBar) * triggerPrice1
+            float levAfter    = marginForLiq != 0 ? posValAfter / marginForLiq : na
+            float levText     = not na(levAfter) ? math.round(levAfter * 100.0) / 100.0 : na
+
+            if showEntryLabels
+                if not na(levText)
+                    label.new(bar_index, low, "Lev " + str.tostring(levText) + "x",
+                         yloc=entryLabelYloc, style=label.style_label_down, size=size.large,
+                         color=color.new(color.gray, 0), textcolor=color.white)
+
+                label.new(bar_index, low,
+                     "Buy " + str.tostring(usedPct, format.mintick) + "% @ " + str.tostring(triggerPrice1, format.mintick),
+                     yloc=entryLabelYloc, style=label.style_label_up, size=size.large,
+                     color=color.new(color.lime, 10), textcolor=color.black)
+
+            strategy.entry("Buy_1", strategy.long, qty=usedQty, limit=triggerPrice1,
+                 comment="ATH -" + str.tostring(drawdownBuy1) + "%")
+
+    // 2차(-72.5%)
+    if secondBuyCond
+        bool  isFirstPosEntry = (posSizeBeforeBar == 0) and (newLongQtyThisBar == 0)
+        float usedQty = 0.0
+        float usedPct = na
+
+        if isFirstPosEntry
+            float ddForRule = (lowSample / ath - 1.0) * 100.0
+            float firstPct  = ddForRule <= -firstEntryHighDD ? firstEntryHighPct : firstEntryBasePct
+            float firstVal  = equityNow * (firstPct / 100.0) * leverageInput
+            usedQty := triggerPrice2 > 0 ? firstVal / triggerPrice2 : 0.0
+            usedPct := firstPct
+        else
+            usedQty := effectiveBuy2Qty
+            usedPct := buy2Pct
+
+        if usedQty > 0
+            buy2Done    := true
+            lastBuy2Bar := bar_index
+
+            newLongQtyThisBar += usedQty
+
+            float posValAfter = (posSizeBeforeBar + newLongQtyThisBar) * triggerPrice2
+            float levAfter    = marginForLiq != 0 ? posValAfter / marginForLiq : na
+            float levText     = not na(levAfter) ? math.round(levAfter * 100.0) / 100.0 : na
+
+            if showEntryLabels
+                if not na(levText)
+                    label.new(bar_index, low, "Lev " + str.tostring(levText) + "x",
+                         yloc=entryLabelYloc, style=label.style_label_down, size=size.large,
+                         color=color.new(color.gray, 0), textcolor=color.white)
+
+                label.new(bar_index, low,
+                     "Buy " + str.tostring(usedPct, format.mintick) + "% @ " + str.tostring(triggerPrice2, format.mintick),
+                     yloc=entryLabelYloc, style=label.style_label_up, size=size.large,
+                     color=color.new(color.teal, 10), textcolor=color.black)
+
+            strategy.entry("Buy_2", strategy.long, qty=usedQty, limit=triggerPrice2,
+                 comment="ATH -" + str.tostring(drawdownBuy2) + "%")
+
+//──────────────────────────────────────
+// Avg Entry plot
+//──────────────────────────────────────
+float avgEntryPrice = na
+avgEntryPrice := strategy.position_size != 0 ? strategy.position_avg_price : na
+plot(avgEntryPrice, title="Avg Entry Price (평단가)", color=color.yellow, linewidth=2)
+
+//──────────────────────────────────────
+// ✅ Liquidation Price (Approx, Dynamic)
+// 롱 근사: (AvgEntry - margin/qty) / (1 - MMR)
+//──────────────────────────────────────
+float liqPriceReal = na
+if posQtyNow > 0 and posQtyAbsNow > 0 and not na(avgEntryPrice)
+    float denom = 1.0 - mmrInput
+    float base  = avgEntryPrice - (marginForLiq / posQtyAbsNow)
+    liqPriceReal := denom != 0 ? (base / denom) : na
+    liqPriceReal := liqPriceReal < 0 ? 0 : liqPriceReal
+else
+    liqPriceReal := na
+
+plot(liqPriceReal, title="Liq Price (Approx)", color=color.red, linewidth=2, style=plot.style_linebr)
+
+// (선택) 청산 시뮬레이션
+if simulateLiquidation and not killActiveThisBar and inTradeWindow
+    if posQtyNow > 0 and not na(liqPriceReal) and low <= liqPriceReal
+        strategy.cancel("Buy_1")
+        strategy.cancel("Buy_2")
+        strategy.close_all(comment="Simulated Liquidation")
+
+//──────────────────────────────────────
+// ✅ Last Fill Price(최근 체결가) 계산 (역산)
+// fill = (avgNew*qNew - avgPrev*qPrev) / (qNew-qPrev)
+//──────────────────────────────────────
+varip float prevPosSize  = 0.0
+varip float prevAvgPrice = na
+varip float lastFillPrice = na
+varip float lastFillQty   = na
+varip float lastEntryLev  = na  // 최근 체결 직후 레버리지(담보 기준)
+
+bool posChangedFill = posQtyNow != prevPosSize
+
+if posChangedFill
+    // 추가매수(증가)만 업데이트
+    if posQtyNow > prevPosSize and posQtyNow > 0 and not na(avgEntryPrice)
+        float qPrev = math.abs(prevPosSize)
+        float qNew  = math.abs(posQtyNow)
+        float qAdd  = qNew - qPrev
+
+        float fill = na
+        if qAdd > 0
+            if qPrev == 0 or na(prevAvgPrice)
+                fill := avgEntryPrice
+            else
+                fill := (avgEntryPrice * qNew - prevAvgPrice * qPrev) / qAdd
+
+        lastFillPrice := fill
+        lastFillQty   := qAdd
+
+        float posValAtAvg = qNew * avgEntryPrice
+        lastEntryLev := marginForLiq != 0 ? (posValAtAvg / marginForLiq) : na
+
+    // 포지션 종료면 초기화
+    if posQtyNow <= 0
+        lastFillPrice := na
+        lastFillQty   := na
+        lastEntryLev  := na
+
+    prevPosSize  := posQtyNow
+    prevAvgPrice := avgEntryPrice
+else
+    prevAvgPrice := avgEntryPrice
+
+//──────────────────────────────────────
+// Visuals: ATH + buy markers
+//──────────────────────────────────────
+plot(ath, color=color.orange, linewidth=2, title="ATH (HIGH 기반)")
+
+plotshape(firstBuyCond  and not killActiveThisBar and inTradeWindow, title="First Buy",  style=shape.triangleup, color=color.lime, size=size.tiny,  location=location.belowbar, text="Buy")
+plotshape(secondBuyCond and not killActiveThisBar and inTradeWindow, title="Second Buy", style=shape.triangleup, color=color.teal, size=size.small, location=location.belowbar, text="Buy")
+
+//──────────────────────────────────────
+// Info table
+//──────────────────────────────────────
+float maxDDSinceATH = not na(lowestLowSinceATH) ? (lowestLowSinceATH / ath - 1.0) * 100.0 : na
+
+// 16 rows
+var table info = table.new(position.top_right, 2, 16, border_width=1)
+
+if barstate.islast
+    float posQtyT    = strategy.position_size
+    float posQtyAbsT = math.abs(posQtyT)
+    float posValT    = posQtyAbsT * close
+
+    float levWallet = walletNow != 0 ? posValT / walletNow : na
+    float levEquity = equityNow != 0 ? posValT / equityNow : na
+
+    float ddFromAth = percentFromATHNow
+
+    float posCost = (posQtyAbsT > 0 and not na(avgEntryPrice)) ? (posQtyAbsT * avgEntryPrice) : na
+    float pnlPerc = (not na(posCost) and posCost > 0) ? (strategy.openprofit / posCost) * 100.0 : na
+    float equityRetPerc = strategy.initial_capital != 0 ? (equityNow / strategy.initial_capital - 1.0) * 100.0 : na
+
+    color bg  = color.new(color.blue, 0)
+    color txt = color.white
+
+    // 0
+    table.cell(info, 0, 0, "Pos Qty", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 0, posQtyAbsT != 0 ? str.tostring(posQtyAbsT, format.mintick) : "0", bgcolor=bg, text_color=txt)
+
+    // 1
+    table.cell(info, 0, 1, "Pos Value", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 1, posValT != 0 ? str.tostring(posValT, format.mintick) : "0", bgcolor=bg, text_color=txt)
+
+    // 2
+    table.cell(info, 0, 2, "Lev (Wallet)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 2, not na(levWallet) ? str.tostring(levWallet, format.mintick) + "x" : "N/A", bgcolor=bg, text_color=txt)
+
+    // 3
+    table.cell(info, 0, 3, "Lev (Equity)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 3, not na(levEquity) ? str.tostring(levEquity, format.mintick) + "x" : "N/A", bgcolor=bg, text_color=txt)
+
+    // 4
+    table.cell(info, 0, 4, "DD from ATH (%)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 4, not na(ddFromAth) ? str.tostring(ddFromAth, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 5
+    table.cell(info, 0, 5, "Avg Entry", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 5, not na(avgEntryPrice) ? str.tostring(avgEntryPrice, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 6
+    table.cell(info, 0, 6, "Last Fill Price", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 6, not na(lastFillPrice) ? str.tostring(lastFillPrice, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 7
+    table.cell(info, 0, 7, "Last Fill Qty", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 7, not na(lastFillQty) ? str.tostring(lastFillQty, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 8
+    table.cell(info, 0, 8, "Last Entry Lev", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 8, not na(lastEntryLev) ? str.tostring(lastEntryLev, format.mintick) + "x" : "N/A", bgcolor=bg, text_color=txt)
+
+    // 9
+    table.cell(info, 0, 9, "Liq Price (Approx)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 9, not na(liqPriceReal) ? str.tostring(liqPriceReal, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 10
+    table.cell(info, 0, 10, "Wallet (Realized)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 10, str.tostring(walletNow, format.mintick), bgcolor=bg, text_color=txt)
+
+    // 11
+    table.cell(info, 0, 11, "Equity (Incl PnL)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 11, str.tostring(equityNow, format.mintick), bgcolor=bg, text_color=txt)
+
+    // 12
+    table.cell(info, 0, 12, "Pos PnL (%)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 12, not na(pnlPerc) ? str.tostring(pnlPerc, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 13
+    table.cell(info, 0, 13, "Max DD (Equity %)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 13, str.tostring(maxDDPerc, format.mintick), bgcolor=bg, text_color=txt)
+
+    // 14
+    table.cell(info, 0, 14, "Lowest Low (Since ATH)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 14, not na(lowestLowSinceATH) ? str.tostring(lowestLowSinceATH, format.mintick) : "N/A", bgcolor=bg, text_color=txt)
+
+    // 15
+    table.cell(info, 0, 15, "Max DD from ATH (%)", bgcolor=bg, text_color=txt)
+    table.cell(info, 1, 15, not na(maxDDSinceATH) ? str.tostring(maxDDSinceATH, format.mintick) + "%" : "N/A", bgcolor=bg, text_color=txt)
+
+View in Pine Editor・452 lines
+Use on chart
+3
+7
+4
+1 018
+Nov 22, 2025
+본 스크립트는 과거 하락 데이터를 이용하여, 정해진 하락 %가 발생하는 경우 자기 자본의 정해진 %만큼을 진입하게 설계되어진 스트레티지입니다.
+레버리지를 사용할 수 있으며 기본적으로 셋팅해둔 값이 내장되어있습니다.(자유롭게 바꿔서 쓰시면 됩니다.) 추가적으로 2번의 진입 외에도 다른 진입 기준, 진입 %를 설정하실 수 있으며 - ChatGPT에게 요청하면 수정해줄 것입니다.
+실제 사용용도로는 KillSwitch 기능을 꺼주세요. 바 돋보기 기능을 켜주세요.
+
+ATH Drawdown Re-Buy Long Only 전략 설명
+1. 전략 개요
+
+ATH Drawdown Re-Buy Long Only 전략은 자산의 역대 최고가(ATH, All-Time High)를 기준으로 한 하락폭(드로우다운)을 활용하여,
+특정 구간마다 단계적으로 롱 포지션을 구축하는 자동 재매수(Long Only) 전략입니다.
+
+본 전략은 다음과 같은 목적을 가지고 설계되었습니다.
+
+급격한 조정 구간에서 체계적인 분할 매수 및 레버리지 활용
+
+ATH를 기준으로 한 명확한 진입 규칙 제공
+
+실시간으로
+
+평단가
+
+레버리지
+
+청산가 추정
+
+계좌 MDD
+
+수익률
+등을 시각적으로 제공하여 리스크와 포지션 상태를 직관적으로 확인할 수 있도록 지원
+
+※ 본 전략은 교육·연구·백테스트 용도로 제공되며,
+어떠한 형태의 투자 권유 또는 수익을 보장하지 않습니다.
+
+2. 전략의 핵심 개념
+2-1. ATH(역대 최고가) 기준 드로우다운
+
+전략은 차트 상에서 항상 가장 높은 고가(High)를 ATH로 기록합니다.
+새로운 고점이 형성될 때마다 ATH를 갱신하고, 해당 ATH를 기준으로 다음을 계산합니다.
+
+현재 바의 저가(Low)가 ATH에서 몇 % 하락했는지
+
+현재 바의 종가(Close)가 ATH에서 몇 % 하락했는지
+
+그리고 사전에 설정한 두 개의 드로우다운 구간에서 매수를 수행합니다.
+
+1차 진입 구간: ATH 대비 X% 하락 시
+
+2차 진입 구간: ATH 대비 Y% 하락 시
+
+각 구간은 ATH가 새로 갱신될 때마다 한 번씩만 작동하며,
+새로운 ATH가 생성되면 다시 “1차 / 2차 진입 가능 상태”로 초기화됩니다.
+
+2-2. 첫 포지션 100% / 300% 특수 규칙
+
+이 전략의 중요한 특징은 **“첫 포지션 진입 시의 예외 규칙”**입니다.
+
+전략이 현재 어떠한 포지션도 들고 있지 않은 상태에서
+최초로 롱 포지션을 진입하는 시점(첫 포지션)에 대해:
+
+기본적으로는 **자산의 100%**를 기준으로 포지션을 구축하지만,
+
+만약 그 순간의 가격이 ATH 대비 설정값 이상(예: 약 –72.5% 이상 하락한 상황) 이라면
+→ 자산의 300% 규모로 첫 포지션을 진입하도록 설계되어 있습니다.
+
+이 규칙은 다음과 같이 동작합니다.
+
+첫 진입이 1차 드로우다운 구간에서 발생하든,
+첫 진입이 2차 드로우다운 구간에서 발생하든,
+
+현재 하락폭이 설정된 기준 이상(예: –72.5% 이상) 이라면
+→ “이 정도 하락이면 첫 진입부터 더 공격적으로 들어간다”는 의미로 300% 규모로 진입
+
+그 이하의 하락폭이라면
+→ 첫 진입은 100% 규모로 제한
+
+즉, 전략은 다음 두 가지 모드로 동작합니다.
+
+일반적인 상황의 첫 진입: 자산의 100%
+
+심각한 드로우다운 구간에서의 첫 진입: 자산의 300%
+
+이 특수 규칙은 깊은 하락에서는 공격적으로, 평소에는 상대적으로 보수적으로 진입하도록 설계된 것입니다.
+
+3. 전략 동작 구조
+3-1. 매수 조건
+
+차트 상 High 기준으로 ATH를 추적합니다.
+
+각 바마다 해당 ATH에서의 하락률을 계산합니다.
+
+사용자가 설정한 두 개의 드로우다운 구간(예시):
+
+1차 구간: 예를 들어 ATH – 50%
+
+2차 구간: 예를 들어 ATH – 72.5%
+
+각 구간에 대해 다음과 같은 조건을 확인합니다.
+
+“이번 ATH 구간에서 아직 해당 구간 매수를 한 적이 없는 상태”이고,
+
+현재 바의 저가(Low)가 해당 구간 가격 이하를 찍는 순간
+→ 해당 바에서 매수 조건 충족으로 간주
+
+실제 주문은:
+
+해당 구간 가격에 맞춰 롱 포지션 진입(리밋/시장가 기반 시뮬레이션) 으로 처리됩니다.
+
+3-2. ATH 갱신과 진입 기회 리셋
+
+차트 상에서 새로운 고점(High)이 기존 ATH를 넘어서는 순간,
+
+ATH가 갱신되고,
+
+1차 / 2차 진입 여부를 나타내는 내부 플래그가 초기화됩니다.
+
+이를 통해, 시장이 새로운 고점을 돌파해 나갈 때마다,
+
+해당 구간에서 다시 한 번씩 1차·2차 드로우다운 진입 기회를 갖게 됩니다.
+
+4. 포지션 사이징 및 레버리지
+4-1. 계좌 자산(Equity) 기준 포지션 크기 결정
+
+전략은 현재 계좌 자산을 다음과 같이 정의하여 사용합니다.
+
+현재 자산 = 초기 자본 + 실현 손익 + 미실현 손익
+
+각 진입 구간에서의 포지션 가치는 다음과 같이 결정됩니다.
+
+1차 진입 구간:
+
+“자산의 몇 %를 사용할지”를 설정값으로 입력
+
+설정된 퍼센트를 계좌 자산에 곱한 뒤,
+다시 전략 내 레버리지 배수(Leverage) 를 곱하여 실제 포지션 가치를 계산
+
+2차 진입 구간:
+
+동일한 방식으로, 독립된 퍼센트 설정값을 사용
+
+즉, 포지션 가치는 다음과 같이 계산됩니다.
+
+포지션 가치 = 현재 자산 × (해당 구간 설정 % / 100) × 레버리지 배수
+
+그리고 이를 해당 구간의 진입 가격으로 나누어 실제 수량(토큰 단위) 를 산출합니다.
+
+4-2. 첫 포지션의 예외 처리 (100% / 300%)
+
+첫 포지션에 대해서는 위의 일반적인 퍼센트 설정 대신,
+다음과 같은 고정 비율이 사용됩니다.
+
+기본: 자산의 100% 규모로 첫 포지션 진입
+
+단, 진입 시점의 ATH 대비 하락률이 설정값 이상(예: –72.5% 이상) 일 경우
+→ 자산의 300% 규모로 첫 포지션 진입
+
+이때 역시 다음 공식을 사용합니다.
+
+포지션 가치 = 현재 자산 × (100% 또는 300%) × 레버리지
+
+그리고 이를 가격으로 나누어 실제 진입 수량을 계산합니다.
+
+이 규칙은:
+
+첫 진입이 1차 구간이든 2차 구간이든 동일하게 적용되며,
+
+“충분히 깊은 하락 구간에서는 첫 진입부터 더 크게,
+평소에는 비교적 보수적으로” 라는 운용 철학을 반영합니다.
+
+4-3. 실레버리지(Real Leverage)의 추적
+
+전략은 각 바 단위로 다음을 추적합니다.
+
+바가 시작할 때의 기존 포지션 크기
+
+해당 바에서 새로 진입한 수량
+
+이를 바탕으로, 진입이 발생한 시점에 다음을 계산합니다.
+
+실제 레버리지 = (포지션 가치 / 현재 자산)
+
+그리고 차트 상에 예를 들어:
+
+Lev 2.53x 와 같은 형식의 레이블로 표시합니다.
+
+이를 통해, 매수 시점마다 실제 계좌 레버리지가 어느 정도였는지를 직관적으로 확인할 수 있습니다.
+
+5. 시각화 및 모니터링 요소
+5-1. 차트 상 시각 요소
+
+전략은 차트 위에 다음과 같은 정보를 직접 표시합니다.
+
+ATH 라인
+High 기준으로 계산된 역대 최고가를 주황색 선으로 표시
+
+평단가(평균 진입가) 라인
+현재 보유 포지션이 있을 때,
+해당 포지션의 평균 진입가를 노란색 선으로 표시
+
+추정 청산가(고정형 청산가) 라인
+
+포지션 수량이 변화하는 시점을 감지하여,
+
+당시의 평단가와 실제 레버리지를 이용해 근사적인 청산가를 계산
+
+이를 빨간색 선으로 차트에 고정 표시
+
+포지션이 없거나 레버리지가 1배 이하인 경우에는 청산가 라인을 제거
+
+매수 마커 및 레이블
+
+1차/2차 매수 조건이 충족될 때마다 해당 지점에 매수 마커를 표시
+
+"Buy XX% @ 가격", "Lev XXx" 형태의 라벨로
+진입 비율과 당시 레버리지를 함께 시각화
+
+레이블의 위치는 설정에서 선택 가능:
+
+바 아래 (Below Bar)
+
+바 위 (Above Bar)
+
+실제 가격 위치 (At Price)
+
+5-2. 우측 상단 정보 테이블
+
+차트 우측 상단에는 현재 계좌·포지션 상태를 요약한 정보 테이블이 표시됩니다.
+대표적으로 다음 항목들이 포함됩니다.
+
+Pos Qty (Token)
+현재 보유 중인 포지션 수량(토큰 기준, 절대값 기준)
+
+Pos Value (USDT)
+현재 포지션의 시장 가치 (수량 × 현재 가격)
+
+Leverage (Now)
+현재 실레버리지 (포지션 가치 / 현재 자산)
+
+DD from ATH (%)
+현재 가격 기준, 최근 ATH에서의 하락률(%)
+
+Avg Entry
+현재 포지션의 평균 진입 가격
+
+PnL (%)
+현재 포지션 기준 미실현 손익률(%)
+
+Max DD (Equity %)
+전략 전체 기간 동안 기록된 계좌 기준 최대 손실(MDD, Max Drawdown)
+
+Last Entry Price
+가장 최근에 포지션을 추가로 진입한 직후의 평균 진입 가격
+
+Last Entry Lev
+위 “Last Entry Price” 시점에서의 실레버리지
+
+Liq Price (Fixed)
+위에서 설명한 고정형 추정 청산가
+
+Return from Start (%)
+전략 시작 시점(초기 자본) 대비 현재 계좌 자산의 총 수익률(%)
+
+이 테이블을 통해 사용자는:
+
+현재 계좌와 포지션의 상태
+
+리스크 수준
+
+누적 성과
+
+를 직관적으로 파악할 수 있습니다.
+
+6. 시간 필터 및 라벨 옵션
+6-1. 전략 동작 기간 설정
+
+전략은 옵션으로 특정 기간에만 전략을 동작시키는 시간 필터를 제공합니다.
+
+“Use Date Range” 옵션을 활성화하면:
+
+시작 시각과 종료 시각을 지정하여
+
+해당 구간에 한해서만 매매가 발생하도록 제한
+
+옵션을 비활성화하면:
+
+전략은 전체 차트 구간에서 자유롭게 동작
+
+6-2. 진입 라벨 위치 설정
+
+사용자는 매수/레버리지 라벨의 위치를 선택할 수 있습니다.
+
+바 아래 (Below Bar)
+
+바 위 (Above Bar)
+
+실제 가격 위치 (At Price)
+
+이를 통해 개인 취향 및 차트 가독성에 맞추어
+시각화 방식을 유연하게 조정할 수 있습니다.
+
+7. 활용 대상 및 사용 예시
+
+본 전략은 다음과 같은 목적에 적합합니다.
+
+현물 또는 선물 롱 포지션 기준 장기·스윙 관점 추매 전략 백테스트
+
+“고점 대비 하락률”을 기준으로 한 규칙 기반 운용 아이디어 검증
+
+레버리지 사용 시
+계좌 레버리지·청산가·MDD를 동시에 모니터링하고자 하는 경우
+
+특정 자산에 대해
+
+“새로운 고점이 형성될 때마다
+일정한 규칙으로 깊은 조정 구간에서만 분할 진입하고자 할 때”
+
+실거래에 그대로 적용하기보다는,
+전략 아이디어 검증 및 리스크 프로파일 분석,
+자신의 성향에 맞는 파라미터 탐색 용도로 사용하는 것을 권장합니다.
+
+8. 한계 및 유의사항
+
+백테스트 결과는 미래 성과를 보장하지 않습니다.
+
+과거 데이터에 기반한 시뮬레이션일 뿐이며,
+실제 시장에서는
+
+유동성
+
+슬리피지
+
+수수료 체계
+
+강제청산 규칙
+등 다양한 변수가 존재합니다.
+
+청산가는 단순화된 공식에 따른 추정치입니다.
+
+거래소별 실제 청산 규칙, 유지 증거금, 수수료, 펀딩비 등은
+본 전략의 계산과 다를 수 있으며,
+청산가 추정 라인은 참고용 지표일 뿐입니다.
+
+레버리지 및 진입 비율 설정에 따라 손실 폭이 매우 커질 수 있습니다.
+
+특히 **“첫 포지션 300% 진입”**과 같이 매우 공격적인 설정은
+시장 급락 시 계좌 손실과 청산 리스크를 크게 증가시킬 수 있으므로
+신중한 검토가 필요합니다.
+
+실거래 연동 시에는 별도의 리스크 관리가 필수입니다.
+
+개별 손절 기준
+
+포지션 상한선
+
+전체 포트폴리오 내 비중 관리 등
+본 전략 외부에서 추가적인 안전장치가 필요합니다.
+
+9. 결론
+
+ATH Drawdown Re-Buy Long Only 전략은 단순한 “저가 매수”를 넘어서,
+
+ATH 기준으로 드로우다운을 구조적으로 활용하고,
+
+첫 포지션에 대한 **특수 규칙(100% / 300%)**을 적용하며,
+
+레버리지·청산가·MDD·수익률을 통합적으로 시각화함으로써,
+
+하락 구간에서의 규칙 기반 롱 포지션 구축과
+리스크 모니터링을 동시에 지원하는 전략입니다.
+
+사용자는 본 전략을 통해:
+
+자신의 시장 관점과 리스크 허용 범위에 맞는
+
+드로우다운 구간
+
+진입 비율
+
+레버리지 설정
+
+다양한 시나리오에 대한 백테스트와 분석
+
+을 수행할 수 있습니다.
+
+다시 한 번 강조하지만,
+본 전략은 연구·학습·백테스트를 위한 도구이며,
+실제 투자 판단과 책임은 전적으로 사용자 본인에게 있습니다.
+
+/ENG Version.
+
+This script is designed to use historical drawdown data and automatically enter positions when a predefined percentage drop from the all-time high occurs, using a predefined percentage of your account equity.
+
+You can use leverage, and default parameter values are provided out of the box (you can freely change them to suit your style).
+In addition to the two main entry levels, you can add more entry conditions and custom entry percentages – just ask ChatGPT to modify the script.
+
+For actual/live usage, please turn OFF the KillSwitch function and turn ON the Bar Magnifier feature.
+
+ATH Drawdown Re-Buy Long Only Strategy
+1. Strategy Overview
+
+The ATH Drawdown Re-Buy Long Only strategy is an automatic re-buy (Long Only) system that builds long positions step-by-step at specific drawdown levels, based on the asset’s all-time high (ATH) and its subsequent drawdown.
+
+This strategy is designed with the following goals:
+
+Systematic scaled buying and leverage usage during sharp correction periods
+
+Clear, rule-based entry logic using drawdowns from ATH
+
+Real-time visualization of:
+
+Average entry price
+
+Leverage
+
+Estimated liquidation price
+
+Account MDD (Max Drawdown)
+
+Return / performance
+
+This allows traders to intuitively monitor both risk and position status.
+
+※ This strategy is provided for educational, research, and backtesting purposes only.
+It does not constitute investment advice and does not guarantee any profits.
+
+2. Core Concepts
+2-1. Drawdown from ATH (All-Time High)
+
+On the chart, the strategy always tracks the highest high as the ATH.
+Whenever a new high is made, ATH is updated, and based on that ATH the following are calculated:
+
+How many percent the current bar’s Low is below the ATH
+
+How many percent the current bar’s Close is below the ATH
+
+Using these, the strategy executes buys at two predefined drawdown zones:
+
+1st entry zone: When price drops X% from ATH
+
+2nd entry zone: When price drops Y% from ATH
+
+Each zone is allowed to trigger only once per ATH cycle.
+When a new ATH is created, the “1st / 2nd entry possible” flags are reset, and new opportunities open up for that ATH leg.
+
+2-2. Special Rule for the First Position (100% / 300%)
+
+A key feature of this strategy is the special rule for the very first position.
+
+When the strategy currently holds no position and is about to open the first long position:
+
+Under normal conditions, it builds the position using 100% of account equity.
+
+However, if at that moment the price has dropped by at least a predefined threshold from ATH (e.g. around –72.5% or more),
+→ the strategy will open the first position using 300% of account equity.
+
+This rule works as follows:
+
+Whether the first entry happens at the 1st drawdown zone or at the 2nd drawdown zone,
+
+If the current drawdown from ATH is at or below the threshold (e.g. –72.5% or worse),
+→ the strategy interprets this as “a sufficiently deep crash” and opens the initial position with 300% of equity.
+
+If the drawdown is less severe than the threshold,
+→ the first entry is capped at 100% of equity.
+
+So the strategy has two modes for the first entry:
+
+Normal market conditions: 100% of equity
+
+Deep drawdown conditions: 300% of equity
+
+This special rule is intended to be aggressive in extremely deep crashes while staying more conservative in normal corrections.
+
+3. Strategy Logic & Execution
+3-1. Entry Conditions
+
+The strategy tracks the ATH using the High price.
+
+For each bar, it calculates the drawdown from ATH.
+
+The user defines two drawdown zones, for example:
+
+1st zone: ATH – 50%
+
+2nd zone: ATH – 72.5%
+
+For each zone, the strategy checks:
+
+If no buy has been executed yet for that zone in the current ATH leg, and
+
+If the current bar’s Low touches or falls below that zone’s price level,
+→ That bar is considered to have triggered a buy condition.
+
+Order simulation:
+
+The strategy simulates entering a long position at that zone’s price level
+(using a limit/market-like approximation for backtesting).
+
+3-2. ATH Reset & Entry Opportunity Reset
+
+When a new High goes above the previous ATH:
+
+The ATH is updated to this new high.
+
+Internal flags that track whether the 1st and 2nd entries have been used are reset.
+
+This means:
+
+Each time the market makes a new ATH,
+
+The strategy once again has a fresh opportunity to execute 1st and 2nd drawdown entries for that new ATH leg.
+
+4. Position Sizing & Leverage
+4-1. Position Size Based on Account Equity
+
+The strategy defines current equity as:
+
+Current Equity = Initial Capital + Realized PnL + Unrealized PnL
+
+For each entry zone, the position value is calculated as follows:
+
+The user inputs:
+
+“What % of equity to use at this zone”
+
+The strategy:
+
+Multiplies current equity by that percentage
+
+Then multiplies by the strategy’s leverage factor
+
+Thus:
+
+Position Value = Current Equity × (Zone % / 100) × Leverage
+
+Finally, this position value is divided by the entry price to determine the actual position size in tokens.
+
+4-2. Exception for the First Position (100% / 300%)
+
+For the very first position (when there is no open position),
+the strategy does not use the zone % parameters. Instead, it uses fixed ratios:
+
+Default: Enter the first position with 100% of equity.
+
+If the drawdown from ATH at that moment is greater than or equal to a predefined threshold (e.g. –72.5% or more)
+→ Enter the first position with 300% of equity.
+
+The position value is computed as:
+
+Position Value = Current Equity × (100% or 300%) × Leverage
+
+Then it is divided by the entry price to obtain the token quantity.
+
+This rule:
+
+Applies regardless of whether the first entry occurs at the 1st zone or 2nd zone.
+
+Embeds the philosophy:
+“In very deep crashes, go much larger on the first entry; otherwise, stay more conservative.”
+
+4-3. Tracking Real Leverage
+
+On each bar, the strategy tracks:
+
+The existing position size at the start of the bar
+
+The newly added size (if any) on that bar
+
+When a new entry occurs, it calculates the real leverage at that moment:
+
+Real Leverage = (Position Value / Current Equity)
+
+This is then displayed on the chart as a label, for example:
+
+Lev 2.53x
+
+This makes it easy to see the actual leverage level at each entry point.
+
+5. Visualization & Monitoring
+5-1. On-Chart Visual Elements
+
+The strategy plots the following directly on the chart:
+
+ATH Line
+
+The all-time high (based on High) is plotted as an orange line.
+
+Average Entry Price Line
+
+When a position is open, the average entry price of that position is plotted as a yellow line.
+
+Estimated Liquidation Price (Fixed) Line
+
+The strategy detects when the position size changes.
+
+At each size change, it uses the current average entry price and real leverage to compute an approximate liquidation price.
+
+This “fixed liquidation price” is then plotted as a red line on the chart.
+
+If there is no position, or if leverage is 1x or lower, the liquidation line is removed.
+
+Entry Markers & Labels
+
+When 1st/2nd entry conditions are met, the strategy:
+
+Marks the entry point on the chart.
+
+Displays labels such as "Buy XX% @ Price" and "Lev XXx",
+showing both entry percentage and real leverage at that time.
+
+The label placement is configurable:
+
+Below Bar
+
+Above Bar
+
+At Price
+
+5-2. Information Table (Top-Right Panel)
+
+In the top-right corner of the chart, the strategy displays a summary table of the current account and position status. It typically includes:
+
+Pos Qty (Token)
+Absolute size of the current position (in tokens)
+
+Pos Value (USDT)
+Market value of the current position (qty × current price)
+
+Leverage (Now)
+Current real leverage (position value / current equity)
+
+DD from ATH (%)
+Current drawdown (%) from the latest ATH, based on current price
+
+Avg Entry
+Average entry price of the current position
+
+PnL (%)
+Unrealized profit/loss (%) of the current position
+
+Max DD (Equity %)
+The maximum equity drawdown (MDD) recorded over the entire backtest period
+
+Last Entry Price
+Average entry price immediately after the most recent add-on entry
+
+Last Entry Lev
+Real leverage at the time of the most recent entry
+
+Liq Price (Fixed)
+The fixed estimated liquidation price described above
+
+Return from Start (%)
+Total return (%) of equity compared to the initial capital
+
+Through this table, users can quickly grasp:
+
+Current account and position status
+
+Current risk level
+
+Cumulative performance
+
+6. Time Filters & Label Options
+6-1. Strategy Date Range Filter
+
+The strategy provides an option to restrict trading to a specific time range.
+
+When “Use Date Range” is enabled:
+
+You can specify start and end timestamps.
+
+The strategy will only execute trades within that range.
+
+When this option is disabled:
+
+The strategy operates over the entire chart history.
+
+6-2. Entry Label Placement
+
+Users can customize where entry/leverage labels are drawn:
+
+Below Bar (Below Bar)
+
+Above Bar (Above Bar)
+
+At the actual price level (At Price)
+
+This allows you to adjust visualization according to personal preference and chart readability.
+
+7. Use Cases & Applications
+
+This strategy is suitable for the following purposes:
+
+Long-term / swing-style re-buy strategies for spot or futures long positions
+
+Testing rule-based strategies that rely on “drawdown from ATH” as a main signal
+
+Monitoring account leverage, liquidation price, and MDD when using leverage
+
+Handling situations where, for a given asset:
+
+“Every time a new ATH is formed,
+you want to wait for deep corrections and enter only at specific drawdown zones”
+
+It is generally recommended to use this strategy not as a direct plug-and-play live system, but as a tool for:
+
+Strategy idea validation
+
+Risk profile analysis
+
+Parameter exploration to match your personal risk tolerance and style
+
+8. Limitations & Warnings
+
+Backtest results do not guarantee future performance.
+
+They are based on historical data only.
+
+In live markets, additional factors exist:
+
+Liquidity
+
+Slippage
+
+Fee structures
+
+Exchange-specific liquidation rules
+
+Funding fees, etc.
+
+The liquidation price is only an approximate estimate, derived from a simplified formula.
+
+Actual liquidation rules, maintenance margin requirements, fees, and other details differ by exchange.
+
+The liquidation line should be treated as a reference indicator, not an exact guarantee.
+
+Depending on the configured leverage and entry percentages, losses can be very large.
+
+In particular, extremely aggressive settings such as “first position 300% of equity” can greatly increase the risk of large account drawdowns and liquidation during sharp market crashes.
+
+Use such settings with extreme caution.
+
+For live trading, additional risk management is essential:
+
+Your own stop-loss rules
+
+Maximum position size limits
+
+Portfolio-level exposure controls
+
+And other external safety mechanisms beyond this strategy
+
+9. Conclusion
+
+The ATH Drawdown Re-Buy Long Only strategy goes beyond simple “buy the dip” logic. It:
+
+Systematically utilizes drawdowns from ATH as a structural signal
+
+Applies a special first-position rule (100% / 300%)
+
+Integrates visualization of leverage, liquidation price, MDD, and returns
+
+All of this supports rule-based long position building in drawdown phases and comprehensive risk monitoring.
+
+With this strategy, users can:
+
+Explore different:
+
+Drawdown zones
+
+Entry percentages
+
+Leverage levels
+
+Run various backtests and scenario analyses
+
+Better understand the risk/return profile that fits their own market view and risk tolerance
+
+Once again, this strategy is intended for research, learning, and backtesting only.
+All real trading decisions and their consequences are solely the responsibility of the user.
+Feb 7
+Release Notes
+Updated

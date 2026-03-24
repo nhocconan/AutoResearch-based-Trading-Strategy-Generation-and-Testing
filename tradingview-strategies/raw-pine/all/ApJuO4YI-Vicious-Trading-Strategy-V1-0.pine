@@ -1,0 +1,2032 @@
+//@version=3
+strategy("Vicious Trading Strategy V1.0", shorttitle="Vicious Strat V1.0", overlay=true)
+
+// @version=3
+//study("Vicious Trading Suite Trend Number V4", shorttitle="Vicious Trend Number", overlay = true)
+//
+//Input Options   //Move to above Section after
+
+//shmalin = input(false, title="Show HullMA?")
+//sbblin = input(false, title="Show Bollinger Bands?")
+//smalin = input(false, title="Show MA?")
+//sstrnd = input(false, title="Show Supertrend?")
+
+src = input(close, title="Source")
+//scndleptrn = input(false, title="Show Candlestick Pattern?")
+
+///////
+
+//////////////////////////////
+
+//study(title = "Price Action Candles R2.0 by JustUncleL", shorttitle="PACCDL R2", overlay = true)
+
+// By: JustUncleL
+// Date: 16-Aug-2016, 23-Mar-2018
+// Version: R2.0
+//
+// Description:
+//   This is an updated version of my previous script, I have added a few extra Patterns and
+//   some patterns specs have chnaged over those specified by "Price Action Battle Station by theforexguy".
+//   Because this script has diverted from the original specification of "theforexguy",  
+//   I have decided to release it as a new version.
+//   Also improvements have been made to some of the pattern finding calculations, for example Hammer and
+//   Shooting Stars are now special Pin Bars, they now must have preceeding and succeeding
+//   confirm bars, so they do not occur very often.
+//
+//   NOTE: All the identification of PA candles is disabled by default.
+//
+//   The patterns identified are:
+//   - Dark Cloud Cover (Yellow Highlight Bar): 
+//       Large body bull green candle followed by large body
+//       bear red candle that covers the upper bull candle and closes in the
+//       lower 50% of bull body.
+//   - Piecing Line (Aqua Highlight Bar): 
+//       Large body bear red candle followed by large body
+//       bull green candle that covers the lower bear candle and closes in the
+//       upper 50% of bear body.
+//   - Bearish Doji (aka Bearish Harami) (Fuchsia Highlight above Bar): 
+//       A large body Bull (green) candle followed by a small or no body candle 
+//       with wicks top and bottom that are at least 60% of candle.
+//   - Bullish Doji (aka Bullish Harami) (Fuchsia Highlight below Bar): 
+//       A large body Bear (red) candle followed by a small or no body candle
+//       with wicks top and bottom that are at least 60% of candle.
+//   - Bullish Engulfing (Aqua Highlight Bar) (Aqua Highlight Bar): 
+//       A bear body red candle followed by a larger bull green candle
+//       whose body covers the bear candle. Optionally the Engulfing candle
+//       must be an Outside bar as well.
+//   - Bearish Engulfing (Yellow Highlight Bar): 
+//       A bull body green candle followed by a larger bear red candle
+//       whose body covers the bull candle.  Optionally the Engulfing candle
+//       must be an Outside bar as well.
+//   - Morning Star (Bullish) (Aqua Highlight Bar) (Aqua Highlight Bar): 
+//       A large body bear red trend candle is followed by a small body candle (red or green)
+//       which is then followed by a large body bull green candle that closes at least
+//       50% past the body of the 1st candle. The 1st must also close lower than it's previous
+//       candle low, indicating still in a down trend.
+//   - Evening Star (Bearish) (Yellow Highlight Bar): 
+//       A large body bull green trend candle is followed by a small candle (red or green)
+//       which is then followed by a large body bearish red candle that closes at least
+//       50% past body of 1st candle. The 1st must also close higher than it's previous
+//       candle high, indicating still in an up trend.
+//   - Bullish Outside Bar (Aqua Highlight Bar): 
+//       A small inner candle followed by a large outer green candle. 
+//       The outer candle covers the whole inner candle (wick to wick)
+//   - Bearish Outside Bar (Yellow Highlight Bar): 
+//       A small inner candle followed by a large outer red candle. 
+//       The outer candle covers the whole inner candle (wick to wick)
+//   - Inside Bar (Orange Highlight Bar): 
+//       A large inner candle followed by a small outer candle. 
+//       The inner candle covers the whole outer candle (wick to wick)
+//   - Shaved Bars (Bullish DodgerBlue, Bearish Blue)
+//       Large candles with little or no wicks.
+//   - Upper Shadow Pin Bar (aka bull rejection) (Aqua Highlight Bar): 
+//       a small body candle followed which has a large upper wick,
+//       that is higher than previous candle high, and a small or no lower wick.
+//   - Lower Shadow Pin Bar (aka bear rejection) (Yellow Highlight Bar): 
+//       a small body candle followed which has a large lower wick,
+//       that is lower than previous candle low, and a small upper wick.
+//   - Shooting Star (aka Inverted Hammer) (Yellow Highlight Bar on the confirm candle): 
+//       a bull (green) candle is followed by a small body candle which has a large 
+//       upper wick (above previous candle high) with a small or no lower wick. 
+//       This candle is then followed by 1 or 2 bearish (red) confirm candle.
+//   - Hammer (aka hanging man) (Aqua Highlight Bar on the confirm candle) : 
+//       a bear (red) candle is followed by a small body candle which has a large 
+//       lower wick (below previous candle low) with a small or no upper wick.
+//       This candle is then followed by 1 or 2 bullish (green) confirm candle.
+//   - Oversize Bull Bar (Aqua Highlight Bar): 
+//       A Large bull range candle that ratio*larger than the ATR of the time frame.
+//   - Oversize Bear Bar (Yellow Highlight Bar): 
+//       A Large bear range candle that ratio*larger than the ATR of the time frame.
+//
+//
+// references:
+//  - Inside/Outside Bars and Pin Barsome calculations based on
+//        "CM_Price-Action-Patterns Price Bars That Work! by chrismoody"
+//  - Other candles, although they all needed correcting, based on
+//        "All Candlestick Pattern identifier by alona.gz"
+//
+// modifications:
+//  
+//  0.1 - Original Beta version.
+//
+//  0.2 - Added Hammer and inverted hammer bars.
+//      - Added PA Bar Colouring as per "Price Action Battle Station by theforexguy"
+//
+//  0.3 - Added alertcondition(s) so alarm can be created when any or all of the selected
+//        Price Action Candles paterns are detected.
+//      - Modified Doji calculation to be more of a Harami candle, which means the previous
+//        candle needs to be a large bull/bear candle, include selectable wick size and previous
+//        candle body size.
+//  
+//  2.0 : 22-Mar-2018
+//      - Added Forex Morning and Evening Stars (the centre small candle is not a specific color).
+//      - Abbreviated text names for less cluttered look.
+//      - Change minimum/maximum bar sizes to be a % of current ATR, rather than pips, this makes
+//        relative sizing independent on Time Frame, and make the script work better with non-currency
+//        assets like stocks and commodities.
+//      - Change definition of Hammer and shooting Star so the the previous candle is part of a 
+//        trend and is followed by a confirm candle.
+//      - Added some precendence test to reduce multiple action labels.
+//
+//  24-Mar-2018
+//      - Definition for Outside Bar now does not require the previous bar to be 
+//        opposite Colour (this the same as Inside Bars), but added a requirement for minimum size ratio 
+//        compared to previous Bar (set to 1.1 by default). If you require previous Bar
+//        to be opposite colour, use Engulfing candles with Outside Bar option enabled.
+//      - Added Maximum size ratio for Inside Bars (set to 0.9 by default).
+//
+//  17-Apr-2018
+//      - New pattern added: Oversize Bars.
+//      - Added ATR length input.
+//
+//  18-Apr-2018
+//      - Correct Polarity of Oversize Bar labelling.
+//
+// -----------------------------------------------------------------------------
+// Copyright 2016-2018 JustUncleL
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// The GNU General Public License can be found here
+// <http://www.gnu.org/licenses/>.
+//
+// -----------------------------------------------------------------------------
+//
+
+atrLen = input(14, minval=1,title="ATR Length")
+pctSm= input(25.0,minval=0.01,title="Maximum %ATR size for Body of Small Body Candle (Doji etc)")
+pctLg= input(50.0,minval=0.01,title="Mininum %ATR size for Body of Lange Body Candle (Engulfing etc)")
+sdc = input(false,title="Show Dark Cloud Cover")
+spl = input(false,title="Show Piecing Line")
+sdj = input(false,title="Show Doji")
+pctDw = input(60,minval=0,maxval=90,title="Doji, Min % of Range of Candle for Wicks")
+sengulf = input(false,title="Show Engulfing Candles")
+strictEn = input(false,title="Engulfing Candles must Also be Outside Bars")
+szBg   = input(1.1,minval=1.1,step=0.01,title="Mininum Size Ratio of Engulfing candle to Previous candle")
+ne   = 1 //input(1,minval=1,title="How Many candles need to be Engulfed")
+smstar = input(false,title="Show Morning Star and Evening Star")
+sestar = smstar
+sOvr   = input(false,title="Show Oversize Bars")
+szOvr  = input(5.0,minval=2.0,step=0.1,title="Mininum Size Ratio to ATR for Oversize Candle")
+sosb = input(false,title="Show Outside Bars")
+szOs  = input(1.1,minval=1.1,step=0.01,title="Mininum Size Ratio of Outside Bars to Previous candle")
+sisb = input(false,title="Show Inside Bars")
+szIs  = input(0.9,minval=0.1,maxval=0.99,step=0.01,title="Maximum Size Ratio of Inside Bars to Previous candle")
+ssb = input(false, title="Show Shaved Bars")
+spb   = input(false,title="Show Reject Pin Bars")
+shmr = input(false,title="Show Hammers (Hanging Man and Shooting Star)")
+nc    = input(1,minval=1,maxval=2,title="Number of Confirm Bars for Hammer and Shooting Star (1 or 2)")
+pctP = input(66, minval=1, maxval=99, title="PinBar/Hammer, Min % of Range of Candle for Long Wick")
+pctS= input(5, minval=0,maxval=95,title="% Candle Range for Shaved Bar")
+sname=input(true,title="Show Price Action Bar Names")
+cbar = input(true,title="Colour Price Action Bars")
+setalm = input(false, title="Show Alert Dot at bottom of chart for Selected PA Candles")
+
+// Constants colours that include fully non-transparent option.
+GREEN = #008000FF
+LIME  = #00FF00FF
+RED   = #FF0000FF
+BLUE  = #0000FFFF
+DODGERBLUE = #1E90FFFF
+AQUA  = #00FFFFFF
+DARKRED = #8B0000FF
+GRAY = #808080FF
+YELLOW = #FFFF00FF
+ORANGE = #FFA500FF
+FUCHSIA = #FF00FFFF
+
+//
+truerange = tr
+truerange := truerange<=0 ?close*0.00001: truerange
+body = abs(open-close)
+bodySz = body/truerange // ratio of body to total candle range
+//sma50 = sma(close,50)
+
+// Large and Small candle body sizes relative to ATR(14)
+avgtr = atr(atrLen)
+cLarge = avgtr*pctLg * 0.01
+cSmall = avgtr*pctSm * 0.01
+ratio  = truerange/truerange[1]
+atrratio = truerange/avgtr
+
+darkCloud=sdc and (close[1]>open[1] and body[1]>cLarge[1] and bodySz[1]>=0.7 and close<open and bodySz>=0.7 
+                   and open>=close[1] and close>open[1] and close<((open[1]+close[1])/2))
+//plotshape(scndleptrn and darkCloud and sname,title="Dark Cloud Cover",text='DCC',color=red,transp=0, style=shape.arrowdown,location=location.abovebar)
+
+piecingLine=spl and (close[1]<open[1] and body[1]>cLarge[1] and bodySz[1]>=0.7 and close>open and bodySz>=0.7 
+                     and open<=close[1] and close<open[1] and close>((open[1]+close[1])/2))
+//plotshape(scndleptrn and piecingLine and sname,title="Piercieng Line",text="PL",color=lime,transp=0, style=shape.arrowup,location=location.belowbar)
+
+// Calculate Doji/Harami Candles
+pctCDw = (pctDw/2) * 0.01
+pctCDb = (100-pctDw) * 0.01
+dojiBull=sdj and (open[1]>close[1] and body[1]>cLarge[1] and open[1] >= max(close,open) and close[1]<=min(close,open))
+             and (body<=cSmall and bodySz<pctCDb and (high-max(close,open))>(pctCDw*truerange) and (min(close,open)-low)>(pctCDw*truerange))
+dojiBear=sdj and (open[1]<close[1] and body[1]>cLarge[1] and close[1] >= max(close,open) and open[1]<=min(close,open))
+             and (body<=cSmall and bodySz<pctCDb and (high-max(close,open))>(pctCDw*truerange) and (min(close,open)-low)>(pctCDw*truerange))
+//
+//plotshape(scndleptrn and dojiBear and sname?high:na,title="Bearish Doji",text='DOJI',color=fuchsia,transp=0, style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and dojiBear and cbar?max(open,close):na,title="Bear Colour Doji",color=fuchsia,transp=50, style=shape.circle,location=location.absolute,size=size.normal)
+//
+//plotshape(scndleptrn and dojiBull and sname?high:na,title="Bullish Doji",text='DOJI',color=fuchsia,transp=0, style=shape.arrowup,location=location.belowbar)
+//plotshape(scndleptrn and dojiBull and cbar?max(open,close):na,title="Bull Colour Doji",color=fuchsia,transp=50, style=shape.circle,location=location.absolute,size=size.normal)
+
+//Oversize Bars
+oversizeBarBu = sOvr and open<close and atrratio>=szOvr
+oversizeBarBe = sOvr and open>close and atrratio>=szOvr
+
+//Outside Bars
+//plotshape(scndleptrn and oversizeBarBu and sname,title="Oversize Bull Bar",text="OV",color=green,transp=0, style=shape.arrowup,location=location.belowbar)
+//plotshape(scndleptrn and oversizeBarBe and sname,title="Oversize Bear Bar",text="OV",color=maroon,transp=0, style=shape.arrowdown,location=location.abovebar)
+
+//
+bullishEngulf= sengulf and not oversizeBarBu and not oversizeBarBe and (close[1]<open[1] and close>open and open<=close[1] and close>open[1] and body>=cLarge and ratio>=szBg) and 
+               (not strictEn or (low<=low[1] and high>=highest(high,ne+1)))
+
+//plotshape(scndleptrn and bullishEngulf and sname,title="Bullish Engulfing",text='EN',color=lime,transp=0, style=shape.arrowup,location=location.belowbar)
+
+bearishEngulf=sengulf and not oversizeBarBu  and not oversizeBarBe and (close[1]>open[1] and close<open and open>=close[1] and close<open[1] and body>=cLarge and ratio>=szBg) and 
+               (not strictEn or (high>=high[1] and low<=lowest(low,ne+1)))
+//plotshape(scndleptrn and bearishEngulf and sname,title="Bearish Engulfing",text='EN',color=red,transp=0, style=shape.arrowdown,location=location.abovebar)
+
+//
+//Shaved Bars Percentages
+pctCs = pctS * 0.01
+pctSPO = pctCs
+
+//Shaved Bars
+sBarUp = ssb and not bullishEngulf and not oversizeBarBe  and not oversizeBarBu and not piecingLine and body>cLarge and (close >= (high - (truerange * pctCs))) and (open <= (low + (truerange * pctCs)))
+sBarDown = ssb and not bearishEngulf and not oversizeBarBu  and not oversizeBarBe and not darkCloud and body>cLarge and (close <= (low + (truerange * pctCs))) and (open >= (high - (truerange * pctCs))) 
+//plotshape(scndleptrn and sBarDown and sname,title="Bearish Shaved Bar",text="SB",color=red,transp=0, style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and sBarUp and sname,title="Bullish Shaved Bar",text="SB",color=lime,transp=0, style=shape.arrowup,location=location.belowbar)
+
+//PBar Percentages
+pctCp = pctP * .01
+
+//PinBars Long Upper Shadow represent selling pressure
+pBarUp_ = (open<high[1] and close<high[1] and high>high[1]) and (open < (high - (truerange * pctCp)) and close < (high - (truerange * pctCp)))
+pBarUp  = spb and pBarUp_
+//PinBars with Long Lower Shadow represent buying pressure
+pBarDn_ = (open>low[1] and close>low[1] and low<low[1]) and (open > (low + (truerange * pctCp)) and close > (low + (truerange * pctCp)))
+pBarDn  = spb and pBarDn_
+//
+//plotshape(scndleptrn and pBarUp and sname,title="Up Rejection Pin Bar",text='PB',color=red,transp=0, style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and pBarDn and sname,title="Down Rejection Pin Bar",text='PB',color=lime,transp=0, style=shape.arrowup,location=location.belowbar)
+
+//Inside Bars
+insideBar_ = (high<=high[1] and low>=low[1] and ratio<=szIs)
+insideBarBu = sisb and insideBar_ and not pBarUp and not pBarDn and open<close
+insideBarBe = sisb and insideBar_ and not pBarUp and not pBarDn and open>close
+//Outside Bars
+outsideBarBu_ = open<close and (high>=high[1] and low<=low[1]) and ratio>=szOs
+outsideBarBe_ = open>close and (high>=high[1] and low<=low[1]) and ratio>=szOs
+outsideBarBu = sosb and not bullishEngulf and not oversizeBarBu and not oversizeBarBe  and not pBarUp and not pBarDn and outsideBarBu_
+outsideBarBe = sosb and not bearishEngulf and not oversizeBarBe and not oversizeBarBu  and not pBarUp and not pBarDn and outsideBarBe_
+
+//Inside Bars
+//plotshape(scndleptrn and insideBarBu and sname,title="Bullish Inside Bar",text="IB",color=green, transp=0,style=shape.arrowup,location=location.belowbar)
+//plotshape(scndleptrn and insideBarBe and sname,title="Bearish Inside Bar",text="IB",color=maroon, transp=0,style=shape.arrowdown,location=location.abovebar)
+//Outside Bars
+//plotshape(scndleptrn and outsideBarBe and sname,title="Bearish Outside Bar",text="OB",color=maroon,transp=0, style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and outsideBarBu and sname,title="Bullish Outside Bar",text="OB",color=green,transp=0, style=shape.arrowup,location=location.belowbar)
+
+
+//Shooting Star Long Upper Shadow represent selling pressure and confirmed
+sstar = shmr? nc==2? (open[4]<open[3] and open[3]<close[3] and close[1]<close[2] and close<close[1] and pBarUp_[2] and body>cSmall) : 
+              nc==1? (open[2]<close[2] and close<close[1] and pBarUp_[1] and body>cSmall) : false : false
+//Hammer (Hanging Man) with Long Lower Shadow represent buying pressure and confirmed
+hmr   = shmr? nc==2? (open[4]>open[3] and open[3]>close[3] and close[1]>close[2] and close>close[1] and pBarDn_[2] and body>cSmall) : 
+              nc==1?  (open[2]>close[2] and close>close[1] and pBarDn_[1] and body>cSmall) : false : false
+
+//plotshape(scndleptrn and sstar and sname and nc==1,title="Shooting Star 1",text='SS',color=red,transp=0, offset=-1,style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and hmr and sname and nc==1,title="Hammer (Hanging Man) 1",text='HM',color=lime,transp=0,offset=-1, style=shape.arrowup,location=location.belowbar)
+//plotshape(scndleptrn and sstar and sname and nc==2,title="Shooting Star 2",text='SS',color=red,transp=0, offset=-2,style=shape.arrowdown,location=location.abovebar)
+//plotshape(scndleptrn and hmr and sname and nc==2,title="Hammer (Hanging Man) 2",text='HM',color=lime,transp=0,offset=-2, style=shape.arrowup,location=location.belowbar)
+
+// Evening and morning Star patterns.
+estar  = sestar and (close[2] > open[2] and min(open[1],close[1])>=close[2] and close[2]>=high[3] 
+                     and close < open and body[1]<=cSmall and close<(close[2]+open[2])/2 and body[2]>cLarge[2])
+
+//plotshape(scndleptrn and estar, title= "Evening Star", color=red,transp=0, style=shape.arrowdown, text="ES",offset=-1)
+
+mstar  = smstar and (close[2] < open[2] and max(open[1],close[1])<=close[2] and close[2]<=low[3]
+                     and close > open and body[1]<=cSmall and close>(close[2]+open[2])/2 and body[2]>cLarge[2])
+//plotshape(scndleptrn and mstar,  title= "Morning Star", location=location.belowbar, color=lime,transp=0, style=shape.arrowup, text="MS",offset=-1)
+
+
+bcolor = dojiBull or dojiBear? FUCHSIA : 
+         insideBarBe or insideBarBu? ORANGE : 
+         (sstar or pBarUp or bearishEngulf or darkCloud or outsideBarBe or estar or oversizeBarBe)? YELLOW : 
+         (hmr or pBarDn or bullishEngulf or piecingLine or outsideBarBu or mstar or oversizeBarBu)? AQUA :  
+         sBarUp ? DODGERBLUE : 
+         sBarDown ? BLUE : na
+//
+//barcolor(scndleptrn and cbar?bcolor:na,title="Bar Colouring")
+
+//baralert = not na(bcolor)
+//alertcondition(baralert,title="PACCDL Alert",message="PACCDL Alert")
+
+//
+//plotshape(scndleptrn and not setalm or na(baralert[1])?na:baralert[1],title="Bar Alert Confirmed",style=shape.circle,location=location.bottom, offset=-1, color=bcolor[1])
+
+// --- debugs
+
+////////////////////////////////////////////////////////
+
+
+
+///////////////////////////////
+// Created by Robert N. 030715
+// Updated 031115
+// Candle labels
+
+//study(title = "Candles", overlay = true)
+
+trend= input(5, minval=1, title="Trend in Bars")
+
+DojiSize = input(0.05, minval=0.01, title="Doji size")
+djdata=(abs(open - close) <= (high - low) * DojiSize)
+//plotchar(scndleptrn and djdata ? djdata: na , title="Doji", text='Doji', color=white)
+
+data6=(close[1] > open[1] and open > close and open <= close[1] and open[1] <= close and open - close < close[1] - open[1] and open[trend] < open)
+//plotshape(scndleptrn and data6 ? data6 : na , title= "Bearish Harami", color=red, style=shape.arrowdown, text="Bearish\nHarami")
+
+data7=(open[1] > close[1] and close > open and close <= open[1] and close[1] <= open and close - open < open[1] - close[1] and open[trend] > open)
+//plotshape(scndleptrn and data7 ? data7 : na ,  title= "Bullish Harami", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nHarami")
+
+data8=(close[1] > open[1] and open > close and open >= close[1] and open[1] >= close and open - close > close[1] - open[1] and open[trend] < open)
+//plotshape(scndleptrn and data8 ? data8 : na ,  title= "Bearish Engulfing", color=red, style=shape.arrowdown, text="Bearish\nEngulfing")
+
+data9=(open[1] > close[1] and close > open and close >= open[1] and close[1] >= open and close - open > open[1] - close[1] and open[trend] > open)
+//plotshape(scndleptrn and data9 ? data9 : na , title= "Bullish Engulfing", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nEngulfling")
+
+upper = highest(10)[1]
+data10=(close[1] < open[1] and  open < low[1] and close > close[1] + ((open[1] - close[1])/2) and close < open[1] and open[trend] > open)
+//plotshape(scndleptrn and data10 ? data10 : na , title= "Piercing Line", location=location.belowbar, color=lime, style=shape.arrowup, text="Piercing\nLine")
+
+lower = lowest(10)[1]
+data11=(low == open and  open < lower and open < close and close > ((high[1] - low[1]) / 2) + low[1] and open[trend] > open)
+//plotshape(scndleptrn and data11 ? data11 : na , title= "Bullish Belt", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nBelt")
+
+data12=(open[1]>close[1] and open>=open[1] and close>open and open[trend] > open)
+//plotshape(scndleptrn and data12 ? data12 : na , title= "Bullish Kicker", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nKicker")
+
+data13=(open[1]<close[1] and open<=open[1] and close<=open and open[trend] < open)
+//plotshape(scndleptrn and data13 ? data13 : na , title= "Bearish Kicker", color=red, style=shape.arrowdown, text="Bearish\nKicker")
+
+data14=(((high-low>4*(open-close))and((close-low)/(.001+high-low)>=0.75)and((open-low)/(.001+high-low)>=0.75))and open[trend] < open and high[1] < open and high[2] < open)
+//plotshape(scndleptrn and data14 ? data14 : na ,  title= "Hanging Man", color=red, style=shape.arrowdown, text="Hanging\nMan")
+
+//data5b=(((high - low)>3*(open -close)) and  ((high - close)/(.001 + high - low) > 0.6) and ((high - open)/(.001 + high - low) > 0.6))
+//plotshape(scndleptrn and data5b ? data5b : na , title= "Inverted Hammer", location=location.top, color=white, style=shape.diamond, text="Inverted\nHammer")
+
+////////////////////////////////////////////////////////////
+
+spacing1 = input(false, title="_____________________________________________________________")
+//Moving Averages
+sumalin = input(false, title="Show Multi Moving Average?____________________________________")
+
+//Created by user ChrisMoody 4-24-2014
+//Plots The Majority of Moving Averages
+//Defaults to Current Chart Time Frame --- But Can Be Changed to Higher Or Lower Time Frames
+//2nd MA Capability with Show Crosses Feature
+//study(title="CM_Ultimate_MA_MTF", shorttitle="CM_Ultimate_MA_MTF", overlay=true)
+//inputs
+//src = close
+useCurrentRes = input(true, title="Use Current Chart Resolution?")
+resCustom = input(title="Use Different Timeframe? Uncheck Box Above", type=resolution, defval="D")
+len = input(6, title="Moving Average Length - LookBack Period")
+atype = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc = input(true,title="Change Color Based On Direction?")
+smoothe = input(2, minval=1, maxval=10, title="Color Smoothing - 1 = No Smoothing")
+doma2 = input(false, title="Optional 2nd Moving Average")
+len2 = input(20, title="Moving Average Length - Optional 2nd MA")
+atype2 = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc2 = input(true,title="Change Color Based On Direction 2nd MA?")
+warn = input(false, title="***You Can Turn On The Show Dots Parameter Below Without Plotting 2nd MA to See Crosses***")
+warn2 = input(false, title="***If Using Cross Feature W/O Plotting 2ndMA - Make Sure 2ndMA Parameters are Set Correctly***")
+sd = input(false, title="Show Dots on Cross of Both MA's")
+//Added Code
+doma3 = input(false, title="Optional 3rd Moving Average")
+len3 = input(50, title="Moving Average Length - Optional 3rd MA")
+atype3 = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc3 = input(true,title="Change Color Based On Direction 3rd MA?")
+//
+doma4 = input(false, title="Optional 4th Moving Average")
+len4 = input(100, title="Moving Average Length - Optional 4th MA")
+atype4 = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc4 = input(true,title="Change Color Based On Direction 4th MA?")
+//////
+
+
+res = useCurrentRes ? period : resCustom
+//hull ma definition
+hullma = wma(2*wma(src, len/2)-wma(src, len), round(sqrt(len)))
+//
+n2ma=2*wma(src,round(len/2))
+nma=wma(src,len)
+diff=n2ma-nma
+sqn=round(sqrt(len))
+n2ma1=2*wma(src[1],round(len/2))
+nma1=wma(src[1],len)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(len))
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+//c=n1>n2?green:red
+//ma= plot(shmalin and n1 ? n1 : na,title = "HULL MA", linewidth=3, color=c)
+
+
+//TEMA definition
+ema1 = ema(src, len)
+ema2 = ema(ema1, len)
+ema3 = ema(ema2, len)
+tema = 3 * (ema1 - ema2) + ema3
+
+avg = atype == 1 ? sma(src,len) : atype == 2 ? ema(src,len) : atype == 3 ? wma(src,len) : atype == 4 ? hullma : atype == 5 ? vwma(src, len) : atype == 6 ? rma(src,len) : tema
+//2nd Ma - hull ma definition
+hullma2 = wma(2*wma(src, len2/2)-wma(src, len2), round(sqrt(len2)))
+//2nd MA TEMA definition
+sema1a = ema(src, len2)
+sema2a = ema(sema1a, len2)
+sema3a = ema(sema2a, len2)
+stemaa = 3 * (sema1a - sema2a) + sema3a
+
+avg2 = atype2 == 1 ? sma(src,len2) : atype2 == 2 ? ema(src,len2) : atype2 == 3 ? wma(src,len2) : atype2 == 4 ? hullma2 : atype2 == 5 ? vwma(src, len2) : atype2 == 6 ? rma(src,len2) : tema
+//Added Code for 3rd and 4th//
+//3rd Ma - hull ma definition
+hullma3 = wma(2*wma(src, len3/2)-wma(src, len3), round(sqrt(len3)))
+//3rd MA TEMA definition
+sema1b = ema(src, len3)
+sema2b = ema(sema1b, len3)
+sema3b = ema(sema2b, len3)
+stemab = 3 * (sema1b - sema2b) + sema3b
+
+avg3 = atype3 == 1 ? sma(src,len3) : atype3 == 2 ? ema(src,len3) : atype3 == 3 ? wma(src,len3) : atype3 == 4 ? hullma3 : atype3 == 5 ? vwma(src, len3) : atype3 == 6 ? rma(src,len3) : tema
+//
+//4th Ma - hull ma definition
+hullma4 = wma(2*wma(src, len4/2)-wma(src, len4), round(sqrt(len4)))
+//4th MA TEMA definition
+sema1c = ema(src, len4)
+sema2c = ema(sema1c, len4)
+sema3c = ema(sema2c, len4)
+stemac = 3 * (sema1c - sema2c) + sema3c
+
+avg4 = atype4 == 1 ? sma(src,len4) : atype4 == 2 ? ema(src,len4) : atype4 == 3 ? wma(src,len4) : atype4 == 4 ? hullma4 : atype4 == 5 ? vwma(src, len4) : atype4 == 6 ? rma(src,len4) : tema
+
+out = avg 
+out_two = avg2
+//
+out_three = avg3
+out_four = avg4
+//
+
+out1 = security(tickerid, res, out)
+out2 = security(tickerid, res, out_two)
+//
+out3 = security(tickerid, res, out_three)
+out4 = security(tickerid, res, out_four)
+//
+
+ma_up = out1 >= out1[smoothe]
+ma_down = out1 < out1[smoothe]
+
+ma_up2 = out2 >= out2[smoothe]
+ma_down2 = out2 < out2[smoothe]
+//
+ma_up3 = out3 >= out3[smoothe]
+ma_down3 = out3 < out3[smoothe]
+
+ma_up4 = out4 >= out4[smoothe]
+ma_down4 = out4 < out4[smoothe]
+
+
+col = n1>n2 ? cc ? ma_up ? lime : ma_down ? red : aqua : aqua : aqua
+col2 = n1>n2 ? cc2 ? ma_up2 ? lime : ma_down2 ? red : aqua : aqua : aqua
+//
+col3 = n1>n2 ? cc3 ? ma_up3 ? lime : ma_down3 ? red : aqua : aqua : aqua
+col4 = n1>n2 ? cc4 ? ma_up4 ? lime : ma_down4 ? red : aqua : aqua : aqua
+//
+//c=n1>n2?green:red
+//
+
+circleYPosition = out2
+
+//plot(sumalin and out1 ? out1 : na, title="Multi-Timeframe Moving Avg", style=line, linewidth=4, color = col)
+//plot(sumalin and doma2 and out2 ? out2 : na, title="2nd Multi-TimeFrame Moving Average", style=line, linewidth=4, color=col2)
+//
+//plot(sumalin and doma3 and out3 ? out3 : na, title="3rd Multi-TimeFrame Moving Average", style=circles, linewidth=4, color=col3)
+//plot(sumalin and doma4 and out4 ? out4 : na, title="4th Multi-TimeFrame Moving Average", style=circles, linewidth=4, color=col4)
+//
+//plot(sd and cross(out1, out2) or sd and cross(out1, out3) or sd and cross(out1, out4) or sd and cross(out2, out3) or sd and cross(out2, out4) or sd and cross(out3, out4)? circleYPosition : na,style=cross, linewidth=5, color=yellow)
+
+// Fast MA Vs Slow MA
+sfma = input(false, title="Show FastMA?")
+sslma = input(false, title="Show SlowMA?")
+//
+fastPer = input(7, minval=1,title="Fast MM")
+slowPer = input(20,minval=1,title="Slow MM")
+
+
+fastMM = sma(src, fastPer) 
+slowMM = sma(src, slowPer)
+ 
+//ma1=plot(sfma and fastMM ? fastMM : na ,color=rising(fastMM,2)?green:red,linewidth=2,transp=20,title="Fast MM")
+//ma2=plot(sslma and slowMM ? slowMM : na ,color=rising(slowMM,2)?#F705F9:blue,linewidth=2,transp=20,title="Slow MM")
+//
+
+
+
+//Bollinger Bands
+spacing2 = input(false, title="_____________________________________________________________")
+sbblin = input(false, title="Show Bollinger Bands?")
+//
+length = input(20, minval=1)
+//src = input(close, title="Source")
+mult = input(2.0, minval=0.001, maxval=50)
+basis = sma(src, length)
+dev = mult * stdev(src, length)
+upperbb = basis + dev
+lowerbb = basis - dev
+//p1 = plot(sbblin and upperbb ? upperbb : na, title = "BB_UPPER",  color=black, linewidth=3)
+//p2 = plot(sbblin and lowerbb ? lowerbb : na, title = "BB_LOWER", color=black, linewidth=3)
+//fill(p1, p2)
+//
+
+// Parabolic SAR
+spacing3 = input(false, title="_____________________________________________________________")
+sus = input(false, "Show Up Trending Parabolic Sar")
+sds = input(false, "Show Down Trending Parabolic Sar")
+//
+start = input(2, minval=0, maxval=10, title="Start - Default = 2 - Multiplied by .01")
+increment = input(2, minval=0, maxval=10, title="Step Setting (Sensitivity) - Default = 2 - Multiplied by .01" )
+maximum = input(2, minval=1, maxval=10, title="Maximum Step (Sensitivity) - Default = 2 - Multiplied by .10")
+disc = input(false, title="Start and Step settings are *.01 so 2 = .02 etc, Maximum Step is *.10 so 2 = .2")
+startCalc = start * .01
+incrementCalc = increment * .01
+maximumCalc = maximum * .10
+sarUp = sar(startCalc, incrementCalc, maximumCalc)
+sarDown = sar(startCalc, incrementCalc, maximumCalc)
+colUp = close >= sarDown ? lime : na
+colDown = close <= sarUp ? red : na
+//plot(sus and sarUp ? sarUp : na, title="Up Trending SAR", style=circles, linewidth=3,color=colUp)
+//plot(sds and sarDown ? sarDown : na, title="Up Trending SAR", style=circles, linewidth=3,color=colDown)
+
+
+//SUPER TREND
+spacing4 = input(false, title="_____________________________________________________________")
+sstrnd = input(false, title="Show Supertrend?")
+//
+STFactor=input(3, minval=1,maxval = 100)
+STPd=input(7, minval=1,maxval = 100)
+
+STUp=hl2-(STFactor*atr(STPd))
+STDn=hl2+(STFactor*atr(STPd))
+STrendUp=0.0
+STrendUp:=close[1]>STrendUp[1]? max(STUp,STrendUp[1]) : STUp
+
+STrendDown=0.0
+STrendDown:=close[1]<STrendDown[1]? min(STDn,STrendDown[1]) : STDn
+
+STrend=0.0
+STrend:= close > STrendDown[1] ? 1: close< STrendUp[1]? -1: nz(STrend[1],1)
+STsl = STrend==1? STrendUp: STrendDown
+
+linecolor = STrend == 1 ? green : red
+
+//plot(sstrnd and STsl ? STsl : na , color = linecolor , style = line , linewidth = 3,title = "SuperTrend")
+
+//plotshape(sstrnd and cross(close,STsl) and close>STsl ? cross(close,STsl) and close>STsl : na, "Up Arrow", shape.triangleup,location.belowbar,green,0,0)
+//plotshape(sstrnd and cross(STsl,close) and close<STsl ? cross(STsl,close) and close<STsl : na, "Down Arrow", shape.triangledown , location.abovebar, red,0,0)
+
+//plotarrow(sstrnd and STrend == 1 and STrend[1] == -1 ? STrend : na, title="Up Entry Arrow", colorup=lime, maxheight=60, minheight=50, transp=0)
+//plotarrow(sstrnd and STrend == -1 and STrend[1] == 1 ? STrend : na, title="Down Entry Arrow", colordown=red, maxheight=60, minheight=50, transp=0)
+
+STgolong =  STrend == 1 and STrend[1] == -1
+//alertcondition(sstrnd and STgolong ? STgolong : na, title='Long', message='SuperTrend V.1 Alert Long')
+STgoshort =   STrend == -1 and STrend[1] == 1
+//alertcondition(sstrnd and STgoshort ? STgoshort : na , title='Short', message='SuperTrend V.1 Alert Short')
+
+//Doji signals
+Precision = input(0.15, minval=0.0001, title="Doji's Max Body size")
+//
+
+//Trend Trader Strategy
+spacing5 = input(false, title="_____________________________________________________________")
+sttstrat = input(false, title="Show Trend Trader Strategy?")
+//
+Length = input(21, minval=1),
+Multiplier = input(3, minval=1)
+avgTR      = wma(atr(1), Length)
+highestC   = highest(Length)
+lowestC    = lowest(Length)
+hiLimit = highestC[1]-(avgTR[1] * Multiplier)
+loLimit = lowestC[1]+(avgTR[1] * Multiplier)
+ret=0.0
+ret := iff(close > hiLimit and close > loLimit, hiLimit, iff(close < loLimit and close < hiLimit, loLimit, nz(ret[1], 0)))
+pos=0.0
+pos :=    iff(close > ret, 1, iff(close < ret, -1, nz(pos[1], 0))) 
+//plot(sttstrat and ret ? ret : na , color= black, linewidth=2,title="Trend Trader Strategy")
+//
+
+//
+spacing6 = input(false, title="_____________________________________________________________")
+sichmku = input(false, title="Show Ichimoku?")
+//
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(26, minval=1, title="Displacement")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+//plot(sichmku and conversionLine ? conversionLine : na , color=#0496ff, title="Conversion Line")
+//plot(sichmku and baseLine ? baseLine : na , color=#991515, title="Base Line")
+//plot(sichmku and close ? close : na , offset = -displacement, color=#459915, title="Lagging Span")
+
+//p12 = plot(sichmku and leadLine1 ? leadLine1 : na , offset = displacement, color=green, title="Lead 1")
+//p22 = plot(sichmku and leadLine2 ? leadLine2 : na , offset = displacement, color=red, title="Lead 2")
+//fill(p12, p22, color = leadLine1 > leadLine2 ? green : red)
+//
+
+//// Basic Definitions ////
+range = high - low
+//MovAvg's Code
+sma5 = sma(close,5)
+sma200= sma(close, 200)
+
+//
+//EMA Definitions
+emaSlow = ema(close, 62)
+emaFast = ema(close, 38)
+
+//RSI Definitions
+rsiup = rma(max(change(src), 0), 2)
+rsidown = rma(-min(change(src), 0), 2)
+rsi = rsidown == 0 ? 100 : rsiup == 0 ? 0 : 100 - (100 / (1 + rsiup / rsidown))
+//Criteria for Moving Avg rules
+rsima5 = sma(close,5)
+rsima200= sma(close, 200)
+
+//Slingshot Section//////
+spacing7 = input(false, title="_____________________________________________________________")
+//Moving Average Plots and Fill
+smasslin = input(false, title="Show Sling Shot?")
+sae = input(false, title="Show Aggressive Entry?, Or Use as Alert To Potential Conservative Entry?")
+sce = input(false, title="Show Conservative Entry?")
+st = input(false, title="Show Trend Arrows at Top and Bottom of Screen?")
+def = input(false, title="Only Choose 1 - Either Conservative Entry Arrows or 'B'-'S' Letters")
+pa = input(false, title="Show Conservative Entry Arrows?")
+sl = input(false, title="Show 'B'-'S' Letters?")
+
+
+//RSI Section//////
+rsitrnd = input(false, title="Show RSI Trends?")
+
+
+RSIUptrend() => rsitrnd and emaFast > emaSlow and close > rsima200 and close < rsima5 and rsi < 10 
+RSIDowntrend() => rsitrnd and close < rsima200 and close > rsima5 and rsi > 90 and emaFast < emaSlow
+
+RSIUptrendS = emaFast > emaSlow and close > rsima200 and close < rsima5 and rsi < 10 
+RSIDowntrendS = close < rsima200 and close > rsima5 and rsi > 90 and emaFast < emaSlow
+
+
+// RSI+ Overbought/Sold Indicator v2.0
+spacing8 = input(false, title="_____________________________________________________________")
+rsiLength = input(14, title="RSI Length:", type=integer, minval=1)
+rsiOverbought = input(70, title="RSI Overbought:", type=integer, minval=1)
+rsiOversold = input(30, title="RSI Oversold:", type=integer, minval=1)
+drawOnRT = input(title="Draw On Candles Yet To Close:", type=bool, defval=true)
+rsi2 = rsi(close, rsiLength)
+// Check to see if RSI has crossed our threshold
+rsiOB = rsi2 >= rsiOverbought
+rsiOS = rsi2 <= rsiOversold
+// Plot signals and trigger any alerts
+//plotshape(rsiOS and (barstate.ishistory or drawOnRT), title= "Oversold", location=location.belowbar, color=red, transp=0, style=shape.arrowup, text="")
+//plotshape(rsiOB and (barstate.ishistory or drawOnRT),  title= "Overbought", color=red, transp=0, style=shape.arrowdown, text="")
+//alertcondition(rsiOB or rsiOS, title="RSI+ Alert!", message="RSI Alert for ")
+///////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////
+
+
+//Slingshot Section////////////////////////
+//Moved to Combined Definitions
+//Created by ChrisMoody on 10-05-2014
+//Known as SlingShot Method that keeps Traders on Trending Side of Market.
+
+///////////////////////////////////////////
+//SlingShot Calculation Section
+//Aggressive Entry or Alert To Potential Trade
+pullbackUpT() => emaFast > emaSlow and close < emaFast
+pullbackDnT() => emaFast < emaSlow and close > emaFast
+//Conservative Entry Code For Highlight Bars
+entryUpT() => emaFast > emaSlow and close[1] < emaFast and close > emaFast
+entryDnT() => emaFast < emaSlow and close[1] > emaFast and close < emaFast
+//Conservative Entry True/False Condition
+entryUpTrend = emaFast > emaSlow and close[1] < emaFast and close > emaFast ? 1 : 0
+entryDnTrend = emaFast < emaSlow and close[1] > emaFast and close < emaFast ? 1 : 0
+//Define Up and Down Trend for Trend Arrows at Top and Bottom of Screen
+upTrend = emaFast >= emaSlow
+downTrend = emaFast < emaSlow
+//Definition for Conseervative Entry Up and Down PlotArrows
+codiff = entryUpTrend == 1 ? entryUpTrend : 0
+codiff2 = entryDnTrend == 1 ? entryDnTrend : 0
+//Color definition for Moving Averages
+//col = emaFast > emaSlow ? lime : emaFast < emaSlow ? red : yellow
+
+
+//SlingShot
+slingcol = emaFast > emaSlow and close > rsima200 and close < rsima5 and rsi < 10 ? lime : close < rsima200 and close > rsima5 and rsi > 90 and emaFast < emaSlow ? red : yellow 
+
+
+//
+//map1 = plot(smasslin and emaSlow ? emaSlow : na , title="Slow EMA", style=linebr, linewidth=4, color=slingcol)
+//map2 = plot(smasslin and emaFast ? emaFast : na , title="Slow EMA", style=linebr, linewidth=2, color=slingcol)
+//fill(map1, map2, color=silver, transp=50)
+//Trend Triangles at Top and Bottom of Screen
+//plotshape(st and upTrend ? upTrend : na, title="Conservative Buy Entry Triangle",style=shape.triangleup, location=location.bottom, color=lime, transp=0, offset=0)
+//plotshape(st and downTrend ? downTrend : na, title="Conservative Short Entry Triangle",style=shape.triangledown, location=location.top, color=red, transp=0, offset=0)
+//Plot Arrows OR Letters B and S for Buy Sell Signals
+//plotarrow(pa and codiff ? codiff : na, title="Up Entry Arrow", colorup=lime, maxheight=30, minheight=30, transp=0)
+//plotarrow(pa and codiff2*-1 ? codiff2*-1 : na, title="Down Entry Arrow", colordown=red, maxheight=30, minheight=30, transp=0)
+//plotchar(sl and codiff ? low - tr : na, title="Buy Entry", offset=0, char='B', location=location.absolute, color=lime, transp=0)
+//plotchar(sl and codiff2 ? high + tr : na, title="Short Entry", offset=0, char='S', location=location.absolute, color=red, transp=0)
+
+////
+MAlincol = sma5 >= sma200 ? lime : sma5 < sma200 ? red : na
+//
+//plot(smasslin and sma5 ? sma5 : na , color=MAlincol, title="5 SMA", style=line, linewidth=3)
+//plot(smasslin and sma200 ? sma200 : na , color=MAlincol, title="200 SMA", style=circles, linewidth=3)
+
+
+//RSI
+spacing9 = input(false, title="_____________________________________________________________")
+//src = close 
+RSIlen = input(14, minval=1, title="Length")
+up = sma(max(change(src), 0), RSIlen)
+down = sma(-min(change(src), 0), RSIlen)
+//rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+// MACD
+spacing10 = input(false, title="_____________________________________________________________")
+MACDfastLength = input(11, minval=1)
+MACDslowlength = input(26, minval=1)
+MACDLength = input(9, minval=1)
+MACDFast = ema(close, MACDfastLength)
+MACDSlow = ema(close, MACDslowlength)
+MACDLine = MACDFast - MACDSlow
+MACDSignal = ema(MACDLine, MACDLength)
+MACD = MACDLine - MACDSignal
+
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 18/06/2014
+// MACD – Moving Average Convergence Divergence. The MACD is calculated 
+// by subtracting a 26-day moving average of a security's price from a 
+// 12-day moving average of its price. The result is an indicator that 
+// oscillates above and below zero. When the MACD is above zero, it means 
+// the 12-day moving average is higher than the 26-day moving average. 
+// This is bullish as it shows that current expectations (i.e., the 12-day 
+// moving average) are more bullish than previous expectations (i.e., the 
+// 26-day average). This implies a bullish, or upward, shift in the supply/demand 
+// lines. When the MACD falls below zero, it means that the 12-day moving average 
+// is less than the 26-day moving average, implying a bearish shift in the 
+// supply/demand lines.
+// A 9-day moving average of the MACD (not of the security's price) is usually 
+// plotted on top of the MACD indicator. This line is referred to as the "signal" 
+// line. The signal line anticipates the convergence of the two moving averages 
+// (i.e., the movement of the MACD toward the zero line).
+// Let's consider the rational behind this technique. The MACD is the difference 
+// between two moving averages of price. When the shorter-term moving average rises 
+// above the longer-term moving average (i.e., the MACD rises above zero), it means 
+// that investor expectations are becoming more bullish (i.e., there has been an 
+// upward shift in the supply/demand lines). By plotting a 9-day moving average of 
+// the MACD, we can see the changing of expectations (i.e., the shifting of the 
+// supply/demand lines) as they occur.
+////////////////////////////////////////////////////////////
+//study(title="MACD Crossover", shorttitle="MACD Crossover")
+//fastLength = input(8, minval=1)
+//slowLength = input(16,minval=1)
+//signalLength=input(11,minval=1)
+//fastMA = ema(close, fastLength)
+//slowMA = ema(close, slowLength)
+//macd = fastMA - slowMA
+//signal = sma(macd, signalLength)
+//pos = iff(signal < macd , 1, iff(signal > macd, -1, nz(pos[1], 0))) 
+//barcolor(pos == -1 ? red: pos == 1 ? green : blue)
+//plot(signal, color=red, title="SIGNAL")
+//plot(macd, color=blue, title="MACD")
+
+///////////////////////////////////
+//
+// @author LazyBear
+//
+// If you use this code in its original/modified form, do drop me a note. 
+//
+//study("Volume Weighted MACD [LazyBear]", shorttitle="VWMACD_LB")
+//slow = input(12, "Short period")
+//fast = input(26, "Long period")
+//signal = input(9, "Smoothing period")
+
+
+maFast = ema( volume * close, MACDslowlength ) / ema( volume, MACDslowlength ) 
+maSlow = ema( volume * close, MACDfastLength ) / ema( volume, MACDfastLength ) 
+d = maSlow - maFast 
+maSignal = ema( d, MACDLength ) 
+dm=d-maSignal
+
+//h_color=dm>=0? (dm>dm[1]?green:orange) : (dm<dm[1]?red:orange)
+//plot( dm, style=histogram, color=h_color, linewidth=3)
+
+
+//
+// Easter Egg! Have fun :)
+//
+// d_color=d>=0? (d>d[1]?green:orange) : (d<d[1]?red:orange)
+// zl=plot(0, color=gray)
+// dl=plot(d, style=line, color=d_color, linewidth=4)
+// fill(zl, dl, silver)
+
+///////////////////////////////
+
+// COLLAR SIGNAL DETERMINATION AND PLOT
+ema5=ema(close,5)
+ema20=ema(close,20)
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////
+//@version=3
+
+//study(title="Super Guppy R1.2 by JustUncleL", shorttitle="SuperGuppy", overlay=true)
+
+//
+//  Author:   JustUncleL
+//  Revision: R1.2
+//  Date:     6-Jan-2018
+//
+//  Description:
+//  ============
+//  This indicator is a Super Guppy version of standard Guppy GMMA as used in
+//  "CM_GUPPY_EMA Revised R2 by JustUncleL". Guppy is designed to capture the 
+//  inferred behaviour of traders and investors by using two groups of averages.
+//  In this version of Super Guppy Traders Group of EMAs are: 
+//    EMA3 to EMA23 step 2 (Aqua=Uptrend, Blue=downtrend)
+//  and Investors Group EMAs are: 
+//    EMA25 to EMA70 step 3 (Lime=Uptrend, Red=downtrend)
+//  (Gray=Trend not established or in a Pull Back).
+//
+//  The idea of Guppy EMAs is to use fractal repetitions to identify points of 
+//  agreement and disagreement which precede significant trend changes.
+//  For further info on how Guppy/Super Guppy can be used in trading please refer to
+//  http://www.guppytraders.com/gup329.shtml
+//  and many other articles available on the subject.
+//
+//  This indicator provides the following :
+//  - Swing Arrow Alerts (Red for Sell and Green for Buy) to indicate PullBack entries
+//    after new trend has been established. Also have option to wait for both fast and
+//    slow to completely seperate (Confluence). Another option is to show alerts
+//    when show arrows when Candle colour changes, this is handy when using Heikin Ashi
+//    or Renko Charts.
+//  - Trend Break Arrow Alerts (Blue for Sell and Aqua for Buy) to indicate entries
+//    for agressive trend swing point and is calculated by cross over of the
+//    average Traders EMA with the average Investors EMA. This was suggested option
+//    by Guppy himself.
+//  - Anchor time frame (0=current). This is the time frame that the Guppy MAs are
+//    calculated for. This way 60 Guppy can be viewed on a 15 min chart to establish
+//    tighter Stop Loss conditions. 
+//  - Alert conditions are also created for the TradingView Alarm subsystem. Only
+//    alerts for the selected alert options are generated.
+//
+//  References:
+//  ===========
+//  - Based on Daryl Guppy GMMA and
+//    CM GMMA Original - https://www.tradingview.com/v/3rxOtFe0/
+//  - http://www.guppytraders.com/gup329.shtml 
+//
+//
+//  Revisions:
+//  ==========
+//  R1   - Original Version
+//
+//  R1.1 - Some changes to limit the number of Alerts that occur close together.
+//
+//  13-Jan-2018 
+//       - Fix bug in Anchor calculations when chart Time frame not intraday.
+//       - Fix bug in Break Arrow calculation, stop signal when Investor MAs
+//         not change direction yet.
+//       - Change Traders group to start colouring before Investors Group,
+//         rather than together.
+//
+//  R1.2 14-Feb-2018 
+//       - Fix bug in 1st pullback arrow calculation.
+//       - Added option to display candle colours relative to Guppy Trend
+//         indication.
+//       06-Apr-2018
+//       - Change Anchor to be based purely on Minutes, so 1 month=30240mins 
+//         (21 trading days), 1 week=7200mins (5 trading days), 1 Day=1440mins.
+//         This makes it more consistent across intraday and extraday chart Timeframes.
+//
+//
+// -----------------------------------------------------------------------------
+// Copyright 2014 Chris Moody
+// Copyright 2018 JustUncleL
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// The GNU General Public License can be found here
+// <http://www.gnu.org/licenses/>.
+//
+// -----------------------------------------------------------------------------
+//
+
+
+// Show Super Guppy
+spacing11 = input(false, title="_____________________________________________________________")
+ssgppy = input(false, title="Show Super Guppy?")
+// Use Alternate Anchor TF for MAs 
+anchor     = input(0,minval=0,maxval=1440,title="Use Alternate Anchor TimeFrame (0=none, max=1440 (mins,D,W)")
+//
+//src =  input(close, title="EMA Source")
+ShowBreak = input(false,title="Show Trend Break Arrow Alerts")
+ShowSwing = input(false,title="Show Swing Arrow Alerts")
+ShowCon   = input(false,title="Give Only Fast+Slow Confluence Alerts")
+uOCCswing = input(false,title="Add Bar Colour Changes to Swing Alerts")
+Lookback  = input(6,title="Alert Lookback Length")
+ShowAvgs  = input(false,title="Show Average Fast and Slow Guppy Curves")
+show200   = input(false,title="Show 200 EMA Curve")
+emaFilter = input(false,title="Filter Alerts with 200ema")
+clrBars   = input(false,title="Colour Candles to Guppy Trend state")
+
+//
+//Fast EMAs
+lenF1 = input(3, minval=1, title="Fast EMA 1")
+lenF2 = input(5, minval=1, title="Fast EMA 2")
+lenF3 = input(7, minval=1, title="Fast EMA 3")
+lenF4 = input(9, minval=1, title="Fast EMA 4")
+lenF5 = input(11, minval=1, title="Fast EMA 5")
+lenF6 = input(13, minval=1, title="Fast EMA 6")
+lenF7 = input(15, minval=1, title="Fast EMA 7")
+lenF8 = input(17, minval=1, title="Fast EMA 8")
+lenF9 = input(19, minval=1, title="Fast EMA 9")
+lenF10 = input(21, minval=1, title="Fast EMA 10")
+lenF11 = input(23, minval=1, title="Fast EMA 11")
+
+//Slow EMAs
+lenS1 = input(25, minval=1, title="Slow EMA 1")
+lenS2 = input(28, minval=1, title="Slow EMA 2")
+lenS3 = input(31, minval=1, title="Slow EMA 3")
+lenS4 = input(34, minval=1, title="Slow EMA 4")
+lenS5 = input(37, minval=1, title="Slow EMA 5")
+lenS6 = input(40, minval=1, title="Slow EMA 6")
+lenS7 = input(43, minval=1, title="Slow EMA 7")
+lenS8 = input(46, minval=1, title="Slow EMA 8")
+lenS9 = input(49, minval=1, title="Slow EMA 9")
+lenS10 = input(52, minval=1, title="Slow EMA 10")
+lenS11 = input(55, minval=1, title="Slow EMA 11")
+lenS12 = input(58, minval=1, title="Slow EMA 12")
+lenS13 = input(61, minval=1, title="Slow EMA 13")
+lenS14 = input(64, minval=1, title="Slow EMA 14")
+lenS15 = input(67, minval=1, title="Slow EMA 15")
+lenS16 = input(70, minval=1, title="Slow EMA 16")
+
+SGlen    = input(200, minval=1, title="EMA 200 Length")
+
+gold = #FFD700
+AQUAA = #00FFFFFF
+SGBLUE = #0000FFFF
+SGGRAY = #808080FF
+
+// If have anchor specified, calculate the base multiplier.
+SGmult  = isintraday ? anchor==0 or interval<=0 or interval>=anchor? 1 : round(anchor/interval) : 1
+SGmult := isdwm? isdaily ? (anchor==0 or interval<=0 or interval>=anchor or anchor<=1440 ? 1 : round(anchor/1440)) : 
+               isweekly ? (anchor==0 or interval<=0 or interval>=anchor or anchor<=7200 ? 1 : round(anchor/7200)) :
+               ismonthly ? (anchor==0 or interval<=0 or interval>=anchor or anchor<=30240 ? 1 : round(anchor/30240)) : 1 : SGmult
+
+//adjust MA lengths with Anchor Multiplier
+
+//Fast EMA
+emaF1 = ema(src, lenF1*SGmult)
+emaF2 = ema(src, lenF2*SGmult)
+emaF3 = ema(src, lenF3*SGmult)
+emaF4 = ema(src, lenF4*SGmult)
+emaF5 = ema(src, lenF5*SGmult)
+emaF6 = ema(src, lenF6*SGmult)
+emaF7 = ema(src, lenF7*SGmult)
+emaF8 = ema(src, lenF8*SGmult)
+emaF9 = ema(src, lenF9*SGmult)
+emaF10 = ema(src, lenF10*SGmult)
+emaF11 = ema(src, lenF11*SGmult)
+//average
+emafast = (emaF1 + emaF2 + emaF3 + emaF4 + emaF5 + emaF6 + emaF7 + emaF8 + emaF9 + emaF10 + emaF11)/11
+//
+//Slow EMA
+emaS1 = ema(src, lenS1*SGmult)
+emaS2 = ema(src, lenS2*SGmult)
+emaS3 = ema(src, lenS3*SGmult)
+emaS4 = ema(src, lenS4*SGmult)
+emaS5 = ema(src, lenS5*SGmult)
+emaS6 = ema(src, lenS6*SGmult)
+emaS7 = ema(src, lenS7*SGmult)
+emaS8 = ema(src, lenS8*SGmult)
+emaS9 = ema(src, lenS9*SGmult)
+emaS10 = ema(src, lenS10*SGmult)
+emaS11 = ema(src, lenS11*SGmult)
+emaS12 = ema(src, lenS12*SGmult)
+emaS13 = ema(src, lenS13*SGmult)
+emaS14 = ema(src, lenS14*SGmult)
+emaS15 = ema(src, lenS15*SGmult)
+emaS16 = ema(src, lenS16*SGmult)
+// average
+emaslow = (emaS1 + emaS2 + emaS3 + emaS4 + emaS5 + emaS6 + emaS7 + emaS8 + 
+          emaS9 + emaS10 + emaS11 + emaS12 + emaS13 + emaS14 + emaS15 + emaS16)/16
+//
+//EMA 200
+ema200 = ema(src, SGlen*SGmult)
+
+//Fast EMA Color Rules
+colfastL = (emaF1>emaF2 and emaF2>emaF3 and emaF3>emaF4 and emaF4>emaF5 and emaF5>emaF6 and emaF6>emaF7 and emaF7>emaF8 and emaF8>emaF9 and emaF9>emaF10 and emaF10>emaF11)
+colfastS = (emaF1<emaF2 and emaF2<emaF3 and emaF3<emaF4 and emaF4<emaF5 and emaF5<emaF6 and emaF6<emaF7 and emaF7<emaF8 and emaF8<emaF9 and emaF9<emaF10 and emaF10<emaF11)
+//Slow EMA Color Rules
+colslowL = (emaS1>emaS2 and emaS2>emaS3 and emaS3>emaS4 and emaS4>emaS5 and emaS5>emaS6 and emaS6>emaS7 and emaS7>emaS8) and
+           (emaS8>emaS9 and emaS9>emaS10 and emaS10>emaS11 and emaS11>emaS12 and emaS12>emaS13 and emaS13>emaS14 and emaS14>emaS15 and emaS15>emaS16)
+colslowS = (emaS1<emaS2 and emaS2<emaS3 and emaS3<emaS4 and emaS4<emaS5 and emaS5<emaS6 and emaS6<emaS7 and emaS7<emaS8) and
+           (emaS8<emaS9 and emaS9<emaS10 and emaS10<emaS11 and emaS11<emaS12 and emaS12<emaS13 and emaS13<emaS14 and emaS14<emaS15 and emaS15<emaS16)
+
+//Fast EMA Final Color Rules
+colFinal = colfastL and emaS1>emaS16 ? aqua : colfastS and emaS1<emaS16 ? blue : gray
+//Slow EMA Final Color Rules
+colFinal2 = colslowL  ? lime : colslowS ? red : gray
+
+//Fast EMA Plots
+//SGp1=plot(ssgppy and emaF1? emaF1: na, title="Fast EMA 1", style=line, linewidth=2, color=colFinal,transp=10)
+//plot(ssgppy and emaF2? emaF2: na, title="Fast EMA 2", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF3? emaF3: na, title="Fast EMA 3", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF4? emaF4: na, title="Fast EMA 4", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF5? emaF5: na, title="Fast EMA 5", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF6? emaF6: na, title="Fast EMA 6", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF7? emaF7: na, title="Fast EMA 7", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF8? emaF8: na, title="Fast EMA 8", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF9? emaF9: na, title="Fast EMA 9", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and emaF10? emaF10: na, title="Fast EMA 10", style=line, linewidth=1, color=colFinal,transp=10)
+//SGp2=plot(ssgppy and emaF11? emaF11: na, title="Fast EMA 11", style=line, linewidth=1, color=colFinal,transp=10)
+//plot(ssgppy and ShowAvgs?emafast:na, title="Fast Avg", style=circles,join=true, linewidth=2, color=gold,transp=10)
+
+//
+//fill(SGp1,SGp2,color=silver, transp=95)
+
+//Slow EMA Plots
+//SGp3=plot(ssgppy and emaS1? emaS1: na, title="Slow EMA 1", style=line, linewidth=2, color=colFinal2,transp=10)
+//plot(ssgppy and emaS2? emaS2: na, title="Slow EMA 2", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS3? emaS3: na, title="Slow EMA 3", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS4? emaS4: na, title="Slow EMA 4", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS5? emaS5: na, title="Slow EMA 5", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS6? emaS6: na, title="Slow EMA 6", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS7? emaS7: na, title="Slow EMA 7", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS8? emaS8: na, title="Slow EMA 8", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS9? emaS9: na, title="Slow EMA 9", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS10? emaS10: na, title="Slow EMA 10", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS11? emaS11: na, title="Slow EMA 11", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS12? emaS12: na, title="Slow EMA 12", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS13? emaS13: na, title="Slow EMA 13", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS14? emaS14: na, title="Slow EMA 14", style=line, linewidth=1, color=colFinal2,transp=10)
+//plot(ssgppy and emaS15? emaS15: na, title="Slow EMA 15", style=line, linewidth=1, color=colFinal2,transp=10)
+//SGp4=plot(ssgppy and emaS16? emaS16: na, title="Slow EMA 16", style=line, linewidth=2, color=colFinal2,transp=10)
+//plot(ssgppy and ShowAvgs?emaslow:na, title="Slow Avg", style=circles,join=true, linewidth=2, color=fuchsia,transp=10)
+//
+//fill(SGp3,SGp4, color=silver, transp=95)
+
+//plot(ssgppy and show200?ema200:na, title="EMA 200", style=circles, join=true, linewidth=2, color=black,transp=10)
+
+//Fast EMA Final Color Rules
+c = colfastL and emaS1>emaS16 ? AQUAA : colfastS and emaS1<emaS16 ? SGBLUE : SGGRAY
+//barcolor(clrBars? c : na,title="Guppy Bar Colors")
+
+// Generate Alert Arrows
+buy = 0
+sell=0
+buybreak = 0
+sellbreak =0
+//
+buy := emafast > emaslow and emaS1>emaS16 and not colslowS and colfastL and (not ShowCon or colslowL) and (not emaFilter or emafast>ema200)? nz(buy[1])>0?buy[1]+1:1 : 0
+sell := emafast < emaslow and emaS1<emaS16 and not colslowL and colfastS and (not ShowCon or colslowS) and (not emaFilter or emafast<ema200)? nz(sell[1])>0?sell[1]+1:1 : 0
+buy := buy>1 and colfastL and (uOCCswing and ((close[1]<open[1]) and (close>open))) ? 1 : buy
+sell := sell>1 and colfastS and (uOCCswing and ((close[1]>open[1]) and (close<open))) ? 1 : sell
+//
+buybreak  := emafast > emaslow and not colslowS and (not emaFilter or emafast>ema200) ? nz(buybreak[1])>0?buybreak[1]+1:1 : 0
+sellbreak := emafast < emaslow and not colslowL and (not emaFilter or emafast<ema200) ? nz(sellbreak[1])>0?sellbreak[1]+1 :1 : 0
+//
+//plotarrow(ssgppy and ShowSwing and buy==1 and barssince(nz(buy[1],1)==1)>Lookback?1:na, title="BUY Swing Arrow", colorup=lime, maxheight=60, minheight=50, transp=20)
+//plotarrow(ssgppy and ShowSwing and sell==1 and barssince(nz(sell[1],1)==1)>Lookback?-1:na, title="SELL Swing Arrow", colordown=red, maxheight=60, minheight=50, transp=20)
+
+//plotarrow(ssgppy and ShowBreak and buybreak==1 and barssince(nz(sellbreak[1],1)==1)>Lookback and barssince(nz(buybreak[1],1)==1)>Lookback?1:na, title="BUY Break Arrow", colorup=aqua, maxheight=60, minheight=50, transp=20)
+//plotarrow(ssgppy and ShowBreak and sellbreak==1 and barssince(nz(buybreak[1],1)==1)>Lookback and barssince(nz(sellbreak[1],1)==1)>Lookback?-1:na, title="SELL Break Arrow", colordown=blue, maxheight=60, minheight=50, transp=20)
+
+// Generate only Alarms that are selected.
+//gAlert = (ShowSwing and ((buy==1  and barssince(nz(buy[1],1)==1)>Lookback) or (sell==1 and barssince(nz(sell[1],1)==1)>Lookback))) or 
+         //(ShowBreak and (buybreak==1 or sellbreak==1) and barssince(nz(buybreak[1],1)==1)>Lookback and barssince(nz(sellbreak[1],1)==1)>Lookback)
+//alertcondition(gAlert,title="Guppy Alert Arrow",message="Guppy Alert")
+//alertcondition((ShowSwing and buy==1 and barssince(nz(buy[1],1)==1)>Lookback) or 
+               //(ShowBreak and buybreak==1 and barssince(nz(buybreak[1],1)==1)>Lookback and barssince(nz(sellbreak[1],1)==1)>Lookback),title="Buy Arrow",message="BUY")
+//alertcondition((ShowSwing and sell==1 and barssince(nz(sell[1],1)==1)>Lookback) or
+               //(ShowBreak and sellbreak==1 and barssince(nz(buybreak[1],1)==1)>Lookback and barssince(nz(sellbreak[1],1)==1)>Lookback),title="Sell Arrow",message="SELL")
+
+//
+//eof
+
+
+
+
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+spacing12 = input(false, title="_____________________________________________________________")
+ssgmabbs = input(false, title="Show Sigma Band Break System?")
+//study(title="Sigma Band Break Trend System", shorttitle="Sigma Trend", overlay = true)
+
+// Revision:        1
+// Author:          @JayRogers
+// Mentions:        @glaz - found it, waved it in my direction, ported correct method for identifying trend breakout. Massive thanks! :)
+// Sourced from:    http://indexswingtrader.blogspot.gr/2012/07/sigma-band-break-system.html
+//
+// Excerpt from source article:
+//      "Basically the Sigma Band Break System uses multiple Bollinger Bands set at 0.5 / 1 / 1.5 / 2 standard deviation
+//      above and below the midline. When a pricebar closes above the +0.5 band, the beginning of an uptrend is assumed,
+//      while a bar with a closing price below the -0.5 band indicates the start of a downtrend. Both bands can also be
+//      useful for determining stop loss or exit levels."
+//
+// Add-Lib Tweaks:
+//  - Had a brainfart and added Multi Time Frame trend crossreferencing to find potential buy/sell zone entries - worked a treat!
+//  - Buy/Sell zone entry signal shapes added - can easily be toggled off.
+//  - Trend entry signal shapes added - can easily be toggled off.
+//  - Bar colouring - also easily toggled off.
+//  - Crossreference bands can be set up independantly of the basis with their own section of dedicated inputs
+//  - Crossreferencing can easily be disabled for "traditional" band break trend looks/usage.
+//  - Added my usual array of MA selections, because choices are good.
+
+// - INPUTS
+basisType       = input(defval = "SMA", title = "Basis Type: SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, LSMA ( case sensitive )", type = string)
+basisSource     = input(defval = close, title = "Basis Source")
+lsmaOffset      = input(defval = 0, title = "Offset for LSMA ( only affects LSMA )")
+basisLength     = input(defval = 20, title = "Basis Period", minval = 1)
+devMultiply     = input(defval = 1.0, title = "Bands Multiplier", minval = 0.1, step = 0.05)
+sigmaMultiply   = input(defval = 0.5, title = "Trend Tollerance Band Multiplier", minval = 0.05, step = 0.05)
+MTFcheck        = input(defval = true, title = "Reference Higher Resolution for Buy/Sell Zones? ( disable for traditional method )")
+MTFreso         = input(defval = "60", title = "Reference Resolution ( should be higher than current chart )", type = resolution)
+MTFbasisType    = input(defval = "SMA", title = "Reference Basis Type: SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, LSMA ( case sensitive )", type = string)
+MTFsource       = input(defval = close, title = "Reference Basis Source")
+MTFlsmaOffset   = input(defval = 0, title = "Reference Offset for LSMA ( only affects LSMA )")
+MTFlength       = input(defval = 20, title = "Reference Basis Period", minval = 1)
+MTFdevMultiply  = input(defval = 1.0, title = "Reference Bands Multiplier", minval = 0.1, step = 0.05)
+MTFsigmaMultiply= input(defval = 0.5, title = "Reference Trend Tollerance Band Multiplier", minval = 0.05, step = 0.05)
+buySellSigs     = input(defval = false, title = "Show Buy/Sell Zone Entry Signals? ( requires higher resolution referencing )")
+trendSigs       = input(defval = false, title = "Show Trend Entry Signals?")
+useColours      = input(defval = false, title = "Show Bar Colours?")
+// - END INPUTS
+
+// - VARIABLES/FUNCTIONS
+// Returns MA input selection variant, default to SMA if blank or typo.
+variant(type, src, len, lsma) =>
+    v1 = sma(src, len)                                                  // Simple
+    v2 = ema(src, len)                                                  // Exponential
+    v3 = wma(src, len)                                                  // Weighted
+    v4 = vwma(src, len)                                                 // Volume Weighted
+    v5 = 0.0
+    v5 := na(v5[1]) ? sma(src, len) : (v5[1] * (len - 1) + src) / len    // Smoothed
+    v6 = 2 * v2 - ema(v2, len)                                          // Double Exponential
+    v7 = 3 * (v2 - ema(v2, len)) + ema(ema(v2, len), len)               // Triple Exponential
+    v8 = wma(2 * wma(src, len / 2) - wma(src, len), round(sqrt(len)))   // Hull
+    v9 = linreg(src, len, lsma)                                         // Least Squares
+    // return variant, defaults to SMA if input invalid.
+    type=="EMA"?v2 : type=="WMA"?v3 : type=="VWMA"?v4 : type=="SMMA"?v5 : type=="DEMA"?v6 : type=="TEMA"?v7 : type=="HullMA"?v8 : type=="LSMA"?v9 : v1
+// basis lines and deviation
+SGMAbasis               = variant(basisType, basisSource, basisLength, lsmaOffset)
+deviation           = stdev(basisSource, basisLength)
+MTFbasis            = security(tickerid, MTFreso, variant(MTFbasisType, MTFsource, MTFlength, MTFlsmaOffset))
+MTFdeviation        = security(tickerid, MTFreso, stdev(MTFsource, MTFlength))
+// multiply functions for standard deviation bands, because writing the same calc over and over.. pfft
+basisDevMult(num) => SGMAbasis + (deviation * (num * devMultiply))
+MTFbasisDevMult(num) => MTFbasis + (MTFdeviation * (num * MTFdevMultiply))
+// trend identification conditions
+upCondition         = basisSource > basisDevMult(sigmaMultiply)
+downCondition       = basisSource < basisDevMult(-sigmaMultiply)
+MTFupCondition      = basisSource > MTFbasisDevMult(MTFsigmaMultiply)
+MTFdownCondition    = basisSource < MTFbasisDevMult(-MTFsigmaMultiply)
+// determine current, and higher timeframe trend
+trendState          = na
+trendState          := upCondition ? true : downCondition ? false : trendState[1] // if condition is met for change, switch it up and retain.
+MTFtrendState       = na
+MTFtrendState       := MTFupCondition ? true : MTFdownCondition ? false : MTFtrendState[1]
+// figure out the bar colours
+MTFtrendUpColours   = MTFcheck and (MTFtrendState and trendState) ? #009900 : MTFcheck and (MTFtrendState and not trendState) ? #33FF66 : na
+MTFtrendDownColours = MTFcheck and (not MTFtrendState and not trendState) ? #CC0000 : MTFcheck and (not MTFtrendState and trendState) ? #FF9900 : na
+baseTrendColours    = not MTFcheck and trendState ? #009900 : #CC0000
+// are we showing buy and sell signals?
+showBuySell() => buySellSigs and MTFcheck
+// buy zone signal determination
+buyZoneEnter() =>
+    prevState    = trendState[1] and MTFtrendState[1] // lower and major trends both in UP state?
+    currState     = not trendState and MTFtrendState // lower trend DOWN, but still UP in major?
+    r = showBuySell() and prevState and currState
+// sell zone signal determination
+sellZoneEnter() =>
+    prevState    = not trendState[1] and not MTFtrendState[1] // lower and major trends both in DOWN state?
+    currState     = trendState and not MTFtrendState // lower trend UP, but still DOWN in major?
+    r = showBuySell() and prevState and currState
+// trend up signal
+trendUpStart() =>
+    prevState = MTFcheck ? MTFtrendState[1] : trendState[1]
+    currState = MTFcheck ? MTFtrendState : trendState
+    r = trendSigs and currState and not prevState
+// trend up signal
+trendDownStart() =>
+    prevState = MTFcheck ? MTFtrendState[1] : trendState[1]
+    currState = MTFcheck ? MTFtrendState : trendState
+    r = trendSigs and not currState and prevState
+// - END VARIABLES/FUNCTIONS
+
+// - BAR COLOURING
+//barcolor(color = useColours ? MTFtrendUpColours : na, title = "MTF Cross reference Up-Trend Colours")
+//barcolor(color = useColours ? MTFtrendDownColours : na, title = "MTF Cross reference Down-Trend Colours")
+//barcolor(color = useColours ? baseTrendColours : na, title = "Basic Trend Colours")
+// - END BAR COLOURING
+
+// - PLOTTING
+// signal shapes
+//plotshape(ssgmabbs and buyZoneEnter(), title="Buy Tag", style=shape.labelup, location=location.belowbar, color=#00FFCC, transp=0, textcolor=silver, size=size.tiny)
+//plotshape(ssgmabbs and sellZoneEnter(), title="Sell Tag", style=shape.labeldown, location=location.abovebar, color=#FF00CC, transp=0, textcolor=silver, size=size.tiny)
+//plotshape(ssgmabbs and trendUpStart(), title="Trend Up", style=shape.arrowup, location=location.belowbar, color=green, transp=0, text="Trend Up", textcolor=silver, size=size.large)
+//plotshape(ssgmabbs and trendDownStart(), title="Trend Down", style=shape.arrowdown, location=location.abovebar, color=red, transp=0, text="Trend Down", textcolor=silver, size=size.large)
+// basis line
+//plot(ssgmabbs and basis? basis : na , title = "Basis Line", color = #999999, style = line, linewidth = 2, transp = 60)
+// sigma tollerance bands
+//plot(ssgmabbs and basisDevMult(sigmaMultiply)? basisDevMult(sigmaMultiply) : na ,   title = "Trend Tollerance Upper Band", color = #BBFFDD, style = circles, linewidth = 1, transp = 20)
+//plot(ssgmabbs and basisDevMult(-sigmaMultiply)? basisDevMult(-sigmaMultiply) : na ,  title = "Trend Tollerance Lower Band", color = #BBFFDD, style = circles, linewidth = 1, transp = 20)
+// percentile deviation bands
+//plot(ssgmabbs and basisDevMult(0.5)? basisDevMult(0.5) : na ,     title = "50% Deviation Upper Band", color = #009999, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs and basisDevMult(-0.5)? basisDevMult(-0.5) : na ,    title = "50% Deviation Lower Band", color = #009999, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs and basisDevMult(1)? basisDevMult(1) : na ,       title = "Base Deviation Upper Band", color = #00BBBB, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs and basisDevMult(-1)? basisDevMult(-1) : na ,      title = "Base Deviation Lower Band", color = #00BBBB, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs and basisDevMult(1.5)? basisDevMult(1.5) : na ,     title = "150% Deviation Upper Band", color = #00DDDD, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs and basisDevMult(-1.5)? basisDevMult(-1.5) : na ,    title = "150% Deviation Lower Band", color = #00DDDD, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs or sbblin and basisDevMult(2)? basisDevMult(2) : na ,       title = "200% Deviation Upper Band", color = #00FFFF, style = line, linewidth = 1, transp = 60)
+//plot(ssgmabbs or sbblin and basisDevMult(-2)? basisDevMult(-2) : na ,      title = "200% Deviation Lower Band", color = #00FFFF, style = line, linewidth = 1, transp = 60)
+// higher resolution extreme bands visual
+//plot(ssgmabbs and MTFcheck ? MTFbasisDevMult(2) : na,    title = "Higher Reference 200% Upper Band", color = silver, style = circles, linewidth = 1, transp = 50)
+//plot(ssgmabbs and MTFcheck ? MTFbasisDevMult(-2) : na,   title = "Higher Reference 200% Lower Band", color = silver, style = circles, linewidth = 1, transp = 50)
+// fill for higher resolution sigma tollerance channel visual
+//MTFchannelUpper = plot(ssgmabbs and MTFcheck ? MTFbasisDevMult(MTFsigmaMultiply) : na, transp = 100, editable = false)
+//MTFchannelLower = plot(ssgmabbs and MTFcheck ? MTFbasisDevMult(-MTFsigmaMultiply) : na, transp = 100, editable = false)
+//fill(MTFchannelUpper, MTFchannelLower, color=silver, transp=80, title="Higher Reference Trend Tollerance Channel")
+// - END PLOTTING
+
+
+//////////////////////////////
+
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Color Gradient Definition//
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+BRIGHT_GREEN = #00FF08  // hex color. For more gradient could be used more colors
+DARK_GREEN = #14FF00
+MED_DARK_GREEN = #32FF00
+MED_GREEN = #4FFF00
+MED_LIGHT_GREEN = #6DFF00
+LIGHT_GREEN = #8AFF00
+WEAK_GREEN = #A8FF00
+
+//
+
+BRIGHT_YELLOW = #C6FF00
+MED_YELLOW = #FFFC00
+ORANGE_YELLOW = #FFDF00
+MED_ORANGE = #FFC100
+BRIGHT_ORANGE = #FFA400
+
+//
+
+WEAK_RED = #FF8600
+LIGHT_RED = #FF6800
+MED_LIGHT_RED = #FF4B00
+MED_RED = #FF2D00
+MED_DARK_RED = #FF1000
+DARK_RED = #FF000D
+BRIGHT_RED = #FF002A
+
+
+//
+//GreenShade(value) =>
+    //value >= 75 ? #00b300 : // dark green
+     //value > 50 ? #00cc00 :
+     //value > 30 ? #00e600 :
+     //value > 20 ? #00ff00 : // green
+     //value > 15 ? #1aff1a :
+     //value > 10 ? #33ff33 :
+        //#4dff4d             // light green
+
+//RedShade(value) =>
+    //value >= 75 ? #b30000 : // dark red
+     //value > 50 ? #cc0000 :
+     //value > 30 ? #e60000 :
+     //value > 20 ? #ff0000 : // red
+     //value > 15 ? #ff1a1a :
+     //value > 10 ? #ff3333 :
+        //#ff4d4d             // light red
+
+
+
+getColor(num_criteria) =>
+  num_criteria >= 36 ? BRIGHT_GREEN :
+  num_criteria >= 34 ? DARK_GREEN :
+  num_criteria >= 32 ? MED_DARK_GREEN :
+  num_criteria >= 30 ? MED_GREEN :
+  num_criteria >= 28 ? MED_LIGHT_GREEN :
+  num_criteria >= 26 ? LIGHT_GREEN :
+  num_criteria >= 24 ? WEAK_GREEN :
+  num_criteria >= 22 ? BRIGHT_YELLOW :
+  num_criteria >= 20 ? MED_YELLOW :
+  num_criteria >= 18 ? ORANGE_YELLOW :
+  num_criteria >= 16 ? MED_ORANGE :
+  num_criteria >= 14 ? BRIGHT_ORANGE :
+  num_criteria >= 12 ? WEAK_RED :
+  num_criteria >= 10 ? LIGHT_RED :
+  num_criteria >= 8 ? MED_LIGHT_RED :
+  num_criteria >= 6 ? MED_RED :
+  num_criteria >= 4 ? MED_DARK_RED :
+  num_criteria >= 2 ? DARK_RED :
+  BRIGHT_RED
+
+
+//////////////////////////////////////////////////////////////////
+//Positive Factors
+
+
+num_true_criteria = 16
+
+
+
+//////////////////////////////
+//Candles and Pattern//
+/////////////////////////////
+
+
+if (close[1]<open[1] and body[1]>cLarge[1] and bodySz[1]>=0.7 and close>open and bodySz>=0.7 and open<=close[1] and close<open[1] and close>((open[1]+close[1])/2))
+    num_true_criteria := num_true_criteria + 1
+    
+if (open[1]>close[1] and body[1]>cLarge[1] and open[1] >= max(close,open) and close[1]<=min(close,open)) and (body<=cSmall and bodySz<pctCDb and (high-max(close,open))>(pctCDw*truerange) and (min(close,open)-low)>(pctCDw*truerange))
+    num_true_criteria := num_true_criteria + 1
+    
+if open<close and atrratio>=szOvr
+    num_true_criteria := num_true_criteria + 1
+   
+if not oversizeBarBu and not oversizeBarBe and (close[1]<open[1] and close>open and open<=close[1] and close>open[1] and body>=cLarge and ratio>=szBg) and (not strictEn or (low<=low[1] and high>=highest(high,ne+1))) 
+    num_true_criteria := num_true_criteria + 1
+    
+if not bullishEngulf and not oversizeBarBe  and not oversizeBarBu and not piecingLine and body>cLarge and (close >= (high - (truerange * pctCs))) and (open <= (low + (truerange * pctCs)))
+    num_true_criteria := num_true_criteria + 1
+    
+if (open<high[1] and close<high[1] and high>high[1]) and (open < (high - (truerange * pctCp)) and close < (high - (truerange * pctCp)))
+    num_true_criteria := num_true_criteria + 1
+    
+if insideBar_ and not pBarUp and not pBarDn and open<close
+    num_true_criteria := num_true_criteria + 1
+  
+if not bullishEngulf and not oversizeBarBu and not oversizeBarBe  and not pBarUp and not pBarDn and outsideBarBu_
+    num_true_criteria := num_true_criteria + 1
+    
+if nc==2? (open[4]>open[3] and open[3]>close[3] and close[1]>close[2] and close>close[1] and pBarDn_[2] and body>cSmall) : nc==1?  (open[2]>close[2] and close>close[1] and pBarDn_[1] and body>cSmall) : false
+    num_true_criteria := num_true_criteria + 1
+
+if (close[2] < open[2] and max(open[1],close[1])<=close[2] and close[2]<=low[3] and close > open and body[1]<=cSmall and close>(close[2]+open[2])/2 and body[2]>cLarge[2]) 
+    num_true_criteria := num_true_criteria + 1
+
+if (open[1] > close[1] and close > open and close <= open[1] and close[1] <= open and close - open < open[1] - close[1] and open[trend] > open)
+    num_true_criteria := num_true_criteria + 1
+//plotshape(scndleptrn and data7 ? data7 : na ,  title= "Bullish Harami", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nHarami")
+
+if (open[1] > close[1] and close > open and close >= open[1] and close[1] >= open and close - open > open[1] - close[1] and open[trend] > open)
+    num_true_criteria := num_true_criteria + 1
+//plotshape(scndleptrn and data9 ? data9 : na , title= "Bullish Engulfing", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nEngulfling")
+
+//upper = highest(10)[1]
+if (close[1] < open[1] and  open < low[1] and close > close[1] + ((open[1] - close[1])/2) and close < open[1] and open[trend] > open)
+    num_true_criteria := num_true_criteria + 1
+//plotshape(scndleptrn and data10 ? data10 : na , title= "Piercing Line", location=location.belowbar, color=lime, style=shape.arrowup, text="Piercing\nLine")
+
+//lower = lowest(10)[1]
+if (low == open and  open < lower and open < close and close > ((high[1] - low[1]) / 2) + low[1] and open[trend] > open)
+    num_true_criteria := num_true_criteria + 1
+//plotshape(scndleptrn and data11 ? data11 : na , title= "Bullish Belt", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nBelt")
+
+if (open[1]>close[1] and open>=open[1] and close>open and open[trend] > open)
+    num_true_criteria := num_true_criteria + 1
+//plotshape(scndleptrn and data12 ? data12 : na , title= "Bullish Kicker", location=location.belowbar, color=lime, style=shape.arrowup, text="Bullish\nKicker")
+
+
+/////////////////////////////
+//Moving Averages//
+////////////////////////////
+
+//
+if n1>n2
+    num_true_criteria := num_true_criteria + 1
+
+if n1>n2 and ma_up 
+    num_true_criteria := num_true_criteria + 1
+    
+if n1>n2 and ma_up2 
+    num_true_criteria := num_true_criteria + 1
+    
+if n1>n2 and ma_up3 
+    num_true_criteria := num_true_criteria + 1
+    
+if n1>n2 and ma_up4 
+    num_true_criteria := num_true_criteria + 1
+    
+    
+///////////////////////////////////
+//Moving Average Crosses//
+///////////////////////////////////
+
+if crossover(out1, out2)
+    num_true_criteria := num_true_criteria + 1
+
+if crossover(out1, out3) 
+    num_true_criteria := num_true_criteria + 1
+
+if crossover(out1, out4) 
+    num_true_criteria := num_true_criteria + 1
+
+if crossover(out2, out3) 
+    num_true_criteria := num_true_criteria + 1
+
+if crossover(out2, out4) 
+    num_true_criteria := num_true_criteria + 1
+
+if crossover(out3, out4)
+    num_true_criteria := num_true_criteria + 1
+
+
+//
+
+////////////////////////////
+//Bollinger Bands//
+///////////////////////////
+
+//
+
+if close <= lowerbb
+    num_true_criteria := num_true_criteria + 1
+    
+    
+if buyZoneEnter()
+    num_true_criteria := num_true_criteria + 1
+    
+if trendUpStart()
+    num_true_criteria := num_true_criteria + 1
+
+
+
+// sigma tollerance bands
+//plot(basisDevMult(sigmaMultiply),   title = "Trend Tollerance Upper Band", color = #BBFFDD, style = circles, linewidth = 1, transp = 20)
+//plot(basisDevMult(-sigmaMultiply),  title = "Trend Tollerance Lower Band", color = #BBFFDD, style = circles, linewidth = 1, transp = 20)
+// percentile deviation bands
+//plot(basisDevMult(0.5),     title = "50% Deviation Upper Band", color = #009999, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(-0.5),    title = "50% Deviation Lower Band", color = #009999, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(1),       title = "Base Deviation Upper Band", color = #00BBBB, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(-1),      title = "Base Deviation Lower Band", color = #00BBBB, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(1.5),     title = "150% Deviation Upper Band", color = #00DDDD, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(-1.5),    title = "150% Deviation Lower Band", color = #00DDDD, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(2),       title = "200% Deviation Upper Band", color = #00FFFF, style = line, linewidth = 1, transp = 60)
+//plot(basisDevMult(-2),      title = "200% Deviation Lower Band", color = #00FFFF, style = line, linewidth = 1, transp = 60)
+// higher resolution extreme bands visual
+//plot(MTFcheck ? MTFbasisDevMult(2) : na,    title = "Higher Reference 200% Upper Band", color = silver, style = circles, linewidth = 1, transp = 50)
+//plot(MTFcheck ? MTFbasisDevMult(-2) : na,   title = "Higher Reference 200% Lower Band", color = silver, style = circles, linewidth = 1, transp = 50)
+// fill for higher resolution sigma tollerance channel visual
+//MTFchannelUpper = plot(MTFcheck ? MTFbasisDevMult(MTFsigmaMultiply) : na, transp = 100, editable = false)
+//MTFchannelLower = plot(MTFcheck ? MTFbasisDevMult(-MTFsigmaMultiply) : na, transp = 100, editable = false)
+//fill(MTFchannelUpper, MTFchannelLower, color=silver, transp=80, title="Higher Reference Trend Tollerance Channel")
+// - END PLOTTING    
+//
+
+////////////////////////////
+//Parabolic SAR//
+///////////////////////////
+
+//
+if sarUp
+    num_true_criteria := num_true_criteria + 1
+    
+
+//
+
+
+///////////////////////////////
+//SuperTrend//
+//////////////////////////////
+
+//
+if cross(close,STsl) and close>STsl 
+    num_true_criteria := num_true_criteria + 1
+
+if STrend == 1 and STrend[1] == -1
+    num_true_criteria := num_true_criteria + 2
+
+
+//
+////////////////////////////////
+//Trend Trader//
+/////////////////////////////////
+
+//
+if pos == 1 
+    num_true_criteria := num_true_criteria + 1
+
+//
+
+/////////////////////////////////
+//Ichimoku//
+////////////////////////////////
+
+//
+if leadLine1 > leadLine2
+    num_true_criteria := num_true_criteria + 1
+//
+
+//////////////////////////////
+//RSI Trends//
+/////////////////////////////
+
+if emaFast > emaSlow and close > rsima200 and close < rsima5 and rsi < 10 
+    num_true_criteria := num_true_criteria + 1
+
+if emaFast > emaSlow and close > out4 and close < out1 and rsi < 10 
+    num_true_criteria := num_true_criteria + 1
+    
+if emaFast > emaSlow and close > out4 and close < out1 and rsi < 20 
+    num_true_criteria := num_true_criteria + 1
+    
+if rsiOS and (barstate.ishistory or drawOnRT)
+    num_true_criteria := num_true_criteria + 1
+
+    
+//
+
+//////////////////////////////
+//Slingshot//
+/////////////////////////////
+
+//
+
+if emaFast > emaSlow and close < emaFast
+    num_true_criteria := num_true_criteria + 1
+    
+if emaFast > emaSlow and close[1] < emaFast and close > emaFast
+    num_true_criteria := num_true_criteria + 1
+    
+if emaFast >= emaSlow
+    num_true_criteria := num_true_criteria + 1
+    
+if emaFast > emaSlow and close > rsima200 and close < rsima5 and rsi < 10
+    num_true_criteria := num_true_criteria + 1
+//
+
+
+/////////////////////////////////////////
+
+//
+if upTrend 
+    num_true_criteria := num_true_criteria + 1
+    
+if codiff 
+    num_true_criteria := num_true_criteria + 1
+
+//
+
+
+//////////////////////////////////////////////////////
+//Super Guppy//
+/////////////////////////////////////////////////////
+
+//
+
+if buy==1 and barssince(nz(buy[1],1)==1)>Lookback
+    num_true_criteria := num_true_criteria + 1
+    
+if buybreak==1 and barssince(nz(sellbreak[1],1)==1)>Lookback and barssince(nz(buybreak[1],1)==1)>Lookback
+    num_true_criteria := num_true_criteria + 1
+    
+    
+//
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+    
+/////////////////////////////////////////
+
+//////////////////////////////////////
+//MACD//
+////////////////////////////
+
+if MACD >0
+    num_true_criteria := num_true_criteria + 1
+    
+if crossover(MACD,0)
+    num_true_criteria := num_true_criteria + 1
+    
+if dm>dm[1]
+    num_true_criteria := num_true_criteria + 1
+    
+//
+
+
+if ema5 > ema20
+    num_true_criteria := num_true_criteria + 1
+    
+
+    
+if rsi >50
+    num_true_criteria := num_true_criteria + 1
+
+if close > sma200 and close < sma5 and rsi < 10
+    num_true_criteria := num_true_criteria + 1
+    
+if close < sma200 and close[1] > sma5[1] and low < sma5 and ((close[1] < sma200[1] and close[1] > sma5[1] and rsi[1] > 90) or (close[2] < sma200[2] and close[2] > sma5[2] and rsi[2] > 90) or (close[3] < sma200[3] and close[3] > sma5[3] and rsi[3] > 90) or (close[4] < sma200[4] and close[4] > sma5[4] and rsi[4] > 90) )
+    num_true_criteria := num_true_criteria + 1
+        
+    
+if open > open[1]
+    num_true_criteria := num_true_criteria + 1
+
+if high > sma(low, 4)
+    num_true_criteria := num_true_criteria + 1
+
+if high[1] - low[1] > 100
+    num_true_criteria := num_true_criteria + 1
+
+if n % 2 == 0
+    num_true_criteria := num_true_criteria + 1
+    
+//if rsi >50
+    //num_true_criteria := num_true_criteria + 1
+    
+//if rsi >50
+    //num_true_criteria := num_true_criteria + 1
+    
+//if rsi >50
+    //num_true_criteria := num_true_criteria + 1
+    
+    
+    
+    
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////    
+    
+/////////NEGATIVE FACTORS////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////
+//Candles and Pattern//
+/////////////////////////////
+
+if (close[1]>open[1] and body[1]>cLarge[1] and bodySz[1]>=0.7 and close<open and bodySz>=0.7 and open>=close[1] and close>open[1] and close<((open[1]+close[1])/2))
+    num_true_criteria := num_true_criteria - 1
+    
+if (open[1]<close[1] and body[1]>cLarge[1] and close[1] >= max(close,open) and open[1]<=min(close,open)) and (body<=cSmall and bodySz<pctCDb and (high-max(close,open))>(pctCDw*truerange) and (min(close,open)-low)>(pctCDw*truerange))
+    num_true_criteria := num_true_criteria - 1
+    
+if open>close and atrratio>=szOvr
+    num_true_criteria := num_true_criteria - 1
+    
+if not oversizeBarBu  and not oversizeBarBe and (close[1]>open[1] and close<open and open>=close[1] and close<open[1] and body>=cLarge and ratio>=szBg) and (not strictEn or (high>=high[1] and low<=lowest(low,ne+1)))
+    num_true_criteria := num_true_criteria - 1
+    
+if not bearishEngulf and not oversizeBarBu  and not oversizeBarBe and not darkCloud and body>cLarge and (close <= (low + (truerange * pctCs))) and (open >= (high - (truerange * pctCs)))  
+    num_true_criteria := num_true_criteria - 1
+    
+if (open>low[1] and close>low[1] and low<low[1]) and (open > (low + (truerange * pctCp)) and close > (low + (truerange * pctCp)))    
+    num_true_criteria := num_true_criteria - 1
+   
+if insideBar_ and not pBarUp and not pBarDn and open>close
+    num_true_criteria := num_true_criteria - 1
+  
+if not bearishEngulf and not oversizeBarBe and not oversizeBarBu  and not pBarUp and not pBarDn and outsideBarBe_  
+    num_true_criteria := num_true_criteria - 1
+
+if nc==2? (open[4]<open[3] and open[3]<close[3] and close[1]<close[2] and close<close[1] and pBarUp_[2] and body>cSmall) : nc==1? (open[2]<close[2] and close<close[1] and pBarUp_[1] and body>cSmall) : false 
+    num_true_criteria := num_true_criteria - 1
+    
+if (close[2] > open[2] and min(open[1],close[1])>=close[2] and close[2]>=high[3] and close < open and body[1]<=cSmall and close<(close[2]+open[2])/2 and body[2]>cLarge[2])
+    num_true_criteria := num_true_criteria - 1
+
+if close[1] > open[1] and open > close and open <= close[1] and open[1] <= close and open - close < close[1] - open[1] and open[trend] < open
+    num_true_criteria := num_true_criteria - 1
+//plotshape(scndleptrn and data6 ? data6 : na , title= "Bearish Harami", color=red, style=shape.arrowdown, text="Bearish\nHarami")
+
+if close[1] > open[1] and open > close and open >= close[1] and open[1] >= close and open - close > close[1] - open[1] and open[trend] < open
+    num_true_criteria := num_true_criteria - 1
+//plotshape(scndleptrn and data8 ? data8 : na ,  title= "Bearish Engulfing", color=red, style=shape.arrowdown, text="Bearish\nEngulfing")
+
+if open[1]<close[1] and open<=open[1] and close<=open and open[trend] < open
+    num_true_criteria := num_true_criteria - 1
+//plotshape(scndleptrn and data13 ? data13 : na , title= "Bearish Kicker", color=red, style=shape.arrowdown, text="Bearish\nKicker")
+
+if ((high-low>4*(open-close))and((close-low)/(.001+high-low)>=0.75)and((open-low)/(.001+high-low)>=0.75))and open[trend] < open and high[1] < open and high[2] < open
+    num_true_criteria := num_true_criteria - 1
+//plotshape(scndleptrn and data14 ? data14 : na ,  title= "Hanging Man", color=red, style=shape.arrowdown, text="Hanging\nMan")
+
+
+/////////////////////////////
+//Moving Averages//
+////////////////////////////
+
+//
+if ma_down 
+    num_true_criteria := num_true_criteria - 1
+    
+if ma_down2 
+    num_true_criteria := num_true_criteria - 1
+    
+if ma_down3 
+    num_true_criteria := num_true_criteria - 1
+    
+if ma_down4 
+    num_true_criteria := num_true_criteria - 1
+    
+//
+
+
+if emaFast < emaSlow and close > emaFast
+    num_true_criteria := num_true_criteria - 1
+
+if emaFast < emaSlow and close[1] > emaFast and close < emaFast
+    num_true_criteria := num_true_criteria - 1
+
+if emaFast < emaSlow
+    num_true_criteria := num_true_criteria - 1
+   
+//
+   
+///////////////////////////////////
+//Moving Average Crosses//
+///////////////////////////////////
+
+if crossunder(out1, out2)
+    num_true_criteria := num_true_criteria - 1
+
+if crossunder(out1, out3) 
+    num_true_criteria := num_true_criteria - 1
+
+if crossunder(out1, out4) 
+    num_true_criteria := num_true_criteria - 1
+
+if crossunder(out2, out3) 
+    num_true_criteria := num_true_criteria - 1
+
+if crossunder(out2, out4) 
+    num_true_criteria := num_true_criteria - 1
+
+if crossunder(out3, out4)
+    num_true_criteria := num_true_criteria - 1
+
+//    
+    
+////////////////////////////
+//Bollinger Bands//
+///////////////////////////
+
+//
+
+if close >= upperbb
+    num_true_criteria := num_true_criteria - 1
+    
+    
+    
+if sellZoneEnter()
+    num_true_criteria := num_true_criteria - 1
+    
+if trendDownStart()
+    num_true_criteria := num_true_criteria - 1
+    
+    
+//
+
+////////////////////////////
+//Parabolic SAR//
+///////////////////////////
+
+//
+if sarDown
+    num_true_criteria := num_true_criteria - 1
+
+//
+
+
+
+
+/////////////////////////////////
+//Supertrend//
+////////////////////////////////
+
+if cross(STsl,close) and close<STsl 
+    num_true_criteria := num_true_criteria - 1
+
+if STrend == -1 and STrend[1] == 1 
+    num_true_criteria := num_true_criteria - 2
+
+
+//
+
+////////////////////////////////
+//Trend Trader//
+///////////////////////////////
+
+if pos == -1
+    num_true_criteria := num_true_criteria - 1
+
+
+/////////////////////////////////
+//Ichimoku//
+////////////////////////////////
+
+//
+if leadLine1 < leadLine2  
+    num_true_criteria := num_true_criteria - 1
+//
+
+
+//////////////////////////////
+//RSI Trends//
+/////////////////////////////
+
+  
+if close < rsima200 and close > rsima5 and rsi > 90 and emaFast < emaSlow  
+    num_true_criteria := num_true_criteria - 1
+    
+if close < out4 and close > out1 and rsi > 90 and emaFast < emaSlow  
+    num_true_criteria := num_true_criteria - 1
+    
+if close < out4 and close > out1 and rsi > 80  
+    num_true_criteria := num_true_criteria - 1
+    
+if close < sma200 and close > sma5 and rsi > 90
+    num_true_criteria := num_true_criteria - 1
+
+if rsiOB and (barstate.ishistory or drawOnRT)
+    num_true_criteria := num_true_criteria - 1
+ 
+//
+
+//////////////////////////////
+//Slingshot//
+/////////////////////////////
+
+//
+//Aggressive Entry or Alert To Potential Trade
+if emaFast < emaSlow and close > emaFast
+    num_true_criteria := num_true_criteria - 1
+    
+//Conservative Entry Code For Highlight Bars
+if emaFast < emaSlow and close[1] > emaFast and close < emaFast
+    num_true_criteria := num_true_criteria - 1
+
+//Define Up and Down Trend for Trend Arrows at Top and Bottom of Screen
+if emaFast < emaSlow
+    num_true_criteria := num_true_criteria - 1
+
+//SlingShot
+if close < rsima200 and close > rsima5 and rsi > 90 and emaFast < emaSlow 
+    num_true_criteria := num_true_criteria - 1
+    
+//
+
+////////////////////////////////////////////
+
+if downTrend 
+    num_true_criteria := num_true_criteria - 1
+    
+if codiff2*-1 
+    num_true_criteria := num_true_criteria - 1
+
+
+//////////////////////////////////////////
+    
+if close > sma200 and close[1] < sma5[1] and high > sma5 and ((close[1] > sma200[1] and close[1] < sma5[1] and rsi[1] < 10) or (close[2] > sma200[2] and close[2] < sma5[2] and rsi[2] < 10) or (close[3] > sma200[3] and close[3] < sma5[3] and rsi[3] < 10) or (close[4] > sma200[4] and close[4] < sma5[4] and rsi[4] < 10) )
+    num_true_criteria := num_true_criteria - 1
+    
+    
+//////////////////////////////////////
+//MACD//
+////////////////////////////
+
+if MACD <0
+    num_true_criteria := num_true_criteria - 1
+    
+if crossunder(MACD,0)
+    num_true_criteria := num_true_criteria - 1
+    
+if dm<dm[1]
+    num_true_criteria := num_true_criteria - 1
+    
+//
+    
+//////////////////////////////////////////
+//Super Guppy//
+/////////////////////////////////////////
+
+    
+if sell==1 and barssince(nz(sell[1],1)==1)>Lookback
+    num_true_criteria := num_true_criteria - 1
+    
+if sellbreak==1 and barssince(nz(buybreak[1],1)==1)>Lookback and barssince(nz(sellbreak[1],1)==1)>Lookback
+    num_true_criteria := num_true_criteria - 1
+    
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+barcolor(getColor(num_true_criteria))
+
+plot(num_true_criteria, title = "Trend Number", color = getColor(num_true_criteria), style = line, linewidth = 1, transp = 60)
+plot(20, title = "Mid Line", color = black, style = line, linewidth = 3, transp = 50)
+
+////////////////////////////////////
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2010, title = "From Year", minval = 1980)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 1980)
+
+// === FUNCTION EXAMPLE ===
+Tstart     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+Tfinish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= Tstart and time <= Tfinish ? true : false // create function "within window of time"
+
+// === SERIES SETUP ===
+//buy  = crossover(sma(close, fastMA), sma(close, slowMA))     // buy when fastMA crosses over slowMA
+//sell = crossunder(sma(close, fastMA), sma(close, slowMA))    // sell when fastMA crosses under slowMA
+
+// === EXECUTION ===
+//strategy.entry("L", strategy.long, when = window() and buy)  // buy long when "within window of time" AND crossover
+//strategy.close("L", when = window() and sell)                // sell long when "within window of time" AND crossunder         
+
+
+
+///////////////////////////////////
+
+
+
+
+longCondition = crossover(num_true_criteria, 24) or crossover(num_true_criteria, 28) or  crossover(num_true_criteria, ema(num_true_criteria,15)) or STgolong or trendUpStart() or buyZoneEnter() //or upTrend //or RSIUptrendS 
+//if (longCondition)
+strategy.entry("Vicious Overall Long Entry", strategy.long, when = window() and longCondition )
+strategy.close("Vicious Overall Long Entry", when = window() and crossunder(num_true_criteria, 20) or STgoshort or RSIDowntrendS or sellZoneEnter() ) //or crossunder(num_true_criteria, sma(num_true_criteria,5) ) )
+
+shortCondition = STgolong == true ? na : trendUpStart()== true ? na : buyZoneEnter()== true ? na : upTrend== true ? na : RSIUptrendS == true ? na : num_true_criteria < 20 and crossunder(num_true_criteria, 19) or STgoshort or trendDownStart() or sellZoneEnter() //or RSIDowntrendS or downTrend
+//if (shortCondition)
+strategy.entry("Vicious Overall Short", strategy.short, when = window() and shortCondition )
+strategy.close("Vicious Overall Short", when = window() and crossover(num_true_criteria, 19) or STgolong or trendUpStart() or buyZoneEnter() or upTrend or RSIUptrendS or  crossover(num_true_criteria, ema(num_true_criteria,15)) ) //or crossover(num_true_criteria, sma(num_true_criteria,5) ) )
+
+//
+
+View in Pine Editor・2025 lines
+Use on chart
+3
+3
+1 533
+Testing First Strategy

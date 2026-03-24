@@ -1,0 +1,151 @@
+//@version=6
+strategy("Swing EMA Structure RSI ATR v6 Suro", 
+     overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10)
+
+// ==========================
+// INPUT
+// ==========================
+emaFastLen   = input.int(50, "EMA Fast")
+emaSlowLen   = input.int(200, "EMA Slow")
+rsiLen       = input.int(14, "RSI Length")
+atrLen       = input.int(14, "ATR Length")
+atrMult      = input.float(2.0, "ATR Multiplier SL")
+riskReward   = input.float(2.0, "Risk Reward")
+pivotLen     = input.int(5, "Pivot Length")
+useBE        = input.bool(true, "Use Break Even")
+useTrailing  = input.bool(false, "Use ATR Trailing")
+
+// ==========================
+// INDICATORS
+// ==========================
+ema50  = ta.ema(close, emaFastLen)
+ema200 = ta.ema(close, emaSlowLen)
+rsiVal = ta.rsi(close, rsiLen)
+atrVal = ta.atr(atrLen)
+
+// ==========================
+// TREND FILTER
+// ==========================
+trendBull = ema50 > ema200
+trendBear = ema50 < ema200
+
+// ==========================
+// MARKET STRUCTURE
+// ==========================
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float prevHigh = na
+var float prevLow  = na
+
+if not na(ph)
+    prevHigh := ph
+
+if not na(pl)
+    prevLow := pl
+
+higherLow = not na(pl) and pl > prevLow[1]
+lowerHigh = not na(ph) and ph < prevHigh[1]
+
+// ==========================
+// RSI DIVERGENCE (Pivot Based)
+// ==========================
+bullDiv = not na(pl) and low < low[pivotLen] and rsiVal > rsiVal[pivotLen]
+bearDiv = not na(ph) and high > high[pivotLen] and rsiVal < rsiVal[pivotLen]
+
+// ==========================
+// ENTRY CONDITIONS
+// ==========================
+retraceLong  = low <= ema50
+retraceShort = high >= ema50
+
+rsiBuyFilter  = rsiVal > 40 and rsiVal < 70
+rsiSellFilter = rsiVal < 60 and rsiVal > 30
+
+longCondition =
+     trendBull and
+     close > ema200 and
+     retraceLong and
+     rsiBuyFilter
+
+shortCondition =
+     trendBear and
+     close < ema200 and
+     retraceShort and
+     rsiSellFilter
+
+// ==========================
+// STOP LOSS & TAKE PROFIT
+// ==========================
+longSL   = close - (atrVal * atrMult)
+longRisk = close - longSL
+longTP   = close + (longRisk * riskReward)
+
+shortSL   = close + (atrVal * atrMult)
+shortRisk = shortSL - close
+shortTP   = close - (shortRisk * riskReward)
+
+// ==========================
+// EXECUTION
+// ==========================
+if longCondition
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("BUY EXIT", 
+         from_entry = "BUY",
+         stop  = longSL,
+         limit = longTP)
+
+if shortCondition
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("SELL EXIT", 
+         from_entry = "SELL",
+         stop  = shortSL,
+         limit = shortTP)
+
+// ==========================
+// BREAK EVEN LOGIC
+// ==========================
+if useBE and strategy.position_size > 0
+    if close >= strategy.position_avg_price + longRisk
+        strategy.exit("BE BUY", from_entry="BUY", stop=strategy.position_avg_price)
+
+if useBE and strategy.position_size < 0
+    if close <= strategy.position_avg_price - shortRisk
+        strategy.exit("BE SELL", from_entry="SELL", stop=strategy.position_avg_price)
+
+// ==========================
+// ATR TRAILING STOP
+// ==========================
+if useTrailing and strategy.position_size > 0
+    trailStop = close - atrVal * atrMult
+    strategy.exit("TRAIL BUY", from_entry="BUY", stop=trailStop)
+
+if useTrailing and strategy.position_size < 0
+    trailStop = close + atrVal * atrMult
+    strategy.exit("TRAIL SELL", from_entry="SELL", stop=trailStop)
+
+// ==========================
+// PLOT
+// ==========================
+plot(ema50,  color=color.orange, title="EMA 50")
+plot(ema200, color=color.blue,   title="EMA 200")
+
+View in Pine Editor・134 lines
+Use on chart
+1
+5
+661
+This strategy is specifically designed for H1 and H4 swing trading, using a structured trend-following approach.
+
+It combines:
+EMA 50 & EMA 200 → Primary trend filter
+Market Structure (HH/HL & LH/LL) → Directional confirmation
+RSI → Momentum and overbought/oversold filter
+ATR → Volatility-based dynamic Stop Loss
+Minimum Risk:Reward 1:2
+Optional Break Even and ATR Trailing Stop
+
+The strategy focuses on entering retracements within a strong trend rather than chasing breakouts.

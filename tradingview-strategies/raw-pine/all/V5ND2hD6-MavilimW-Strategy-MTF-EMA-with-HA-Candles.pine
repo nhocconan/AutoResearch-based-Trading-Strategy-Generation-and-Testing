@@ -1,0 +1,107 @@
+//@version=4
+
+strategy("MavilimW Strategy MTF", overlay=true)
+
+ma1_len = input(50)
+
+fromDay = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+fromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+fromYear = input(defval = 2020, title = "From Year", minval = 1970)
+ //monday and session 
+// To Date Inputs
+toDay = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+toMonth = input(defval = 12, title = "To Month", minval = 1, maxval = 12)
+toYear = input(defval = 2020, title = "To Year", minval = 1970)
+
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate 
+
+
+//First Moving Average data
+o = ema(open, ma1_len)
+c = ema(close, ma1_len)
+h = ema(high, ma1_len)
+l = ema(low, ma1_len)
+
+// === HA calculator ===
+ha_t = heikinashi(syminfo.tickerid)
+ha_o = security(ha_t, timeframe.period, o)
+ha_c = security(ha_t, timeframe.period, c)
+ha_h = security(ha_t, timeframe.period, h)
+ha_l = security(ha_t, timeframe.period, l)
+
+
+res = input(title="Time Frame", type=input.resolution, defval="D")
+res2 = input(title="Time Frame", type=input.resolution, defval="W")
+res3 = input(title="Time Frame", type=input.resolution, defval="M")
+
+
+
+fmal = input(1, "First Moving Average length")
+smal = input(1, "Second Moving Average length")
+tmal = fmal + smal
+Fmal = smal + tmal
+Ftmal = tmal + Fmal
+Smal = Fmal + Ftmal
+
+M1 = wma(ha_c, fmal)
+M2 = wma(M1, smal)
+M3 = wma(M2, tmal)
+M4 = wma(M3, Fmal)
+M5 = wma(M4, Ftmal)
+M6 = wma(M5, Smal)
+MAVWD = security(syminfo.tickerid, res, M6)
+MAVWW = security(syminfo.tickerid, res2, M6)
+MAVWM = security(syminfo.tickerid, res3, M6)
+
+
+
+plot(MAVWD, color=color.blue, linewidth=2, title="D")
+plot(MAVWW, color=color.white, linewidth=3, title="W")
+plot(MAVWM, color=color.purple, linewidth=4, title="M")
+
+long = close > MAVWD and close > MAVWW and close > MAVWM
+short = close < MAVWD and close < MAVWW and close < MAVWM
+exitlong = crossunder(MAVWD,MAVWW) or crossunder(MAVWD,MAVWM) //or crossunder(MAVWW,MAVWM)
+exitshort = crossover(MAVWD,MAVWW) or crossover(MAVWD,MAVWM) //or crossover(MAVWW,MAVWM) 
+
+
+longA=input(true)
+shortA=input(false)
+if(longA)
+    strategy.entry("long",1,when=long)
+    strategy.close("long",when=exitlong)
+if(shortA)
+    strategy.entry("long2",1,when=short)
+    strategy.close("long2",when=exitshort)
+
+View in Pine Editor・77 lines
+Use on chart
+3
+3
+6
+2
+10 687
+This is a strategy adapted initially for Mavilim moving average indicator, based on WMA MA.
+
+It seems to works amazingly on long term markets, like stocks, some futures, some comodities and so on.
+
+
+In this strategy, I form initially the candle, using EMA values, so I take the EMA of last 50 closes, open, highs and lows and form the candle
+
+After this I take interally HA and convert the EMA candle to HA.
+
+
+Then using the moving averages on multiple timeframes, like in this example we have a chart on 4h, but I use 1h and 1d moving averages.
+
+For long condition we have : close is above moving average timeframe1 and oving average timeframe2 and oving average timeframe3
+Initially short would be close below ma timeframe1, ma timeframe2 and timeframe3 -> but here I also convert it into a long signal.
+So we actually go only long .
+
+And we have 2 different exits : for first long if we have a crossdown of 1h ma with 1 day ma, and for second long if we have a cross up of 1h ma with 1 day ma in this example.
+
+Message me if you have any questions about this strategy.
+
+
+

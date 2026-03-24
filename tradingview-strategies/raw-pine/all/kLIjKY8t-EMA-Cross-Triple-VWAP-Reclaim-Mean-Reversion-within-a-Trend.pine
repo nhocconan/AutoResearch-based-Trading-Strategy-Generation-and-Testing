@@ -1,0 +1,65 @@
+//@version=5
+strategy("EMA Cross + Triple VWAP Reclaim", overlay=true, initial_capital=1000, currency=currency.USD)
+
+// --- Inputs ---
+ema9_len      = input.int(9, "Fast EMA (M5)")
+ema20_len     = input.int(20, "Slow EMA (M5)")
+h1_ema_len    = input.int(20, "H1 EMA Filter")
+atr_len       = input.int(14, "ATR Length (H1)")
+sl_multiplier = input.float(0.5, "H1 ATR Multiplier", step=0.1)
+rr_ratio      = input.float(1.0, "Risk:Reward Ratio", step=0.1)
+lookback      = input.int(10, "VWAP Touch Lookback")
+
+// --- Indicators (M5) ---
+ema9  = ta.ema(close, ema9_len)
+ema20 = ta.ema(close, ema20_len)
+m5_vwap = ta.vwap(close)
+
+// --- HTF Data (H1) ---
+[h1_close, h1_ema20, h1_vwap, h1_atr] = request.security(syminfo.tickerid, "60", [close, ta.ema(close, h1_ema_len), ta.vwap(close), ta.atr(atr_len)])
+
+// --- Logic for VWAP Reclaim (M5) ---
+// Long: Price was below M5 VWAP within the lookback period and is now back above
+was_below_vwap = ta.lowest(low, lookback) < m5_vwap
+reclaimed_vwap_long = was_below_vwap and close > m5_vwap
+
+// Short: Price was above M5 VWAP within the lookback period and is now back below
+was_above_vwap = ta.highest(high, lookback) > m5_vwap
+reclaimed_vwap_short = was_above_vwap and close < m5_vwap
+
+// --- Trend Filters ---
+// H1 Filter: Price above H1 EMA 20 AND H1 VWAP
+h1_buy_ok  = h1_close > h1_ema20 and h1_close > h1_vwap
+h1_sell_ok = h1_close < h1_ema20 and h1_close < h1_vwap
+
+// --- Entry Trigger (M5 Cross) ---
+long_trigger  = ta.crossover(ema9, ema20)
+short_trigger = ta.crossunder(ema9, ema20)
+
+// --- Strategy Execution ---
+float sl_dist = h1_atr * sl_multiplier
+float tp_dist = sl_dist * rr_ratio
+
+if (long_trigger and h1_buy_ok and reclaimed_vwap_long)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=close - sl_dist, limit=close + tp_dist)
+
+if (short_trigger and h1_sell_ok and reclaimed_vwap_short)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=close + sl_dist, limit=close - tp_dist)
+
+// --- Visuals ---
+plot(ema9, color=color.blue, title="M5 EMA 9")
+plot(ema20, color=color.orange, title="M5 EMA 20")
+plot(m5_vwap, color=color.gray, linewidth=2, title="M5 VWAP")
+plot(h1_vwap, color=color.new(color.purple, 50), linewidth=1, title="H1 VWAP")
+
+// Background highlights for active filter zones
+bgcolor(h1_buy_ok ? color.new(color.green, 95) : h1_sell_ok ? color.new(color.red, 95) : na)
+
+View in Pine Editor・58 lines
+Use on chart
+2
+0
+535
+This is a classic "Mean Reversion within a Trend" setup. By waiting for the price to dip below the M5 VWAP and then reclaim it, you are essentially "buying the dip" during an uptrend rather than chasing the price at the highs.

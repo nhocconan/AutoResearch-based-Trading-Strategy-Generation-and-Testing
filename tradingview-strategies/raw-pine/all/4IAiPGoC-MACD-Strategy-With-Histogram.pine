@@ -1,0 +1,39 @@
+//@version=3
+strategy("MACD", calc_on_order_fills=true, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_value=0.0675)
+
+// Getting inputs
+fastLength = input(title="Fast Length", type=integer, defval=12)
+slowlength = input(title="Slow Length", type=integer, defval=26)
+signalLength = input(title="Signal Smoothing", type=integer, minval = 1, maxval = 50, defval = 9)
+
+// Calculating
+macd = ema(close, fastLength) - ema(close, slowlength)
+signal = ema(macd, signalLength)
+delta = macd - signal
+
+// Plot colors
+col_grow_above = #26A69A
+col_grow_below = #FFCDD2
+col_fall_above = #B2DFDB
+col_fall_below = #EF5350
+col_macd = #0094ff
+col_signal = #ff6a00
+
+// Plot histogram
+plot(delta, title="Histogram", style=columns, color=(delta>=0 ? (delta[1] < delta ? col_grow_above : col_fall_above) : (delta[1] < delta ? col_grow_below : col_fall_below) ), transp=0 )
+plot(macd, title="MACD", color=col_macd, transp=0)
+plot(signal, title="Signal", color=col_signal, transp=0)
+
+// Plot orders
+if (crossover(delta, 0))
+    strategy.entry("buy", strategy.long)
+if (crossunder(delta, 0))
+    strategy.entry("sell", strategy.short)
+
+View in Pine Editor・31 lines
+Use on chart
+1
+7
+8
+5 431
+Combines MACD strategy for backtesting with a plotted histogram and orders

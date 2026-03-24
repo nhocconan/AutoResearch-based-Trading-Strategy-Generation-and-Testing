@@ -1,0 +1,66 @@
+//@version=6
+strategy('Consecutive Bearish Candle Strategy', overlay=false, fill_orders_on_standard_ohlc = true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+in_start_time = input.time(timestamp('1 Jan 2014'), title = 'Start Time', group = 'Time Settings')
+in_end_time = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+in_window = time >= in_start_time and time <= in_end_time
+
+lookback = input.int(defval = 3, title = 'Lookback', minval = 1)
+
+var int bullCount = 0
+var int bearCount = 0
+
+bullCount := close > close[1] ? bullCount + 1 : 0
+bearCount := close < close[1] ? bearCount + 1 : 0
+
+plot(bullCount, title="Bullish Count", color=color.green, style=plot.style_columns)
+plot(-bearCount, title="Bearish Count", color=color.red, style=plot.style_columns)
+
+longCondition = bearCount >= lookback and in_window
+exitCondition = close>high[1]
+
+if longCondition
+    strategy.entry("long", strategy.long)
+if exitCondition
+    strategy.close_all()
+
+View in Pine Editor・25 lines
+Use on chart
+7
+3
+1 828
+█ STRATEGY DESCRIPTION
+The "Consecutive Bearish Candle Strategy" is a momentum-based strategy designed to identify potential reversals after a sustained bearish move. It enters a long position when a specific number of consecutive bearish candles occur and exits when the price shows strength by exceeding the previous bar's high. This strategy is optimized for use on various timeframes and instruments.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The close price has been lower than the previous close for at least `Lookback` consecutive bars. This indicates a sustained bearish move, suggesting a potential reversal.
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the current closing price exceeds the high of the previous bar (`close > high[1]`). This indicates that the price has shown strength, potentially confirming the reversal and prompting the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Lookback: The number of consecutive bearish bars required to trigger a Buy Signal. Default is 3.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for markets with frequent momentum shifts.
+
+It performs best in volatile conditions where price movements are significant.
+
+Backtesting results should be analysed to optimize the `Lookback` parameter for specific instruments.
+

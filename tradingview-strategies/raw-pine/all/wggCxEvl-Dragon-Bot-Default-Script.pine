@@ -1,0 +1,426 @@
+//@version=3
+// THIS SCRIPT IS MEANT TO ACCOMPANY COMMAND EXECUTION BOTS
+// THE INCLUDED STRATEGY IS NOT MEANT FOR LIVE TRADING, BUT CAN BE USED AT YOUR OWN RISK
+// THIS STRATEGY IS AN EXAMLE TO START EXPERIMENTATING WITH YOUR OWN IDEAS
+////////////////////////////////////////////////////////////////////////////////////////
+
+// comment out the next line to use this script as an alert script
+strategy(title="Dragon Bot - Default Script", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+// remove the // in the next line to use this script as an alert script
+// study(title="Dragon Bot - Default Script", overlay=true)
+
+// Dragon-Bot default script version 2.1
+// This can also be used with bot that reacts to tradingview alerts.
+// Use the script as "strategy" for backtesting
+// Comment out line 8 and de-comment line 10 to be able to set tradingview alerts.
+// You should also comment out (place // before it) the lines 370, 374, 378 and 382 (strategy.entry and strategy.close) to be able to use the alerts.
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// In this first part of the script we setup variables and make sure the script keeps all information it used in the past. //
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+longs = 0
+longs := nz(longs[1])
+
+shorts = 0
+shorts := nz(shorts[1])
+
+buyprice = 0.0
+buyprice := buyprice[1]
+
+sellprice = 0.0
+sellprice := sellprice[1]
+
+scaler = 0.0
+scaler := scaler[1]
+
+sellprofit = input(1.0, minval=0.0, step=0.1, title="main strat profit")
+sellproffinal = sellprofit/100
+
+enable_shorts = input(1, minval=0, maxval=1, title="Shorts on/off")
+
+enable_flipping = input(0, minval=0, maxval=1, title="Flipping on/off -> Go directly from long -> short or short -> long without closing ")
+
+max_pyramid = input(1, minval=0, maxval=100, title="Max nr of pyramid buys. When backtesting, set to same amount as in properties tab.")
+
+enable_stoploss = input(0, minval=0, maxval=1, title="Stoploss on/off")
+sellstoploss = input(30.0, minval=0.0, step=1.0, title="Stoploss %")
+sellstoplossfinal = sellstoploss/100
+
+enable_trailing = input(1, minval=0, maxval=1, title="Trailing on/off")
+enable_trailing_ATR = input(1, minval=0, maxval=1, title="Trailing use ATR on/off")
+ATR_Multi = input(1.0, minval=0.0, step=0.1, title="Multiplier for ATR")
+selltrailing = input(10.0, minval=0.0, step=1.0, title="Trailing %")
+selltrailingfinal = selltrailing/100
+
+Backtestdate = input(0, minval=0, maxval=1, title="backtest date on/off")
+
+// Component Code by pbergden - Start backtest dates
+// The following code snippet is taken from an example by pbergen
+// All rights to this snippet remain with pbergden
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(1, "Backtest Stop Month")
+testStopDay = input(1, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+// In this second part of the script we setup indicators that we can use for our actual algorithm. //
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//ATR
+lengthtr = input(20, minval=1, title="ATR Length")
+ATRsell = input(0, minval=0, title="1 for added ATR when selling")
+ATR=rma(tr(true), lengthtr)
+Trail_ATR=rma(tr(true), 10) * ATR_Multi
+atr = 0.0
+if ATRsell == 1
+    atr := ATR
+
+//OC2
+lengthoc2 = input(20, minval=1, title="OC2 Length")
+OC2sell = input(0, minval=0, title="1 for added OC2 when selling")
+OC2mult = input(1, minval=1, title="OC2 multiplayer")
+OC= abs(open[1]-close)
+OC2=rma(OC, lengthoc2)
+oc2 = 0.0
+if OC2sell == 1
+    oc2 := OC2*OC2mult
+
+//ADX
+lenadx = input(10, minval=1, title="DI Length")
+lensig = input(10, title="ADX Smoothing", minval=1, maxval=50)
+
+up = change(high)
+down = -change(low)
+plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+trur = rma(tr, lenadx)
+plus = fixnan(100 * rma(plusDM, lenadx) / trur)
+minus = fixnan(100 * rma(minusDM, lenadx) / trur)
+sum = plus + minus
+sigadx = 100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), lensig)
+
+//StochRSI
+smoothKRSI = input(3, minval=1)
+smoothDRSI = input(3, minval=1)
+lengthRSI = input(14, minval=1)
+lengthStochRSI = input(14, minval=1)
+srcRSI = input(close, title="RSI Source")
+buyRSI = input(30, minval=1, title="RSI Buy Value")
+sellRSI = input(70, minval=1, title="RSI Sell Value")
+rsi1 = rsi(srcRSI, lengthRSI)
+krsi = sma(stoch(rsi1, rsi1, rsi1, lengthStochRSI), smoothKRSI)
+drsi = sma(krsi, smoothDRSI)
+
+// Bollinger bands
+lengthbb = input(20, minval=1)
+srcbb = input(close, title="Sourcebb")
+multbb = input(2.0, minval=0.001, maxval=50)
+bb_buy_value = input(0.5, step=0.1, title="BB Buy Value")
+bb_sell_value = input(0.5, step=0.1, title="BB Sell Value")
+basisbb = sma(srcbb, lengthbb)
+devbb = multbb * stdev(srcbb, lengthbb)
+upperbb = basisbb + devbb
+lowerbb = basisbb - devbb
+bbr = (srcbb - lowerbb)/(upperbb - lowerbb)
+bbbuy = basisbb - (devbb*bb_buy_value)
+bbsell = basisbb + (devbb*bb_sell_value)
+
+//ema very short
+shorter = ema(close, 2)
+shorterlong = ema(close, 5)
+
+//ema short
+short = ema(close, 10)
+long = ema(close, 30)
+
+//ema long
+shortday = ema(close, 110)
+longday = ema(close, 360)
+
+//ema even longer
+shortlongerday = ema(close, 240)
+longlongerday = ema(close, 720)
+
+//declaring extra timeframe value
+profit = security(tickerid, period, close)
+
+        
+////////////////////////////////////////////////////////////////////////
+// In the 3rd part of the script we define all the entries and exits //
+///////// This third part is basically the acual algorithm ////////////
+///////////////////////////////////////////////////////////////////////
+
+//Declaring function with the long entries
+OPENLONG_funct() =>
+    // You can add more buy entries to the script
+    longentry1 = false
+    longentry2 = false
+    longentry3 = false
+    longentry4 = false
+    longentry5 = false
+    makelong_funct = false
+    if  close<bbbuy and krsi<buyRSI // You could for instance add "and shortday > longday"
+        longentry1 := close>close[1]
+        // longentry2 := ...
+    // if another thing we want to buy on happens
+        // longentry3 := ...
+    //All the buy entries go above, this last variable is what the function puts out
+    // if you add more entries, add them in the following list too
+    makelong_funct := longentry1 or longentry2 or longentry3 or longentry4 or longentry5
+
+//Declaring function wit the short entries
+OPENSHORT_funct() =>
+    // You can add more buy entries to the script
+    shortentry1 = false
+    shortentry2 = false
+    shortentry3 = false
+    shortentry4 = false
+    shortentry5 = false
+    makeshort_funct = false
+    if  close>bbsell and krsi>sellRSI // You could for instance add "and shortday < longday"
+        shortentry1 := close<close[1]
+        // shortentry2 := ...
+    // if another thing we want to buy on happens
+        // shortentry3 := ...
+    //All the buy entries go above, this last variable is what the function puts out
+    // if you add more entries, add them in the following list too
+    makeshort_funct := shortentry1 or shortentry2 or shortentry3 or shortentry4 or shortentry5
+    
+//Declaring function with the long exits
+CLOSELONG_funct() =>
+    // You can add more buy entries to the script
+    longexit1 = false
+    longexit2 = false
+    longexit3 = false
+    longexit4 = false
+    longexit5 = false
+    closelong_funct = false
+    if  close>bbsell and krsi>sellRSI
+        longexit1 := close<close[1]
+        // longexit2 := ...
+    // if another thing we want to close on on happens you can add them here...
+    // longexit3 := ...
+    //All the buy entries go above, this last variable is what the function puts out
+    // if you add more exits, add them in the following list too
+    closelong_funct := longexit1 or longexit2 or longexit3 or longexit4 or longexit5
+
+//Declaring function wit the short exits
+CLOSESHORT_funct() =>
+    // You can add more buy entries to the script
+    shortexit1 = false
+    shortexit2 = false
+    shortexit3 = false
+    shortexit4 = false
+    shortexit5 = false
+    closeshort_funct = false
+    if  close<bbsell and krsi<sellRSI
+        shortexit1 := close>close[1]
+        // shortexit2 := ...
+    // if another thing we want to close on on happens you can add them here...
+        // shortexit3 := ...
+    //All the buy entries go above, this last variable is what the function puts out
+    // if you add more exits, add them in the following list too
+    closeshort_funct := shortexit1 or shortexit2 or shortexit3 or shortexit4 or shortexit5
+
+/////////////////////////////////////////////////////////////////////////////////////
+////////////// End of "entries" and "exits" definition code /////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/// In the fourth part we do the actual work, as defined in the part before this ////
+////////////////////// This part does not need to be changed ////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+
+//OPEN LONG LOGIC
+makelong = false
+//buy with backtesting on specific dates
+if Backtestdate > 0 and testPeriod()
+    if (longs < max_pyramid and shorts < 1) or (short > 0 and enable_flipping > 0 and enable_shorts > 0 and longs < 1)
+        makelong := OPENLONG_funct()
+
+//buy without backtesting on specific dates
+if Backtestdate < 1
+    if (longs < max_pyramid and shorts < 1) or (short > 0 and enable_flipping > 0 and enable_shorts > 0 and longs < 1)
+        makelong := OPENLONG_funct()
+    
+if makelong
+    longs := longs[1] + 1
+    if longs == 1
+        buyprice := close
+        scaler := close
+    if longs > 1
+        buyprice := ((buyprice[1]*longs[1]) + close)/longs
+        scaler := scaler[1]
+    shorts := 0
+    
+//OPEN SHORT LOGIC
+makeshort = false
+
+//buy with backtesting on specific dates
+if Backtestdate > 0 and testPeriod()
+    if (shorts < max_pyramid and longs < 1 and enable_shorts > 0) or (longs > 0 and enable_flipping > 0 and enable_shorts > 0)
+        makeshort := OPENSHORT_funct()
+
+//buy without backtesting on specific dates
+if Backtestdate < 1
+    if (shorts < max_pyramid and longs < 1 and enable_shorts > 0) or (longs > 0 and enable_flipping > 0 and enable_shorts > 0)
+        makeshort := OPENSHORT_funct()
+    
+
+if makeshort
+    shorts := shorts[1] + 1
+    if shorts == 1
+        buyprice := close
+        scaler := close
+    if shorts > 1
+        buyprice := ((buyprice[1]*longs[1]) + close)/shorts
+        scaler := scaler[1]
+    longs := 0
+
+//Calculating values for traling stop
+if longs > 0 and enable_flipping < 1
+    if close > scaler+Trail_ATR and enable_trailing_ATR > 0
+        scaler := close
+    if close > scaler * (1.0 + selltrailingfinal) and enable_trailing_ATR < 1
+        scaler := close
+if shorts > 0 and enable_flipping < 1
+    if close < scaler-Trail_ATR and enable_trailing_ATR > 0
+        scaler := close
+    if close < scaler * (1.0 - selltrailingfinal) and enable_trailing_ATR < 1
+        scaler := close
+    
+long_exit = false
+long_security1 = false
+long_security2 = false
+long_security3 = false
+
+//CLOSE LONG LOGIC
+if longs > 0 and enable_flipping < 1
+    if ( (buyprice + (buyprice*sellproffinal) + atr + oc2) < close) and ( (buyprice + (buyprice*sellproffinal) ) < profit)
+        long_exit := CLOSELONG_funct()
+//security
+    if enable_stoploss > 0
+        long_security1 := close < ( buyprice * (1.0 - sellstoplossfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR < 1
+        long_security2 := close < ( scaler * (1.0 - selltrailingfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR > 0
+        long_security2 := close < ( scaler - Trail_ATR)
+        
+//CLOSE LONG LOGIC
+if longs > 0 and enable_flipping > 0
+//security
+    if enable_stoploss > 0
+        long_security1 := close < ( buyprice * (1.0 - sellstoplossfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR < 1
+        long_security2 := close < ( scaler * (1.0 - selltrailingfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR > 0
+        long_security2 := close < ( scaler - Trail_ATR)
+        
+closelong = long_exit or long_security1 or long_security2 or long_security3 or makeshort
+
+short_exit = false
+short_security1 = false
+short_security2 = false
+short_security3 = false
+
+if closelong
+    longs := 0
+
+//CLOSE SHORT LOGIC
+if shorts > 0 and enable_flipping < 1
+    if ( (buyprice - (buyprice*(sellproffinal) - atr - oc2) > close) and ( (buyprice - (buyprice*sellproffinal) ) > profit) )
+        short_exit := CLOSESHORT_funct()
+//security
+    if enable_stoploss > 0
+        short_security1 := close > ( buyprice * (1.0 + sellstoplossfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR < 1
+        short_security2 := close > ( scaler * (1.0 + selltrailingfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR > 0
+        short_security2 := close > ( scaler + Trail_ATR)
+if shorts > 0 and enable_flipping > 0
+//security
+    if enable_stoploss > 0
+        short_security1 := close > ( buyprice * (1.0 + sellstoplossfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR < 1
+        short_security2 := close > ( scaler * (1.0 + selltrailingfinal) )
+    if enable_trailing > 0 and enable_trailing_ATR > 0
+        short_security2 := close > ( scaler + Trail_ATR)
+        
+closeshort = short_exit or short_security1 or short_security2 or short_security3 or makelong
+
+if closeshort
+    shorts := 0
+
+///////////////////////////////////////////////////////////////////////////////////////
+///////////// The last section takes care of the alerts //////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////
+plotshape(closelong, style=shape.arrowdown)
+alertcondition(closelong, title="closelong", message="closelong")
+strategy.close("BuyLONG", when=closelong)
+
+plotshape(closeshort, style=shape.arrowup)
+alertcondition(closeshort, title="closeshort", message="closeshort")
+strategy.close("BuySHORT", when=closeshort)
+
+plotshape(makelong, style=shape.arrowup)
+alertcondition(makelong, title="openlong", message="openlong")
+strategy.entry("BuyLONG", strategy.long, oca_name="DBCross", oca_type=strategy.oca.cancel, when= makelong, comment="Open Long")
+
+plotshape(makeshort, style=shape.arrowdown)
+alertcondition(makeshort, title="openshort", message="openshort")
+strategy.entry("BuySHORT", strategy.short, oca_name="DBCross", oca_type=strategy.oca.cancel, when= makeshort, comment="Open Short")
+
+View in Pine Editor・382 lines
+Use on chart
+1
+6
+9
+4
+7 346
+Apr 16, 2019
+Dragon Script is a framework to make it as easy as possible to test your own strategies and set alerts for external execution bots.
+The script has many features build in, like:
+1) A ping/pong mechanism between longs and shorts
+2) A stop-loss
+3) Trailing Stops with several ways to calculate them.
+4) 2 different ways to flip from long to short.
+
+The script is divided into several parts.
+
+The first part of the script is used to set all the variables. You should normally never change the first part except for the comments at the top.
+The second part of the script is the part where you initialise all your indicators. Several indicators can be found on Tradingview and on other sites. Please keep in mind that all the variable names used in the indicator should be unique. (all the … = … parts)
+
+The third part of the script, is the most important part of the script. Here you can create the entry and exit points.
+Let’s look at the OPENLONG function to explain this part: The first variables are all the possible entries; These are longentry1 till longentry5. You can add many more if you like.
+The variables are all initialised as being false. This way the script can set a value to true if an entry happens.
+
+The if function is the actual logic: You could say “if this is true” then (the line below the if function) longentry1 := (becomes) true.
+In this case we have said: “if this is true” then (the line below the if function) longentry1 := (becomes) true when the current close is larger than the close that is 1 back.
+The last part is the makelong_funct. This part says that if any of the entries are true, the whole function is true.
+
+The last part of the script is the actual execution. Here the alerts are plotted and the back test strategies are opened and closed.
+
+We hope you guys like it and all feedback is welcome!
+Apr 17, 2019
+Release Notes
+Added more specific comments
+Apr 17, 2019
+Release Notes
+Fixed a small bug in the logic and some comments..
+Apr 23, 2019
+Release Notes
+The script now allows for pyramid orders and when flipping the order it closes the old one.
+Apr 23, 2019
+Release Notes
+Small update

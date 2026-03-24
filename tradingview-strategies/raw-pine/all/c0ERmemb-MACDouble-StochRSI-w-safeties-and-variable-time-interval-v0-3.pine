@@ -1,0 +1,134 @@
+//@version=2
+
+
+
+//This strategy is an ongoing work in progress. Last updated 8/6/16.
+//Feel free to modify it as you see fit, if you do borrow code then send me a link so I 
+//can see and maybe borrow some of your code to improve this.
+//Thanks to ChrisMoody who I stole the code for setting custom resolution from.
+//
+//more info in comments at end of script
+
+
+
+
+
+strategy("MACDouble & StochRSI w/ safeties v0.3", overlay=true)
+
+source = close
+useCurrentRes = input(true, title="Uncheck to use custom res./intrv. for 2nd MACD indicator")
+resCustom = input(title="Resolution/interval to use for 2nd MACD:", type=resolution, defval="45")
+res = useCurrentRes ? period : resCustom
+
+useCurrentRes2 = input(true, title="Uncheck to use custom res/intrv for StochRSI")
+resCustom2 = input(title="Resolution to use for StochRSI indicator:", type=resolution, defval="45")
+res2 = useCurrentRes2 ? period : resCustom2
+
+
+//MACD1
+fastLength = input(10, title="MACD fast length")
+slowlength = input(21, title="MACD slow length")
+sigLength = input(9, title="MACD signal length")
+
+MACD = ema(source, fastLength) - ema(source, slowlength)
+signal = sma(MACD, sigLength)
+delta = MACD - signal
+
+
+
+//MACD2
+fastLength2 = input(31, title= "2nd MACD fast length")
+slowlength2 = input(63, title= "2nd MACD slow length")
+sigLength2 = input(30, title= "2nd MACD signal length")
+
+MACD2 = ema(source, fastLength2) - ema(source, slowlength2)
+signal2 = sma(MACD2, sigLength2)
+delta2 = MACD2 - signal2
+
+MACDRes = security(tickerid, res, MACD2)
+signalRes = security(tickerid,res, signal2)
+deltaRes = security(tickerid, res, delta2)
+
+
+uptrend = (close + high)/(close[1] + high[2])
+downtrend = (close + low)/(close[1] + low[2])
+
+smoothK = input(3, minval=1)
+smoothD = input(3, minval=1)
+lengthRSI = input(11, minval=1)
+lengthStoch = input(11, minval=1)
+src = close
+
+rsi1 = rsi(src, lengthRSI)
+k = sma(stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+d = sma(k, smoothD)
+RSI_buyTrig = input(90)
+RSI_sellTrig = input(20)
+
+kRes = security(tickerid, res2, k)
+dRes = security(tickerid, res2, d)
+
+
+if (delta > 0) and (year>2012) and (deltaRes > 0) and (uptrend > 1) and (  kRes and dRes < RSI_buyTrig) and (kRes > dRes)
+    strategy.entry("buy", strategy.long, comment="buy")
+    
+
+if (delta < 0) and (year>2012) and (deltaRes < 0) and (downtrend < 1) and ( kRes and dRes > RSI_sellTrig) and (kRes < dRes)
+    strategy.entry("sell", strategy.short, comment="sell")
+    strategy.exit("sell", loss = 9000)
+
+
+
+//  RELEASE NOTES, ETC
+//
+// The core starting idea for this backtesting script came from the desire to have two traditional
+//MACD indicators: one 'fast' and one 'slow'. The slow one is to pretty much smooth out noisy signals
+//so that short term changes in price are ignored (ideally). 
+//    A brief version history
+//        v0.1 - Basic two MACD indicators script
+//      v0.2 - Added StochRSI indicator
+//      v0.21- Added primitive uptrend/downtrend safety condition 
+//      v0.22- Added changable time resolution for MACDslow
+//      v0.23- Added exit safeties conditional on loss threshold   
+//      v0.3 - Added changeable resolution for StochRSI
+//    Future changes planned for next release:
+//        -Fine tuning exit safeties
+//      -Major overhaul of trade logic/triggers (may be forked as a different script)
+//
+//I am more than happy to discuss any difficulties you are having, questions about the script, or improvement suggestions.
+//I am not a coder and my background is actually in economics, so feel free to debug ;)
+//Feel free to tip me on the indcluded bitcoin address on TV as well
+// tradingview.com/u/RyanMartin 
+// rjmarti2@millersville.edu
+
+View in Pine Editor・102 lines
+Use on chart
+3
+3
+8
+6
+9 951
+UPDATE:
+IMPORTANT!!! MAKE SURE "RECALCULATE AFTER ORDER FILLED" IS CHECKED. I will have it on by default in the future.
+
+This is a continuation of my previous scripts of two MACD indicators with a Stochastic RSI indicator.
+
+New features:
+- Alternate MACD time interval
+You can now set the time interval for the second MACD indicator to a different resolution than the displayed chart.
+Uncheck the box and select the desired interval. For example, if your chart is set to 15min then first MACD will be set at 15 min and you can select 5 min for the second MACD.
+
+- Alternate StoRSI time interval
+You can (and should) set the StochRSI to a different time interval as well. StochRSI hasn't worked great with previous versions. Now you can set it to a different time resolution as well. I strongly recommend you set it at a higher (slower) resolution; for example if your chart is set at 15min then you should test setting the StochRSI at 30 or 45min.
+
+- 'True" StochRSI logic
+Trading logic for StochRSI is now a true StochRSI, instead of just reading "k" and ignoring "d", K now has to be greater than D to buy and less than to sell.
+
+- Safeties
+A primitive but low risk safety in the form of an uptrend/downtrend price safety. If current close+high isn't greater than the previous close and high then the buy order will not be executed. The same applies for sell orders.
+
+- Cap on losses from short positions
+A stop loss safety set to 9000 for exiting sell positions. This will need refinement in the future but this puts a cap on losses from any sell position. At an initial currency of 10,000 this translates to 90.00. If it is giving you problems simply delete line 78 from the source code.
+
+
+Please feel free to ask any questions or send me suggestions. This is still very much a work in progress and I'll try to polish up the rough spots but it is fully functional. With a slower StochRSI and the safeties I have gotten it to consistently outperform the old 2x MACD strategy script---typically by 3-fold.

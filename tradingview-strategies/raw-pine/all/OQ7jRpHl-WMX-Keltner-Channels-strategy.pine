@@ -1,0 +1,41 @@
+//@version=3
+
+strategy(title = "WMX Keltner Channels strategy", shorttitle = "WMX Keltner Channels strategy", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0, commission_value = 0.075)
+
+useTrueRange = input(true)
+length = input(20, minval=5)
+mult = input(2.618, minval=0.1)
+mah =ema(ema( ema(high, length),length),length)
+mal =ema(ema( ema(low, length),length),length)
+range = useTrueRange ? tr : high - low
+rangema =ema(ema( ema(range, length),length),length)
+upper = mah + rangema * mult
+lower = mal - rangema * mult
+ma=(upper+lower)/2
+uc = red
+lc=green
+u = plot(upper, color=uc, title="Upper")
+basis=plot(ma, color=yellow, title="Basis")
+l = plot(lower, color=lc, title="Lower")
+fill(u, basis, color=uc, transp=95)
+fill(l, basis, color=lc, transp=95)
+
+
+strategy.entry("Long", strategy.long,  stop = upper, when = strategy.position_size <= 0 and close >upper)
+strategy.entry("Short", strategy.short,  stop = lower, when = strategy.position_size >= 0 and close<lower)
+if strategy.position_size > 0 
+    strategy.exit("Stop Long", "Long", stop = ma)
+
+if strategy.position_size < 0 
+    strategy.exit("Stop Short", "Short", stop = ma)
+
+View in Pine Editor・32 lines
+Use on chart
+1
+5
+7
+2
+3 928
+A simple Keltner Channels strategy
+
+For any suggestions about this strategy, please leave your comment below.

@@ -1,0 +1,72 @@
+//@version=3
+strategy("Simple Stock Strategy", overlay=true)
+
+//Simple Trading Strategy for Stocks//
+// by @ShanghaiCrypto //
+
+////SMA////
+fastLength = input(12)
+slowLength = input(26)
+baseLength = input(100)
+price = close
+
+mafast = sma(price, fastLength)
+maslow = sma(price, slowLength)
+mabase = sma(price, baseLength)
+
+///MACD////
+MACDLength = input(9)
+MACDfast = input(12)
+MACDslow = input(26)
+MACD = ema(close, MACDfast) - ema(close, MACDslow)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+////PUMP////
+OneCandleIncrease = input(6, title='Gain %')
+pump = OneCandleIncrease/100
+
+////Profit Capture and Stop Loss//////
+stop = input(2.0, title='Stop Loss %', type=float)/100
+profit = input(6.0, title='Profit %', type=float)/100
+stop_level = strategy.position_avg_price * (1 - stop)
+take_level = strategy.position_avg_price * (1 + profit)
+
+////Entries/////
+if crossover(mafast, maslow)
+    strategy.entry("Cross", strategy.long, comment="BUY")
+
+if (crossover(delta, 0))
+    strategy.entry("MACD", strategy.long, comment="BUY")
+    
+if close > (open + open*pump)
+    strategy.entry("Pump", strategy.long, comment="BUY")
+
+/////Exits/////
+strategy.exit("SELL","Cross", stop=stop_level, limit=take_level)
+strategy.exit("SELL","MACD", stop=stop_level, limit=take_level)
+strategy.exit("SELL","Pump", stop=stop_level, limit=take_level)
+
+////Plots////
+plot(mafast, color=green)
+plot(maslow, color=red)
+plot(mabase, color=yellow)
+plot(take_level, color=blue)
+plot(stop_level, color=orange)
+
+View in Pine Editor・55 lines
+Use on chart
+6
+7
+2 040
+This is a simple and easy to use strategy for low-volatility stocks. It prints a BUY or SELL signal to alert you that certain conditions have been met. I use it as a time saver to help identify which charts I need to look at. You can adjust the inputs and properties to suit your needs. I would suggest allowing two or three orders.
+
+BUY Signals
+MACD Above 0
+SMA Cross
+Big Green Candles
+
+SELL Signals
+Profit Target %
+Stop Loss %
+

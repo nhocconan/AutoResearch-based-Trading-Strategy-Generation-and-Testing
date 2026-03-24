@@ -1,0 +1,301 @@
+//@version=5
+strategy("3-Level DCA Buy Strategy", 
+         shorttitle="DCA Buy 3L", 
+         overlay=true, 
+         pyramiding=500)
+
+// Strategy Settings
+strategy_group = "Strategy Settings"
+peak_lookback = input.int(100, "Peak Detection Period", minval=20, maxval=300, group=strategy_group)
+drop1_percent = input.float(5.0, "Drop Level 1 (%)", minval=1.0, maxval=20.0, group=strategy_group)
+drop2_percent = input.float(10.0, "Drop Level 2 (%)", minval=1.0, maxval=30.0, group=strategy_group)
+drop3_percent = input.float(15.0, "Drop Level 3 (%)", minval=1.0, maxval=40.0, group=strategy_group)
+
+// Position Settings
+position_group = "Position Settings"
+position_size_1 = input.float(100.0, "Position Size Level 1 (USD)", minval=10.0, maxval=10000.0, group=position_group)
+position_size_2 = input.float(150.0, "Position Size Level 2 (USD)", minval=10.0, maxval=10000.0, group=position_group)
+position_size_3 = input.float(200.0, "Position Size Level 3 (USD)", minval=10.0, maxval=10000.0, group=position_group)
+
+// Multi-Timeframe Analysis
+mtf_group = "Multi-Timeframe"
+enable_mtf = input.bool(true, "Enable Multi-Timeframe Analysis", group=mtf_group)
+htf_timeframe = input.timeframe("1D", "Higher Timeframe", group=mtf_group)
+
+// Volume Filter
+volume_group = "Volume Filter"
+use_volume_filter = input.bool(false, "Enable Volume Filter", group=volume_group)
+volume_threshold = input.float(1.2, "Volume Threshold", minval=0.5, maxval=3.0, group=volume_group)
+
+// Visual Settings
+visual_group = "Visual Settings"
+show_levels = input.bool(true, "Show Drop Levels", group=visual_group)
+show_labels = input.bool(true, "Show Buy Labels", group=visual_group)
+
+// Alert Settings
+alert_group = "Alerts"
+enable_alerts = input.bool(true, "Enable Alerts", group=alert_group)
+
+// TEMPORARY SELL FOR PUBLISHING
+temp_group = "Temporary (For Publishing Only)"
+enable_temp_sell = input.bool(true, "Enable 1-Day Sell Cycle", group=temp_group, tooltip="Buy → Wait 1 day → Sell → Immediately rebuy. Only for TradingView publishing requirement.")
+
+// Volume analysis
+volume_sma = ta.sma(volume, 20)
+volume_ok = not use_volume_filter or volume > (volume_sma * volume_threshold)
+
+// Multi-timeframe analysis
+htf_close = request.security(syminfo.tickerid, htf_timeframe, close)
+htf_sma = request.security(syminfo.tickerid, htf_timeframe, ta.sma(close, 50))
+htf_trend_up = htf_close > htf_sma
+mtf_confirmation = not enable_mtf or htf_trend_up
+
+// State variables
+var float cycle_high = na
+var bool can_buy_level1 = false
+var bool can_buy_level2 = false
+var bool can_buy_level3 = false
+
+// Temporary sell tracking
+var int buy1_bar = na
+var int buy2_bar = na
+var int buy3_bar = na
+var float buy1_size = na
+var float buy2_size = na
+var float buy3_size = na
+
+// Find significant peaks
+is_peak = high == ta.highest(high, peak_lookback)
+peak_condition = is_peak and volume_ok and mtf_confirmation
+
+// Update cycle high and reset buy permissions
+if peak_condition and (na(cycle_high) or high > cycle_high)
+    cycle_high := high
+    can_buy_level1 := true
+    can_buy_level2 := true
+    can_buy_level3 := true
+
+// Calculate drop from cycle high
+drop_from_high = na(cycle_high) ? 0.0 : ((cycle_high - close) / cycle_high) * 100
+
+// Buy conditions
+buy_level1 = can_buy_level1 and drop_from_high >= drop1_percent and volume_ok and mtf_confirmation
+buy_level2 = can_buy_level2 and drop_from_high >= drop2_percent and volume_ok and mtf_confirmation
+buy_level3 = can_buy_level3 and drop_from_high >= drop3_percent and volume_ok and mtf_confirmation
+
+// Execute buy orders - TÜM str.tostring DÜZELTILDI
+if buy_level1
+    qty1 = position_size_1/close
+    strategy.entry("BUY_1", strategy.long, qty=qty1, comment="Alım %-" + str.tostring(drop1_percent))
+    can_buy_level1 := false
+    if enable_temp_sell
+        buy1_bar := bar_index
+        buy1_size := qty1
+    if enable_alerts
+        alert("BUY Level 1: $" + str.tostring(close, "#.##") + " Amount: $" + str.tostring(position_size_1), alert.freq_once_per_bar)
+
+if buy_level2
+    qty2 = position_size_2/close
+    strategy.entry("BUY_2", strategy.long, qty=qty2, comment="Alım %-" + str.tostring(drop2_percent))
+    can_buy_level2 := false
+    if enable_temp_sell
+        buy2_bar := bar_index
+        buy2_size := qty2
+    if enable_alerts
+        alert("BUY Level 2: $" + str.tostring(close, "#.##") + " Amount: $" + str.tostring(position_size_2), alert.freq_once_per_bar)
+
+if buy_level3
+    qty3 = position_size_3/close
+    strategy.entry("BUY_3", strategy.long, qty=qty3, comment="Alım %-" + str.tostring(drop3_percent))
+    can_buy_level3 := false
+    if enable_temp_sell
+        buy3_bar := bar_index
+        buy3_size := qty3
+    if enable_alerts
+        alert("BUY Level 3: $" + str.tostring(close, "#.##") + " Amount: $" + str.tostring(position_size_3), alert.freq_once_per_bar)
+
+// TEMPORARY SELL CYCLE (1 day after buy)
+if enable_temp_sell
+    // Sell after 1 day, then immediately rebuy
+    if not na(buy1_bar) and bar_index >= buy1_bar + 1
+        strategy.close("BUY_1", comment="TEMP_SELL_1")
+        strategy.entry("REBUY_1", strategy.long, qty=buy1_size, comment="REBUY_1")
+        buy1_bar := na
+        
+    if not na(buy2_bar) and bar_index >= buy2_bar + 1
+        strategy.close("BUY_2", comment="TEMP_SELL_2")
+        strategy.entry("REBUY_2", strategy.long, qty=buy2_size, comment="REBUY_2")
+        buy2_bar := na
+        
+    if not na(buy3_bar) and bar_index >= buy3_bar + 1
+        strategy.close("BUY_3", comment="TEMP_SELL_3")
+        strategy.entry("REBUY_3", strategy.long, qty=buy3_size, comment="REBUY_3")
+        buy3_bar := na
+
+// Calculate level prices
+level1_price = show_levels and not na(cycle_high) ? cycle_high * (1 - drop1_percent / 100) : na
+level2_price = show_levels and not na(cycle_high) ? cycle_high * (1 - drop2_percent / 100) : na
+level3_price = show_levels and not na(cycle_high) ? cycle_high * (1 - drop3_percent / 100) : na
+
+// Plot cycle high
+plot(cycle_high, "Cycle High", color=color.orange, linewidth=2, style=plot.style_circles)
+
+// Plot drop levels
+plot(level1_price, "Drop Level 1", color=color.green, linewidth=1)
+plot(level2_price, "Drop Level 2", color=color.blue, linewidth=1)
+plot(level3_price, "Drop Level 3", color=color.red, linewidth=1)
+
+// Plot HTF trend line
+plot(enable_mtf ? htf_sma : na, "Daily Trend", color=htf_trend_up ? color.green : color.red, linewidth=1, style=plot.style_line)
+
+// Buy signals
+plotshape(buy_level1, "Buy Level 1", shape.triangleup, location.belowbar, color.green, size=size.normal)
+plotshape(buy_level2, "Buy Level 2", shape.triangleup, location.belowbar, color.blue, size=size.normal)
+plotshape(buy_level3, "Buy Level 3", shape.triangleup, location.belowbar, color.red, size=size.large)
+
+// Peak signals
+plotshape(peak_condition, "New Peak", shape.diamond, location.abovebar, color.orange, size=size.normal)
+
+// Background for current drop level
+bgcolor_color = drop_from_high >= drop3_percent ? color.new(color.red, 90) : drop_from_high >= drop2_percent ? color.new(color.blue, 90) : drop_from_high >= drop1_percent ? color.new(color.green, 90) : na
+bgcolor(bgcolor_color, title="Drop Level Background")
+
+// Daily trend background
+htf_bgcolor = enable_mtf ? (htf_trend_up ? color.new(color.green, 97) : color.new(color.red, 97)) : na
+bgcolor(htf_bgcolor, title="Daily Trend Background")
+
+// Labels
+if show_labels
+    if buy_level1
+        temp_note = enable_temp_sell ? "\n(1D cycle)" : ""
+        label.new(bar_index, low, "BUY 1\n$" + str.tostring(position_size_1) + "\n@$" + str.tostring(close, "#.##") + temp_note, color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+    if buy_level2
+        temp_note = enable_temp_sell ? "\n(1D cycle)" : ""
+        label.new(bar_index, low, "BUY 2\n$" + str.tostring(position_size_2) + "\n@$" + str.tostring(close, "#.##") + temp_note, color=color.blue, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+    if buy_level3
+        temp_note = enable_temp_sell ? "\n(1D cycle)" : ""
+        label.new(bar_index, low, "BUY 3\n$" + str.tostring(position_size_3) + "\n@$" + str.tostring(close, "#.##") + temp_note, color=color.red, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+    if peak_condition
+        daily_status = enable_mtf ? (htf_trend_up ? " ↑D" : " ↓D") : ""
+        label.new(bar_index, high, "PEAK\n$" + str.tostring(high, "#.##") + daily_status, color=color.orange, style=label.style_label_down, textcolor=color.white, size=size.small)
+
+// Statistics table
+if barstate.islast
+    var table info_table = table.new(position.top_right, 2, 9, bgcolor=color.white, border_width=1)
+    
+    table.cell(info_table, 0, 0, "DCA STATUS", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    table.cell(info_table, 1, 0, "", text_color=color.white, bgcolor=color.blue)
+    
+    table.cell(info_table, 0, 1, "Temp Sell Mode:", text_color=color.black)
+    temp_status = enable_temp_sell ? "ACTIVE (1D)" : "DISABLED"
+    temp_color = enable_temp_sell ? color.orange : color.green
+    table.cell(info_table, 1, 1, temp_status, text_color=temp_color)
+    
+    table.cell(info_table, 0, 2, "Daily Timeframe:", text_color=color.black)
+    table.cell(info_table, 1, 2, htf_timeframe, text_color=color.blue)
+    
+    table.cell(info_table, 0, 3, "Daily Trend:", text_color=color.black)
+    daily_trend_text = enable_mtf ? (htf_trend_up ? "BULLISH ↑" : "BEARISH ↓") : "DISABLED"
+    daily_trend_color = enable_mtf ? (htf_trend_up ? color.green : color.red) : color.gray
+    table.cell(info_table, 1, 3, daily_trend_text, text_color=daily_trend_color)
+    
+    table.cell(info_table, 0, 4, "Cycle High:", text_color=color.black)
+    table.cell(info_table, 1, 4, "$" + str.tostring(cycle_high, "#.##"), text_color=color.blue)
+    
+    table.cell(info_table, 0, 5, "Current Drop:", text_color=color.black)
+    drop_color = drop_from_high > drop3_percent ? color.red : drop_from_high > drop2_percent ? color.blue : color.green
+    table.cell(info_table, 1, 5, str.tostring(drop_from_high, "#.##") + "%", text_color=drop_color)
+    
+    table.cell(info_table, 0, 6, "Next Buy:", text_color=color.black)
+    next_buy = can_buy_level1 ? "$" + str.tostring(position_size_1) : can_buy_level2 ? "$" + str.tostring(position_size_2) : can_buy_level3 ? "$" + str.tostring(position_size_3) : "All used"
+    table.cell(info_table, 1, 6, next_buy, text_color=color.purple)
+    
+    table.cell(info_table, 0, 7, "Total P&L:", text_color=color.black)
+    pnl_color = strategy.netprofit >= 0 ? color.green : color.red
+    table.cell(info_table, 1, 7, "$" + str.tostring(strategy.netprofit, "#.##"), text_color=pnl_color)
+    
+    table.cell(info_table, 0, 8, "Open Trades:", text_color=color.black)
+    table.cell(info_table, 1, 8, str.tostring(strategy.opentrades), text_color=color.navy)
+
+// Additional alerts
+if enable_alerts
+    if peak_condition
+        alert("NEW PEAK: $" + str.tostring(high, "#.##") + " | Levels Reset", alert.freq_once_per_bar)
+    
+    if drop_from_high > 20
+        alert("MAJOR DROP: " + str.tostring(drop_from_high, "#.##") + "% from peak", alert.freq_once_per_bar)
+    
+    if enable_mtf and not htf_trend_up
+        alert("DAILY TREND BEARISH: Daily trend turned down", alert.freq_once_per_bar_close)
+
+View in Pine Editor・232 lines
+Use on chart
+4
+4
+1
+1 092
+🎯 3-Level DCA Buy Strategy - Smart Dollar Cost Averaging
+
+Professional DCA strategy that systematically accumulates positions during market dips. Enhanced with daily trend analysis for intelligent accumulation.
+
+🚀 Key Features
+- 3-Level Buying System: Automatic purchases at 5%, 10%, 15% drops from cycle highs
+- Daily Trend Analysis: 1-day timeframe trend confirmation
+- Smart Peak Detection: 100-period lookback for meaningful peaks
+- Volume Filter: Optional volume confirmation system
+- USD-Based Positions: Fixed dollar amounts per level
+- Never Sells: Pure accumulation philosophy (buy-only)
+
+📊 How It Works
+1. Peak Identification: Detects highest price in last 100 periods
+2. Daily Trend Check: Confirms price above 50 SMA on 1D timeframe
+3. Drop Tracking: Calculates percentage drops from cycle high
+4. Systematic Buying: Executes predetermined amounts at each level
+5. Cycle Reset: Renews buy permissions when new peaks form
+
+⚙️ Default Settings
+- Buy Levels: 5%, 10%, 15% drops
+- Position Sizes: $100, $150, $200
+- Peak Period: 100 bars
+- Higher Timeframe: 1 Day (1D)
+- Pyramiding: 500 order capacity
+
+🎨 Visual Elements
+- Orange Circles: Mark cycle highs
+- Colored Lines: Green/Blue/Red buy levels
+- Triangle Signals: Buy point indicators
+- Live Panel: Real-time statistics
+- Background Colors: Trend and drop level indicators
+
+🔔 Alert System
+- Instant notifications for each buy level
+- New peak detection alerts
+- Major drop warnings (>20%)
+- Daily trend change notifications
+
+💡 Ideal Use Cases
+- Crypto Accumulation: Bitcoin, Ethereum and major altcoins
+- Stock DCA: Long-term portfolio building
+- Volatile Markets: Capitalizing on price fluctuations
+- Emotional Trading Prevention: Automated and disciplined buying
+
+📈 Strategy Logic
+This strategy follows the "buy the dip" philosophy. It waits during market rises and systematically builds positions during declines. Only buys when daily trend is bullish, providing protection during major bear markets.
+
+⚠️ Important Notes
+- Buy-only strategy - never sells positions
+- Requires sufficient capital for multiple entries
+- Most effective in trending and volatile markets
+- Always backtest before live trading
+- Risk management is your responsibility
+
+🛠️ Customization Options
+All parameters are fully customizable: drop percentages, position amounts, timeframes, visual elements and more. Suitable for both beginner and experienced investors.
+
+🎯 Publishing Feature
+Note: Strategy includes temporary 1-day sell cycle for TradingView publishing requirements. This feature can be disabled for normal DCA mode operation.
+
+⭐ If you find this strategy helpful, please like and follow! Visit the profile for more trading tools.

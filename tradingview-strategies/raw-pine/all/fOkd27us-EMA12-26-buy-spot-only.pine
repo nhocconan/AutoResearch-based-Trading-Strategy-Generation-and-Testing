@@ -1,0 +1,16 @@
+//@version=5
+strategy("EMA12/26 buy spot only", overlay=true)
+
+longCondition = ta.crossover(ta.ema(close, 12), ta.ema(close, 26))
+if (longCondition)
+    strategy.entry("buy", strategy.long)
+
+if ta.crossunder(ta.ema(close, 12), ta.ema(close, 26))
+    strategy.close("buy")
+
+View in Pine Editor・12 lines
+Use on chart
+5
+5
+2 498
+Inspire by CDC action zone, all thanks should be given to AJ piranya33

@@ -1,0 +1,285 @@
+//@version=5
+strategy("Candle Breakout Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+targetHour = input.int(13, "Target Hour (UTC)", minval=0, maxval=23, tooltip="The hour when the breakout range candle will be identified")
+targetMinute = input.int(0, "Target Minute", minval=0, maxval=59, tooltip="The minute when the breakout range candle will be identified")
+riskRewardRatio = input.float(1.0, "Risk:Reward Ratio", minval=0.5, maxval=10, step=0.5, tooltip="The reward multiplier for take profit calculation (e.g., 1, 2, or 3)")
+enableAlerts = input.bool(true, "Enable Alerts", tooltip="Enable entry signal alerts")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TIME DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+currentHour = hour(time, "UTC")
+currentMinute = minute(time, "UTC")
+previousHour = hour(time[1], "UTC")
+previousMinute = minute(time[1], "UTC")
+
+// Detect first candle at target time
+isFirstCandle = currentHour == targetHour and currentMinute == targetMinute and (previousHour != targetHour or previousMinute != targetMinute)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RANGE VARIABLES
+// ══════════════════════════════════════════════════════════════════════════════
+showLastBoxOnly = true
+var float boxHigh = na
+var float boxLow = na
+var bool waitingForBreakout = false
+var int boxBarIndex = na
+var box currentBox = na
+var line currentLineHigh = na
+var line currentLineLow = na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BREAKOUT RANGE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if isFirstCandle
+    boxHigh := high
+    boxLow := low
+    waitingForBreakout := true
+    boxBarIndex := bar_index
+    
+    // Delete previous box if needed
+    if showLastBoxOnly
+        if not na(currentBox)
+            box.delete(currentBox)
+        if not na(currentLineHigh)
+            line.delete(currentLineHigh)
+        if not na(currentLineLow)
+            line.delete(currentLineLow)
+    
+    // Draw new range box
+    currentBox := box.new(boxBarIndex, boxHigh, bar_index + 1, boxLow, 
+                         border_color=color.blue, 
+                         bgcolor=color.new(color.blue, 90),
+                         border_width=2,
+                         extend=extend.right)
+    
+    // Draw range levels
+    currentLineHigh := line.new(boxBarIndex, boxHigh, bar_index + 1, boxHigh, color=color.blue, width=1, extend=extend.right, style=line.style_dashed)
+    currentLineLow := line.new(boxBarIndex, boxLow, bar_index + 1, boxLow, color=color.blue, width=1, extend=extend.right, style=line.style_dashed)
+
+// Update current box extension
+if waitingForBreakout and not na(currentBox)
+    box.set_right(currentBox, bar_index + 1)
+    if not na(currentLineHigh)
+        line.set_x2(currentLineHigh, bar_index + 1)
+    if not na(currentLineLow)
+        line.set_x2(currentLineLow, bar_index + 1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+longCondition = waitingForBreakout and not na(boxHigh) and close > boxHigh and strategy.position_size == 0
+shortCondition = waitingForBreakout and not na(boxLow) and close < boxLow and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LONG ENTRY LOGIC
+// ══════════════════════════════════════════════════════════════════════════════
+
+if longCondition
+    stopLoss = boxLow
+    risk = close - stopLoss
+    takeProfit = close + (risk * riskRewardRatio)
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", "Long", stop=stopLoss, limit=takeProfit)
+    
+    waitingForBreakout := false
+    
+    // Long alert
+    if enableAlerts
+        alert("🟢 LONG SIGNAL\nEntry Price: " + str.tostring(close, "#.##") + "\nStop Loss: " + str.tostring(stopLoss, "#.##") + "\nTake Profit: " + str.tostring(takeProfit, "#.##"), alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SHORT ENTRY LOGIC
+// ══════════════════════════════════════════════════════════════════════════════
+
+if shortCondition
+    stopLoss = boxHigh
+    risk = stopLoss - close
+    takeProfit = close - (risk * riskRewardRatio)
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", "Short", stop=stopLoss, limit=takeProfit)
+    
+    waitingForBreakout := false
+    
+    // Short alert
+    if enableAlerts
+        alert("🔴 SHORT SIGNAL\nEntry Price: " + str.tostring(close, "#.##") + "\nStop Loss: " + str.tostring(stopLoss, "#.##") + "\nTake Profit: " + str.tostring(takeProfit, "#.##"), alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUAL SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), text="BUY", textcolor=color.white, size=size.small)
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), text="SELL", textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFORMATION TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Target Time", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(infoTable, 1, 0, str.format("{0,number,00}:{1,number,00} UTC", targetHour, targetMinute), bgcolor=color.new(color.gray, 80), text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Active Range", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(infoTable, 1, 1, waitingForBreakout ? "Yes" : "No", bgcolor=color.new(color.gray, 80), text_color=color.white)
+    
+    table.cell(infoTable, 0, 2, "Range High", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(infoTable, 1, 2, not na(boxHigh) ? str.tostring(boxHigh, "#.##") : "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "Range Low", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(infoTable, 1, 3, not na(boxLow) ? str.tostring(boxLow, "#.##") : "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white)
+    
+    table.cell(infoTable, 0, 4, "Risk:Reward", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(infoTable, 1, 4, "1:" + str.tostring(riskRewardRatio), bgcolor=color.new(color.gray, 80), text_color=color.white)
+
+View in Pine Editor・144 lines
+Use on chart
+3
+4
+3
+3 912
+Short description (one-liner)
+
+Candle Breakout Strategy — identifies a user-specified candle (UTC time), draws its high/low range, then enters on breakouts with configurable stop-loss, take-profit (via Risk:Reward) and optional alerts.
+
+Full description (ready-to-paste)
+
+Candle Breakout Strategy
+Version 1.0 — Strategy script (Pine v5)
+
+Overview
+
+The Candle Breakout Strategy automatically captures a single "range candle" at a user-specified UTC time, draws its high/low as a visible box and dashed level lines, and waits for a breakout. When price closes above the range high it enters a Long; when price closes below the range low it enters a Short. Stop-loss is placed at the opposite range boundary and take-profit is calculated with a user-configurable Risk:Reward multiplier. Alerts for entries can be enabled.
+
+This strategy is intended for breakout style trading where a clearly defined intraday range is established at a fixed time. It is simple, transparent and easy to adapt to multiple symbols and timeframes.
+
+How it works (step-by-step)
+
+On every bar the script checks the current UTC time.
+
+When the first bar that matches the configured Target Hour:Target Minute (UTC) appears, the script records that candle’s high and low. This defines the breakout range.
+
+A box and dashed lines are drawn on the chart to display the range and extended to the right while the range is active.
+
+The script then waits for price to close outside the box:
+
+Close > Range High → Long entry
+
+Close < Range Low → Short entry
+
+When an entry triggers:
+
+Stop-loss = opposite range boundary (range low for longs, range high for shorts).
+
+Take-profit = entry ± (risk × Risk:Reward). Risk is computed as the distance between entry price and stop-loss.
+
+After entry the range becomes inactive (waitingForBreakout = false) until the next configured target time.
+
+Inputs / Parameters
+
+Target Hour (UTC) — the hour (0–23) in UTC when the range candle is detected.
+
+Target Minute — minute (0–59) of the target candle.
+
+Risk:Reward Ratio — multiplier for computing take profit from risk (0.5–10). Example: 2 means TP = entry + 2×risk.
+
+Enable Alerts — turn on/off entry alerts (string message sent once per bar when an entry occurs).
+
+Show Last Box Only (internal behavior) — when enabled the previous box is deleted at the next range creation so only the most recent range is visible (default behavior in the script).
+
+Visuals & On-chart Info
+
+A semi-transparent blue box shows the recorded range and extends to the right while active.
+
+Dashed horizontal lines mark the range high and low.
+
+On-chart shapes: green triangle below bar for Long signals, red triangle above bar for Short signals.
+
+An information table (top-right) displays:
+
+Target Time (UTC)
+
+Active Range (Yes / No)
+
+Range High
+
+Range Low
+
+Risk:Reward
+
+Alerts
+
+If Enable Alerts is on, the script sends an alert with the following formats when an entry occurs:
+
+Long alert:
+
+🟢 LONG SIGNAL
+Entry Price: <price>
+Stop Loss: <price>
+Take Profit: <price>
+
+
+Short alert:
+
+🔴 SHORT SIGNAL
+Entry Price: <price>
+Stop Loss: <price>
+Take Profit: <price>
+
+
+Use TradingView's alert dialog to create alerts based on the script — select the script’s alert condition or use the alert() messages.
+
+Recommended usage & tips
+
+Timeframe: This strategy works on any timeframe but the definition of "candle at target time" depends on the chart timeframe. For intraday breakout styles, use 1m — 60m charts depending on the session you want to capture.
+
+Target Time: Choose a time that is meaningful for the instrument (e.g., market open, economic release, session overlap). All times are handled in UTC.
+
+Position Sizing: The script’s example uses strategy.percent_of_equity with 100% default — change default_qty_value or strategy settings to suit your risk management.
+
+Filtering: Consider combining this breakout with trend filters (EMA, ADX, etc.) to reduce false breakouts.
+
+Backtesting: Always backtest over a sufficiently large and recent sample. Pay attention to slippage and commission settings in TradingView’s strategy tester.
+
+Known behavior & limitations
+
+The script registers the breakout on close outside the recorded range. If you prefer intrabar breakout rules (e.g., high/low breach without close), you must adjust the condition accordingly.
+
+The recorded range is taken from a single candle at the exact configured UTC time. If there are missing bars or the chart timeframe doesn't align, the intended candle may differ — choose the target time and chart timeframe consistently.
+
+Only a single active position is allowed at a time (the script checks strategy.position_size == 0 before entries).
+
+Example setups
+
+EURUSD (Forex): Target Time 07:00 UTC — captures London open range.
+
+Nifty / Index: Target Time 09:15 UTC — captures local session open range.
+
+Crypto: Target Time 00:00 UTC — captures daily reset candle for breakout.
+
+Risk disclaimer
+
+This script is educational and provided as-is. Past performance is not indicative of future results. Use proper risk management, test on historical data, and consider slippage and commissions. Do not trade real capital without sufficient testing.
+
+Change log
+
+v1.0 — Initial release: range capture, box and level drawing, long/short entry by close breakout, SL at opposite boundary, TP via Risk:Reward, alerts, info table.
+
+If you want, I can also:
+
+Provide a short README version (2–3 lines) for the TradingView “Short description” field.
+
+Add a couple of suggested alert templates for the TradingView alert dialog (if you want alerts that include variable placeholders).
+
+Convert the disclaimer into multiple language versions.

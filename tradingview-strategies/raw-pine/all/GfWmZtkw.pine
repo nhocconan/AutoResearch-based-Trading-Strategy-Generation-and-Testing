@@ -1,0 +1,72 @@
+//@version=5
+strategy("I11L Bollinger Bot",overlay=true, initial_capital=1000000,default_qty_value=1000000,default_qty_type=strategy.cash,commission_type=strategy.commission.percent,commission_value=0.00)
+
+mode = input.string(title="Which mode to Trade with?",defval="Outbreak",options=["Outbreak","Reversal"])
+invertBuyLogic = mode == "Outbreak" ? true : false
+
+leverage = input.float(1,"Leverage (x)",step=1)
+SL_Factor = 1 - input.float(1, "SL unlevered (%)", step=0.025) / 100
+TP_Factor = 1 + input.float(2.175, "TP unlevered (%)", step=0.025) / 100
+lookbackDistance = input.int(25)
+devMult = input.float(2,step=0.05)
+timeoutAfterTrade = input.int(6)
+
+var lastSellHour = 0
+var disableAdditionalBuysThisDay = false
+
+
+if(time > lastSellHour + 1000 * 60 * 60 * timeoutAfterTrade)
+    disableAdditionalBuysThisDay := false
+if(strategy.position_size != strategy.position_size[1])
+    disableAdditionalBuysThisDay := true
+    lastSellHour := time
+ 
+source = close
+
+//Trade Logic
+basis = ta.sma(source, lookbackDistance)
+dev = devMult * ta.stdev(source, lookbackDistance)
+upper = basis + dev
+lower = basis - dev
+isBuy = ta.crossover(source, lower)
+isBuyInverted = ta.crossunder(source, upper)
+
+plot(upper, color=invertBuyLogic ? color.green : color.gray)
+plot(lower, color=invertBuyLogic ? color.gray : color.green)
+
+
+if((invertBuyLogic ? isBuyInverted : isBuy) and not(disableAdditionalBuysThisDay))
+    strategy.entry("Long", strategy.long, (strategy.initial_capital / close) * leverage)
+
+if(strategy.position_size > 0)
+    strategy.exit("Exit", "Long", stop=strategy.position_avg_price * SL_Factor,limit=strategy.position_avg_price * TP_Factor)
+    //strategy.close("Long",  when=close > strategy.position_avg_price * TP_Factor, comment="TP Long")
+
+View in Pine Editor・43 lines
+Use on chart
+1
+0
+0
+1
+4 133
+Mar 27, 2022
+The System makes use of the Bolinger Bands strategy from TradingView and implements simple Money Management Rules like SL and TP.
+
+You can adjust the following Parameters:
+Leverage: Leverage.
+Risk Capital per Trade: The amount you are willing to lose per Trade, keep in mind that changes in Leverage should follow changes in Risk Capital.
+TP_Factor: Default is 2:1 Risk:Reward, you might want to adjust this according to the underlying market.
+InvertBuyLogic: Inverts the Logic of the System, important for checking if you have a true performance advantage from using the System. I look for a flat looking Curve in the wrong mode.
+LookbackDistance: The distance your standart Deviation is refering to. A Lookback Distance too big might result in very few signals.
+DevMult: We only want outliers, so we multiply our standart Deviation Bands by a Factor.
+Mar 27, 2022
+Release Notes
+Implemented the TP properly.
+made it clearer what the "Invert Logic" means.
+Enhanced the system communication with color coding in the upper and lower Bollinger band.
+Adjusted the TP slightly upwards.
+
+Its now possible to adjust the forced Trading halt after a trade has been resvoled.
+Mar 27, 2022
+Release Notes
+Fixed a wrong default Parameter Setting (whoops)

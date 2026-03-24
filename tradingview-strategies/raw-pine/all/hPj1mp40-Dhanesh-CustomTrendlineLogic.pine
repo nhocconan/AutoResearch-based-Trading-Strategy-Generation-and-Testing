@@ -1,0 +1,1588 @@
+//@version=5
+strategy(title='CustomTrendlineLogic', shorttitle='CustomTrendlineLogic', format=format.price, precision=4, overlay=true,max_bars_back=2000)
+ 
+string timezoneInput = input.string("Asia/Kolkata", "Time zone")
+// y1 = input.int(title='Enter Top year 1', defval=2025, confirm=false)
+// y2 = input.int(title='Enter Top year 2', defval=2025, confirm=false)
+// y3 = input.int(title='Enter Bottom year 1', defval=2025, confirm=false)
+// y4 = input.int(title='Enter Bottom year 2', defval=2025, confirm=false)
+
+// m1 = input.int(title='Enter Top month 1', defval=2, confirm=false)
+// m2 = input.int(title='Enter Top month 2', defval=2, confirm=false)
+// m3 = input.int(title='Enter Bottom month 1', defval=2, confirm=false)
+// m4 = input.int(title='Enter Bottom month 2', defval=3, confirm=false)
+
+// d1 = input.int(title='Enter Top day 1', defval=26, confirm=false)
+// d2 = input.int(title='Enter Top day 2', defval=27, confirm=false)
+// d3 = input.int(title='Enter Bottom day 1', defval=28, confirm=false)
+// d4 = input.int(title='Enter Bottom day 2', defval=1, confirm=false)
+
+// h1 = input.int(title='Enter Top hour 1', defval=16, confirm=false)
+// min1 = input.int(title='Enter Top minute 1', defval=30, confirm=false)
+// price1 = input.float(title='Enter Top Price 1', defval=0.0, confirm=false)
+
+// h2 = input.int(title='Enter Top hour 2', defval=17, confirm=false)
+// min2 = input.int(title='Enter Top minute 2', defval=00, confirm=false)
+// price2 = input.float(title='Enter Top Price 2', defval=0.0, confirm=false)
+
+// h3 = input.int(title='Enter Bottom hour 1', defval=2, confirm=false)
+// min3 = input.int(title='Enter Bottom minute 1', defval=0, confirm=false)
+// price3 = input.float(title='Enter Bottom Price 1', defval=0.0, confirm=false)
+
+// h4 = input.int(title='Enter Bottom hour 2', defval=6, confirm=false)
+// min4 = input.int(title='Enter Bottom minute 2', defval=30, confirm=false)
+// price4 = input.float(title='Enter Bottom Price 2', defval=0.0, confirm=false)
+
+y1 = input.int(title='************* Enter Top year 1', defval=2025, confirm=false)
+m1 = input.int(title='Enter Top month 1', defval=9, confirm=false)
+d1 = input.int(title='Enter Top day 1', defval=26, confirm=false)
+h1 = input.int(title='Enter Top hour 1', defval=16, confirm=false)
+min1 = input.int(title='Enter Top minute 1', defval=30, confirm=false)
+price1 = input.float(title='Enter Top Price 1', defval=100000.0, confirm=false)
+
+
+y2 = input.int(title='************* Enter Top year 2', defval=2025, confirm=false)
+m2 = input.int(title='Enter Top month 2', defval=9, confirm=false)
+d2 = input.int(title='Enter Top day 2', defval=27, confirm=false)
+h2 = input.int(title='Enter Top hour 2', defval=17, confirm=false)
+min2 = input.int(title='Enter Top minute 2', defval=00, confirm=false)
+price2 = input.float(title='Enter Top Price 2', defval=100000.0, confirm=false)
+
+
+y3 = input.int(title='************* Enter Bottom year 1', defval=2025, confirm=false)
+m3 = input.int(title='Enter Bottom month 1', defval=9, confirm=false)
+d3 = input.int(title='Enter Bottom day 1', defval=28, confirm=false)
+h3 = input.int(title='Enter Bottom hour 1', defval=2, confirm=false)
+min3 = input.int(title='Enter Bottom minute 1', defval=0, confirm=false)
+price3 = input.float(title='Enter Bottom Price 1', defval=100000.0, confirm=false)
+
+y4 = input.int(title='************* Enter Bottom year 2', defval=2025, confirm=false)
+m4 = input.int(title='Enter Bottom month 2', defval=9, confirm=false)
+d4 = input.int(title='Enter Bottom day 2', defval=1, confirm=false)
+h4 = input.int(title='Enter Bottom hour 2', defval=6, confirm=false)
+min4 = input.int(title='Enter Bottom minute 2', defval=30, confirm=false)
+price4 = input.float(title='Enter Bottom Price 2', defval=100000.0, confirm=false)
+
+price5 = input.float(title='Custom Price: Enter Bottom Price 5', defval=0.0, confirm=false)
+price6 = input.float(title='Custom Price: Enter Bottom Price 6', defval=0.0, confirm=false)
+
+
+int unixTimestampIn1 = timestamp(timezone=timezoneInput, year = y1, month = m1, day = d1, hour = h1, minute = min1, second = 0) //top1
+int unixTimestampIn2 = timestamp(timezone=timezoneInput,  year = y2, month = m2, day = d2, hour = h2, minute = min2, second = 0) //top2
+int unixTimestampIn3 = timestamp(timezone=timezoneInput,  year = y3, month = m3, day = d3, hour = h3, minute = min3, second = 0) //bottom1
+int unixTimestampIn4 = timestamp(timezone=timezoneInput,  year = y4, month = m4, day = d4, hour = h4, minute = min4, second = 0) //bottom2
+
+
+//SLOPE of line 
+MAPeriod=input.int(title='************* Slope MA Period', defval=50, confirm=false)
+SlopePeriod=input.int(title='************* Slope Period', defval=50, confirm=false)
+sma50=ta.sma(close,MAPeriod)
+slope50=( sma50 - sma50[SlopePeriod]) / SlopePeriod
+plot(sma50, "Sma 50", color=color.yellow, linewidth=2)
+slope50Deried=sma50+3 * slope50
+plot(slope50Deried, "Slope Sma 50", color=color.rgb(42, 216, 19), linewidth=2)
+
+//BELOW CODE IS NEEDD for not to delete below section
+alertSymbol = input.string(confirm=false, defval = "BTCUSD", title="Enter Symbol Name")
+mhh = input.int(title='Mkt Start Hours', defval=9, confirm=false)
+mhm = input.int(title='Mkt Start Min', defval=15, confirm=false)
+mhhA = input.int(title='Mkt Start Hours Actual', defval=9, confirm=false)
+mhmA = input.int(title='Mkt Start Min Actual', defval=18, confirm=false)
+
+mhhc = input.int(title='Mkt Close Hours', defval=14, confirm=false)
+mhmc = input.int(title='Mkt Close Min', defval=45, confirm=false)
+period=timeframe.period
+isSquaredOffInt=0
+debugMsg=''
+// isAlreadyBuyBefore1=strategy.position_size > 0
+// isAlreadySellBefore1=strategy.position_size < 0
+
+isAlreadyBuyBefore1=false
+if na(isAlreadyBuyBefore1[1])
+    isAlreadyBuyBefore1:=false
+else
+    isAlreadyBuyBefore1:=isAlreadyBuyBefore1[1]
+
+isAlreadySellBefore1=false
+if na(isAlreadySellBefore1[1])
+    isAlreadySellBefore1:=false
+else
+    isAlreadySellBefore1:=isAlreadySellBefore1[1]
+
+isStartDay= (hour(time) == mhh and minute(time) == mhm) // or (hour(time) == mhh and minute(time) == mhm+( int(str.tonumber(period)))) 
+isEndDay=(hour(time) == mhhc and minute(time) >= mhmc) or (hour(time) > mhhc)
+onlyIntradayTrades = input.bool(title='Take only Intraday Trades?', defval=false, confirm=false)
+if onlyIntradayTrades == false
+    isEndDay:=false
+    isStartDay:=false
+
+
+glob_pl=0.0
+if na(glob_pl[1])
+    glob_pl:=0.0
+else
+    glob_pl:=glob_pl[1]
+
+mypl=0.0
+if na(mypl[1])
+    mypl:=0.0
+else
+    mypl:=mypl[1]
+
+totalPL=0.0
+if na(totalPL[1])
+    totalPL:=0.0
+else
+    totalPL:=totalPL[1]
+closepl= request.security((syminfo.tickerid), timeframe.period, close)
+tradeInB=0.00
+if na(tradeInB[1])
+    tradeInB:=0.0
+else
+    tradeInB:=tradeInB[1]
+tradeInS=0.0
+if na(tradeInS[1])
+    tradeInS:=0.0
+else
+    tradeInS:=tradeInS[1]
+ppl=0.0
+brokerage_pl=20.0
+target = input.int(title='Target', defval=300000, confirm=false)
+isToConsider=false
+
+
+isB=false
+if na(isB[1])
+    isB:=false
+else
+    isB:=isB[1]
+
+isS=false
+if na(isS[1])
+    isS:=false
+else
+    isS:=isS[1]
+
+sl=0.0
+if na(sl[1])
+    sl:=0.0
+else
+    sl:=sl[1]
+
+sl1=0.0
+if na(sl1[1])
+    sl1:=0.0
+else
+    sl1:=sl1[1]
+
+tradeNumIntraday=0
+if na(tradeNumIntraday[1])
+    tradeNumIntraday:=0
+else
+    tradeNumIntraday:=tradeNumIntraday[1]
+
+canHi=0.0
+if na(canHi[1])
+    canHi:=0.0
+else
+    canHi:=canHi[1]
+
+canLow=0.0
+if na(canLow[1])
+    canLow:=0.0
+else
+    canLow:=canLow[1]
+
+prevSquareoffInt=0
+if na(prevSquareoffInt[1])
+    prevSquareoffInt:=0
+else
+    prevSquareoffInt:=prevSquareoffInt[1]
+
+hh=0.0
+if na(hh[1])
+    hh:=0.0
+else
+    hh:=hh[1]
+ll=0.0
+if na(ll[1])
+    ll:=0.0
+else
+    ll:=ll[1]  
+tempHH=0.0
+if na(tempHH[1])
+    tempHH:=0.0
+else
+    tempHH:=tempHH[1]
+tempLL=0.0
+if na(tempLL[1])
+    tempLL:=0.0
+else
+    tempLL:=tempLL[1]
+
+tempHH1=0.0
+if na(tempHH1[1])
+    tempHH1:=0.0
+else
+    tempHH1:=tempHH1[1]
+tempLL1=0.0
+if na(tempLL1[1])
+    tempLL1:=0.0
+else
+    tempLL1:=tempLL1[1]
+
+isUpStarted=false
+if na(isUpStarted[1])
+    isUpStarted:=false
+else
+    isUpStarted:=isUpStarted[1]
+
+isDownStarted=false
+if na(isDownStarted[1])
+    isDownStarted:=false
+else
+    isDownStarted:=isDownStarted[1]
+
+isDayStarted=false
+if na(isDayStarted[1])
+    isDayStarted:=false
+else
+    isDayStarted:=isDayStarted[1]
+
+isToStart=false
+if na(isToStart[1])
+    isToStart:=false
+else
+    isToStart:=isToStart[1]
+
+is1=false
+if na(is1[1])
+    is1:=false
+else
+    is1:=is1[1]
+is2=false
+if na(is2[1])
+    is2:=false
+else
+    is2:=is2[1]
+
+is3=false
+if na(is3[1])
+    is3:=false 
+else
+    is3:=is3[1]
+is4=false
+if na(is4[1])
+    is4:=false
+else
+    is4:=is4[1]
+is5=false
+if na(is5[1])
+    is5:=false
+else
+    is5:=is5[1]
+
+cnt1=0
+if na(cnt1[1])
+    cnt1:=0
+else
+    cnt1:=cnt1[1]
+cnt2=0
+if na(cnt2[1])
+    cnt2:=0
+else
+    cnt2:=cnt2[1]
+cnt3=0
+if na(cnt3[1])
+    cnt3:=0
+else
+    cnt3:=cnt3[1]
+
+currLookingForBuy=''
+if na(currLookingForBuy[1])
+    currLookingForBuy:=''
+else
+    currLookingForBuy:=currLookingForBuy[1]
+nextSLOfPrevSell=''
+if na(nextSLOfPrevSell[1])
+    nextSLOfPrevSell:=''
+else
+    nextSLOfPrevSell:=nextSLOfPrevSell[1]
+currLookingForSell=''
+if na(currLookingForSell[1])
+    currLookingForSell:=''
+else
+    currLookingForSell:=currLookingForSell[1]
+nextSLOfPrevBuy=''
+if na(nextSLOfPrevBuy[1])
+    nextSLOfPrevBuy:=''
+else
+    nextSLOfPrevBuy:=nextSLOfPrevBuy[1]
+
+tmp1=0
+if na(tmp1[1])
+    tmp1:=0
+else
+    tmp1:=tmp1[1]
+tmp2=0
+if na(tmp2[1])
+    tmp2:=0
+else
+    tmp2:=tmp2[1]
+tmp3=0
+if na(tmp3[1])
+    tmp3:=0
+else
+    tmp3:=tmp3[1]
+
+gapup=0.0
+if na(gapup[1])
+    gapup:=0.0
+else
+    gapup:=gapup[1]
+prevDayClose=0.0
+if na(prevDayClose[1])
+    prevDayClose:=0.0
+else
+    prevDayClose:=prevDayClose[1]
+finalPL=0.0
+if na(finalPL[1])
+    finalPL:=0.0
+else
+    finalPL:=finalPL[1]
+
+newDay = ta.change(dayofweek)
+ndDone=false
+if na(ndDone[1])
+    ndDone:=false
+else
+    ndDone:=ndDone[1]
+// Get the high and low of the first candle of the day
+if newDay
+    isStartDay:= true
+    is2:=false
+    ndDone:=true
+    if onlyIntradayTrades
+        sl1:=0
+        isAlreadySellBefore1:=false
+        isAlreadyBuyBefore1:=false
+        //label.new(bar_index, na, "START dhgf fgh fg hfgh", yloc = yloc.abovebar, style = label.style_none, textcolor = color.rgb(172, 240, 13), size = size.large)
+        glob_pl:=0.0
+    //strategy.exit(id="End: Daily Profit: "+str.tostring( int (glob_pl) )+" Total Profit: "+str.tostring( int (totalPL) ) , stop=close)
+    
+isFirstCandleDone = (hour(time) == mhh and minute(time) == (mhm + timeframe.multiplier))
+isActStart=(hour(time) == mhhA and minute(time) == mhmA)
+openpl= request.security((syminfo.tickerid), timeframe.period, open)
+
+if isStartDay
+    prevDayClose:=closepl[1]
+    gapup:=high - prevDayClose
+    tmp1:=0
+    tmp2:=0
+
+if onlyIntradayTrades == true
+    if isActStart
+        canHi:=high[1]
+        canLow:=low[1]
+    if isStartDay
+        currLookingForBuy:=''
+        nextSLOfPrevSell:=''
+        currLookingForSell:=''
+        nextSLOfPrevBuy:=''
+        glob_pl:=0
+        tradeInB:=0
+        tradeInS:=0
+        tradeNumIntraday:=0
+        isDayStarted:=true
+        isToStart:=false
+        //isHighLowBroken:=false
+        //is1:=false
+        // is2:=false
+        // is3:=false
+        is4:=false
+        is5:=false
+        cnt1:=0
+        cnt2:=0
+        // cnt3:=0
+        isUpStarted:=false
+        isDownStarted:=false
+    if isEndDay
+        isDayStarted:=false
+        canHi:=0.0
+        canLow:=0.0
+        //isHighLowBroken:=false
+    if  ( ( isStartDay ) or isEndDay )
+        isToConsider := false
+        //isHighLowBroken:=false
+        if (hour(time) == mhhA and minute(time) == mhmA)
+            isToConsider := true
+        hh:=0.0
+        ll:=0.0
+        //tempHH:=0.0
+        //tempLL:=0.0
+        sl:=0.0
+        isUpStarted:=false
+        isDownStarted:=false
+        isS:=false
+        isB:=false
+        //is1:=false
+        // is2:=false
+        // is3:=false 
+        is4:=false
+        is5:=false
+        cnt1:=0
+        cnt2:=0
+        // cnt3:=0
+        // if(isAlreadyBuyBefore1 or isAlreadySellBefore1)
+        //     if isEndDay == false
+        //         strategy.exit(id="Start", stop=close) 
+    else if (hour(time) == mhhA and minute(time) == mhmA)
+        isToConsider := true
+    else 
+        isToConsider := isToConsider[1]
+else
+    isToConsider:=true
+finalBuySellVal=0
+noTrade=isAlreadyBuyBefore1==false and isAlreadySellBefore1==false
+
+
+// *******************************************************************************
+//     START  FRAMA 
+// *********************************************************************************
+
+// ＩＮＰＵＴＳ --------------------------------------------------------------------------------------------------------{
+// User Inputs for FRAMA Channel
+int    N          = input.int   (26, title="Length", minval=2, step = 2, group = "Channel") // Length for FRAMA calculation
+float  distance   = input.float (1.5, "Bands Distance", step = 0.01, minval = 0.3, group = "Channel") // Distance for channel bands
+string price_vol  = input.string("Price", "Signals Data", ["Price", "Average Volume"]) // Source data for signals
+string labl_size  = input.string("Small", "Lables Size", ["Small", "Normal", "Large"])
+
+// Colors
+group = "Colors"
+color color1     = input.color(#27e27b, "Momentum Up", group = group, inline = "1") // Color for upward momentum
+color color2     = input.color(color.rgb(39, 114, 226), "Down", group = group, inline = "1") // Color for downward momentum
+color color3     = input.color(#a2b5ca, "Neutral", group = group) // Color for neutral state
+var color color  = color(na) // Variable to hold the current color
+
+bool  candles    = input.bool  (true, "Color Candles") // Toggle for coloring candles based on momentum
+
+// Source for FRAMA calculation
+series float price = hl2 // Use hl2 as the default source
+
+// Variables for FRAMA calculation
+var float Filt   = na
+var float Filt1  = na
+var float Filt2  = na
+var int   count1 = na
+var int   count2 = na
+// }
+
+// UDTs----------------------------------------------------------------------------------------------------------------{
+// Define a user-defined type (UDT) to store variables used in FRAMA calculation
+type vars 
+    float N1
+    float N2
+    float N3
+    float HH
+    float LL
+    float Dimen 
+    float alpha
+
+// Initialize UDT instance
+v = vars.new(0., 0., 0., 0., 0., 0., 0.)
+// }
+
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ----------------------------------------------------------------------------------------------{
+// Perform calculations for the FRAMA Channel
+series float volatility = ta.sma(high - low, 200) // Calculate volatility using the average true range
+series float p_vol      = switch price_vol // Select the data source for signals (Price or Average Volume)
+    "Price"             => close
+    "Average Volume"    => math.round(math.sum(volume, 10) / 10, 2)
+
+// Calculate N3 for the fractal dimension
+v.N3 := (ta.highest(high, N) - ta.lowest(low, N)) / N
+
+// Loop to calculate N1
+v.HH := high
+v.LL := low
+
+for count = 0 to N / 2 - 1
+    if high[count] > v.HH
+        v.HH := high[count]
+    if low[count] < v.LL
+        v.LL := low[count]
+
+v.N1 := (v.HH - v.LL) / (N / 2)
+
+// Loop to calculate N2
+v.HH := high[N / 2]
+v.LL := low[N / 2]
+
+for count = N / 2 to N - 1
+    if high[count] > v.HH
+        v.HH := high[count]
+    if low[count] < v.LL
+        v.LL := low[count]
+
+v.N2 := (v.HH - v.LL) / (N / 2)
+
+// Calculate the fractal dimension
+if (v.N1 > 0 and v.N2 > 0 and v.N3 > 0)
+    v.Dimen := (math.log(v.N1 + v.N2) - math.log(v.N3)) / math.log(2)
+
+// Calculate alpha for FRAMA
+v.alpha := math.exp(-4.6 * (v.Dimen - 1))
+v.alpha := math.max(math.min(v.alpha, 1), 0.01) // Clamp alpha between 0.01 and 1
+
+// Calculate the FRAMA filtered value
+Filt  := na(Filt) 
+          ? price 
+          : v.alpha * price + (1 - v.alpha) * Filt[1]
+
+Filt  := ta.sma((bar_index < N + 1) ? price : Filt, 5) // Apply SMA for smoothing
+
+// Calculate the channel bands
+Filt1 := Filt + volatility * distance
+Filt2 := Filt - volatility * distance
+// }
+
+
+// ＰＬＯＴ-------------------------------------------------------------------------------------------------------------{
+// Define conditions for plotting and coloring
+break_up = ta.crossover(hlc3, Filt1) and barstate.isconfirmed
+break_dn = ta.crossunder(hlc3, Filt2) and barstate.isconfirmed
+
+if ta.cross(close, Filt)
+    color := color3 // Neutral color 
+
+// Determine the color based on breakout conditions
+switch 
+    break_up => color := color1 // Upward breakout
+    break_dn => color := color2 // Downward breakout
+
+// Set candle color if enabled
+color color_c = candles ? color : na
+
+// Plot the FRAMA and bands
+p0 = plot(Filt,  color = color.new(color,color == color3 ? 100 : 50),  editable = false)
+p1 = plot(Filt1, color = color.new(color,20), linewidth = 1, editable = false)
+p2 = plot(Filt2, color = color.new(color,20), linewidth = 1, editable = false)
+
+// Fill the area between the bands and FRAMA
+fill(p1, p0, Filt1, Filt, color.new(color, candles ? 95 : 85), na, editable = false)
+fill(p0, p2, Filt, Filt2, na, color.new(color, candles ? 95 : 85), editable = false)
+
+size = switch labl_size
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+
+// Add labels on breakout events
+if break_up
+    count2 := 0
+    count1 += 1 
+    if count1 == 1
+        label.new(
+                  x         = bar_index,
+                  y         = Filt2, 
+                  text      = "🢁\n" + str.tostring(p_vol),
+                  style     = label.style_label_up,
+                  textcolor = color1, 
+                  color     = color(na), 
+                  size = size
+                  )
+
+if break_dn
+    count1 := 0 
+    count2 += 1
+    if count2 == 1
+        label.new(
+                  x         = bar_index,
+                  y         = Filt1, 
+                  text      = str.tostring(p_vol) + "\n🢃",
+                  style     = label.style_label_down,
+                  textcolor = color2, 
+                  color     = color(na), 
+                  size      = size
+                  )
+
+// Plot candles with the calculated colors
+plotcandle(
+             open, high, low, close, 
+             "Candles", 
+             color_c,
+             color_c, 
+             bordercolor = color_c, 
+             editable    = false
+             )
+// }
+
+// *******************************************************************************
+//      END FRAMA
+// *********************************************************************************
+
+
+// *******************************************************************************
+//      MultiTimeframe EMAs START 
+// *********************************************************************************
+
+
+
+//------------------------------------------------------------------------------
+// Inputs
+
+// global input
+i_hideFromLowerTf = input.bool(true, 'Hide MA from lower timeframe')
+i_mtf_mode = input.bool(true, "MTF Smoothed Mode", tooltip = "Smoothes the average between the bars of higher timeframes or shows the actual value (step lines).")
+
+// label input
+const string g_label = 'MA Labels'
+i_showType = input.bool(true, 'Display MA Type', group = g_label)
+i_showLen = input.bool(true, 'Display MA Length', group = g_label)
+i_showTf = input.bool(true, 'Display MA Timeframe', group = g_label)
+i_showN = input.bool(false, 'Display MA Number', group = g_label, tooltip = 'Helps you find and configure the moving average more easily')
+i_labelOffset = input.int(0, 'Label offset', minval=0, group = g_label)
+i_labelSize = input.string('normal', 'Label size', options = ['tiny', 'small', 'normal', 'large', 'huge'])
+
+
+//------------------------------------------------------------------------------
+// Funcs
+
+
+f_mvwap(src, length, vol) =>
+    uvol = vol
+    uwgt = vol * src
+
+    if length < 1
+        na
+    else
+        for i = 1 to length - 1
+            uvol := uvol + vol[i]
+            uwgt := uwgt + vol[i] * src[i]
+        uwgt / uvol
+
+
+f_dema(_src, _length) =>
+    e1 = ta.ema(_src, _length)
+    e2 = ta.ema(e1, _length)
+    2 * e1 - e2
+
+
+f_tema(_src, _length) =>
+    e1 = ta.ema(_src, _length)
+    e2 = ta.ema(e1, _length)
+    e3 = ta.ema(e2, _length)
+    (3 * e1) - (3 * e2) + e3
+
+
+f_smma(_src, _length) =>
+    sma = ta.sma(_src, _length)
+    float smma = 0.0
+    smma := na(smma[1]) ? sma : (smma[1] * (_length - 1) + _src) / _length
+
+
+f_ma(_type, _src, _len) =>
+    switch _type
+        "EMA: Exponential Moving Average" => ta.ema(_src, _len)
+        "DEMA: Double Exponential Moving Average" => f_dema(_src, _len)
+        "TEMA: Triple Exponential Moving Average" => f_tema(_src, _len)
+        "VWMA: Volume Weighted Moving Average" => ta.vwma(_src, _len)
+        "RMA: Rolling Moving Average" => ta.rma(_src, _len)
+        "WMA: Weighted Moving Average" => ta.wma(_src, _len)
+        "HMA: Hull Moving Average" => ta.hma(_src, _len)
+        "SMA: Simple Moving Average" => ta.sma(_src, _len)
+        "SWMA: Symmetrically Weighted Moving Average" => ta.swma(_src)
+        "SMMA: Smoothed Moving Average" => f_smma(_src, _len)
+        "VWAP: Volume Weighted Average Price (Daily)" => ta.vwap(_src)
+        "MVWAP: Moving VWAP" => f_mvwap(_src, _len, volume)
+        "LSMA: Least Squares Moving Average" => ta.linreg(_src, _len, 0)
+
+
+f_timeframeToHuman(_tf) =>
+    seconds = timeframe.in_seconds(_tf)
+
+    if seconds < 60
+        _tf
+    else if seconds < 3600
+        str.tostring(seconds / 60) + 'm'
+    else if seconds < 86400
+        str.tostring(seconds / 60 / 60) + 'h'
+    else
+        switch _tf
+            "1D" => "D"
+            "1W" => "W"
+            "1M" => "M"
+            => str.tostring(_tf)
+
+
+f_getSizeFromString(_size) =>
+    switch _size
+        "auto" => size.auto
+        "tiny" => size.tiny
+        "small" => size.small
+        "normal" => size.normal
+        "large" => size.large
+        "huge" => size.huge
+
+
+f_getLabelText(_tf, _type, _len, _n) =>
+    t = ''
+    maType = str.substring(_type, 0, str.pos(_type, ':'))
+
+    if i_showType
+        t := maType
+
+    if i_showLen and maType != "VWAP" and maType != "SWMA"
+        t += (t != '' ? ' ' : '') + str.tostring(_len)
+
+    if i_showTf and _tf != ''
+        t += (t != '' ? ' / ' : '') + f_timeframeToHuman(_tf)
+
+    if i_showN
+        t += (t != '' ? ' ' : '') + '#' + str.tostring(_n)
+    t
+
+
+labelSize = f_getSizeFromString(i_labelSize)
+
+f_addMaLabel(_enabled, _n, _src, _price, _tf, _type, _len, _color, _offset) =>
+    label l = na
+    if _enabled and not na(_price)
+        labelText = f_getLabelText(_tf, _type, _len, _n)
+        if labelText != ''
+            pos = chart.point.from_index(bar_index + i_labelOffset + _offset, _price)
+            maTooltip = str.format("MA #{0}\nType: {1}\nLength: {2}\nTimeframe: {3}\nPrice: {4}", _n, str.replace(_type, ':', ' -'), _len, f_timeframeToHuman(_tf), _price)
+            l := label.new(pos, text=labelText, color=color.new(color.black, 100), textcolor=_color, style=label.style_label_left, textalign=text.align_left, yloc=yloc.price, size = labelSize, tooltip = maTooltip)
+    label.delete(l[1])
+
+
+
+// real value / step lines
+f_getMaConverted_mode2(_tf, _type, _src, _len) =>
+    ma = f_ma(_type, _src, _len)
+    tfma = request.security(syminfo.tickerid, _tf, ma)
+
+// smoothed lines
+f_getMaConverted_mode1(_tf, _type, _src, _len) =>
+    ma = f_ma(_type, _src, _len)
+    [m, bindex] = request.security(syminfo.tickerid, _tf, [ma, bar_index])
+    int lbindex = na
+    lbindex := na(lbindex[1]) or bindex > lbindex[1] ? bindex : lbindex[1]
+    lbindex != lbindex[1] or barstate.islast ? m : na
+
+f_getMaConverted(_tf, _type, _src, _len) =>
+    if i_mtf_mode
+        f_getMaConverted_mode1(_tf, _type, _src, _len)
+    else
+        f_getMaConverted_mode2(_tf, _type, _src, _len)
+
+
+
+f_showInCurrentTimeframe(_hideInLowerTf, _tf) =>
+    if _hideInLowerTf == false
+        true
+    else
+        timeframe.in_seconds(_tf) >= timeframe.in_seconds()
+
+
+
+
+//------------------------------------------------------------------------------
+// Plots
+
+
+// line width
+const int C_LINEWIDTH = 2
+
+
+//------------------------------------
+// MA #1
+const string g_ma1 = 'Moving Average #1'
+i_ma1_enabled = input.bool(true, 'Enabled', group = g_ma1)
+i_ma1_tf = input.timeframe('', 'Timeframe', group = g_ma1)
+i_ma1_src = input.source(close, 'Source', group = g_ma1)
+i_ma1_len = input.int(20, 'Length', group = g_ma1)
+i_ma1_offset = input.int(0, 'Offset', group = g_ma1)
+i_ma1_type = input.string('EMA: Exponential Moving Average', 'Type', options=["DEMA: Double Exponential Moving Average","EMA: Exponential Moving Average","HMA: Hull Moving Average","LSMA: Least Squares Moving Average","MVWAP: Moving VWAP","RMA: Rolling Moving Average","SMA: Simple Moving Average","SMMA: Smoothed Moving Average","SWMA: Symmetrically Weighted Moving Average","TEMA: Triple Exponential Moving Average","VWAP: Volume Weighted Average Price (Daily)","VWMA: Volume Weighted Moving Average","WMA: Weighted Moving Average"], group = g_ma1)
+i_ma1_color = input.color(#f7525f, 'Color', group = g_ma1)
+
+v_ma1 = f_getMaConverted(i_ma1_tf, i_ma1_type, i_ma1_src, i_ma1_len)
+v_ma1_visible = i_ma1_enabled and f_showInCurrentTimeframe(i_hideFromLowerTf, i_ma1_tf)
+plot(v_ma1_visible ? v_ma1 : na, color=i_ma1_color, linewidth=C_LINEWIDTH, title='MA #1', join=true, offset = i_ma1_offset)
+f_addMaLabel(v_ma1_visible, 1, i_ma1_src, v_ma1, i_ma1_tf, i_ma1_type, i_ma1_len, i_ma1_color, i_ma1_offset)
+threshold_ma1 = input(0.6, "Threshold")
+// Calculate the Simple Moving Average slope
+sma_slope_ma1 = ta.sma(close,i_ma1_len) - ta.sma(close[1], i_ma1_len)
+// Normalize the Simple Moving Average slope by dividing it by the long-term strandard deviation of the slope
+normalized_sma_slope_ma1 = sma_slope_ma1 / ta.stdev(sma_slope_ma1, i_ma1_len*10)
+
+
+//------------------------------------
+// MA #2
+const string g_ma2 = 'Moving Average #2'
+i_ma2_enabled = input.bool(true, 'Enabled', group = g_ma2)
+i_ma2_tf = input.timeframe('', 'Timeframe', group = g_ma2)
+i_ma2_src = input.source(close, 'Source', group = g_ma2)
+i_ma2_len = input.int(50, 'Length', group = g_ma2)
+i_ma2_offset = input.int(0, 'Offset', group = g_ma2)
+i_ma2_type = input.string('EMA: Exponential Moving Average', 'Type', options=["DEMA: Double Exponential Moving Average","EMA: Exponential Moving Average","HMA: Hull Moving Average","LSMA: Least Squares Moving Average","MVWAP: Moving VWAP","RMA: Rolling Moving Average","SMA: Simple Moving Average","SMMA: Smoothed Moving Average","SWMA: Symmetrically Weighted Moving Average","TEMA: Triple Exponential Moving Average","VWAP: Volume Weighted Average Price (Daily)","VWMA: Volume Weighted Moving Average","WMA: Weighted Moving Average"], group = g_ma2)
+i_ma2_color = input.color(#ffa726, 'Color', group = g_ma2)
+
+v_ma2 = f_getMaConverted(i_ma2_tf, i_ma2_type, i_ma2_src, i_ma2_len)
+v_ma2_visible = i_ma2_enabled and f_showInCurrentTimeframe(i_hideFromLowerTf, i_ma2_tf)
+plot(v_ma2_visible ? v_ma2 : na, color=i_ma2_color, linewidth=C_LINEWIDTH, title='MA #2', join=true, offset = i_ma2_offset)
+f_addMaLabel(v_ma2_visible, 2, i_ma2_src, v_ma2, i_ma2_tf, i_ma2_type, i_ma2_len, i_ma2_color, i_ma2_offset)
+threshold_ma2 = input(0.6, "Threshold")
+// Calculate the Simple Moving Average slope
+sma_slope_ma2 = ta.sma(close,i_ma2_len) - ta.sma(close[1], i_ma2_len)
+// Normalize the Simple Moving Average slope by dividing it by the long-term strandard deviation of the slope
+normalized_sma_slope_ma2 = sma_slope_ma2 / ta.stdev(sma_slope_ma2, i_ma2_len*10)
+
+
+
+// *******************************************************************************
+//     ENDSs MultiTimeframe EMAs ENDs 
+// *********************************************************************************
+
+// *******************************************************************************
+//     START Durbtrade BollingerBand BB
+// *********************************************************************************
+
+// *******************************************************************************
+//     ENDSs Durbtrade BollingerBand BB
+// *********************************************************************************
+func_multitimeframe()=>
+    //your logic goes here
+    length = input.int(20, minval=1)
+    src = input(close, title="Source")
+    mult = input.float(2.0, minval=0.001, maxval=50, title="StdDev")
+    basis = ta.sma(src, length)
+    dev = mult * ta.stdev(src, length)
+    upper = basis + dev
+    lower = basis - dev
+    bbw = (upper-lower)/basis
+    col = bbw - bbw[1] >0 ?  color.green : color.red
+    len2 = input.int(2, minval=1, title="EMA Length")
+    offset = input.int(title="EMA Offset", defval=0, minval=-500, maxval=500)
+    out = ta.ema(bbw, len2)
+    zero= basis - basis
+    FilCol = bbw>out ? #17ff03 : #ff0000
+
+    // plot(zero, title="Zero", color=#d1d4dc, offset=1)
+    // F1 = plot(out, title="EMA", color=#0300ff, linewidth=2, offset=offset)
+    // F2 = plot(bbw, "Durbtrade BBW", color=col, linewidth=2)
+    // fill(F1, F2, title="Fill", color=FilCol, transp=85)
+
+    // Cross1 = ta.crossover(bbw, out) ? #17ff03 : na
+    // Cross2 = ta.crossunder(bbw, out) ? #ff0000 : na
+    // bgcolor(Cross1, title="Cross Over")
+    // bgcolor(Cross2, title="Cross Under")
+    [bbw,col,out] 
+
+//plot(smoothingMA, "RSI-based MA", color=color.yellow, display =  display.all)
+
+// // Global Request Function
+getRequest_multitimeframe(_symbol, _timeframe) =>
+    [magic,col,out]= request.security(_symbol, _timeframe, func_multitimeframe(),gaps=barmerge.gaps_off,lookahead=barmerge.lookahead_on)    
+
+// Timeframe_A_3 = input.timeframe("5", title="Timeframe A")
+Timeframe_B_15 = input.timeframe("60", title="Timeframe B")
+
+// [magic3] = getRequestMagicTrend(syminfo.tickerid, Timeframe_A_3)
+[bbw60,col,out60] = getRequest_multitimeframe(syminfo.tickerid, Timeframe_B_15)
+plot(88000+bbw60, "Durbtrade BBW", color=col, linewidth=2)
+
+
+// *******************************************************************************
+//     START Fractals
+// *********************************************************************************
+
+//
+// === INPUTS ===
+//
+// jawLength     = input(13, "Jaw Length")
+// teethLength   = input(8, "Teeth Length")
+// lipsLength    = input(5, "Lips Length")
+// //
+// jawOffset     = input(8, "Jaw Offset")
+// teethOffset   = input(5, "Teeth Offset")
+// lipsOffset    = input(3, "Lips Offset")
+// asrc          = input(hl2, "Alligator Source")
+// //
+// hideAlligator = input(false)
+// showAlligatorState = input(false)
+// //
+// hidefractals  = input(false)
+// hidelevels    = input(false)
+// maxLvlLen     = input(0)
+// uFractalRev   = input(false, "Use Fractal Reversal Strategy")
+// uFractalBO    = input(false, "Use Fractal Break Out Strategy")
+// //
+// uAwesomeBO    = input(false, "Use Awesome Break Out Strategy")
+// nLengthSlow   = input(34, minval=1, title="Awesome Slow Length")
+// nLengthFast   = input(5,  minval=1, title="Awesome Fast Length")
+//
+// === /INPUTS ===
+
+
+// === FUNCTIONS ===
+
+//  ||---   Completed Fractals Recognition Functions:  -----------------------------------------------------||
+// isIdealFractal(mode) =>
+//     ret = mode == 1 ? high[4] < high[3] and high[3] < high[2] and high[2] > high[1] and high[1] > high[0] : 
+//           mode == -1 ? low[4] > low[3] and low[3] > low[2] and low[2] < low[1] and low[1] < low[0] : false
+    
+
+isRegularFractal(mode) =>
+    ret = mode == 1 ? high[4] < high[2] and high[3] <= high[2] and high[2] > high[1] and high[2] > high[0] : 
+          mode == -1 ? low[4] > low[2] and low[3] >= low[2] and low[2] < low[1] and low[2] < low[0] : false
+          
+// //  ||-----------------------------------------------------------------------------------------------------||
+
+// //
+// // SMMA function to Calculate Alligaor Trend Lines
+// //
+// smma(src, length) =>
+//     s = 0.0
+//     s := na(s[1]) ? sma(src, length) : ( (s[1] * (length - 1)) + src) / length
+//     s
+    
+// // === /FUNCIONS ===
+
+// // === SERIES ===
+
+// // Calculate Offsetted Alligator curves
+// jaw_   = smma(asrc, jawLength)
+// teeth_ = smma(asrc, teethLength)
+// lips_  = smma(asrc, lipsLength)
+
+// // Re-allign Alligator to current price action.
+// jaw   = jaw_[jawOffset]
+// teeth = teeth_[teethOffset]
+// lips  = lips_[lipsOffset]
+
+// Fractals.
+topfractal = isRegularFractal(1)
+botfractal = isRegularFractal(-1)
+
+//Count How many candles for current Pivot Level, If new reset.
+topcnt = 0
+botcnt = 0
+topcnt := topfractal ? 0 : nz(topcnt[1])+1
+botcnt := botfractal ? 0 : nz(botcnt[1])+1
+
+topfractals = 0.0
+botfractals = 0.0
+topfractals := topfractal ? high[2] : topfractals[1]
+botfractals := botfractal ? low[2] : botfractals[1]
+
+topfc = (topfractals != topfractals[1]) ? na : color.green
+botfc = (botfractals != botfractals[1]) ? na : color.red
+
+// // Alligator trend States down(<0), up(>0), considation(0) conditions.
+// // 1 = lips above teeth above jaw in order, 2 = lips above teeth and jaw, 3 = lips above teeth.
+// //
+// AlligatorState = lips < teeth and teeth < jaw? -1 : lips > teeth and teeth > jaw ? 1 : 
+//                  lips<teeth and lips<jaw? -2 : lips>teeth and lips>jaw? 2 :
+//                  lips<teeth? -3 : lips>teeth? 3 : 0
+
+// // Awesome Oscillator 
+// xSMA1_hl2 = sma(hl2, nLengthFast)
+// xSMA2_hl2 = sma(hl2, nLengthSlow)
+// xSMA1_SMA2 = xSMA1_hl2 - xSMA2_hl2
+// // AO State
+// // 1 = start above zero and ascending, 2 = above zero but descending.
+// AOstate = xSMA1_SMA2>=0? xSMA1_SMA2 > xSMA1_SMA2[1] ? 1 : 2 : xSMA1_SMA2 > xSMA1_SMA2[1] ? -2 : -1
+
+// // === /SERIES ===
+
+// // === PLOTTING ===
+// //
+// // Plot Alligator
+// plot(hideAlligator ? na : jaw_, "Jaw", blue, offset=jawOffset,transp=10,linewidth=2)
+// plot(hideAlligator ? na : teeth_, "Teeth", red, offset=teethOffset,transp=10,linewidth=2)
+// plot(hideAlligator ? na : lips_, "Lips", green, offset=lipsOffset,transp=10,linewidth=2)
+
+// Plot Fractals
+// plotshape(topfractal, color=color.green, transp=0, style=shape.triangleup, location=location.abovebar, offset=-2, size=size.auto)
+// plotshape(botfractal, color=color.red, transp=0, style=shape.triangledown, location=location.belowbar, offset=-2, size=size.auto)
+
+// Build The Fractal Level lines, fill in the gaps.
+// plot( (topcnt<=2)? topfractals : na, color=topfc, transp=20, linewidth=2, offset=-2, title="Top Levels -2")
+// plot( (botcnt<=2)? botfractals : na, color=botfc, transp=20, linewidth=2, offset=-2, title="Bottom Levels -2")
+// plot( (topcnt<=3)? topfractals : na, color=topfc, transp=20, linewidth=2, offset=-1, title="Top Levels -1")
+// plot( (botcnt<=3)? botfractals : na, color=botfc, transp=20, linewidth=2, offset=-1, title="Bottom Levels -1")
+// plot( ( topcnt<maxLvlLen)? topfractals : na, color=topfc, transp=20, linewidth=1, offset=0, title="Top Levels 0")
+// plot( ( botcnt<maxLvlLen)? botfractals : na, color=botfc, transp=20, linewidth=1, offset=0, title="Bottom Levels 0")
+
+// // === /PLOTTING ===
+
+// //
+// // === ALERTS ===
+// //
+
+// //
+// // Type 1 - Fractal Reversal Signal
+// //
+// highRev = 0
+// lowRev  = 0
+// highRev := AlligatorState<=0 ? 0 : AlligatorState==1? AlligatorState[2]>0 and botfractal and low[2]>teeth[2] ? nz(highRev[1])+1 :   highRev[1]>0? highRev[1]+1 : 0 : 0
+// lowRev  := AlligatorState>=0 ? 0 : AlligatorState==-1? AlligatorState[2]<0 and topfractal and high[2]<teeth[2] ? nz(lowRev[1])+1 : lowRev[1]>0? lowRev[1]+1 : 0 : 0
+
+// // Show Fractal Reversal alert Arrows
+// plotarrow(uFractalRev ? highRev==1?1:lowRev==1?-1:na : na, title='Fractal Reversal Arrow', colorup=lime, colordown=red, transp=20, offset=0, minheight=40, maxheight=60 )
+
+// //
+// // Type 2 - Fractal Break Out Signal
+// //
+// highBO = 0
+// lowBO = 0
+// highBO := AlligatorState<=0 or low<teeth? 0 : AlligatorState>0? (valuewhen(topfractal,high[2],0) > valuewhen(topfractal,teeth[2],0)) ? nz(highBO[1])+1 : highBO[1]>0? highBO[1]+1 : 0 : 0
+// lowBO  := AlligatorState>=0 or high>teeth? 0 : AlligatorState<0? (valuewhen(botfractal,low[2],0) < valuewhen(botfractal,teeth[2],0)) ? nz(lowBO[1])+1 : lowBO[1]>0? lowBO[1]+1 : 0 : 0
+ 
+// // Show Break out alert arrows
+// plotarrow(uFractalBO ? highBO==1?1:lowBO==1?-1:na : na, title='Fractal BreakOut Arrow', colorup=aqua, colordown=fuchsia, transp=20, offset=0, minheight=40, maxheight=60 )
+
+// //
+// // Type 3 - Awesome Break Out Signal
+// //
+// highABO = 0
+// lowABO = 0
+// highABO := AlligatorState<=0 or low<teeth? 0 : AlligatorState<=2? AOstate==1 and close>lips ? nz(highABO[1])+1 : 0 : 0
+// lowABO  := AlligatorState>=0 or high>teeth? 0 : AlligatorState>=-2? AOstate==-1 and close<lips ? nz(lowABO[1])+1 : 0 : 0
+
+// // Show Break out alert arrows
+// plotarrow(uAwesomeBO ? highABO==1?1:lowABO==1?-1:na : na, title='Fractal BreakOut Arrow', colorup=teal, colordown=orange, transp=20, offset=0, minheight=40, maxheight=60 )
+
+
+// // show Alligator Trend Direction State.
+// plotshape(showAlligatorState?true:na, title="Alligator Trend Direction", location=location.bottom,style=shape.square, color=AlligatorState==1?green:AlligatorState==-1?red:yellow,transp=10)
+
+// // send alerts to alarm subsystem
+// alertcondition(highRev==1,title="Fractal Reversal Long",message="REV LONG")
+// alertcondition(lowRev==1,title="Fractal Reversal Short",message="REV SHORT")
+// alertcondition(highBO==1,title="Fractal BreakOut Long",message="BO LONG")
+// alertcondition(lowBO==1,title="Fractal BreakOut Short",message="BO SHORT")
+
+// // === /ALERTS ===
+// //EOF
+// *******************************************************************************
+//     ENDs Fractals
+// *********************************************************************************
+
+
+
+//LOGIC HERE starts
+//**************************************************************************************************************************************************
+//**************************************************************************************************************************************************
+//**************************************************************************************************************************************************
+
+tradeLogic = input.int(title = "Select \n TradeLogic: 15: For Manual Trendline with ema crossover \n 16: only slope  \n 17: Trade using FRAMAA  ",  defval = 17)
+minStochasticPriceDiff = input.float(title = " min span between hh and lll in one side stochstics candle price values ",  defval = 350.0)
+
+dop = request.security(ticker.standard( syminfo.tickerid), 'D', open, lookahead=barmerge.lookahead_on)
+
+// plot(dop , color=color.rgb(185, 178, 77), style=plot.style_cross, linewidth=2, title="open", transp = 5)
+
+// ttt=label.new(bar_index+1, dop, "Open" + ": " + str.tostring(dop, format.mintick), color=color.new(color.white, 100), textcolor=color.yellow, style=label.style_label_left)
+// label.delete(ttt[1])
+
+pdh = request.security(ticker.standard( syminfo.tickerid), 'D', high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(ticker.standard( syminfo.tickerid), 'D', low[1], lookahead=barmerge.lookahead_on)
+
+pmh = request.security(ticker.standard( syminfo.tickerid), 'M', high[1], lookahead=barmerge.lookahead_on)
+pml = request.security(ticker.standard( syminfo.tickerid), 'M', low[1], lookahead=barmerge.lookahead_on)
+pmc = request.security(ticker.standard( syminfo.tickerid), 'M', close[1], lookahead=barmerge.lookahead_on)
+
+
+monthR1 = (0.0916*(pmh-pml)) + pmc
+monthS1 = pmc - (0.0916*(pmh-pml))
+
+
+plot(pdh , color=color.rgb(230, 39, 13), style=plot.style_cross, linewidth=2, title="open", transp = 5)
+plot(pdl , color=color.rgb(185, 178, 77), style=plot.style_cross, linewidth=2, title="open", transp = 5)
+
+ttt=label.new(bar_index+1, pdh, "HighV" + ": " + str.tostring(pdh, format.mintick), color=color.new(color.white, 100), textcolor=color.rgb(238, 27, 27), style=label.style_label_left)
+label.delete(ttt[1])
+ttt1=label.new(bar_index+1, pdl, "LowV" + ": " + str.tostring(pdl, format.mintick), color=color.new(color.white, 100), textcolor=color.yellow, style=label.style_label_left)
+label.delete(ttt1[1])
+
+plot(monthR1 , color=#380fce, style=plot.style_circles, linewidth=2, title="monthR1", transp = 5)
+plot(monthS1 , color=color.rgb(43, 231, 231), style=plot.style_circles, linewidth=2, title="monthS1", transp = 5)
+ttt_mRq1=label.new(bar_index+1, monthR1, "Month-R1" + ": " + str.tostring(monthR1, format.mintick), color=color.new(color.white, 100), textcolor=color.rgb(238, 27, 27), style=label.style_label_left)
+label.delete(ttt_mRq1[1])
+ttt1_mS1=label.new(bar_index+1, monthS1, "Month-S1" + ": " + str.tostring(monthS1, format.mintick), color=color.new(color.white, 100), textcolor=color.yellow, style=label.style_label_left)
+label.delete(ttt1_mS1[1])
+
+finalBuySellVal:=0
+bool longCondition=false
+bool shortCondition=false
+
+isgreen= col==color.green //(bbw60 - bbw60[1] >0)
+if not isgreen and (isAlreadyBuyBefore1 or isAlreadySellBefore1)
+    if isAlreadyBuyBefore1
+        isSquaredOffInt:=1
+        finalBuySellVal:=-50
+        debugMsg+= str.tostring( int (1))
+    else if isAlreadySellBefore1
+        isSquaredOffInt:=2
+        finalBuySellVal:=50
+        debugMsg+= str.tostring( int (2))
+if(isgreen and ta.crossover(bbw60, out60))
+    if v_ma1 > v_ma1[1]
+        finalBuySellVal:=50
+        debugMsg+= str.tostring( int (3))
+    else if v_ma1 < v_ma1[1]
+        finalBuySellVal:=-50
+        debugMsg+= str.tostring( int (4))
+else if isgreen
+    if isAlreadyBuyBefore1 and  ( ta.crossunder(v_ma1, v_ma2) or (v_ma1 < v_ma1[1] and v_ma2 < v_ma2[1] and v_ma1 < v_ma2))
+        finalBuySellVal:=-50
+        debugMsg+= str.tostring( int (5))
+    else if isAlreadySellBefore1 and ( ta.crossover(v_ma1, v_ma2)  or (v_ma1 > v_ma1[1] and v_ma2 > v_ma2[1] and v_ma1 > v_ma2))
+        finalBuySellVal:=50
+        debugMsg+= str.tostring( int (6))
+
+
+// if  topfractals!=0.0 and close > topfractals and close[1] <= topfractals and (bbw60 - bbw60[1] >0)
+//     finalBuySellVal:=50
+// else if  botfractals!=0.0 and close < botfractals and close[1] >= botfractals and (bbw60 - bbw60[1] >0)
+//     finalBuySellVal:=-50
+// else if (isAlreadyBuyBefore1 ) and (col==color.red)
+//     finalBuySellVal:=-50
+//     //isSquaredOffInt:=1
+// else if (isAlreadySellBefore1 ) and (col==color.red)
+//     finalBuySellVal:=50
+//     //isSquaredOffInt:=2
+// else if  topfractals[1]!=0.0 and close > topfractals[1] and close[1] <= topfractals[1] and (bbw60 - bbw60[1] >0)
+//     finalBuySellVal:=50
+// else if  botfractals[1]!=0.0 and close < botfractals[1] and close[1] >= botfractals[1] and (bbw60 - bbw60[1] >0)
+//     finalBuySellVal:=-50
+        
+
+//debugMsg+= str.tostring( bool (bbw60 - bbw60[1] >0))
+//debugMsg+= str.tostring( float (bbw60))
+T_from = 0 //int(input.time(title="Plz enter the Top line point 1 timestamp", defval=0)) // unixTimestampIn1
+T_to   = 0 // int(input.time(title="Plz enter the Top line point 2 timestamp", defval=0)) //unixTimestampIn2
+
+T_from1 = 0 // int(input.time(title="Plz enter the Bottom line point 1 timestamp", defval=0)) // unixTimestampIn1
+T_to1   =  0 //int(input.time(title="Plz enter the Bottom line point 2 timestamp", defval=0)) //unixTimestampIn2
+
+if T_from==0
+    T_from:=unixTimestampIn1
+if T_to==0
+    T_to:=unixTimestampIn2
+if T_from1==0
+    T_from1:=unixTimestampIn3
+if T_to1==0
+    T_to1:=unixTimestampIn4
+
+bartime = int(ta.change(time))
+
+int count_bars1 = ta.barssince(year(T_from)==year(time) and month(T_from)==month(time) and dayofmonth(T_from)==dayofmonth(time) and hour(T_from)==hour(time) and minute(T_from)==minute(time))//math.floor((timenow - T_from) / bartime)
+int count_bars2 = ta.barssince(year(T_to)==year(time) and month(T_to)==month(time) and dayofmonth(T_to)==dayofmonth(time) and hour(T_to)==hour(time) and minute(T_to)==minute(time)) //math.floor((timenow - T_to) / bartime)
+
+int count_bars3 = ta.barssince(year(T_from1)==year(time) and month(T_from1)==month(time) and dayofmonth(T_from1)==dayofmonth(time) and hour(T_from1)==hour(time) and minute(T_from1)==minute(time))//math.floor((timenow - T_from) / bartime)
+int count_bars4 = ta.barssince(year(T_to1)==year(time) and month(T_to1)==month(time) and dayofmonth(T_to1)==dayofmonth(time) and hour(T_to1)==hour(time) and minute(T_to1)==minute(time)) //math.floor((timenow - T_to) / bartime)
+
+count_bars3 := math.min(count_bars3, 4999)
+count_bars4 := math.min(count_bars4, 4999)
+
+count_bars1 := math.min(count_bars1, 4999)
+count_bars2 := math.min(count_bars2, 4999)
+// 1 Jan 25 9:48
+// 6 jan 25 13:54
+
+trendBottom=line(na)
+trendBottom:=tradeLogic!=15?line(na):line.new(x1=bar_index-count_bars1, y1=price1==0.0?high[count_bars1]:price1, x2=bar_index-count_bars2, y2=price2==0.0?high[count_bars2]:price2, xloc=xloc.bar_index ,extend =extend.right, color=#7d69ee, style=line.style_solid, width=1)
+line.delete(trendBottom[2])
+
+trendTop=line(na)
+trendTop:=tradeLogic!=15?line(na):line.new(x1=bar_index-count_bars3, y1=price3==0.0?low[count_bars3]:price3, x2=bar_index-count_bars4, y2=price4==0.0?low[count_bars4]:price4, xloc=xloc.bar_index ,extend =extend.right, color=#7d69ee, style=line.style_solid, width=1)
+line.delete(trendTop[2]) 
+
+hline(price=price5,title='Resistence',color=color.rgb(42, 231, 222), linestyle=hline.style_dashed, linewidth=3)
+hline(price=price6,title='Resistence',color=color.rgb(42, 231, 222), linestyle=hline.style_dashed, linewidth=3)
+// if(time == unixTimestampIn2 or time == unixTimestampIn4)
+//     strategy.exit(id="BS", stop=close) 
+if tradeLogic==15
+    finalBuySellVal:=0
+    isSquaredOffInt:=0
+    e201= v_ma1_visible? v_ma1: close
+    topLinePrice=line.get_price(trendBottom,bar_index)
+    bottomLinePrice=line.get_price(trendTop,bar_index)
+    if ta.crossover(e201, topLinePrice[1]) or ta.crossover(e201, bottomLinePrice[1]) or (e201[1] <= topLinePrice[1] and e201>topLinePrice[0] ) or (e201[1] <= bottomLinePrice[1] and e201>bottomLinePrice[0] )
+        finalBuySellVal:=50
+    else if ta.crossunder(e201, topLinePrice[1]) or ta.crossunder(e201, bottomLinePrice[1]) or (e201[1] >= topLinePrice[1] and e201<topLinePrice[0] ) or (e201[1] >= bottomLinePrice[1] and e201<bottomLinePrice[0] )
+        finalBuySellVal:=-50
+
+    if (price5 >0 or price6 > 0) and (ta.crossunder(e201, price5) or ta.crossunder(e201, price6))
+        finalBuySellVal:=-50
+    else if (price5 >0 or price6 > 0) and (ta.crossover(e201, price5) or ta.crossover(e201, price6))
+        finalBuySellVal:=50
+                
+    if time < math.max(unixTimestampIn2,unixTimestampIn4)
+        finalBuySellVal:=0
+if tradeLogic==16 // only slope
+    finalBuySellVal:=0
+    isSquaredOffInt:=0
+    if slope50Deried > slope50Deried[1] and slope50Deried[1] > slope50Deried[2] and slope50Deried[2] <= slope50Deried[3] 
+        finalBuySellVal:=50
+    if slope50Deried < slope50Deried[1] and slope50Deried[1] < slope50Deried[2] and slope50Deried[2] >= slope50Deried[3]
+        finalBuySellVal:=-50
+
+if tradeLogic==17 // FRAMA
+    finalBuySellVal:=0
+    isSquaredOffInt:=0
+    topLinePrice=line.get_price(trendBottom,bar_index)
+    bottomLinePrice=line.get_price(trendTop,bar_index)
+    // Detect if current bar is the first of a new day
+    isNewDay = (dayofmonth != dayofmonth[1]) or (month != month[1]) or (year != year[1])
+
+    isFilt1Buy=ta.crossover(Filt1,topLinePrice[0]) or ta.crossover(Filt1,topLinePrice[1]) or ta.crossover(Filt1,bottomLinePrice[0]) or ta.crossover(Filt1,bottomLinePrice[1]) or ta.crossover(Filt1,monthR1[0]) or ta.crossover(Filt1,monthS1[0])  or ta.crossover(Filt1,pdh[0])  or ta.crossover(Filt1,pdl[0]) or ta.crossover(Filt1,price5[0]) or ta.crossover(Filt1,price6[0]) 
+    isFilt2Buy=ta.crossover(Filt2,topLinePrice[0]) or ta.crossover(Filt2,topLinePrice[1]) or ta.crossover(Filt2,bottomLinePrice[0]) or ta.crossover(Filt2,bottomLinePrice[1]) or ta.crossover(Filt2,monthR1[0]) or ta.crossover(Filt2,monthS1[0])  or ta.crossover(Filt2,pdh[0])  or ta.crossover(Filt2,pdl[0]) or ta.crossover(Filt2,price5[0]) or ta.crossover(Filt2,price6[0])
+    isFilt1Sell=ta.crossunder(Filt1,topLinePrice[0]) or ta.crossunder(Filt1,topLinePrice[1]) or ta.crossunder(Filt1,bottomLinePrice[0]) or ta.crossunder(Filt1,bottomLinePrice[1]) or ta.crossunder(Filt1,monthR1[0]) or ta.crossunder(Filt1,monthS1[0])  or ta.crossunder(Filt1,pdh[0])  or ta.crossunder(Filt1,pdl[0]) or ta.crossunder(Filt1,price5[0]) or ta.crossunder(Filt1,price6[0]) 
+    isFilt2Sell=ta.crossunder(Filt2,topLinePrice[0]) or ta.crossunder(Filt2,topLinePrice[1]) or ta.crossunder(Filt2,bottomLinePrice[0]) or ta.crossunder(Filt2,bottomLinePrice[1]) or ta.crossunder(Filt2,monthR1[0]) or ta.crossunder(Filt2,monthS1[0])  or ta.crossunder(Filt2,pdh[0])  or ta.crossunder(Filt2,pdl[0]) or ta.crossunder(Filt2,price5[0]) or ta.crossunder(Filt2,price6[0])
+
+    if isNewDay==false and (isFilt1Buy or isFilt2Buy)
+        finalBuySellVal:=50
+    else if  isNewDay==false and (isFilt1Sell or isFilt2Sell)
+        finalBuySellVal:=-50
+//LOGIC here END 
+//**************************************************************************************************************************************************
+//**************************************************************************************************************************************************
+//**************************************************************************************************************************************************
+
+
+
+
+
+
+//***********************************************************************************************************************************
+//**********************************************************************************************************************************
+//**************************************************DO not deleted below this*********************************************************************************
+//***********************************************************************************************************************************
+//***********************************************************************************************************************************
+// *********************************************************************************************************
+if isEndDay and onlyIntradayTrades
+    if isAlreadyBuyBefore1
+        isSquaredOffInt:=1
+        finalBuySellVal:=-50
+    else if isAlreadySellBefore1
+        isSquaredOffInt:=2
+        finalBuySellVal:=50
+if isEndDay==false and finalBuySellVal==50 and (isAlreadySellBefore1 or (isAlreadyBuyBefore1==false and isAlreadySellBefore1==false) or (isSquaredOffInt==2))
+    tradeInB:=closepl
+    if tradeInS > 0
+        ppl:=tradeInS - tradeInB - brokerage_pl
+        glob_pl:=glob_pl+ppl
+        totalPL:=totalPL+ppl
+        if ndDone
+            mypl:=mypl+ppl
+else if isEndDay==false and finalBuySellVal==-50 and (isAlreadyBuyBefore1 or (isAlreadyBuyBefore1==false and isAlreadySellBefore1==false) or (isSquaredOffInt==1) )
+    tradeInS:=closepl
+    if tradeInB > 0
+        ppl:=tradeInS - tradeInB - brokerage_pl
+        glob_pl:=glob_pl+ppl
+        totalPL:=totalPL+ppl
+        if ndDone
+            mypl:=mypl+ppl
+
+qty = input.int(confirm=false, defval = 40, title="Qty to trade for bitcoin")
+productType = input.string(confirm=false, defval = "M", options=["M","I"], title="Product Type - Day(M) or Intraday(I)")
+instrumentType = input.string(confirm=false, defval = "OPT", options=["OPT","FUT"], title="Is this future or options?")
+ecn = input.string(confirm=false, defval = "NSE", options=["NSE","MCX"], title="Exchange Select")
+strike_price = input.string(confirm=false, defval = "50000.0", title="Enter Strike Price")
+secret = input.string(confirm=false, defval = "N.A.", title="Enter Dhan Secret against the URL Webhook")
+real_qty = input.string(confirm=false, defval = "4", title="Enter Dhan Qty Lot to trade")
+exp_date = input.string(confirm=false, defval = "2024-05-15", title="Enter Expiry date of the option")
+
+getAlertJsonMessage_DHAN(c,o,h,l,bsVal,isSqrd,t,sym,secret,real_qty,exp_date) =>
+    isFuture = instrumentType == "FUT"
+    cepe = "CE"
+    tranType = "B"
+    price = 0.0
+    if isFuture
+        tranType := bsVal == 50 ? 'B' : 'S'
+    else
+        if isSqrd==0
+            if bsVal == 50
+                cepe := "CE"
+                tranType:="B"
+                price := high + 10
+            else if bsVal == -50
+                cepe := "PE"
+                tranType:="B"
+                price := high + 10
+        else if isSqrd == 1
+            cepe := "CE"
+            tranType:="S"
+            price := low - 10
+        else if isSqrd == 2
+            cepe := "PE"
+            tranType:="S"
+            price := low - 10
+    //productType
+    json = "{\"secret\":\""++str.tostring(secret)+"\","
+    json += "\"alertType\":\"multi_leg_order\",\"order_legs\":["
+    
+    json += " {\"orderType\":\"MKT\",\"exchange\":\""+str.tostring(ecn)+"\",\"instrument\":\""+str.tostring(instrumentType)+"\",\"sort_order\":\"1\","
+    json += "\"symbol\":\""+str.tostring(sym)+"\","
+    //json += "\"price\":\""+str.tostring(price)+"\","
+    json += "\"price\":\"0\","
+    
+    json += "\"transactionType\":\""+str.tostring(tranType)+"\","
+    json += "\"productType\":\""+str.tostring(productType)+"\","
+    json += "\"quantity\":\""+str.tostring(real_qty)+"\""
+    if isFuture == false
+        json += "\","
+        json += "\"option_type\":\""+str.tostring(cepe)+"\","
+        json += "\"strike_price\":\""+str.tostring(strike_price)+"\","
+        json += "\"expiry_date\":\""+str.tostring(exp_date)+"\""
+        json += "},"
+    else
+        json += "}"
+    //Counter order
+    if isFuture
+        tranType := bsVal == -50 ? 'B' : 'S'
+    else
+        if isSqrd==0
+            if bsVal == 50
+                cepe := "PE"
+                tranType:="S"
+                price := high + 10
+            else if bsVal == -50
+                cepe := "CE"
+                tranType:="S"
+                price := high + 10
+        else if isSqrd == 1
+            cepe := "PE"
+            tranType:="B"
+            price := low - 10
+        else if isSqrd == 2
+            cepe := "CE"
+            tranType:="B"
+            price := low - 10
+        
+    if isFuture == false
+        json += " {\"orderType\":\"MKT\",\"exchange\":\""+str.tostring(ecn)+"\",\"instrument\":\""+str.tostring(instrumentType)+"\",\"sort_order\":\"1\","
+        json += "\"symbol\":\""+str.tostring(sym)+"\","
+        //json += "\"price\":\""+str.tostring(price)+"\","
+        json += "\"price\":\"0\","
+        if isFuture
+            if tranType =="S"
+                tranType:="B"
+            else
+                tranType:="S"
+        json += "\"transactionType\":\""+str.tostring(tranType)+"\","
+        json += "\"productType\":\""+str.tostring(productType)+"\","
+        json += "\"quantity\":\""+str.tostring(real_qty)+"\""
+        if isFuture == false    
+            json += "\","
+            json += "\"option_type\":\""+str.tostring(cepe)+"\","
+            json += "\"strike_price\":\""+str.tostring(strike_price)+"\","
+            json += "\"expiry_date\":\""+str.tostring(exp_date)+"\""
+        json += "}"
+
+    json += "]}"
+    json
+
+getAlertJsonMessage(c,o,h,l,bsVal,isSqrd,t,sym) =>
+    json = "{\"stocks\": \""+str.tostring(sym)+"\","
+    json +="    \"trigger_prices\":"+str.tostring( int (c) ) +","
+    json +="    \"scan_name\":\"positionalmyrnd\","
+    json +="    \"triggeredAtInLong\":"+str.tostring(t) +","
+    json +="    \"open\":"+str.tostring( int (o) ) +","
+    json +="    \"high\":"+str.tostring( int (h) ) +","
+    json +="    \"low\":"+str.tostring( int (l) ) +"," 
+    json +="    \"close\":"+str.tostring( int (c) ) +","
+    json +="    \"minDeviation\": 1.7,"
+    json +="    \"conversionLine\":0.0,"
+    json +="    \"baseLine\":0.0,"
+    json +="    \"isOnBuySellValue\": true,"
+    json +="    \"buySellValue\":"+str.tostring( int (bsVal) ) +","
+    json +="    \"isSquaredOff\":"+str.tostring( int (isSqrd) ) +","
+    json +="    \"version\": 222,"
+    json +="    \"sendAlertAsIs\":false}"
+    json
+
+xDown=  finalBuySellVal[0] == -50 and  isSquaredOffInt==0 and (noTrade or isAlreadyBuyBefore1) 
+xUp=  finalBuySellVal[0] == 50 and  isSquaredOffInt==0 and (noTrade or isAlreadySellBefore1)
+xSquareOff=isSquaredOffInt > 0 and ((isAlreadySellBefore1 or isAlreadyBuyBefore1) )
+
+
+side= xUp ? "buy": xDown ? "sell" : "NA"
+if isSquaredOffInt==1
+    side:="sell"
+else if isSquaredOffInt==2
+    side:="buy"
+
+getAlertJsonMessageBitcoin(qty, mm, sym) =>
+    json = "{"
+    json += "\"symbol\": \""+str.tostring(sym)+"\","
+    json += "\"side\":\""+str.tostring(mm)+"\","
+    json += "\"qty\": \""+str.tostring(qty)+"\","
+    json += "\"trigger_time\": \"{{timenow}}\","
+    json += "\"strategy_id\": \"6691cbdf4ed9de5491f9b0a8c9c3858d\""
+    json += "}"
+    json
+
+alert_msg = alertSymbol=='BTCUSD' ?getAlertJsonMessageBitcoin(qty,side,alertSymbol) : getAlertJsonMessage(close,open,high,low,finalBuySellVal,isSquaredOffInt,time,alertSymbol) 
+//alert_msg_target_exit = alertSymbol=='BTCUSD' ?getAlertJsonMessageBitcoin(qty,side_target_exit,alertSymbol) : secret!='N.A.' ? getAlertJsonMessage_DHAN(close,open,high,low,finalBuySellVal==50?-50:finalBuySellVal==-50?50:0,isSquaredOffInt,time_close,alertSymbol,secret,real_qty,exp_date) :getAlertJsonMessage(close,open,high,low,finalBuySellVal==50?-50:finalBuySellVal==-50?50:0,isSquaredOffInt,time,alertSymbol) 
+
+
+
+
+
+
+buySellCol =  finalBuySellVal==50 ? color.black :  color.black
+plot(finalBuySellVal , color=buySellCol, style=plot.style_line, linewidth=1, title="BuySellValue", transp = 5)
+plot(isSquaredOffInt , color=buySellCol, style=plot.style_line, linewidth=1, title="isSquaredOff", transp = 5)
+
+if isEndDay and ndDone and onlyIntradayTrades
+    xSquareOff:=true
+    if (isAlreadySellBefore1) // earlier sell
+        ppl:=tradeInS - closepl - brokerage_pl
+        glob_pl:=glob_pl+ppl
+        totalPL:=totalPL+ppl
+    else if (isAlreadyBuyBefore1) 
+        ppl:=closepl - tradeInB - brokerage_pl
+        glob_pl:=glob_pl+ppl
+        totalPL:=totalPL+ppl
+    ndDone:=false
+    mypl:=mypl+ppl
+    finalPL:=finalPL+(totalPL - mypl)
+    isAlreadySellBefore1:=false
+    isAlreadyBuyBefore1:=false
+else
+    if (isAlreadySellBefore1 and tradeInS == 0) 
+        tradeInS:=closepl
+    if (isAlreadyBuyBefore1 and tradeInB == 0) 
+        tradeInB:=closepl
+    candleWiseProfit=0.0
+    if isAlreadyBuyBefore1 and tradeInB > 0
+        candleWiseProfit:=closepl - tradeInB + glob_pl
+    else if isAlreadySellBefore1 and tradeInS > 0
+        candleWiseProfit:=tradeInS - closepl + glob_pl
+    if (isAlreadySellBefore1 and tradeInS > 0) // earlier sell
+        ppl:=tradeInS - closepl - brokerage_pl
+        totalPL:=totalPL+ppl
+    else if (isAlreadyBuyBefore1  and tradeInB > 0) 
+        ppl:=closepl - tradeInB - brokerage_pl
+        totalPL:=totalPL+ppl
+    if candleWiseProfit >= target and target > 0
+        isToConsider:=false
+        xSquareOff:=true
+
+if ((xDown ) or (xUp ) or (xSquareOff))    
+    if (xDown and not xSquareOff)
+        tradeInS:=closepl
+        
+        isAlreadySellBefore1:=true
+        isAlreadyBuyBefore1:=false
+        strategy.entry("S "+debugMsg, strategy.short, when= (xDown and not xSquareOff)  , alert_message=alert_msg)
+        log.warning("sell xSquareOff:"+str.tostring(bool(xSquareOff))+ " xDown:"+str.tostring(bool(xDown)) + " xUp:"+str.tostring(bool(xUp)) )
+    else if (xUp and not xSquareOff)
+        tradeInB:=closepl
+        isAlreadySellBefore1:=false
+        isAlreadyBuyBefore1:=true
+        strategy.entry("B "+debugMsg, strategy.long, when= (xUp and not xSquareOff), alert_message=alert_msg )
+        log.warning("buy xSquareOff:"+str.tostring(bool(xSquareOff))+ " xDown:"+str.tostring(bool(xDown)) + " xUp:"+str.tostring(bool(xUp)) )
+    else if  ( xSquareOff)
+        isAlreadySellBefore1:=false
+        isAlreadyBuyBefore1:=false
+        strategy.exit(id="e "+debugMsg, stop=close, alert_message=alert_msg)
+        log.warning("exit xSquareOff:"+str.tostring(bool(xSquareOff))+ " xDown:"+str.tostring(bool(xDown)) + " xUp:"+str.tostring(bool(xUp)) )
+    //alert(getAlertJsonMessage(close,open,high,low,finalBuySellVal,isSquaredOffInt,time,alertSymbol),alert.freq_once_per_bar)
+
+ 
+plot(totalPL , color=color.rgb(241, 222, 78), style=plot.style_line, linewidth=1, title="PROFIT", transp = 5)
+
+
+ 
+plotchar(xUp and not xSquareOff, 'Go Long', '▲', location.belowbar, color.new(color.lime, 0), size=size.tiny)
+plotchar(xDown and not xSquareOff, 'Go Short', '▼', location.abovebar, color.new(color.red, 0), size=size.tiny)
+plotchar(xSquareOff, 'Squareoff', '▼', location.abovebar, color.new(#6d45fc, 0), size=size.tiny,text="")
+
+// //START:: Logic for SL and Target diagramtically on chart
+
+
+// moneyToSLPoints(money) =>
+//     strategy.position_size !=0 ? (money / syminfo.pointvalue / math.abs(strategy.position_size)) / syminfo.mintick : na
+
+// // p = moneyToSLPoints(input(200, title = "Take Profit $$"))
+// // l = moneyToSLPoints(input(100, title = "Stop Loss $$"))
+
+// p=0
+// if na(p[1])
+//     p:=0
+// else
+//     p:=p[1]
+// l =0
+// if na(l[1])
+//     l:=0
+// else
+//     l:=l[1]
+
+// if ((longCondition and strategy.position_size <= 0) or (shortCondition and strategy.position_size >= 0))
+//     p := int(profit)  //moneyToSLPoints(int(profit))
+//     l := int(loss)    //moneyToSLPoints(int(loss))
+
+
+// if (longCondition and strategy.position_size <= 0)
+//     //strategy.exit(id="x ", stop=close,alert_message=alert_msg_target_exit)
+//     strategy.entry("My Long Entry Id"+ str.tostring(int (p))+" "+str.tostring(int (l)), strategy.long,alert_message=alert_msg)
+//     eventTriggered:=4
+
+
+// if (shortCondition and strategy.position_size >= 0)
+//     //strategy.exit(id="x ", stop=close,alert_message=alert_msg_target_exit)
+//     strategy.entry("My Short Entry Id"+ str.tostring(int (p))+" "+str.tostring(int (l)), strategy.short,alert_message=alert_msg)
+//     eventTriggered:=2
+
+// if p > 0 and strategy.position_size != 0 
+//     strategy.exit("x ", profit = p, loss = l,alert_message=alert_msg_target_exit)
+// //strategy.exit("x "+ str.tostring(int (p))+" "+str.tostring(int (l)), profit = p, loss = l,alert_message=alert_msg)
+
+// // debug plots for visualize SL & TP levels
+// pointsToPrice(pp) =>
+//     na(pp) ? na : strategy.position_avg_price + pp * math.sign(strategy.position_size) * syminfo.mintick
+    
+// pp = plot(pointsToPrice(p), style = plot.style_linebr )
+// lp = plot(pointsToPrice(-l), style = plot.style_linebr )
+// avg = plot( strategy.position_avg_price, style = plot.style_linebr )
+// fill(pp, avg, color = color.green)
+// fill(avg, lp, color = color.red)
+// //END:: Logic for SL and Target diagramtically on chart 
+
+
+//*******************************************************************
+// STARTS MultiTimeframe CODE
+//*******************************************************************
+
+// func_multitimeframe()=>
+//     //your logic goes here
+//     [23432]
+// //plot(smoothingMA, "RSI-based MA", color=color.yellow, display =  display.all)
+
+// // // Global Request Function
+// getRequest_multitimeframe(_symbol, _timeframe) =>
+//     [magic]= request.security(_symbol, _timeframe, func_multitimeframe(),gaps=barmerge.gaps_off,lookahead=barmerge.lookahead_off)    
+
+// // Timeframe_A_3 = input.timeframe("5", title="Timeframe A")
+// Timeframe_B_15 = input.timeframe("15", title="Timeframe B")
+
+// // [magic3] = getRequestMagicTrend(syminfo.tickerid, Timeframe_A_3)
+// [magic15] = getRequest_multitimeframe(syminfo.tickerid, Timeframe_B_15)
+//*******************************************************************
+// ENDS MultiTimeframe CODE
+//*******************************************************************
+
+View in Pine Editor・1580 lines
+Use on chart
+8
+700
+Used framma in getting the trades.
+You can also define the custom horizontal and an inclined trendline breaking of which can trigger the trade. Enjoy the script.
+

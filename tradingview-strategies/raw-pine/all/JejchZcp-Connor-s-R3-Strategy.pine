@@ -1,0 +1,35 @@
+//@version=3
+strategy("Connor's R3 Strategy", overlay=false, calc_on_every_tick=true)
+
+MAlength = input(200, "Simple Moving Average", minval=1, step=1)
+SMA = sma(close, MAlength)
+
+RSIlength = input(2, "Relative Strength Index", minval=1, step=1)
+RSI = rsi(close, RSIlength)
+
+Bcond = close > SMA and crossunder(RSI[2], 60) and crossunder(RSI, 10)
+Scond = close < SMA and crossover(RSI[2], 40) and crossover(RSI, 90)
+
+
+strategy.entry("Buy", strategy.long, oca_name="OuterRSI", oca_type=strategy.oca.cancel, comment="Buy", when=Bcond)
+strategy.close("Buy", when=crossover(RSI, 70))
+
+strategy.entry("Sell", strategy.short, oca_name="OuterRSI", oca_type=strategy.oca.cancel, comment="Sell", when=Scond)
+strategy.close("Sell", when=crossunder(RSI, 30))
+
+
+
+plot(RSI, title="RSI", style=line, linewidth=3, color=crossunder(RSI, 10) ? lime : crossover(RSI, 90) ? red : black)
+upperborder = plot(100, title="Upper Border", style=line, linewidth=2, color=black)
+lowerborder = plot(0, title="Lower Border", style=line, linewidth=2, color=black)
+upperline = plot(90, title="Upper Line", style=line, linewidth=2, color=silver)
+lowerline = plot(10, title="Lower Line", style=line, linewidth=2, color=silver)
+fill(upperline, lowerline, color=purple, transp=95)
+
+View in Pine Editor・27 lines
+Use on chart
+7
+7
+2
+2 757
+Created based on Connor's R3 Strategy. However, the signal always appears on the next candle, where it should appear at the closing price of the same candle.

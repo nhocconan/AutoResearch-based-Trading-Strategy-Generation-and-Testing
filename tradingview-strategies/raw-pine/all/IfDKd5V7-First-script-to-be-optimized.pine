@@ -1,0 +1,32 @@
+//@version=3
+strategy("Saverio1", overlay=true)
+
+//study(title="Awesome Oscillator", shorttitle="AO")
+ao = sma(hl2,5) - sma(hl2,34)
+
+fastLength = input(12)
+slowlength = input(26)
+MACDLength = input(9)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+if (crossover(ao, 0))
+    if(delta>0.0015)
+        strategy.entry("buy", strategy.long, 4)
+        strategy.exit("buy", "long", profit = 70, loss = 20)
+
+if (crossunder(ao, 0))
+    if(delta<-0.0015)
+        strategy.entry("sell", strategy.short, 4)
+        strategy.exit("sell", "short", profit = 70, loss = 20)
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・25 lines
+Use on chart
+1
+1
+2 127
+Please, if you can help me to set stop-loss and take-profit rules based on prices and not on ticks, please comment that!

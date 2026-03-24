@@ -1,0 +1,159 @@
+//@version=3
+strategy(title="Bitlinc Entry Strategy BTC BitMEX - 30 minute v.1.1", overlay=true, pyramiding=0, calc_on_every_tick=true, default_qty_value=1, initial_capital=1000, currency='USD', calc_on_order_fills = true)
+
+// === GENERAL INPUTS ===
+// short ma
+maFastSource   = input(defval = open, title = "Fast MA Source")
+maFastLength   = input(defval = 10, title = "Fast MA Period", minval = 1)
+// long ma
+maSlowSource   = input(defval = open, title = "Slow MA Source")
+maSlowLength   = input(defval = 35, title = "Slow MA Period", minval = 1)
+
+// === SERIES SETUP ===
+// create the fast and slow ma's from source and length from above
+maFast = ema(maFastSource, maFastLength)
+maSlow = ema(maSlowSource, maSlowLength)
+
+// === PLOTTING ===
+fast = plot(maFast, title = "Fast MA", color = green, linewidth = 2, style = line, transp =90)
+slow = plot(maSlow, title = "Slow MA", color = red, linewidth = 2, style = line, transp =90)
+
+// === LOGIC for the entry off the crossing of the Moving Averages ===-
+longEntryMA = crossover(maFast, maSlow)
+shortEntryMA = crossunder(maFast, maSlow)
+
+// === Alerts don't work in Strategy Tester ===
+//alertcondition(longEntryMA, title='Bitlinc Script', message='Enter Long')
+//alertcondition(shortEntryMA, title='Bitlinc Script', message='Enter Short')
+
+// === 200 MA ===
+len = input(200, minval=1, title="Length")
+src = input(close, title="Source")
+out = sma(src, len)
+plot(out, color=yellow, title="200_MA", style = line, transp = 10, linewidth = 2)
+
+// === FILL MA lines with bull = green and bear = red ====
+fill(fast, slow, color = maFast > maSlow ? green : red, transp = 40)
+
+// === Buy and Sell entires for the MA's for the exchange NOT TV strategy script ====
+// *****WILL FIRE ONE CANDLE AFTER CLOSING OF THE CONFIRMING CANDLE 
+buy=longEntryMA
+sell=shortEntryMA
+//plotshape(buy, color=green, location=location.belowbar, style=shape.arrowup, size=size.huge, transp=0, text="Exchange Buy Alert")
+//plotshape(sell, color=red, location=location.abovebar, style=shape.arrowdown, size=size.huge, transp=0, text="Exchange Sell Alert")
+
+// === Basic BBandsL TV Method ====
+length = input(20, minval=1)
+src1= input(close, title="Source")
+mult = input(2.0, minval=0.001, maxval=50)
+basis = sma(src1, length)
+dev = mult * stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+plot(basis, color=red, transp=100)
+//p1 = plot(upper, color=aqua)
+//p2 = plot(lower, color=aqua)
+//fill(p1, p2,transp=95 )
+
+// === Basic VWAP TV Method ====
+src3 = input(hlc3, title="VWAP")
+t = time("D")
+startVWAP = na(t[1]) or t > t[1]
+sumSrc = src3 * volume
+sumVol = volume
+sumSrc := startVWAP ? sumSrc : sumSrc + sumSrc[1]
+sumVol := startVWAP ? sumVol : sumVol + sumVol[1]
+// You can use built-in vwap() function instead.
+// plotshape(sumSrc / sumVol, title="VWAP", color=white, location=location.belowbar, style=shape.cross, size=size.auto, transp=40)
+plot(sumSrc / sumVol, title="VWAP", color=white, linewidth = 1, style = line, transp =0)
+
+// === Proift and Stop levels
+profit = input(7000)
+stop = input(71)
+Leverage = input (1)
+
+
+// ==== Basic Stochastic RSI TV Method
+//smoothK = input(9, minval=1)
+//smoothD = input(12, minval=1)
+//overboughtSRSI = input(88)
+//oversoldSRSI = input(8)
+//lengthRSI = input(9, minval=1)
+//lengthStoch = input(26, minval=1)
+//srcSRSI = input(close, title="RSI Source")
+//rsi1 = rsi(srcSRSI, lengthRSI)
+//k = sma(stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+//d = sma(k, smoothD)
+//plot(k, color=blue)
+//plot(d, color=orange)
+
+// === Long Entry off Stochastic RSI
+//longEntrySRSI = crossover (d, k) and k < oversoldSRSI
+//longEntrySRSI = k < oversoldSRSI
+
+// === Short Entry off Stochastic RSI
+//shortEntrySRSI = crossover (d, k) and k > overboughtSRSI
+//shortEntrySRSI = k > overboughtSRSI
+
+// === Close Entry All off Stochastic RSI
+//closeEntrySRSI = crossover (k, d) and k > overboughtSRSI
+//closeEntrySRSI = k > overboughtSRSI
+
+// Build Williams %R with EMA (Brian Beamish Willy) and plot it on the screen to test the entry and exit
+lengthWR = input(36, minval=1)
+var = input(close)
+overSoldWR = input( -96.5059)
+overBoughtWR = input(-10.3375)
+upperWR = highest(lengthWR)
+lowerWR = lowest(lengthWR)
+outputWR = 100 * (var - upperWR) / (upperWR - lowerWR)
+//plot(outputWR, title="%R", color=yellow, linewidth=6)
+//plot(ema, title="EMA", color=aqua, linewidth=2)
+
+// === Long Entry off Williams %R
+longEntryWR = crossover (overSoldWR, outputWR)
+//longEntryWR = crossunder (outputWR, overSoldWR)
+
+// === Short Entry off Williams %R
+//shortEntryWR = crossover (outputWR, overSoldWR)
+shortEntryWR = crossover (outputWR, overBoughtWR)
+
+// === Close All Entry off Williams %R
+closeEntryWR = crossover (outputWR, overBoughtWR)
+
+// === Strategy Entry ===
+strategy.entry(id="Enter Long MA", long=true, stop=stop, comment="Long Entry MA", when=longEntryMA)
+//strategy.entry(id="Long Entry W%R", long=true, comment="Long Entry WR", when=longEntryWR)
+strategy.entry(id="Short Entry MA", long=false, comment="Short Entry MA", when=shortEntryMA)
+//strategy.entry(id="Short Entry W%R", long=false, comment="Short Entry WR", when=shortEntryWR)
+
+//strategy.entry(id="Enter Short S-RSI", long=false, comment="Enter Short off SRSI", when=enterShortEntry)
+//strategy.entry(id="Long Entry W%R", long=true, comment="Long Entry W%R", when=enterLongWR)
+//strategy.entry(id="Enter Short MA", long=false, comment="Short Entry MA", when=exitLong)
+//strategy.entry(id="Enter Short W%R", long=false, comment="Short Entry W%R", when=enterShortWR)
+
+// === Strategy Close ===
+strategy.exit("STOP-LIMIT EXIT!!!", loss = stop, profit = profit)
+//strategy.exit("PROFIT SAVER EXIT!!!", profit = profit)
+//strategy.close_all(when=shortEntryWR)
+//strategy.close_all(when=exitLong)
+//strategy.close(id="Long Exit RSI",when=exitLongRsi)
+//strategy.close(id="Long Exit W%R",when=exitLongRsi)
+
+View in Pine Editor・143 lines
+Use on chart
+5
+6
+3
+4
+22 368
+Jul 4, 2018
+Simply define your fast and slow M then backtest the strategy.
+
+*First script, work in progress. Will allow you to combine two TV indicators into one.
+Mar 7, 2019
+Release Notes
+- **Using XBT for this iteration
+- Long and Short, immediately alternating, off the EMA's
+- User defined Stop
+- User defined Profit Exit

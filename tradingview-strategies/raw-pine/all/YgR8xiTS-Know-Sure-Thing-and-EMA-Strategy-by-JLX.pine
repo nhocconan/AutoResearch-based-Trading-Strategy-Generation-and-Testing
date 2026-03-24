@@ -1,0 +1,11 @@
+//@version=4
+dashColor=##input(defval=#69696933,type='INPUT_COLOR',##id='in_8')
+dashTextColor=##input(defval=#ffffffff,type='INPUT_COLOR',##id='in_9')
+##root(root_metainfo,rm_0,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_1,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_2,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_5,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_ic_0,dashColor,input__color)
+##root(root_metainfo,rm_ic_1,dashTextColor,input__color)

@@ -1,0 +1,62 @@
+//@version = 2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 09/12/2016
+// This is one of the techniques described by William Blau in his book
+// "Momentum, Direction and Divergence" (1995). If you like to learn more,
+// we advise you to read this book. His book focuses on three key aspects
+// of trading: momentum, direction and divergence. Blau, who was an electrical
+// engineer before becoming a trader, thoroughly examines the relationship 
+// between price and momentum in step-by-step examples. From this grounding,
+// he then looks at the deficiencies in other oscillators and introduces some
+// innovative techniques, including a fresh twist on Stochastics. On directional 
+// issues, he analyzes the intricacies of ADX and offers a unique approach to help 
+// define trending and non-trending periods.
+// Blau`s indicator is like usual MACD, but it plots opposite of meaningof
+// stndard MACD indicator. 
+//
+// You can change long to short in the Input Settings
+// Please, use it only for learning or paper trading. Do not for real trading.
+////////////////////////////////////////////////////////////
+strategy(title="Ergotic MACD Strategy Backtest")
+r = input(32, minval=1)
+SmthLen = input(5, minval=1)
+reverse = input(false, title="Trade reverse")
+hline(0, color=blue, linestyle=line)
+source = close
+fastMA = ema(source, r)
+slowMA = ema(source, 5)
+xmacd = fastMA - slowMA
+xMA_MACD = ema(xmacd, 5)
+pos = iff(xmacd < xMA_MACD, 1,
+       iff(xmacd > xMA_MACD, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue )
+plot(xmacd, color=green, title="Ergotic MACD")
+plot(xMA_MACD, color=red, title="SigLin")
+
+View in Pine Editor・40 lines
+Use on chart
+1
+1
+3
+3 074
+This is one of the techniques described by William Blau in his book
+"Momentum, Direction and Divergence" (1995). If you like to learn more,
+we advise you to read this book. His book focuses on three key aspects
+of trading: momentum, direction and divergence. Blau, who was an electrical
+engineer before becoming a trader, thoroughly examines the relationship
+between price and momentum in step-by-step examples. From this grounding,
+he then looks at the deficiencies in other oscillators and introduces some
+innovative techniques, including a fresh twist on Stochastics. On directional
+issues, he analyzes the intricacies of ADX and offers a unique approach to help
+define trending and non-trending periods.
+Blau`s indicator is like usual MACD, but it plots opposite of meaningof
+stndard MACD indicator.
+
+You can change long to short in the Input Settings
+Please, use it only for learning or paper trading. Do not for real trading.

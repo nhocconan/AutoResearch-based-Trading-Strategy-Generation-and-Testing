@@ -1,0 +1,212 @@
+//@version=6
+strategy("АЗЪ 3.610 - Squeeze Momentum + ADX + FastTF + Alerts + PnL", 
+     overlay=true, pyramiding=0, calc_on_order_fills=true, process_orders_on_close=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     max_labels_count=500, max_lines_count=200)
+
+// =================== ПАРАМЕТРЫ СТРАТЕГИИ ===================
+aggressiveMode = input.bool(false, "Агрессивный режим")
+
+// Фильтры
+useRSI         = input.bool(true, "Использовать RSI-фильтр", group="Фильтры")  
+useVolumeFilt  = input.bool(true, "Использовать фильтр давления объёма", group="Фильтры")      
+usePressRatio  = input.bool(true, "Требовать перевес Buy/Sell (ratio)", group="Фильтры")
+useSuperTrend  = input.bool(true, "Использовать SuperTrend", group="Фильтры")
+useHTF         = input.bool(false, "Использовать HTF подтверждение", group="Фильтры")  
+htfTF          = input.timeframe("60", "HTF таймфрейм", group="Фильтры")
+
+// =================== ПАРАМЕТРЫ ADX ===================
+useADX     = input.bool(true, "Использовать ADX", group="ADX")
+adxLen     = input.int(14, "ADX период", minval=1, group="ADX")
+adxSmooth  = input.int(14, "ADX сглаживание", minval=1, group="ADX")
+adxThres   = input.int(20, "Порог ADX", minval=1, group="ADX")
+
+// =================== ПАРАМЕТРЫ SQUEEZE ===================
+useSqueeze = input.bool(true, "Использовать фильтр Squeeze Momentum (только в Агрессивном режиме)", group="Squeeze")
+lengthBB   = input.int(20, "BB Length", group="Squeeze")
+multBB     = input.float(2.0, "BB MultFactor", group="Squeeze")
+lengthKC   = input.int(20, "KC Length", group="Squeeze")
+multKC     = input.float(1.5, "KC MultFactor", group="Squeeze")
+
+// =================== ОБЩИЕ ПАРАМЕТРЫ ===================
+rsiLength      = input.int(14, "RSI период", minval=1, group="Настройки")
+volSmaLen      = input.int(8, "SMA период для объёмов", minval=1, group="Настройки")
+volGrowthPct   = input.float(5.0, "Мин. рост объёма vs SMA (%)", step=0.1, group="Настройки")
+minPressRatio  = input.float(1.05, "Мин. перевес Buy/Sell (×)", step=0.01, minval=1.0, group="Настройки")
+stFactor       = input.float(2.5, "SuperTrend Factor", step=0.1, group="Настройки")
+stAtr          = input.int(10, "SuperTrend ATR", minval=1, group="Настройки")
+
+// =================== УПРАВЛЕНИЕ СДЕЛКОЙ ===================
+tp1TargetPct   = input.float(1.0, "TP1 % от входа", minval=0.0, group="Управление сделкой")     
+tp2TargetPct   = input.float(3.0, "TP2 % от входа", minval=0.0, group="Управление сделкой")
+tp1Perc        = input.float(40.0, "Закрыть % позиции на TP1", minval=0.0, maxval=100.0, group="Управление сделкой")
+tp2Perc        = input.float(60.0, "Закрыть % позиции на TP2", minval=0.0, maxval=100.0, group="Управление сделкой")
+stopLossPct    = input.float(1.0, "Stop-Loss % от входа", minval=0.0, group="Управление сделкой")
+
+// =================== ИНДИКАТОРЫ ===================
+rsi = ta.rsi(close, rsiLength)
+rsiSafe = nz(rsi, 50)
+
+[stLine, stDirRaw] = ta.supertrend(stFactor, stAtr)
+stDir = nz(stDirRaw, 0)
+
+htfRsi_raw = useHTF ? request.security(syminfo.tickerid, htfTF, ta.rsi(close, rsiLength)) : na
+htfRsi = useHTF ? nz(htfRsi_raw, 50) : 50
+
+// Объемы
+bv = close > open ? volume : close == open ? volume * 0.5 : 0
+sv = close < open ? volume : close == open ? volume * 0.5 : 0
+
+bvSMA = ta.sma(bv, volSmaLen)
+svSMA = ta.sma(sv, volSmaLen)
+bvSMAg = nz(bvSMA,0)
+svSMAg = nz(svSMA,0)
+
+buyGrow  = aggressiveMode ? (bv > bvSMAg) : (bv > bvSMAg * (1 + volGrowthPct/100))
+sellGrow = aggressiveMode ? (sv > svSMAg) : (sv > svSMAg * (1 + volGrowthPct/100))
+
+small = 1e-12
+ratioBuy  = bvSMAg / math.max(svSMAg, small)
+ratioSell = svSMAg / math.max(bvSMAg, small)
+
+// =================== ЛОГИКА SQUEEZE MOMENTUM ===================
+basisBB = ta.sma(close, lengthBB)
+devBB = multBB * ta.stdev(close, lengthBB)
+upperBB = basisBB + devBB
+lowerBB = basisBB - devBB
+
+maKC = ta.sma(close, lengthKC)
+rangeKC = ta.tr
+rangemaKC = ta.sma(rangeKC, lengthKC)
+upperKC = maKC + rangemaKC * multKC
+lowerKC = maKC - rangemaKC * multKC
+
+sqzOn  = (lowerBB > lowerKC) and (upperBB < upperKC)
+sqzOff = (lowerBB < lowerKC) and (upperBB > upperKC)
+noSqz  = (sqzOn == false) and (sqzOff == false)
+
+sqzLongOk = aggressiveMode ? sqzOff : true
+sqzShortOk = aggressiveMode ? sqzOff : true
+
+// =================== Проверка условий ===================
+rsiLongOk   = (not useRSI) or (rsiSafe > 50)
+rsiShortOk  = (not useRSI) or (rsiSafe < 50)
+volLongOk   = (not useVolumeFilt) or buyGrow
+volShortOk  = (not useVolumeFilt) or sellGrow
+pressLongOk = (not usePressRatio) or (ratioBuy  > minPressRatio)
+pressShortOk= (not usePressRatio) or (ratioSell > minPressRatio)
+stLongOk    = (not useSuperTrend) or (stDir == 1)
+stShortOk   = (not useSuperTrend) or (stDir == -1)
+htfLongOk   = (not useHTF) or (aggressiveMode ? htfRsi > 45 : htfRsi > 50)
+htfShortOk  = (not useHTF) or (aggressiveMode ? htfRsi < 55 : htfRsi < 50)
+
+// =================== ADX ===================
+[plusDI, minusDI, adxVal] = ta.dmi(adxLen, adxSmooth)
+adxOk = (not useADX) or (adxVal > adxThres)
+
+// =================== ОСНОВЫ СИГНАЛОВ ===================
+longBase  = rsiLongOk and volLongOk and pressLongOk and stLongOk and htfLongOk and sqzLongOk and adxOk
+shortBase = rsiShortOk and volShortOk and pressShortOk and stShortOk and htfShortOk and sqzShortOk and adxOk
+
+// =================== Ускоренные сигналы (Fast TF) ===================
+useFastTF   = input.string("OFF", "Fast TF", options=["OFF","1","5"])
+fastCombine = input.string("AND", "Комбинация FastTF с MainTF", options=["AND","OR"])
+
+fastTFVal = useFastTF == "OFF" ? na : useFastTF
+
+fastSignalLong  = false
+fastSignalShort = false
+if not na(fastTFVal)
+    fastLongOnTF  = request.security(syminfo.tickerid, fastTFVal, longBase ? 1 : 0)
+    fastShortOnTF = request.security(syminfo.tickerid, fastTFVal, shortBase ? 1 : 0)
+    fastSignalLong  := (fastLongOnTF  == 1)
+    fastSignalShort := (fastShortOnTF == 1)
+
+finalLongSignal  = (fastCombine == "OR") ? (longBase  or (fastSignalLong  and not na(fastTFVal))) : (longBase  and (fastSignalLong  and not na(fastTFVal)))
+finalShortSignal = (fastCombine == "OR") ? (shortBase or (fastSignalShort and not na(fastTFVal))) : (shortBase and (fastSignalShort and not na(fastTFVal)))
+
+// =================== ПЛОТ СИГНАЛОВ ===================
+plotshape(finalLongSignal,  title="Long Entry",  style=shape.triangleup,   color=color.green, size=size.large, location=location.belowbar, text="BUY")
+plotshape(finalShortSignal, title="Short Entry", style=shape.triangledown, color=color.red,   size=size.large, location=location.abovebar,  text="SELL")
+
+// =================== ВХОДЫ ===================
+if finalLongSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if finalShortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+// =================== ВЫХОДЫ (TP/SL) ===================
+if strategy.position_size > 0
+    avgP = strategy.position_avg_price
+    SL   = avgP * (1 - stopLossPct/100)
+    TP1  = avgP * (1 + tp1TargetPct/100)
+    TP2  = avgP * (1 + tp2TargetPct/100)
+    if tp1Perc > 0
+        strategy.exit("L-TP1", from_entry="Long", limit=TP1, qty_percent=tp1Perc)
+    if tp2Perc > 0
+        strategy.exit("L-TP2", from_entry="Long", limit=TP2, qty_percent=tp2Perc)
+    strategy.exit("L-SL", from_entry="Long", stop=SL)
+
+if strategy.position_size < 0
+    avgP = strategy.position_avg_price
+    SLs  = avgP * (1 + stopLossPct/100)
+    TP1s = avgP * (1 - tp1TargetPct/100)
+    TP2s = avgP * (1 - tp2TargetPct/100)
+    if tp1Perc > 0
+        strategy.exit("S-TP1", from_entry="Short", limit=TP1s, qty_percent=tp1Perc)
+    if tp2Perc > 0
+        strategy.exit("S-TP2", from_entry="Short", limit=TP2s, qty_percent=tp2Perc)
+    strategy.exit("S-SL", from_entry="Short", stop=SLs)
+
+// =================== Встроенный PnL ===================
+startCapital = strategy.initial_capital
+var int prevClosed = 0
+var float pnlAccum = 0.0
+if strategy.closedtrades > prevClosed
+    for i = prevClosed to strategy.closedtrades - 1
+        tp = strategy.closedtrades.profit(i)
+        pnlAccum := pnlAccum + nz(tp, 0.0)
+    prevClosed := strategy.closedtrades
+
+equityLocal = startCapital + pnlAccum
+
+// =================== Таблица PnL на графике ===================
+var table pnlTable = table.new(position.top_right, 2, 4, border_width=1)
+if barstate.islastconfirmedhistory or barstate.islast
+    table.cell(pnlTable, 0, 0, "Start $", text_color=color.white, bgcolor=color.blue)
+    table.cell(pnlTable, 1, 0, str.tostring(startCapital, "#.##"), text_color=color.white, bgcolor=color.black)
+    table.cell(pnlTable, 0, 1, "PnL $", text_color=color.white, bgcolor=color.green)
+    table.cell(pnlTable, 1, 1, str.tostring(pnlAccum, "#.##"), text_color=color.white, bgcolor=color.black)
+    table.cell(pnlTable, 0, 2, "Equity $", text_color=color.white, bgcolor=color.orange)
+    table.cell(pnlTable, 1, 2, str.tostring(equityLocal, "#.##"), text_color=color.white, bgcolor=color.black)
+    table.cell(pnlTable, 0, 3, "Closed trades", text_color=color.white, bgcolor=color.purple)
+    table.cell(pnlTable, 1, 3, str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=color.black)
+
+// =================== АЛЕРТЫ ===================
+// Лонг
+alertcondition(finalLongSignal, title="Long Entry", message='{"signal":"BUY","side":"long"}')
+alertcondition(strategy.position_size > 0 and close >= strategy.position_avg_price * (1 + tp1TargetPct/100), title="Long TP1", message='{"signal":"TP1","side":"long"}')
+alertcondition(strategy.position_size > 0 and close >= strategy.position_avg_price * (1 + tp2TargetPct/100), title="Long TP2", message='{"signal":"TP2","side":"long"}')
+alertcondition(strategy.position_size > 0 and close <= strategy.position_avg_price * (1 - stopLossPct/100), title="Long SL", message='{"signal":"SL","side":"long"}')
+
+// Шорт
+alertcondition(finalShortSignal, title="Short Entry", message='{"signal":"SELL","side":"short"}')
+alertcondition(strategy.position_size < 0 and close <= strategy.position_avg_price * (1 - tp1TargetPct/100), title="Short TP1", message='{"signal":"TP1","side":"short"}')
+alertcondition(strategy.position_size < 0 and close <= strategy.position_avg_price * (1 - tp2TargetPct/100), title="Short TP2", message='{"signal":"TP2","side":"short"}')
+alertcondition(strategy.position_size < 0 and close >= strategy.position_avg_price * (1 + stopLossPct/100), title="Short SL", message='{"signal":"SL","side":"short"}')
+
+// =================== ПЛОТ SuperTrend ===================
+plot(stLine, title="SuperTrend", color= stDir==1 ? color.green : color.red)
+
+View in Pine Editor・200 lines
+Use on chart
+4
+8
+1 431
+Sep 1, 2025
+Strata genius squeeze momentum + tester + adx +fast tf
+Sep 1, 2025
+Release Notes
+AZI 3.610 - Squeeze Momentum + ADX + FastTF + Alerts + PnL
+change new version no piramidimg

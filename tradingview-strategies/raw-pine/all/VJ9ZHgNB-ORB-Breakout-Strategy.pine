@@ -1,0 +1,340 @@
+//@version=6
+strategy(
+     title              = "ORB Breakout",
+     overlay            = true,
+     initial_capital    = 100000,
+     pyramiding         = 0,
+     margin_long        = 12.5,
+     margin_short       = 12.5,
+     commission_type    = strategy.commission.cash_per_contract,
+     commission_value   = 0.05
+)
+
+// ----------------------------------------------------------------------------------------
+// Inputs
+// ----------------------------------------------------------------------------------------
+riskUsd      = input.float(2000, "Risk per trade ($)", step=50)
+rr           = input.float(2.0, "Reward/Risk", step=0.25)
+
+sessionRTH   = input.session("0930-1600", "Regular session (exchange time)")
+orbSession   = input.session("0930-0945", "Opening range window")
+entryWindow  = input.session("0930-1200", "Entry window (no entries after)")
+flatWindow   = input.session("1550-1600", "Flat window (close at 15:50)")
+
+// If your CFD needs integer sizing, keep these at 1.
+// If you need micro sizing, set minQty=0.1 and qtyStep=0.1, etc.
+minQty       = input.float(1.0, "Min Qty", step=0.1)
+qtyStep      = input.float(1.0, "Qty Step", step=0.1)
+
+// ----------------------------------------------------------------------------------------
+// Safety: intended for 5m charts
+// ----------------------------------------------------------------------------------------
+is5m = timeframe.isintraday and timeframe.multiplier == 5
+
+// ----------------------------------------------------------------------------------------
+// Session filters (exchange-time consistent)
+// ----------------------------------------------------------------------------------------
+inRTH      = not na(time(timeframe.period, sessionRTH))
+inORB      = not na(time(timeframe.period, orbSession))
+inEntryWin = not na(time(timeframe.period, entryWindow))
+inFlatWin  = not na(time(timeframe.period, flatWindow))
+
+afterCutoff = inRTH and not inEntryWin
+
+// New trading day
+newDay = ta.change(time("D")) != 0
+
+// ----------------------------------------------------------------------------------------
+// ORB state
+// ----------------------------------------------------------------------------------------
+var float orbHigh  = na
+var float orbLow   = na
+var bool  orbReady = false
+
+// 1 FILLED trade per day
+var bool hasTradedToday = false
+var int closedTradesAtDayStart = 0
+
+// Persistent setup states (so retest fills are not missed)
+var bool  longSetupActive  = false
+var bool  shortSetupActive = false
+
+// Store anchored risk params from the breakout/breakdown candle
+var float longStopStored   = na
+var float longTargetStored = na
+var float longQtyStored    = na
+
+var float shortStopStored   = na
+var float shortTargetStored = na
+var float shortQtyStored    = na
+
+// ----------------------------------------------------------------------------------------
+// Reset on new day
+// ----------------------------------------------------------------------------------------
+if newDay
+    orbHigh := na
+    orbLow  := na
+    orbReady := false
+    hasTradedToday := false
+    closedTradesAtDayStart := strategy.closedtrades
+
+    longSetupActive := false
+    shortSetupActive := false
+    longStopStored := na
+    longTargetStored := na
+    longQtyStored := na
+    shortStopStored := na
+    shortTargetStored := na
+    shortQtyStored := na
+
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ----------------------------------------------------------------------------------------
+// Detect any trade occurred today (robust, incl. same-bar round trips)
+// ----------------------------------------------------------------------------------------
+tradeHappenedToday =
+     (strategy.opentrades > 0) or (strategy.closedtrades > closedTradesAtDayStart)
+
+if tradeHappenedToday and not hasTradedToday
+    hasTradedToday := true
+    longSetupActive := false
+    shortSetupActive := false
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ----------------------------------------------------------------------------------------
+// Build ORB (09:30–09:45)
+// ----------------------------------------------------------------------------------------
+if inORB and inRTH and is5m
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+
+// Lock ORB after window ends
+if not inORB and inRTH and is5m and not orbReady and not na(orbHigh) and not na(orbLow)
+    orbReady := true
+
+// ----------------------------------------------------------------------------------------
+// Signal definitions
+// ----------------------------------------------------------------------------------------
+longBreak  = orbReady and inRTH and close > orbHigh
+shortBreak = orbReady and inRTH and close < orbLow
+
+// FVG filter vs 2 bars ago (10m on 5m chart)
+longFVG  = low > high[2]
+shortFVG = high < low[2]
+
+// Entry prices at ORB boundaries (retest)
+longEntryPrice  = orbHigh
+shortEntryPrice = orbLow
+
+// ----------------------------------------------------------------------------------------
+// Qty rounding helpers
+// ----------------------------------------------------------------------------------------
+roundToStep(x, step) =>
+    step <= 0 ? x : math.round(x / step) * step
+
+// ----------------------------------------------------------------------------------------
+// Activate setup on breakout/breakdown candle (store anchored SL/TP/Qty)
+// Only if:
+// - within entry window
+// - no trade filled yet today
+// - flat/no position
+// - no other setup active
+// --------------------
+canArmSetup =
+     is5m and inRTH and inEntryWin and orbReady and not hasTradedToday and strategy.position_size == 0 and not (longSetupActive or shortSetupActive)
+
+// LONG setup arm
+if canArmSetup and longBreak and longFVG
+    rawStop = low[2]  // your rule: SL = low of 2-prior candle of breakout candle
+    stop    = math.min(rawStop, longEntryPrice - syminfo.mintick)  // enforce valid side
+    riskPts = longEntryPrice - stop
+
+    if riskPts > 0
+        qtyRaw = riskUsd / (riskPts * syminfo.pointvalue)
+        qty    = roundToStep(qtyRaw, qtyStep)
+
+        if qty >= minQty
+            longStopStored   := stop
+            longTargetStored := longEntryPrice + rr * riskPts
+            longQtyStored    := qty
+            longSetupActive  := true
+
+// SHORT setup arm
+if canArmSetup and shortBreak and shortFVG
+    rawStop = high[2] // your rule: SL = high of 2-prior candle of breakdown candle
+    stop    = math.max(rawStop, shortEntryPrice + syminfo.mintick) // enforce valid side
+    riskPts = stop - shortEntryPrice
+
+    if riskPts > 0
+        qtyRaw = riskUsd / (riskPts * syminfo.pointvalue)
+        qty    = roundToStep(qtyRaw, qtyStep)
+
+        if qty >= minQty
+            shortStopStored   := stop
+            shortTargetStored := shortEntryPrice - rr * riskPts
+            shortQtyStored    := qty
+            shortSetupActive  := true
+
+// ----------------------------------------------------------------------------------------
+// Maintain pending orders while setup is active
+// (This is the key fix so fills 1–N candles later are NOT missed.)
+// ----------------------------------------------------------------------------------------
+canMaintainOrders = is5m and inRTH and inEntryWin and strategy.position_size == 0 and not hasTradedToday
+
+if canMaintainOrders and longSetupActive
+    strategy.entry("L", strategy.long, qty=longQtyStored, limit=longEntryPrice)
+    strategy.exit("L-X", from_entry="L", stop=longStopStored, limit=longTargetStored)
+
+if canMaintainOrders and shortSetupActive
+    strategy.entry("S", strategy.short, qty=shortQtyStored, limit=shortEntryPrice)
+    strategy.exit("S-X", from_entry="S", stop=shortStopStored, limit=shortTargetStored)
+
+// ----------------------------------------------------------------------------------------
+// Cancel pending orders after cutoff and after RTH
+// ----------------------------------------------------------------------------------------
+if afterCutoff
+    strategy.cancel("L")
+    strategy.cancel("S")
+    longSetupActive := false
+    shortSetupActive := false
+
+if not inRTH
+    strategy.cancel("L")
+    strategy.cancel("S")
+    longSetupActive := false
+    shortSetupActive := false
+
+// ----------------------------------------------------------------------------------------
+// Flat at 15:50 (close same day)
+// Note: on 5m chart this happens at the close of the 15:50 bar.
+// ----------------------------------------------------------------------------------------
+if inRTH and inFlatWin and strategy.position_size != 0
+    strategy.close("L")
+    strategy.close("S")
+
+// ----------------------------------------------------------------------------------------
+// Visuals
+// ----------------------------------------------------------------------------------------
+// Plot ORB lines only until 12:00 (exchange time)
+plotORB = inRTH and inEntryWin
+plot(plotORB ? orbHigh : na, "ORB High", style=plot.style_linebr, linewidth=2, color=color.new(#18b79c, 0))
+plot(plotORB ? orbLow  : na, "ORB Low",  style=plot.style_linebr, linewidth=2, color=color.new(#5d606b, 0))
+
+View in Pine Editor・223 lines
+Use on chart
+1
+5
+6
+2
+2 600
+📊 Overview
+
+📈 Systematic intraday Opening Range Breakout (ORB) strategy
+
+🧭 Designed for index CFDs (e.g. US500)
+
+⏱️ Optimized for 5-minute charts during regular trading hours
+
+🛡️ Strict risk management and position sizing
+
+🚦 Maximum one trade per day
+
+
+💡 Core Idea
+
+🌅 The market establishes a key price range shortly after the open
+
+🚀 A confirmed breakout from this opening range can signal directional momentum
+
+🎯 The strategy trades only confirmed breakouts with predefined risk
+
+
+📐 Opening Range Definition
+
+⏰ Opening range is defined between 09:30 and 09:45 (exchange time)
+
+🕯️ Uses the first three 5-minute candles of the session
+
+⬆️ Opening Range High is the highest high of those candles
+
+⬇️ Opening Range Low is the lowest low of those candles
+
+
+🟢 Long Trade
+
+📊 A 5-minute candle closes above the Opening Range High
+
+🟩 A Fair Value Gap (FVG) exists relative to the candle 10 minutes earlier
+
+🧲 A buy limit order is placed at the Opening Range High
+
+
+🔴 Short Trade
+
+📉 A 5-minute candle closes below the Opening Range Low
+
+🟥 A Fair Value Gap (FVG) exists relative to the candle 10 minutes earlier
+
+🧲 A sell limit order is placed at the Opening Range Low
+
+
+🛑 Stop Loss
+
+📉 Long trades use the low of the candle 10 minutes before the breakout
+
+📈 Short trades use the high of the candle 10 minutes before the breakdown
+
+
+🎯 Take Profit
+
+⚖️ Fixed reward-to-risk ratio of 2:1
+
+📏 Take profit distance equals two times the stop loss distance
+
+
+💰 Position Sizing
+
+💵 Fixed dollar risk per trade (default: $2,000)
+
+📐 Position size is calculated dynamically based on stop loss distance
+
+🔁 Risk remains consistent across changing volatility conditions
+
+
+⏳ Trade Management Rules
+
+🚦 Maximum one trade per day, including same-bar entries and exits
+
+🕛 No new entries after 12:00 (exchange time)
+
+⏰ All open positions are closed at 15:50
+
+❌ Pending orders are cancelled after the entry cutoff or at session end
+
+
+⚙️ Execution & Costs
+
+💸 Commission model can be configured in the strategy settings
+
+🧪 Backtests use TradingView Strategy Tester mechanics
+
+
+📝 Notes
+
+📚 This is a rules-based trading strategy, not a signal service
+
+🔍 Results depend on instrument, broker feed, spreads, and commissions
+
+🧠 Forward testing is strongly recommended before live trading
+
+
+⚠️ Disclaimer
+
+📖 This script is provided for educational and research purposes only
+
+🚫 It does not constitute financial advice
+
+🔥 Trading leveraged instruments involves significant risk
+

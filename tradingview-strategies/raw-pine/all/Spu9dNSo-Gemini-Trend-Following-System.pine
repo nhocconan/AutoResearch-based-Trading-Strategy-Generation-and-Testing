@@ -1,0 +1,127 @@
+//@version=5
+strategy("Gemini Trend Following System", 
+     overlay=true, 
+     initial_capital=50000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=20, // Using a larger position size for fewer, longer-term trades
+     commission_type=strategy.commission.percent, 
+     commission_value=0.05,
+     pyramiding = 0)
+
+// --- I. USER INPUTS ---
+ma_group = "Moving Averages"
+sma50_len = input.int(50, "50-period SMA Length", group=ma_group)
+sma200_len = input.int(200, "200-period SMA Length", group=ma_group)
+
+perf_group = "Performance Filters (for Screening)"
+roc_period = input.int(252, "Rate of Change Period (days)", group=perf_group, tooltip="Approx 1 year")
+roc_min_perc = input.float(15.0, "Minimum Annual ROC %", group=perf_group, tooltip="Filters for stocks in strong long-term uptrends")
+
+risk_group = "Risk Management"
+use_catastrophic_stop = input.bool(true, "Use Catastrophic Stop Loss?", group=risk_group)
+
+// --- II. CALCULATIONS ---
+sma50 = ta.sma(close, sma50_len)
+sma200 = ta.sma(close, sma200_len)
+roc = (close - close[roc_period]) / close[roc_period] * 100
+
+// --- III. LOGIC & CONDITIONS ---
+// Define boolean conditions for our strategy rules.
+
+// Regime Filter: Is the stock in a long-term uptrend?
+// This is the most important condition for this strategy.
+bool is_major_uptrend = sma50 > sma200 and roc > roc_min_perc and sma200 > sma200[20] // Ensure the 200 SMA itself is rising
+
+// Entry Condition: Buy the dip
+// We look for a pullback TO the 50 SMA, then a recovery.
+bool pulled_back_to_50sma = ta.crossunder(close, sma50) // Did the price dip below the 50 SMA recently?
+bool recovered_above_50sma = ta.crossover(close, sma50) // Did it just cross back above?
+
+// We use ta.barssince to confirm the pullback happened within the last 10 bars.
+bool entry_condition = is_major_uptrend and recovered_above_50sma and ta.barssince(pulled_back_to_50sma) < 10
+
+// Exit Condition: The primary trend has failed.
+bool trend_exit_condition = ta.crossunder(sma50, sma200) // The "Death Cross"
+
+// --- IV. STRATEGY EXECUTION ---
+// Define when to enter and exit trades.
+
+// Entry Logic
+if (entry_condition and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long, comment="Entry (Pullback Buy)")
+
+    // Set a wide, catastrophic stop-loss below the 200-day SMA at time of entry
+    if (use_catastrophic_stop)
+        stop_loss_price = ta.lowest(low, 20)[1] < sma200 ? ta.lowest(low, 20)[1] : sma200[1]
+        strategy.exit("SL Exit", from_entry="Long", stop=stop_loss_price)
+
+// Trend Exit Logic
+if (trend_exit_condition)
+    strategy.close("Long", comment="Exit (Trend Failure)")
+
+// --- V. VISUALS ---
+// Plot indicators on the chart for easier analysis.
+plot(sma50, "50 SMA", color=color.new(color.blue, 0), linewidth=2)
+plot(sma200, "200 SMA", color=color.new(color.red, 0), linewidth=2)
+
+// Highlight bars where an entry signal occurred
+bgcolor(entry_condition ? color.new(color.teal, 80) : na, title="Entry Signal")
+// Highlight bars where the trend exit signal occurred
+bgcolor(trend_exit_condition and strategy.position_size > 0 ? color.new(color.maroon, 70) : na, title="Exit Signal")
+
+View in Pine Editor・71 lines
+Use on chart
+4
+5
+2 097
+Strategy Description: The Gemini Trend Following System
+Core Philosophy
+This is a long-term trend-following system designed for a position trader or a patient swing trader, not a day trader. The fundamental goal is to capture the majority of a stock's major, multi-month or even multi-year uptrend.
+
+The core principle is: "Buy weakness in a confirmed uptrend, and sell only when the uptrend's structure is fundamentally broken."
+
+It operates on the belief that it's more profitable to ride a durable trend than to chase short-term breakouts or worry about daily price fluctuations. It prioritizes staying in a winning trade over frequent trading.
+
+The Three Pillars of the Strategy
+The script's logic is built on three distinct pillars, processed in order:
+
+1. The Regime Filter: "Is This Stock in a Healthy Uptrend?"
+Before even considering a trade, the script acts as a strict gatekeeper. It will only "watch" a stock if it meets all the criteria of a healthy, long-term uptrend. This is the most important part of the strategy as it filters out weak or speculative stocks.
+
+A stock passes this filter if:
+
+The 50-day Simple Moving Average (SMA) is above the 200-day SMA. This is the classic definition of a "Golden Cross" state, indicating the medium-term trend is stronger than the long-term trend—a hallmark of a bull market for the stock.
+
+The stock's performance over the last year is positive. The Rate of Change (ROC) must be above a minimum threshold (e.g., 15%). This ensures we are only looking at stocks that have already demonstrated significant strength.
+
+The 200-day SMA itself is rising. This is a crucial check to ensure the very foundation of the trend is solid and not flattening out or beginning to decline.
+
+If a stock doesn't meet these conditions, the script ignores it completely.
+
+2. The Entry Trigger: "When to Buy the Dip"
+Once a stock is confirmed to be in a healthy uptrend, the script does not buy immediately. Instead, it patiently waits for a point of lower risk and higher potential reward—a pullback.
+
+The entry trigger is a specific, two-step sequence:
+
+The stock price first dips and closes below its 50-day SMA. This signifies a period of temporary weakness or profit-taking.
+
+The price then recovers and closes back above the 50-day SMA within a short period (10 bars).
+
+This sequence is a powerful signal. It suggests that institutional buyers view the 50-day SMA as a key support level and have stepped in to defend it, overpowering the sellers. The entry occurs at this point of confirmed support, marking the likely resumption of the uptrend. On the chart, this event is highlighted with a teal background.
+
+3. The Exit Strategy: "When is the Trend Over?"
+The exit logic is designed to keep you in the trade as long as possible and only sell when the trend's character has fundamentally changed. It uses a dual-exit system:
+
+Primary Exit (Trend Failure): The main reason to sell is a "Death Cross"—when the 50-day SMA crosses below the 200-day SMA. This is a robust, albeit lagging, signal that the long-term uptrend is over and a bearish market structure is taking hold. This exit condition is designed to ignore normal market corrections and only trigger when the underlying trend has truly broken. On the chart, this is highlighted with a maroon background.
+
+Safety-Net Exit (Catastrophic Stop-Loss): To protect against a sudden market crash or a company-specific disaster, a "safety-net" stop-loss is placed at the time of entry. This stop is set far below the entry price, typically underneath the 200-day SMA. It is a "just-in-case" measure that should only be triggered in a severe and rapid decline, protecting your capital from an unexpected black swan event.
+
+Who is This Strategy For?
+Position Traders: Investors who are comfortable holding a stock for many months to over a year.
+
+Patient Swing Traders: Traders who want to capture large price swings over weeks and months, not days.
+
+Investors using a Rules-Based Approach: Anyone looking to apply a disciplined, non-emotional system to their long-term portfolio.
+
+Ideal Market Conditions
+This strategy excels in markets with clear, durable trends. It performs best on strong, leading stocks during a sustained bull market. It will underperform significantly or generate losses in choppy, sideways, or range-bound markets, where the moving averages will frequently cross back and forth, leading to "whipsaw" trades.

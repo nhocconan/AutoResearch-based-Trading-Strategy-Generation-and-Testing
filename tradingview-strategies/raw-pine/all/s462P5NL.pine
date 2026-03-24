@@ -1,0 +1,57 @@
+//@version=2
+// by Saucius Finance https://saucius-finance.blogspot.com/
+// copyrights reserved :)
+// This strategy derives form the consideration of the author, Tushar Chande, that, in "more patterns" paragraph, 
+// long and short trends are identified by oscillator < or > line 50. 
+// This helps because simple Aroon and Aroon crosses suffer in not trending periods.
+// original article avabile in:" Stocks & Commodities, V. 13:9 (369-374) : A Time Price Oscillator by Tushar Chande, Ph.D.""
+strategy("Aroon Oscillator strategy by Saucius", overlay=false)
+//building aroon lines, Embodying both Aroon line (Up and Down) and Aroon Oscillator
+length = input(19, type=integer, minval=1)
+level_middle = input(-25, type=integer, minval=-90, maxval=90, step = 5)
+levelhigh = input(75,  minval=-100, maxval=100, step = 5)
+levellow = input(-85,  minval=-100, maxval=100, step = 5)
+upper = 100 * (highestbars(high, length+1) + length)/length
+lower = 100 * (lowestbars(low, length+1) + length)/length
+oscillator = upper - lower 
+plot(upper, title="Aroon Up", color=blue)
+plot(lower, title="Aroon Down", color=red)
+plot(oscillator, title="Aroon Oscillator", color = yellow)
+hline(level_middle, title="middle line", color=gray,  linewidth=2)
+hline(levelhigh, title ="upper border", color=gray,  linewidth=1)
+hline(levellow, title ="lower border", color=gray, linewidth=1)
+
+// Entry //
+entryl = oscillator[1] < level_middle[1] and oscillator > level_middle
+entrys = oscillator[1] > level_middle[1] and oscillator < level_middle
+strategy.entry("Long", true, when = entryl)
+strategy.entry("Short", false, when = crossunder (oscillator, level_middle))
+
+
+// === EXIT===
+exitL1 = oscillator[1] > levelhigh[1] and oscillator < levelhigh
+exitS1 =  oscillator[1] < levellow[1] and oscillator > levellow
+strategy.close("Long", when=entrys)
+strategy.close("Short", when=entryl)
+strategy.close("Long", when= exitL1)
+strategy.close("Short", when= exitS1)
+
+View in Pine Editor・37 lines
+Use on chart
+1
+5
+2
+5
+7 428
+This strategy suits better for stock, indexes and commodities sufficiently volatile but with not so strong trend, where perspective of future quotations are not so certain.
+For these financial instruments this system works better than others based on classical trend oscillator (like Supertrend)
+
+This strategy starts from the idea of the creator of Aroon lines, Tushar Chande, whose suggested to an unique Aroon Oscillator (defined as Aroon Up - Aroon Down), instead of 2 lines (for reference, original article avaible in:" Stocks & Commodities , V. 13:9 : A Time Price Oscillator by Tushar Chande, Ph .D."" - paragraph: "more patterns").
+
+Use middle line for taking position, and the extreme ones (high and low) for exiting from long/short position. Extreme lines are not use for opening position against the trend.
+
+Best values are for EU stocks and indexes: 19 periods, middle line = - 25 (ecxpecially for shares, give the general tendency of growing). Therefore also levels for exiting long/short position are not specular (levelhigh stops at + 75, low at -85 since stocks when go down, fall often heavily)
+
+
+Please give feedback for improving this strategy! All the best,
+MS .

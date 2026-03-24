@@ -1,0 +1,300 @@
+//@version=5
+strategy("BULL Whale Finder + BTC 1h",
+     overlay=true,
+     pyramiding=4,
+     calc_on_every_tick=true,
+     process_orders_on_close=false,
+     default_qty_type=strategy.fixed)
+
+// =====================================================
+// INPUTS (SOLO 1)
+// =====================================================
+float MLPT_USD = input.float(100, "MLPT USD (riesgo por trade)", minval=1, step=1)
+
+// =====================================================
+// HARD CODED (NO TOCAR)
+// =====================================================
+// Execution
+string POINTER = ""
+bool allowBacktestNoPointer = true
+
+// SL (ATR)
+int   atrLen  = 14
+float atrMult = 2.7
+
+// Pay-Self
+bool  usePaySelf    = true
+float payTriggerPct = 2.0  / 100.0
+float payLockPct    = 0.15 / 100.0
+
+// MA200 Filter
+bool useMA200Filter = true
+bool useMA200Slope  = true
+int  ma200Len       = 200
+int  ma200SlopeLen  = 20
+
+// MA200 HTF
+bool   useMA200HTF   = true
+string ma200HTF_tf   = "240" // 4H
+
+// VS Params
+int   vsLen      = 21
+int   vsOut      = 2
+float vsMult     = 2.3
+float vsMinPct   = 0.7  / 100.0
+float vsClosePct = 35.0 / 100.0
+
+// Exchange / rounding
+float SL_BUFFER        = 0.01
+float qtyFixed         = 0.001
+float stepQty          = 0.001
+float MIN_NOTIONAL_USD = 20.0
+
+// TP
+bool  tpFromVS3 = false
+float tp1Pct    = 33.0
+float tp2Pct    = 50.0
+
+// Visual
+bool  showSL       = true
+bool  showShade    = true
+bool  showEntryDot = true
+color cSL      = color.new(color.green, 0)
+color cShade   = color.new(color.green, 85)
+color cVSentry = color.lime
+color cVStp    = color.orange
+
+// Proximidad MA1/MA2 (tal cual tus valores)
+bool useMA1Filter      = true        // exigir close > MA20
+bool useEntryNearMA2   = true        // VS#1 cerca MA200 desde LOW
+float entryNearMA2Pct  = 6.0 / 100.0 // 6%
+bool useEntryNearMA1   = false       // desactivado (tu screenshot)
+float entryNearMA1Pct  = 6.0 / 100.0 // queda fijo aunque no se use
+bool useMA1MA2Near     = true        // MA20 y MA200 cerca
+float ma1ma2NearPct    = 6.0 / 100.0 // 6%
+
+// =====================================================
+// JSON (ALERTS) — hardcode pointer vacío
+// =====================================================
+f_json(_event, _reduce) =>
+    "{" + "\"ticker\":\"{{ticker}}\"," + "\"action\":\"{{strategy.order.action}}\"," + "\"quantity\":\"{{strategy.order.contracts}}\"," + "\"pointer\":\"" + POINTER + "\"," + "\"reduce_only\":" + (_reduce ? "true" : "false") + "," + "\"event\":\"" + _event + "\"}"
+
+// =====================================================
+// HELPERS
+// =====================================================
+f_round_step_floor(_x, _step) => _step > 0 ? math.floor(_x / _step) * _step : _x
+f_round_step_ceil(_x, _step)  => _step > 0 ? math.ceil(_x / _step)  * _step : _x
+
+f_qty_min_notional(_qty, _px) =>
+    need = (MIN_NOTIONAL_USD > 0) ? (MIN_NOTIONAL_USD / _px) : 0.0
+    qRaw = math.max(_qty, need)
+    f_round_step_ceil(qRaw, stepQty)
+
+f_qty_mlpt_long(_entry, _sl) =>
+    risk = _entry - _sl
+    qRaw = (risk > 0) ? (MLPT_USD / risk) : 0.0
+    f_round_step_floor(qRaw, stepQty)
+
+// =====================================================
+// MA200 / MA20
+// =====================================================
+ma200 = ta.sma(close, ma200Len)
+plot(ma200, "MA200", color=color.red, linewidth=2)
+
+ma1 = ta.sma(close, 20)
+plot(ma1, "MA20", color=color.blue, linewidth=2)
+
+ma200Slope   = ma200 - ma200[ma200SlopeLen]
+ma200SlopeOK = (not useMA200Slope) or (not na(ma200Slope) and ma200Slope > 0)
+ma200FilterOK = (not useMA200Filter) or (close > ma200 and ma200SlopeOK)
+
+// HTF MA200
+ma200HTF = request.security(syminfo.tickerid, ma200HTF_tf, ta.sma(close, ma200Len))
+ma200HTFFilterOK = (not useMA200HTF) or (not na(ma200HTF) and close > ma200HTF)
+
+// Proximidad (medido desde LOW)
+ma1FilterOK = (not useMA1Filter) or (close > ma1)
+
+distLowMA2 = (not na(ma200) and low > 0) ? math.abs(low - ma200) / low : na
+entryNearMA2OK = (not useEntryNearMA2) or (not na(distLowMA2) and distLowMA2 <= entryNearMA2Pct)
+
+distLowMA1 = (not na(ma1) and low > 0) ? math.abs(low - ma1) / low : na
+entryNearMA1OK = (not useEntryNearMA1) or (not na(distLowMA1) and distLowMA1 <= entryNearMA1Pct)
+
+distMA1MA2 = (not na(ma1) and not na(ma200) and ma1 != 0) ? math.abs(ma1 - ma200) / ma1 : na
+ma1ma2NearOK = (not useMA1MA2Near) or (not na(distMA1MA2) and distMA1MA2 <= ma1ma2NearPct)
+
+// =====================================================
+// VS DETECTION — LONG
+// =====================================================
+rng = high - low
+
+f_avg_no_out(_len, _k) =>
+    float result = na
+    if bar_index >= _len
+        arr = array.new_float(0)
+        for i = 0 to _len - 1
+            array.push(arr, high[i] - low[i])
+        array.sort(arr, order.ascending)
+        n = array.size(arr)
+        kk = math.min(_k, math.floor((n - 1) / 2))
+        start = kk
+        stop  = n - kk - 1
+        sum = 0.0
+        count = 0
+        if stop >= start
+            for j = start to stop
+                sum += array.get(arr, j)
+                count += 1
+            result := count > 0 ? sum / count : na
+    result
+
+avgRng = f_avg_no_out(vsLen, vsOut)
+okRange   = not na(avgRng) and rng >= avgRng * vsMult
+okMinPct  = rng >= close * vsMinPct
+strongBull = rng > 0 and (high - close) / rng <= vsClosePct
+isVS = okRange and okMinPct and strongBull
+
+// =====================================================
+// EXEC FLAGS (hardcoded)
+// =====================================================
+hasPointer = str.length(POINTER) > 0
+canTrade   = allowBacktestNoPointer or hasPointer
+
+// =====================================================
+// VARS
+// =====================================================
+var float slPrice = na
+var float entryPx = na
+var float initQty = na
+var float mfePct  = 0.0
+var bool  payArmed = false
+
+var int   vsCount = 0
+var float vs2Low  = na
+var bool  tp1     = false
+var bool  tp2     = false
+
+// RESET
+if strategy.position_size == 0
+    slPrice := na
+    entryPx := na
+    initQty := na
+    mfePct  := 0.0
+    payArmed := false
+    vsCount := 0
+    vs2Low  := na
+    tp1 := false
+    tp2 := false
+
+// =====================================================
+// ENTRY (VS #1) + SL inicial ATR
+// =====================================================
+enterCond = barstate.isconfirmed and isVS and ma200FilterOK and ma200HTFFilterOK and ma1FilterOK and entryNearMA2OK and entryNearMA1OK and ma1ma2NearOK and strategy.position_size == 0 and canTrade
+if enterCond
+    atr   = ta.atr(atrLen)
+    slInit = close - atr * atrMult
+    qtyRisk = f_qty_mlpt_long(close, slInit)
+    qtyFinal = f_qty_min_notional(qtyRisk, close)
+    qtyFinal := f_round_step_floor(qtyFinal, stepQty)
+    if qtyFinal > 0
+        strategy.entry("L", strategy.long, qty=qtyFinal, alert_message=(hasPointer ? f_json("ENTRY_INIT", false) : ""))
+        entryPx := close
+        initQty := qtyFinal
+        slPrice := slInit
+        vsCount := 1
+
+plotshape(showEntryDot and enterCond, title="Entry Dot", style=shape.circle, size=size.tiny, location=location.belowbar, color=color.new(color.green, 0))
+
+// =====================================================
+// PAY-SELF (MFE % -> SL piso a profit fijo, sin cerrar size)
+// =====================================================
+if usePaySelf and strategy.position_size > 0 and not na(entryPx) and entryPx > 0
+    curMfePct = math.max(0.0, (high - entryPx) / entryPx)
+    mfePct := math.max(mfePct, curMfePct)
+    if not payArmed and mfePct >= payTriggerPct
+        payArmed := true
+    if payArmed and payLockPct > 0 and not na(initQty) and initQty > 0
+        paySL = entryPx * (1.0 + payLockPct)
+        slPrice := na(slPrice) ? paySL : math.max(slPrice, paySL)
+
+// =====================================================
+// VS SEQUENCE
+// =====================================================
+if barstate.isconfirmed and strategy.position_size > 0 and isVS
+    vsCount += 1
+
+    slTrail = low - SL_BUFFER
+    slPrice := na(slPrice) ? slTrail : math.max(slPrice, slTrail)
+
+    if vsCount == 2
+        vs2Low := low - SL_BUFFER
+        addQty = f_qty_mlpt_long(close, slPrice)
+        addQty := f_qty_min_notional(addQty, close)
+        addQty := f_round_step_floor(addQty, stepQty)
+        if addQty > 0
+            strategy.entry("L", strategy.long, qty=addQty, alert_message=(hasPointer ? f_json("ADD_VS2", false) : ""))
+
+    if vsCount == 3
+        slPrice := math.max(slPrice, entryPx)
+        if not na(vs2Low)
+            slPrice := math.max(slPrice, vs2Low)
+
+    int tp1VS = tpFromVS3 ? 3 : 4
+    int tp2VS = tpFromVS3 ? 4 : 5
+
+    if vsCount == tp1VS and not tp1
+        strategy.close("L", qty_percent=tp1Pct, alert_message=(hasPointer ? f_json("TP1_VS" + str.tostring(tp1VS), true) : ""))
+        tp1 := true
+
+    if vsCount == tp2VS and not tp2
+        strategy.close("L", qty_percent=tp2Pct, alert_message=(hasPointer ? f_json("TP2_VS" + str.tostring(tp2VS), true) : ""))
+        tp2 := true
+
+// =====================================================
+// EXIT (SL EVENT)
+// =====================================================
+if strategy.position_size > 0 and not na(slPrice)
+    strategy.exit("XL", from_entry="L", stop=slPrice, alert_message=(hasPointer ? f_json("SL_EVENT", true) : ""))
+
+// =====================================================
+// BAR COLORS (VS entrada vs VS de TP)
+// =====================================================
+int tp1VS_now = tpFromVS3 ? 3 : 4
+int tp2VS_now = tpFromVS3 ? 4 : 5
+isTPvs = strategy.position_size > 0 and isVS and (vsCount == tp1VS_now or vsCount == tp2VS_now)
+barcolor(isTPvs ? cVStp : (isVS ? cVSentry : na))
+
+// =====================================================
+// SL PLOT + SHADE
+// =====================================================
+pSL = plot(showSL ? slPrice : na, "SL", color=cSL, linewidth=2, style=plot.style_linebr)
+pPx = plot(showShade and strategy.position_size > 0 ? close : na, "PX (fill)", color=color.new(color.white, 100), display=display.none)
+fill(pSL, pPx, color=(showShade and strategy.position_size > 0 ? cShade : na))
+
+View in Pine Editor・273 lines
+Use on chart
+3
+4
+857
+BULL Whale Finder + BTC 1h is a long-only strategy designed to capture strong impulsive moves in Bitcoin.
+
+It trades expansion (Whale) bars that appear in the direction of the trend, confirmed by the 200-period moving average on both 1H and 4H, with price holding above the 20-period moving average.
+Entries focus on impulsive moves that originate from structural zones, not late breakouts.
+
+Risk management is fully automated:
+
+ATR-based initial stop
+
+Automatic profit protection (Pay-Self)
+
+Adds and partial exits based on the expansion-bar sequence
+
+A protected runner managed with a trailing stop
+
+The user only sets the risk per trade (MLPT).
+All other parameters are hardcoded and locked to prevent over-optimization.
+
+👉 Ready for backtesting, discretionary execution, or full automation.
+
+

@@ -1,0 +1,122 @@
+//@version=6
+strategy("Smart Scalping PRO Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===== INPUTS =====
+
+emaFastLen = input.int(50, "EMA 50")
+emaSlowLen = input.int(200, "EMA 200")
+
+rsiLen = input.int(3, "RSI Length")
+rsiOB = input.int(80, "RSI Overbought")
+rsiOS = input.int(20, "RSI Oversold")
+
+adxLen = input.int(5, "ADX Length")
+adxLevel = input.int(30, "ADX Threshold")
+
+atrLen = input.int(14, "ATR Length")
+atrMult = input.float(1.2, "ATR Multiplier")
+
+rr = input.float(1.5, "Risk Reward")
+
+// sesiones
+london = input.session("0800-1200", "London Session")
+newyork = input.session("1300-1700", "New York Session")
+
+// ===== INDICADORES =====
+
+ema50 = ta.ema(close, emaFastLen)
+ema200 = ta.ema(close, emaSlowLen)
+
+rsi = ta.rsi(close, rsiLen)
+
+[diplus, diminus, adx] = ta.dmi(adxLen, adxLen)
+
+atr = ta.atr(atrLen)
+
+// pendiente tendencia
+emaSlope = ema50 - ema50[5]
+
+// volatilidad mínima
+volatility = atr > ta.sma(atr, 20)
+
+// sesiones activas
+inLondon = not na(time(timeframe.period, london))
+inNY = not na(time(timeframe.period, newyork))
+
+sessionOK = inLondon or inNY
+
+// ===== FILTRO DE TENDENCIA =====
+
+trendLong =
+     close > ema50 and
+     ema50 > ema200 and
+     emaSlope > 0
+
+trendShort =
+     close < ema50 and
+     ema50 < ema200 and
+     emaSlope < 0
+
+// ===== MOMENTUM =====
+
+rsiLong = ta.crossover(rsi, rsiOS)
+rsiShort = ta.crossunder(rsi, rsiOB)
+
+// ===== FUERZA DE MERCADO =====
+
+strongTrend = adx > adxLevel
+
+// ===== CONDICIONES FINALES =====
+
+longCondition =
+     trendLong and
+     rsiLong and
+     strongTrend and
+     sessionOK and
+     volatility
+
+shortCondition =
+     trendShort and
+     rsiShort and
+     strongTrend and
+     sessionOK and
+     volatility
+
+// ===== STOP / TAKE PROFIT =====
+
+longStop = close - atr * atrMult
+shortStop = close + atr * atrMult
+
+longTarget = close + (close - longStop) * rr
+shortTarget = close - (shortStop - close) * rr
+
+// ===== EJECUCIÓN =====
+
+if longCondition
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL BUY", "BUY", stop=longStop, limit=longTarget)
+
+if shortCondition
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP/SL SELL", "SELL", stop=shortStop, limit=shortTarget)
+
+// ===== ALERTAS =====
+
+alertcondition(longCondition, title="BUY Signal", message="Buy Signal Generated")
+
+alertcondition(shortCondition, title="SELL Signal", message="Sell Signal Generated")
+
+// ===== PLOTS =====
+
+plot(ema50, color=color.orange, linewidth=2, title="EMA 50")
+plot(ema200, color=color.blue, linewidth=2, title="EMA 200")
+
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.triangleup, title="BUY")
+
+plotshape(shortCondition, location=location.abovebar, color=color.red, style=shape.triangledown, title="SELL")
+
+View in Pine Editor・116 lines
+Use on chart
+6
+388
+Esta estrategia se basa en varios indicadores institucionales y muy mejorada

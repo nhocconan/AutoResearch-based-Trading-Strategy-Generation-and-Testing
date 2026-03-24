@@ -1,0 +1,93 @@
+//@version=5
+strategy("15-Min Opening Range Breakout", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+sessionStart = input.time(timestamp("2025-01-01 08:00 +0000"), "Session Start (GMT)")
+rangeMinutes = input.int(15, "Opening Range Duration (min)")
+riskMultiplier = input.float(2.0, "Reward to Risk Ratio", minval=0.5)
+buffer = input.float(0.0001, "Entry Buffer (in pips)", step=0.0001)
+
+inSession = (time >= sessionStart) and (time < sessionStart + rangeMinutes * 60 * 1000)
+
+// Capture Opening Range High and Low
+var float orHigh = na
+var float orLow = na
+if inSession
+    orHigh := na( orHigh ) ? high : math.max(high, orHigh)
+    orLow := na( orLow ) ? low : math.min(low, orLow)
+else if not na(orHigh)
+    // Once session ends
+    longEntry = orHigh + buffer
+    shortEntry = orLow - buffer
+    stopLong = orLow - buffer
+    stopShort = orHigh + buffer
+    longTP = longEntry + (longEntry - stopLong) * riskMultiplier
+    shortTP = shortEntry - (stopShort - shortEntry) * riskMultiplier
+
+    // Execute breakout entries
+    if close > longEntry
+        strategy.entry("Buy ORB", strategy.long, stop=longEntry)
+        strategy.exit("TP Buy", from_entry="Buy ORB", limit=longTP, stop=stopLong)
+    if close < shortEntry
+        strategy.entry("Sell ORB", strategy.short, stop=shortEntry)
+        strategy.exit("TP Sell", from_entry="Sell ORB", limit=shortTP, stop=stopShort)
+
+    // Reset OR values after execution
+    orHigh := na
+    orLow := na
+
+// Plotting
+plotshape(not na(orHigh) ? orHigh : na, title="OR High", location=location.absolute, color=color.green, style=shape.triangledown)
+plotshape(not na(orLow) ? orLow : na, title="OR Low", location=location.absolute, color=color.red, style=shape.triangleup)
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © JefferyTanYongSheng
+
+View in Pine Editor・42 lines
+Use on chart
+6
+2
+2 963
+STEP-BY-STEP RULES
+1. Define the Opening Range (OR)
+Mark the high and low of the first 15-minute candle of the session.
+
+This creates your Opening Range.
+
+Example: London session opens at 08:00 GMT. Use the 08:00–08:15 candle.
+
+2. Set Entry Triggers
+Buy Breakout: Place a Buy Stop order 1 pip above the Opening Range high.
+
+Sell Breakout: Place a Sell Stop order 1 pip below the Opening Range low.
+
+⚠️ Only one side should be triggered. Cancel the opposite order once one is active.
+
+3. Set Stop Loss (SL)
+For Buy trades:
+SL = Opening Range Low - 2 pips
+
+For Sell trades:
+SL = Opening Range High + 2 pips
+
+This ensures you give the price enough space, while keeping risk controlled.
+
+4. Set Take Profit (TP)
+Use either of these two approaches:
+
+✅ Fixed Risk-Reward (Preferred)
+Target 1: TP = 2R (i.e., 2 × SL distance)
+
+Target 2 (optional): Leave runner for 3R or trail stop behind minor S/R
+
+✅ Fixed Pip Target (alternative)
+TP = +50 pips
+
+SL = -20 pips
+
+Matches your preferred risk model of 20 SL / 50 TP
+
+5. Trade Management
+If no breakout occurs within 1 hour, cancel the pending orders. No trade that day.
+
+If trade triggers but fails to move, consider time-based exit after 2 hours.
+
+Optional: Move SL to breakeven once price moves 1R in your favor.

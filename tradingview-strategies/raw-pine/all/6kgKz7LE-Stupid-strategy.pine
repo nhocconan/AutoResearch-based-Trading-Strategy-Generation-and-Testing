@@ -1,0 +1,50 @@
+//@version=2
+//@author=Tr0sT
+strategy(title = "Stupid strategy", shorttitle = "Stupid", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+stopLoss = input(10, title = "Stop loss percentage(0.1%)")
+takeProfit = input(10, title = "Take profit percentage(0.1%)")
+
+winTradesCashe = strategy.wintrades
+winTradesCashe := nz(winTradesCashe[1])
+lastTradeLong = -1
+lastTradeLong := nz(lastTradeLong[1])
+
+if (strategy.position_size == 0)
+    if (winTradesCashe == strategy.wintrades)
+        lastTradeLong := -lastTradeLong
+    winTradesCashe := strategy.wintrades 
+    if (lastTradeLong == 1)
+        strategy.entry("Enter", strategy.long)
+    else
+        lastTradeLong := -1
+        strategy.entry("Enter", strategy.short)
+    strategy.exit("Exit", "Enter", loss = close * stopLoss / 1000 / syminfo.mintick, profit = close * takeProfit / 1000 / syminfo.mintick)
+            
+// === Backtesting Dates ===
+testPeriodSwitch = input(false, "Custom Backtesting Dates")
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(3, "Backtest Start Month")
+testStartDay = input(6, "Backtest Start Day")
+testStartHour = input(08, "Backtest Start Hour")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,testStartHour,0)
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(14, "Backtest Stop Day")
+testStopHour = input(14, "Backtest Stop Hour")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,testStopHour,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+isPeriod = testPeriodSwitch == true ? testPeriod() : true
+// === /END
+if not isPeriod
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・42 lines
+Use on chart
+1
+0
+1
+5 875
+Strategy with simple stop-loss and take-profit in percentage. If last trade was a successful one then repeat it. If not successful - do a reversal trade.

@@ -1,0 +1,70 @@
+//@version=3
+strategy("My ETH/BTC 5 min Strategy", overlay=true,default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=1000, currency=currency.EUR,commission_type=strategy.commission.percent,commission_value=0.05)
+
+// === BACKTEST RANGE ===
+FromMonth = input(defval = 3, title = "From Month", minval = 1)
+FromDay   = input(defval = 1, title = "From Day", minval = 1)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2014)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1)
+ToDay     = input(defval = 1, title = "To Day", minval = 1)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2014)
+
+//***** PIVOT
+barsBack=input(244,minval=10,title="BarsBack")
+c=close[barsBack]
+h=highest(close,barsBack)
+b=lowest(close,barsBack)
+pivot = (h + b + c) / 3
+
+p_pivot = plot(pivot,transp=0,color=aqua)
+
+//***** Stochastic
+len = input(12, minval=1, title="Length for Main Stochastic") 
+smoothK = input(4, minval=1, title="SmoothK for Main Stochastic")
+smoothD = input(3, minval=1, title="SmoothD for Main Stochastic")
+upLine = input(80, minval=50, maxval=90, title="Upper Line Value?")
+lowLine = input(20, minval=10, maxval=50, title="Lower Line Value?")
+k = sma(stoch(close, high, low, len), smoothK)
+d = sma(k, smoothD)
+
+tunnel_offset=input(20,minval=1,title="Tunnel offset")
+tunnel_range=input(2750,minval=1,title="Tunnel range")
+
+p1=plot(highest(close[tunnel_offset],tunnel_range),color=lime,transp=0,linewidth=2)
+p2=plot(lowest(close[tunnel_offset],tunnel_range),color=orange,transp=0,linewidth=2)
+fill(p1,p2,color=white)
+//**************************
+
+buy=close<pivot and k<lowLine and crossover(k,d) and (close>lowest(close[tunnel_offset],tunnel_range)) or crossover(close,highest(close[tunnel_offset],tunnel_range))
+sell=close>pivot and k>upLine and crossunder(k,d) and (close<highest(close[tunnel_offset],tunnel_range)) or crossunder(close,lowest(close[tunnel_offset],tunnel_range))
+
+plotshape(buy,style=shape.triangleup,color=lime,transp=0,size=size.small,location=location.belowbar)
+plotshape(sell,style=shape.triangledown,color=yellow,transp=0,size=size.small,location=location.abovebar)
+
+// === ALERTS ===
+strategy.entry("L", strategy.long, when=(buy and (time > timestamp(FromYear, FromMonth, FromDay, 00, 00)) and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))))
+strategy.close("L", when=(sell and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))))
+
+View in Pine Editor・46 lines
+Use on chart
+3
+6
+3
+6
+9 666
+Hello, beginner in trading here. Use this at your own risk.
+Commission : 0.05%
+Time Unit : 5 min
+Backtest range : 15 days (looking like that is the maximum in 5 min UT)
+Initial capital : 1000€
+
+How it works :
+Long entries and exits. That's all, no pyramiding, no shorting.
+It takes the first buy signal (green triangle) and the first sell signal (yellow triangle)
+
+
+The idea is to scalp while in range using stochastic, and to get out / in when a big trend appears (that is what the tunnel is for).
+
+See the code for details.
+
+I think those are pretty good result when we look at hueg negative buy and hold returns of this month of March. What do you think?

@@ -1,0 +1,163 @@
+//@version=5
+strategy("Strict 1-Trade/Day SMC v13", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, currency=currency.USD)
+
+// === INPUTS ===
+tz = input.string("UTC-5", "Time Zone")
+rthSession = input.session("0930-1600", "Regular Trading Hours")
+orbSession = input.session("0930-0945", "Custom ORB Session")
+entryCutoff = input.session("1200-1600", "Entry Cutoff Session")
+exitTime = input.session("1400-1600", "Exit Time Session")
+
+// FVG settings
+fvgThreshold = input.float(0.0, "FVG Threshold", tooltip="Minimum size of FVG in ticks")
+
+// ATR Settings for Trailing Stop
+atrLength = input.int(15, "ATR Length")
+atrMultiplier = input.float(3.0, "ATR Multiplier", step=0.1)
+
+// SMA Settings
+smaFastLen = input.int(10, "Fast SMA Length")
+smaSlowLen = input.int(20, "Slow SMA Length")
+
+// === ORB SESSION CALCULATION ===
+var float orh = na
+var float orl = na
+in_orb = not na(time(timeframe.period, orbSession, tz))
+new_day = ta.change(time("D"))
+
+if new_day
+    orh := na
+    orl := na
+else if in_orb
+    orh := na(orh) ? high : math.max(orh, high)
+    orl := na(orl) ? low : math.min(orl, low)
+
+// === SWING DETECTION (CHoCH) ===
+swingLen = 2
+sHigh = ta.pivothigh(high, swingLen, swingLen)
+sLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(sHigh)
+    lastSwingHigh := sHigh
+if not na(sLow)
+    lastSwingLow := sLow
+
+// === FVG DETECTION ===
+bullFVG = low > high[2] + (fvgThreshold * syminfo.mintick)
+bearFVG = high < low[2] - (fvgThreshold * syminfo.mintick)
+
+// === TIME & TRADE LIMITER LOGIC ===
+inRTH = not na(time(timeframe.period, rthSession, tz))
+afterORB = not in_orb and not na(orh) and inRTH
+isBeforeCutoff = na(time(timeframe.period, entryCutoff, tz)) // True before 3:00 PM
+
+isBullishCHoCH = ta.crossover(close, lastSwingHigh)
+isBearishCHoCH = ta.crossunder(close, lastSwingLow)
+chochBullValid = ta.barssince(isBullishCHoCH) <= 5
+chochBearValid = ta.barssince(isBearishCHoCH) <= 5
+
+// 1R = ORB Range
+orbRange = orh - orl
+
+// === ONE TRADE PER DAY LIMITER ===
+var int tradeCount = 0
+if new_day
+    tradeCount := 0
+
+// === ATR CALCULATION ===
+atrValue = ta.atr(atrLength)
+
+// === SMA CALCULATION ===
+smaFast = ta.sma(close, smaFastLen)
+smaSlow = ta.sma(close, smaSlowLen)
+
+// === ENTRY CONDITIONS ===
+canEnter = afterORB and isBeforeCutoff and strategy.position_size == 0 and tradeCount == 0
+
+// === TRADE MANAGEMENT VARIABLES ===
+var float entryPrice = na
+var bool partialTaken1R = false
+var bool movedToBE = false
+
+// === LONG SETUP ===
+if canEnter and close > orh and chochBullValid and bullFVG
+    entryPrice := close
+    takeProfit = entryPrice + (orbRange * 2) // 2R Reward
+
+    strategy.entry("Long", strategy.long, comment="L: CHoCH+FVG")
+    
+    // Native ATR Trail: ACTIVATED IMMEDIATELY
+    strategy.exit("Exit Long", "Long", trail_price=entryPrice, trail_offset=atrValue * atrMultiplier / syminfo.mintick, limit=takeProfit, comment_loss="ATR Trail")
+    tradeCount := 1 
+    partialTaken1R := false
+    movedToBE := false
+
+// === SHORT SETUP ===
+if canEnter and close < orl and chochBearValid and bearFVG
+    entryPrice := close
+    takeProfit = entryPrice - (orbRange * 2) // 2R Reward
+
+    strategy.entry("Short", strategy.short, comment="S: CHoCH+FVG")
+    
+    // Native ATR Trail: ACTIVATED IMMEDIATELY
+    strategy.exit("Exit Short", "Short", trail_price=entryPrice, trail_offset=atrValue * atrMultiplier / syminfo.mintick, limit=takeProfit, comment_loss="ATR Trail")
+    tradeCount := 1
+    partialTaken1R := false
+    movedToBE := false
+
+// === ADVANCED MANAGEMENT ===
+if strategy.position_size != 0
+    // 1. Take half position off at 1R OR SMA Crossover
+    if not partialTaken1R
+        // Check 1R Hit
+        hit1R = (strategy.position_size > 0 and high >= entryPrice + orbRange) or (strategy.position_size < 0 and low <= entryPrice - orbRange)
+        
+        // Check SMA Crossover
+        maCross = (strategy.position_size > 0 and ta.crossunder(smaFast, smaSlow)) or (strategy.position_size < 0 and ta.crossover(smaFast, smaSlow))
+        
+        if hit1R or maCross
+            strategy.close("Long", qty_percent=50, comment="1R/SMA Partial")
+            strategy.close("Short", qty_percent=50, comment="1R/SMA Partial")
+            partialTaken1R := true
+    
+    // 2. MOVE STOP TO BE AFTER 3 HOURS
+    if not movedToBE
+        if (time - strategy.opentrades.entry_time(strategy.opentrades - 1)) > 10800000 // 3 hours
+            if strategy.position_size > 0
+                strategy.exit("BE Long", "Long", stop=entryPrice, comment="Stop to BE")
+            else
+                strategy.exit("BE Short", "Short", stop=entryPrice, comment="Stop to BE")
+            movedToBE := true
+
+// === EOD FORCED EXIT ===
+timeToExit = not na(time(timeframe.period, exitTime, tz))
+if timeToExit
+    strategy.close_all(comment="EOD Exit")
+
+// === PLOTS ===
+plot(orh, "ORB High", color=color.green, style=plot.style_linebr)
+plot(orl, "ORB Low", color=color.red, style=plot.style_linebr)
+plot(lastSwingHigh, "Last Swing High", color=color.orange, style=plot.style_linebr, offset=-swingLen)
+plot(lastSwingLow, "Last Swing Low", color=color.blue, style=plot.style_linebr, offset=-swingLen)
+plot(smaFast, "10 SMA", color=color.yellow)
+plot(smaSlow, "20 SMA", color=color.white)
+
+View in Pine Editor・146 lines
+Use on chart
+4
+4
+896
+This is a trend-continuation strategy designed to capture intraday volatility after the initial market direction is established. It combines Price Action (Opening Range) to define the bias and SMC mechanics (CHoCH + FVG) for precise entries.
+The strategy strictly limits trading to one high-probability setup per day to combat overtrading.
+Key Components
+1.The Setup (Opening Range)The strategy ignores the first 15 minutes of the Regular Trading Session (9:30 AM - 9:45 AM EST). The high and low of this period establish the Opening Range (OR).Bullish Bias: Price breaks above the Opening Range High (ORH).Bearish Bias: Price breaks below the Opening Range Low (ORL).
+2. Entry Trigger (CHoCH + FVG)Once the bias is established, the strategy waits for a retracement to create a Change of Character (CHoCH) on a lower timeframe, coupled with a Fair Value Gap (FVG).
+Long Entry: Price breaks above the most recent swing high (CHoCH) and leaves a gap between the low of the current candle and the high of the candle two bars prior (Bullish FVG).
+Short Entry: Price breaks below the most recent swing low (CHoCH) and leaves a gap between the high of the current candle and the low of the candle two bars prior (Bearish FVG).
+3. Risk Management & Exit Strategy Risk is defined immediately based on the opening range. Stop Loss: Placed at the opposite side of the Opening Range ($1R$ Risk).Initial Take Profit ($2R$): The first target is set to two times the range of the opening 15 minutes ($2R$).Immediate Trailing Stop (ATR): Immediately upon entry, a trailing stop loss based on $4 \times$ Average True Range (ATR) is activated to protect capital against sudden reversals. Advanced Management (Partial Exit): If the trade reaches $1R$ profit, or if the $10$ SMA crosses the $20$ SMA in the opposite direction of the trade, $50\%$ of the position is closed. Break-Even Move: If the position is still open $3$ hours after entry, the stop loss is moved to the entry price to guarantee a risk-free trade.
+best result on nq last 30days 59 trades, P/L +50%, max drawdown 10%, 67% win rate(40/59), profit factor 3.1.
+To ensure this strategy holds up under different market conditions, it is crucial to backtest it over a long timeframe (e.g., at least 2–3 years of data) to see how it handles both trending and choppy markets in NQ and ES.
+Once you have tested it, please share your results, specifically for: Total Net Profit, Max Drawdown, Profit Factor, Win Rate. Appreciate it and thanks.

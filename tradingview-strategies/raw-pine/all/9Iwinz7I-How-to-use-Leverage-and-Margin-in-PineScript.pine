@@ -1,0 +1,80 @@
+//@version=4
+strategy(title="How to use Leverage and Margin in PineScript", overlay=false, pyramiding=100,
+     default_qty_type = strategy.percent_of_equity, default_qty_value=3000,
+     margin_long=1./30*50, margin_short=1./30*50)
+
+periodK = input(13, title="K", minval=1)
+periodD = input(3, title="D", minval=1)
+smoothK = input(4, title="Smooth", minval=1)
+k = sma(stoch(close, high, low, periodK), smoothK)
+d = sma(k, periodD)
+plot(k, title="%K", color=color.blue)
+plot(d, title="%D", color=color.orange)
+h0 = hline(80)
+h1 = hline(20)
+fill(h0, h1, color=color.purple, transp=75)
+
+GoLong=crossover(k,d) and k<80
+GoShort=crossunder(k,d) and k>20
+
+TP=input(100, title="Take Profit (in ticks)")
+
+strategy.entry("Long", strategy.long, when=GoLong)
+strategy.exit("tp_long", from_entry="Long", profit=TP)
+strategy.entry("Short", strategy.short, when=GoShort)
+strategy.exit("tp_short", from_entry="Short", profit=TP)
+
+View in Pine Editor・28 lines
+Use on chart
+1.2 K
+42
+69 701
+En route to being absolutely the best and most complete trading platform out there, TradingView has just closed 2 gaps in their PineScript language.
+
+
+It is now possible to create and backtest a strategy for trading with leverage.
+
+Backtester now produces Margin Calls - so recognizes mid-trade drawdown and if it is too big for the broker to maintain your trade, some part of if will be instantly closed.
+
+
+New additions were announced in official blogpost, but it lacked code examples, so I have decided to publish this script. Having said that - this is purely educational stuff.
+
+█ LEVERAGE
+
+Let's start with the Leverage. I will discuss this assuming we are always entering trades with some percentage of our equity balance (default_qty_type = strategy.percent_of_equity), not fixed order quantity.
+
+If you want to trade with 1:1 leverage (so no leverage) and enter a trade with all money in your trading account, then first line of your strategy script must include this parameter:
+
+Pine Script®
+default_qty_value = 100    // which stands for 100%
+
+
+
+Now, if you want to trade with 30:1 leverage, you need to multipy the quantity by 30x, so you'd get 30 x 100 = 3000:
+
+Pine Script®
+default_qty_value = 3000    // which stands for 3000%
+
+
+
+And you can play around with this value as you wish, so if you want to enter each trade with 10% equity on 15:1 leverage you'd get default_qty_value = 150.
+That's easy. Of course you can modify this quantity value not only in the script, but also afterwards in Script Settings popup, "Properties" tab.
+
+█ MARGIN
+
+Second newly released feature is Margin calculation together with Margin Calls. If the market goes against your trades and your trading account cannot maintain mid-trade drawdown - those trades will be closed in full or partly. Also, if your trading account cannot afford to open more trades (pyramiding those trades), Margin mechanism will prevent them from being entered.
+
+I will not go into details about how Margin calculation works, it was all explainged in above mentioned blogpost and documentation.
+
+All you need to do is to add two parameters to the opening line of your script:
+
+Pine Script®
+margin_long = 1./30*50, margin_short = 1./30*50
+
+
+
+Whereas "30" is a leverage scale as in 30:1, and "50" stands for 50% of Margin required by your broker. Personally the Required Margin number I've met most often is 50%, so I'm using value 50 here, but there are literally 1000+ brokers in this world and this is individual decision by each of them, so you'd better ask yourself.
+
+--------------------
+
+Please note, that if you ever encounter a strategy which triggers Margin Call at least once, then it is probably a very bad strategy. Margin Call is a last resort, last security measure - all the risks should be calculated by the strategy algorithm before it is ever hit. So if you see a Margin Call being triggred, then something is wrong with risk management of the strategy. Therefore - don't use it!

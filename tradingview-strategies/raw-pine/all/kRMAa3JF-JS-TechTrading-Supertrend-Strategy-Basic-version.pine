@@ -1,0 +1,141 @@
+//@version=5
+strategy("Supertrend", overlay=true,default_qty_type =strategy.percent_of_equity,default_qty_value = 1,process_orders_on_close = false)
+
+// group string////
+var string group_text000="Choose Strategy"
+var string group_text0="Supertrend Settings"
+var string group_text0000="Ema Settings"
+var string group_text00="Rsi Settings"
+var string group_text1="Backtest Period"
+var string group_text2="Trade Direction"
+// var string group_text3="Quantity Settings"
+var string group_text4="Sl/Tp Settings"
+////////////////////
+option_ch=input.string('Pullback',title = "Type Of Strategy",options =['Pullback','Simple'])
+
+//atr period input supertrend 
+atrPeriod = input(10, "ATR Length",group = group_text0)
+factor = input.float(3.0, "Factor", step = 0.01,group=group_text0)
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+bodyMiddle = plot((open + close) / 2, display=display.none)
+upTrend = plot(direction < 0 ? supertrend : na, "Up Trend", color = color.green, style=plot.style_linebr)
+downTrend = plot(direction < 0? na : supertrend, "Down Trend", color = color.red, style=plot.style_linebr)
+
+fill(bodyMiddle, upTrend, color.new(color.green, 90), fillgaps=false)
+fill(bodyMiddle, downTrend, color.new(color.red, 90), fillgaps=false)
+
+long=direction < 0 ? supertrend : na
+short=direction < 0? na : supertrend
+
+longpos=false
+shortpos=false
+
+longpos :=long?true :short?false:longpos[1]
+shortpos:=short?true:long?false:shortpos[1]
+
+fin_pullbuy= (ta.crossunder(low[1],long) and long and high>high[1])
+fin_pullsell=(ta.crossover(high[1],short) and short and low<low[1]) 
+
+//Ema 1
+on_ma=input.bool(true,"Ema Condition On/Off",group=group_text0000)
+ma_len= input.int(200, minval=1, title="Ema Length",group = group_text0000)
+ma_src = input.source(close, title="Ema Source",group = group_text0000)
+ma_out = ta.ema(ma_src, ma_len)
+
+ma_buy=on_ma?close>ma_out?true:false:true
+ma_sell=on_ma?close<ma_out?true:false:true
+
+// rsi indicator and condition
+// Get user input
+en_rsi    = input.bool(true,"Rsi Condition On/Off",group = group_text00)
+rsiSource = input(title='RSI Source', defval=close,group = group_text00)
+rsiLength = input(title='RSI Length', defval=14,group = group_text00)
+rsiOverbought = input(title='RSI BUY Level', defval=50,group = group_text00)
+rsiOversold   = input(title='RSI SELL Level', defval=50,group = group_text00)
+
+// Get RSI value
+rsiValue = ta.rsi(rsiSource, rsiLength)
+
+rsi_buy=en_rsi?rsiValue>=rsiOverbought ?true:false:true
+rsi_sell=en_rsi?rsiValue<=rsiOversold?true:false:true
+
+// final condition
+buy_cond=option_ch=='Simple'?long and not(longpos[1]) and rsi_buy and ma_buy:option_ch=='Pullback'?fin_pullbuy and rsi_buy and ma_buy:na
+sell_cond=option_ch=='Simple'?short and not(shortpos[1]) and rsi_sell and ma_sell:option_ch=='Pullback'?fin_pullsell and rsi_sell and ma_sell:na
+
+//backtest engine
+start = input.time(timestamp('2005-01-01'), title='Start calculations from',group=group_text1)
+end=input.time(timestamp('2045-03-01'), title='End calculations',group=group_text1)
+
+time_cond = time >= start and time<=end
+
+// Make input option to configure trade direction
+
+tradeDirection = input.string(title='Trade Direction', options=['Long', 'Short', 'Both'], defval='Both',group = group_text2)
+
+// Translate input into trading conditions
+longOK  = (tradeDirection == "Long") or (tradeDirection == "Both")
+shortOK = (tradeDirection == "Short") or (tradeDirection == "Both")
+
+
+
+// strategy start
+if buy_cond and longOK and time_cond and strategy.position_size==0
+    strategy.entry('long',direction = strategy.long)
+if sell_cond and shortOK and time_cond and strategy.position_size==0
+    strategy.entry('short',direction =strategy.short)
+
+// fixed percentage based stop loss and take profit 
+
+// User Options to Change Inputs (%)
+stopPer = input.float(1.0,step=0.10, title='Stop Loss %',group =group_text4) / 100
+takePer = input.float(1.0,step =0.10, title='Take Profit %',group =group_text4) / 100
+
+// Determine where you've entered and in what direction
+longStop  = strategy.position_avg_price * (1 - stopPer)
+shortStop = strategy.position_avg_price * (1 + stopPer)
+shortTake = strategy.position_avg_price * (1 - takePer)
+longTake  = strategy.position_avg_price * (1 + takePer)
+
+
+if strategy.position_size > 0
+    strategy.exit(id='Close Long',stop=longStop, limit=longTake)
+if strategy.position_size < 0
+    strategy.exit(id='Close Short',stop=shortStop, limit=shortTake)
+
+//PLOT FIXED SLTP LINE
+plot(strategy.position_size > 0 ? longStop : na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='Long Fixed SL')
+plot(strategy.position_size < 0 ? shortStop :na, style=plot.style_linebr, color=color.new(color.red, 0), linewidth=1, title='Short Fixed SL')
+plot(strategy.position_size > 0 ? longTake : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='Long Take Profit')
+plot(strategy.position_size < 0 ? shortTake : na, style=plot.style_linebr, color=color.new(color.green, 0), linewidth=1, title='Short Take Profit')
+
+//
+
+View in Pine Editor・117 lines
+Use on chart
+6
+5
+8
+1
+13 018
+Are you looking for a reliable and profitable algorithmic trading strategy for TradingView? If so, you might be interested in our Supertrend basic strategy, which is based on three powerful indicators: Supertrend (ATR), RSI and EMA.
+
+Supertrend is a trend-following indicator that helps you identify the direction and strength of the market. It also gives you clear signals for entry and exit points based on price movements.
+
+RSI is a momentum indicator that measures the speed and change of price movements. It helps you filter out false signals and avoid overbought or oversold conditions.
+
+EMA is a moving average indicator that smooths out price fluctuations and shows you the long-term trend of the market. It helps you confirm the validity of your trades and avoid trading against the trend.
+
+Our Supertrend basic strategy combines these three indicators to give you a simple yet effective way to trade any market. Here's how it works:
+
+- For long trades, you enter when the price is above Supertrend and pulls back below it (the low of the candle crosses Supertrend) and then rebounds above it (the high of the next candle goes above the pullback candle). You exit when the price closes below Supertrend or when you reach your target profit or stop loss.
+
+- For short trades, you enter when the price is below Supertrend and pulls back above it (the high of the candle crosses Supertrend) and then drops below it (the low of the next candle goes below the pullback candle). You exit when the price closes above Supertrend or when you reach your target profit or stop loss.
+
+- You can also use RSI and EMA filters to improve your results. For long trades, you only enter if RSI is above 50 and price is above 200 EMA. For short trades, you only enter if RSI is below 50 and price is below 200 EMA.
+
+- You can set your stop loss and target profit as a percentage of your entry price or based on other criteria. You can also adjust the parameters of each indicator according to your preferences and risk tolerance.
+
+Our Supertrend basic strategy is easy to use and has been tested on various markets and time frames. It can help you capture consistent profits while minimizing your losses.

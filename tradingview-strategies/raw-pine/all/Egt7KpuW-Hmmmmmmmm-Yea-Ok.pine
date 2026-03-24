@@ -1,0 +1,25 @@
+//@version=4
+strategy("Hmmmmmmmm_Yea_Ok", overlay=true)
+
+
+DAY = security(syminfo.tickerid,'D',open)
+fhour = security(syminfo.tickerid,'240',open)
+Ohour = security(syminfo.tickerid,'60',open)
+
+longCondition = DAY[1] < ema(DAY,14) and mom(fhour[1],14) < 0 and crossunder(ema(open,14),ema(open,28)) and ema(Ohour,14) > ema(Ohour,28)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = DAY[1] > ema(DAY,14) and mom(fhour[1],14) > 0 and crossover(ema(open,14),ema(open,28)) and ema(Ohour,14) > ema(Ohour,28) 
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・15 lines
+Use on chart
+3
+5
+1 550
+Hmmmmmmmm_Yea_Ok
+
+
+Just testing different things out

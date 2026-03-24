@@ -1,0 +1,186 @@
+//@version=3
+strategy(title="[XC] Adaptive strategy with volume bands",shorttitle="VAB", overlay=true, currency=currency.EUR,initial_capital=10000, default_qty_value=100, default_qty_type=strategy.percent_of_equity , calc_on_every_tick=true, calc_on_order_fills=true)
+
+// Settings
+//Curency - -     src     Time    stategy Length    C. Factor     Smoothed  SL      TP         Profit Factor (with no Commission)
+//---------------------------------------------------------------------------------------------------------------------------------                                                                                           
+//BTCUSD    NOHA  close   15min   1       240       10            yes       3000    25000      4.2 (June 2019)
+//XBTUSD    NOHA  close   15min   1       310       0.00006       no        1000    11000      2.3 (June 2019)
+//IOTABTC   NOHA  close   15min   1       380       0.0004        no        2000    11000     10.6 (June 2019)
+
+
+length    = input(310) //100
+cr        = input(defval=0.00006 ,type=float,title="Correction Factor") //1.
+smoothed  = input(false)
+//----
+clac_data_HA  = input ( defval="NO HA!", title= "Use Heikin Ashi Data?" , options=[ "NO HA!","calculation method 1", "calculation method 2", "calculation method 3"] )
+src_list      = input ( close, title="Price Source")
+
+//src       = input ( close, title="Price Source")
+Recursive = input(false)
+//                  ╔═ STRATEGY                  ╗
+//░░░░░░░░░░░░░░░░░ ╚════════════════════════════╝ ░░░░░░░░░░░░░░░░░░░░░░░░
+
+strategy_1     = input ( defval=true   , type=bool    , title="STRATEGY 1? —>"      )
+
+StopLoss        = input(defval = 1000 , title = "Stop Loss", minval = 0)
+TakeProfit      = input(defval = 11000, title = "Take Profit", minval = 0)
+// === RISK MANAGEMENT VALUE PREP ===
+// if an input is less than 1, assuming not wanted so we assign 'na' value to disable it.
+useTakeProfit   = TakeProfit  >= 1 ? TakeProfit  : na
+useStopLoss     = StopLoss    >= 1 ? StopLoss    : na
+
+
+//                  ╔═ BACKTEST RANGE            ╗
+//░░░░░░░░░░░░░░░░░ ╚════════════════════════════╝ ░░░░░░░░░░░░░░░░░░░░░░░░
+line_breakBTR  = input ( defval = true   , type=bool   , title="BACKTEST RANGE —"      ) 
+FromYear       = input ( defval = 2019, title = "From Year", minval = 2017)
+FromMonth      = input ( defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay        = input ( defval = 2, title = "From Day", minval = 1, maxval = 31)
+//FromHour     = input ( defval = 1, title = "From Hour", minval = 1, maxval = 24)
+ToYear         = input ( defval = 9999, title = "To Year", minval = 2017)
+//ToHour       = input ( defval = 0, title = "From Hour", minval = 0, maxval = 24)
+ToMonth        = input ( defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay          = input ( defval = 1, title = "To Day", minval = 1, maxval = 31)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(syminfo.timezone, FromYear, FromMonth, FromDay, 0, 00)  // backtest start window
+finish    = timestamp(syminfo.timezone, ToYear  , ToMonth  , ToDay  , 0, 59)  // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+
+//                  ╔═ HEIKIN ASHI               ╗
+//░░░░░░░░░░░░░░░░░ ╚════════════════════════════╝ ░░░░░░░░░░░░░░░░░░░░░░░░
+
+
+openHA  = security(heikinashi(tickerid), period, open)
+closeHA = security(heikinashi(tickerid), period, close)
+highHA  = security(heikinashi(tickerid), period, high)
+lowHA   = security(heikinashi(tickerid), period, low)
+
+//-- calculation method 1
+calc1_HA = closeHA
+
+//-- calculation method 2
+calc2_HA = (openHA+closeHA+highHA+lowHA)/4
+
+//-- calculation method 3
+calc3_HA = ((open + high + low + close)/4)
+
+heikin_data = clac_data_HA == "NO HA!" ?  src_list : clac_data_HA == "calculation method 1" ? calc1_HA : clac_data_HA == "calculation method 2" ? calc2_HA : calc3_HA
+
+src = heikin_data
+
+//                  ╔═ INDICATORS                ╗
+//░░░░░░░░░░░░░░░░░ ╚════════════════════════════╝ ░░░░░░░░░░░░░░░░░░░░░░░░
+
+//"Volume Adaptive Bands" -> alexgrover / tradingview.com/script/kzmBoVcW-Volume-Adaptive-Bands/
+vabands(src, length, cr)=>
+    srcsm = smoothed ? sma(src,length) : src
+    a     = sma( volume,length)*cr
+    b     = sma(-volume,length)*cr
+    up    = 0.
+    dn    = 0.
+    up := sma((nz(up[1],src) + srcsm*a)/a,length)
+    dn := sma((nz(dn[1],src) + srcsm*b)/b,length)
+    upperB = up
+    lowerB = dn
+    [upperB,lowerB]
+
+[upperB,lowerB]=vabands(src, length, cr)
+
+strat1_line2 = upperB
+strat1_line3 = lowerB
+
+//----
+A = plot(upperB,title="upper Band",color=blue,linewidth=2,transp=0)
+B = plot(lowerB,title="lower Band",color=orange,linewidth=2,transp=0)
+fill(A,B,title="Background",color=#0094ff,transp=95)
+
+//"Non Parametric Adaptive Moving Average" -> alexgrover / tradingview.com/script/2Jkn9oI1-Non-Parametric-Adaptive-Moving-Average/
+npama()=>
+    a = vwap(close)
+    b = vwap(open)
+    c = vwap(high)
+    d = vwap(low)
+    //----
+    k = abs(a-b)/(c - d)
+    ma = 0.
+    ma := k*close+(1-k)*nz(ma[1],close)
+
+strat1_line1 = npama()
+plot(npama(),title="Non Parametric AMA",color=red,linewidth=2,transp=0)
+
+
+//                  ╔═ STRATEGY 1                ╗
+//░░░░░░░░░░░░░░░░░ ╚════════════════════════════╝ ░░░░░░░░░░░░░░░░░░░░░░░░
+
+trading_strat1_line1 = strategy_1 == 1  ? strat1_line1   : na
+trading_strat1_line2 = strategy_1 == 1  ? strat1_line2   : na
+trading_strat1_line3 = strategy_1 == 1  ? strat1_line3   : na
+
+
+Lmarker  = 0
+Lcounter = 0
+Lmarker := nz(Lmarker[Lcounter])
+
+Smarker  = 0
+Scounter = 0
+Smarker := nz(Smarker[Scounter])
+
+Lmarker := Lmarker[1] == 1 ? 1 : 0
+Smarker := Smarker[1] == 1 ? 1 : 0
+
+Go_long = false
+Go_short= false
+
+long_trade  = crossover  (trading_strat1_line1, trading_strat1_line2) ? true : false
+short_trade = crossunder (trading_strat1_line1, trading_strat1_line3) ? true : false
+
+
+if long_trade  == 1 and Lmarker[1] == 0
+    Lmarker := 1
+    Smarker := 0
+    Go_long := true
+
+if short_trade == 1 and Smarker[1] == 0
+    Lmarker := 0
+    Smarker := 1
+    Go_short := true
+
+  
+plot( Go_long  ? trading_strat1_line2 : na , title = "Long"  , color=aqua, style=circles, linewidth=5, offset= 0)
+plot( Go_short ? trading_strat1_line3 : na , title = "Short" , color=red , style=circles, linewidth=5, offset= 0)
+
+
+//STRATEGY 1
+strategy.exit("close",loss = useStopLoss, profit = useTakeProfit)
+
+if Go_long  and window() and strategy_1 == 1
+    strategy.entry("Go Long", strategy.long)
+if Go_short and window() and strategy_1 == 1
+    strategy.entry("Go Short", strategy.short)
+
+
+//end
+
+View in Pine Editor・165 lines
+Use on chart
+1
+8
+6
+3
+4 801
+First much thanks to alexgrover for his rich source of unbelievable indicators
+
+The list below shows as an example some might profitable strategy settings.
+But like every new strategy only a long term test can tell you if it works.
+
+
+//Curency - - src Time stategy Length C. Factor Smoothed SL TP Profit Factor (with no Commission)
+//---------------------------------------------------------------------------------------------------------------------------------
+//BTCUSD NOHA close 15min 1 240 10 yes 3000 25000 4.2 (June 2019)
+//XBTUSD NOHA close 15min 1 310 0.00006 no 1000 11000 2.3 (June 2019)
+//IOTABTC NOHA close 15min 1 380 0.0004 no 2000 11000 10.6 (June 2019)
+
+

@@ -1,0 +1,23 @@
+//@version=3
+strategy("UVTrader Strateji", overlay=true)
+
+longCondition = crossover(close, highest(high[1],3))
+if (longCondition)
+    strategy.entry("AL", strategy.long)
+
+shortCondition = crossunder(close, lowest(low[1],3))
+if (shortCondition)
+    strategy.entry("SAT", strategy.short)
+
+View in Pine Editor・10 lines
+Use on chart
+1
+3
+8
+3
+3 387
+If you see "AL", you can buy.
+
+If you see "SAT", you can sell.
+
+You can use all charts, but 4H and 1D charts are very well.

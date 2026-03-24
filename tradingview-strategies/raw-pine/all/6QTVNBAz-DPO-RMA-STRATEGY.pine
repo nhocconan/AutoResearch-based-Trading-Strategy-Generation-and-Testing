@@ -1,0 +1,132 @@
+//@version=4
+
+strategy(title="DPO RMA STRATEGY", overlay=false, calc_on_order_fills=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, currency="USD", default_qty_value=100)
+
+price = input(close)
+
+length = input(55)
+xsma = rma(price, length)
+detrend = price - xsma
+
+///////////////////////
+
+length1 = input(89)
+xsma1 = rma(price, length1)
+detrend1 = price - xsma1
+
+////////////////////
+
+length2 = input(144)
+xsma2 = rma(price, length2)
+detrend2 = price - xsma2
+
+////////////////////
+
+length3 = input(233)
+xsma3 = rma(price, length3)
+detrend3 = price - xsma3
+
+////////////////////
+
+length4 = input(377)
+xsma4 = rma(price, length4)
+detrend4 = price - xsma4
+
+////////////////////
+
+length5 = input(610)
+xsma5 = rma(price, length5)
+detrend5 = price - xsma5
+
+
+/////////////////////////
+////////////////////////
+
+len = input(233, title="RMA SMOOTHER")
+rma = rma(detrend, len)
+rma1 = rma(detrend1, len)
+rma2 = rma(detrend2, len)
+rma3 = rma(detrend3, len)
+rma4 = rma(detrend4, len)
+rma5 = rma(detrend5, len)
+
+rma_avg = avg(rma, rma1, rma2, rma3, rma4, rma5)
+
+
+
+len1 = input(55, title="AVG RMA SMOOTHER ")
+rmab = rma(detrend, len)
+rmab1 = rma(detrend1, len1)
+rmab2 = rma(detrend2, len1)
+rmab3 = rma(detrend3, len1)
+rmab4 = rma(detrend4, len1)
+rmab5 = rma(detrend5, len1)
+
+rma_avg1 = avg(rmab, rmab1, rmab2, rmab3, rmab4, rmab5)
+
+/////////////////////////////////
+////////////////////////////////////
+
+
+detrend_avg = avg(detrend, detrend1, detrend2, detrend3, detrend4, detrend5)
+
+
+
+//////////////////////
+
+
+hline(0, color=color.gray)
+plot(detrend_avg, "DETREND AVERAGE", color=color.purple)
+plot(rma_avg, "SLOW MA ", color=color.yellow)
+plot(rma_avg1, "SLOWER MA", color=color.red)
+
+long = crossover(detrend_avg,0)
+short = crossunder(detrend_avg,0)
+
+
+long1 = crossover(rma_avg,0)
+short1 = crossunder(rma_avg, 0)
+
+long2 = crossover(detrend_avg, rma_avg) and rma_avg1 > rma_avg1[1]
+short2 = crossunder(detrend_avg, rma_avg) and rma_avg1 < rma_avg1[1]
+
+
+strategy.entry("Long", strategy.long, when=long2)
+strategy.entry("Short", strategy.short, when=short2)
+
+
+
+//strategy.close("Long", when=crossunder(detrend_avg,rma_avg1))
+//strategy.close("Short", when=crossover(detrend_avg,rma_avg1))
+
+View in Pine Editor・100 lines
+Use on chart
+1
+5
+6
+7 481
+This strategy uses tradingview's built-in "Detrended Price Osciilator" ( DPO )indicator script.
+
+It takes the average of 6 different fib lookback periods. (55,89,144,233,377,610)
+This is plotted in the purple line.
+
+It then takes the RMA of the DPO and uses the RMA's to determine entry points with crossovers and crossunders.
+
+
+
+It's an extremely easy indicator to use. You mostly only need to adjust the last 2 inputs (These are the RMA Smoother inputs)
+Works well with most any market and with any timeframe.
+
+
+
+
+
+Works great on Heiken Ashi if you keep orders under 150. But I can't post in heiken ashi format thanks to automated traders complaining to tradingivew that they can't make any money with heiken ashi candles
+
+And then pine coders like this that are embraced with high regard because they realized that they can spam a heiken ashi chart with over 400 trades and magically it has excessive slippage.
+
+
+
+
+
+

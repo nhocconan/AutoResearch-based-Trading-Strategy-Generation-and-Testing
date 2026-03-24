@@ -1,0 +1,110 @@
+//@version=3
+
+strategy(title="RSI MACD", precision = 6, pyramiding = 1, default_qty_type = strategy.percent_of_equity, default_qty_value = 99, commission_type = strategy.commission.percent, commission_value = 0.0, initial_capital = 1000)
+
+// Component Code Start
+// Example usage:
+// if testPeriod()
+//   strategy.entry("LE", strategy.long)
+testStartYear = input(2017, "Backtest Start Year")
+testStartMonth = input(01, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(7, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+// Component Code Stop
+
+//standard rsi template
+src = ohlc4, len = input(14, minval=1, title="Length")
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+plot(rsi, color=#87ff1a)
+band1 = hline(80)
+band = hline(50)
+band0 = hline(20)
+fill(band1, band0, color=purple, transp=90)
+
+//macd
+
+fast_length = input(title="Fast Length", type=integer, defval=9)
+slow_length = input(title="Slow Length", type=integer, defval=72)
+signal_length = input(title="Signal Length", type=integer, defval=9)
+
+fast_ma = sma(rsi, fast_length) 
+slow_ma = sma(rsi, slow_length) 
+shortma = sma(ohlc4, fast_length)
+longma = sma(ohlc4, slow_length)
+controlmainput = input(title = "Control MA", type = integer, defval = 234)
+controlma = sma(ohlc4, controlmainput)
+macdx = fast_ma - slow_ma
+signalx = sma(macdx, signal_length)
+hist = macdx - signalx
+ma_hist = shortma - controlma
+macd = macdx + 50
+signal = signalx + 50
+
+plot(macd,"macd", color = fuchsia)
+plot(hist,"hist", style = histogram, color = fuchsia)
+//plot(ma_hist,"ma hist", style = histogram, color = orange)
+plot(signal,"signal", color = white)
+
+//input
+control_buy_toggle = input(true, "Buy on crossover control MA?", type = bool)
+buy_on_control = control_buy_toggle == true? true : false
+
+//conditions
+buy = buy_on_control == true? ma_hist > 0 and crossover(macd,signal) and shortma >= longma or ma_hist > 0 and crossover(shortma, controlma) or ma_hist > 0 and crossover(shortma, longma) : ma_hist > 0 and crossover(macd,signal) or ma_hist > 0 and crossover(shortma, longma)
+sell = ma_hist > 0 and crossunder(macd,signal)
+stop = crossunder(shortma, longma) or crossunder(shortma, controlma)
+sell2 = sell or stop
+
+plotshape(buy,"buy", shape.triangleup, location.bottom, green, size = size.tiny)
+plotshape(sell,"sell", shape.triangledown, location.bottom, red, size = size.tiny)
+plotshape(stop,"stop",shape.circle,location.bottom, white, size = size.tiny)
+
+
+//new testing
+//formatted signals
+num_bars_buy = barssince(buy)
+num_bars_sell = barssince(sell2)
+//plot(num_bars_buy, color = teal)
+//plot(num_bars_sell, color = orange)
+
+xbuy = crossover(num_bars_sell, num_bars_buy)
+xsell = crossunder(num_bars_sell, num_bars_buy)
+plotshape(xbuy,"Buy Up Arrow", shape.triangleup, location.bottom, fuchsia, size = size.tiny)
+plotshape(xsell,"Sell Down Arrow", shape.triangledown, location.bottom, orange, size = size.tiny)
+
+
+if testPeriod()
+    strategy.entry("buy", true, 1000, when = xbuy, limit = close)
+    strategy.close("buy", when = xsell)
+
+View in Pine Editor・93 lines
+Use on chart
+3
+2
+9
+3
+11 671
+Oct 5, 2018
+backtesting for the RSI MACD with conditional MA indicator:
+
+Oct 5, 2018
+Release Notes
+set the commision value to 0 so that you can better backtest crypto to crypto pairs that use satoshi pricing
+Oct 17, 2018
+Release Notes
+better alert triggers

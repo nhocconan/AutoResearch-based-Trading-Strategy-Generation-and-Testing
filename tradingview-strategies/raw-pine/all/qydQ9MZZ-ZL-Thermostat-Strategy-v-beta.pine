@@ -1,0 +1,102 @@
+//@version=2
+//Created and coded by Shanghai Reed Asset Management Co., Ltd.
+//本策略为上海蘆田资產管理有限公司制
+//市场测温策略
+strategy("[蘆田资產]Thermostat", overlay=true)
+//Input
+bollLength = input(50, title = "Bollinger Length", minval = 1)
+trLiqLength = input(50, title = "Trend Liq")
+numStdev = input(2, title = "No. of Std. Dev.")
+swingPct1 = input(0.5, title = "Swing Percent 1")
+swingPct2 = input(0.75, title = "Swing Percent 2")
+atrLength = input(10, title = "ATR Length")
+swingTrSwitch = input(20, title = "Swing Trade Switch")
+
+//Choppy Market Index
+cmiPeriod = input(30, title = "CMI Length")
+cmi(Period) =>
+    shortLength = Period - 1
+    cmi = abs(close - close[shortLength]) / (highest(high, Period) - lowest(low, Period)) * 100
+
+//Default Setting
+cmiVal = cmi(cmiPeriod)
+buyEasierDay = 0
+sellEasierDay = 0
+trendLokBuy = sma(low,3)
+trendLokSell = sma(high,3)
+keyOfDay = (high + low + close)/3
+//Find Buy and Sell Easier Day 
+if(close > keyOfDay)
+    sellEasierDay = 1
+if(close <= keyOfDay)
+    buyEasierDay = 1
+
+//Find buy and sell point
+if(buyEasierDay == 1)
+    swingBuyPt = close + swingPct1 * atr(atrLength)
+    swingSellPt = close - swingPct2 * atr(atrLength)
+    //Set Swing Trade Point
+    swingBuyPtN = max(swingBuyPt, trendLokBuy)
+    swingSellPtN = min(swingSellPt, trendLokSell)
+    //Set Trend Trade Point
+    basis = sma(close, bollLength)
+    buyDev = numStdev * stdev(close, bollLength)
+    trendBuyPt = basis + buyDev
+    sellDev = numStdev * stdev(close, bollLength)
+    trendSellPt = basis - sellDev
+        //Strategy Entry
+    swingTrendCondition = cmiVal < swingTrSwitch? 1 : 0
+    swingStop = 3 * atr(atrLength)
+    if (swingTrendCondition == 1)
+        if(strategy.position_size != 1)
+            strategy.entry("SwingBuy", strategy.long, stop = swingBuyPtN)
+        if(strategy.position_size != -1)
+            strategy.entry("SwingSell", strategy.short, stop = swingSellPtN)
+    if (swingTrendCondition == 0)
+        strategy.entry("TrendBuy", strategy.long, stop = trendBuyPt)
+        strategy.entry("TrendSell", strategy.short, stop = trendSellPt)
+    //Strategy Exit
+    strategy.exit(id = "ExitLong", from_entry = "TrendBuy", stop = sma(close, trLiqLength))
+    strategy.exit(id = "ExitShort", from_entry = "TrendSell", stop = sma(close, trLiqLength))
+    strategy.exit(id = "ExitLong", from_entry =  "SwingBuy", stop = strategy.position_avg_price - swingStop)
+    strategy.exit(id = "ExitShort", from_entry = "SwingSell", stop = strategy.position_avg_price - swingStop)
+
+if(sellEasierDay == 1)
+    swingBuyPt = close + swingPct2 * atr(atrLength),
+    swingSellPt = close - swingPct1 * atr(atrLength)
+    //Set Swing Trade Point
+    swingBuyPtN = max(swingBuyPt, trendLokBuy)
+    swingSellPtN = min(swingSellPt, trendLokSell)
+    //Set Trend Trade Point
+    basis = sma(close, bollLength)
+    buyDev = numStdev * stdev(close, bollLength)
+    trendBuyPt = basis + buyDev
+    sellDev = numStdev * stdev(close, bollLength)
+    trendSellPt = basis - sellDev
+    //Strategy Entry
+    swingTrendCondition = cmiVal < swingTrSwitch? 1 : 0
+    swingStop = 3 * atr(atrLength)
+    if (swingTrendCondition == 1)
+        if(strategy.position_size != 1)
+            strategy.entry("SwingBuy", strategy.long, stop = swingBuyPtN)
+        if(strategy.position_size != -1)
+            strategy.entry("SwingSell", strategy.short, stop = swingSellPtN)
+    if (swingTrendCondition == 0)
+        strategy.entry("TrendBuy", strategy.long, stop = trendBuyPt)
+        strategy.entry("TrendSell", strategy.short, stop = trendSellPt)
+        //Strategy Exit
+    strategy.exit(id = "ExitLong", from_entry = "TrendBuy", stop = sma(close, trLiqLength))
+    strategy.exit(id = "ExitShort", from_entry = "TrendSell", stop = sma(close, trLiqLength))
+    strategy.exit(id = "ExitLong", from_entry =  "SwingBuy", stop = strategy.position_avg_price - swingStop)
+    strategy.exit(id = "ExitShort", from_entry = "SwingSell", stop = strategy.position_avg_price - swingStop)
+
+View in Pine Editor・91 lines
+Use on chart
+8
+9
+3 671
+Dec 2, 2015
+This strategy can identify the trending market and the choppy market. It tries to catch swings in the choppy market and catch the big move in the trending market.
+Dec 2, 2015
+Order cancelled
+***THERE IS SOMETHING WRONG WITH SHOWING THE STRATEGY ON THE GRAPH. THIS VERSION OF STRATEGY IS ALREADY DISCARDED. FIXING!!!***

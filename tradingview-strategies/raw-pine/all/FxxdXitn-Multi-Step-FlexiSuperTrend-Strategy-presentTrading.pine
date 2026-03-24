@@ -1,0 +1,390 @@
+//@version=5
+strategy("Multi-Step FlexiSuperTrend - Strategy [presentTrading]", shorttitle = "Multi-Step FlexiST-VT - Strategy [presentTrading]", overlay = false, precision=3, commission_value=0.1, commission_type=strategy.commission.percent, slippage=1, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000)
+
+// Inputs
+tradeDirectionChoice = input.string("Both", "Trading Direction", options=["Both", "Long", "Short"])
+indicatorSource = input.source(hlc3, title="Indicator Source")
+indicatorLength = input.int(10, minval = 2, title="Indicator Length")
+startingFactor = input.float(0.618, title="Starting Factor", minval = 0)
+incrementFactor_1 = input.float(.382, minval = 0, step = .10, title="Increment Factor")
+normalizeMethod = input.string('None', options = ['None', 'Max-Min', 'Absolute Sum'], title="Normalization Method")
+
+// Multi-Step Take Profit Inputs
+tp_level1 = input.float(title="Take Profit Level 1 (%)", defval=2.0)
+tp_level2 = input.float(title="Take Profit Level 2 (%)", defval=8.0)
+tp_level3 = input.float(title="Take Profit Level 3 (%)", defval=18.0)
+
+tp_percent1 = input.float(title="Take Profit Percent 1 (%)", defval=30.0)
+tp_percent2 = input.float(title="Take Profit Percent 2 (%)", defval=20.0)
+tp_percent3 = input.float(title="Take Profit Percent 3 (%)", defval=15.0)
+
+var float longEntryTime = na
+var float shortEntryTime = na
+var bool recentlyExitedLong = false
+var bool recentlyExitedShort = false
+
+// Supertrend Type
+type supertrend
+    float upper = hl2
+    float lower = hl2
+    float output
+    float perf = 0
+    float factor
+    int trend = 0
+
+norm(value, diffs, den)=>
+    normalizeMethod = switch normalizeMethod
+        'Max-Min' => (value - diffs.min()) / diffs.range()
+        'Absolute Sum' => value / den
+        => value
+
+// Function to calculate SuperTrend Polyfactor Oscillator
+SuperTrendPolyfactorOscillator(indicatorSource, indicatorLength, startingFactor, incrementFactor, normalizeMethod) =>
+    var holder = array.new<supertrend>(0)
+    diffs = array.new<float>(0)
+    den = 0.0
+    factor = startingFactor
+    
+    // Populate supertrend type array
+    if barstate.isfirst
+        for i = 0 to 19
+            holder.push(supertrend.new())
+
+    atr = ta.atr(indicatorLength)
+
+    for i = 0 to 19
+        get_spt = holder.get(i)
+        atr = ta.atr(indicatorLength)
+        up = hl2 + atr * (factor)
+        dn = hl2 - atr * (factor)
+
+        get_spt.trend := indicatorSource > get_spt.upper ? 1 : indicatorSource < get_spt.lower ? 0 : get_spt.trend
+        get_spt.upper := indicatorSource[1] < get_spt.upper ? math.min(up, get_spt.upper) : up
+        get_spt.lower := indicatorSource[1] > get_spt.lower ? math.max(dn, get_spt.lower) : dn
+        get_spt.output := get_spt.trend == 1 ? get_spt.lower : get_spt.upper
+
+        diffs.push(indicatorSource - get_spt.output)
+        den += math.abs(indicatorSource - get_spt.output)
+        factor += incrementFactor 
+    
+    median = norm(diffs.median(), diffs, den)
+    stdev = normalizeMethod != 'Max-Min' ? norm(diffs.stdev(), diffs, den) : na
+    [median, stdev, diffs, den]
+
+// Access the SuperTrend Polyfactor Oscillator values
+[medianValue, stdevValue, diffs, den] = SuperTrendPolyfactorOscillator(indicatorSource, indicatorLength, startingFactor, incrementFactor_1, normalizeMethod)
+
+// Style
+mesh = input(true, inline = 'mesh', group = 'Style')
+upCss = input.color(color.new(#089981, 90), '', inline = 'mesh', group = 'Style')
+dnCss = input.color(color.new(#f23645, 90), '', inline = 'mesh', group = 'Style')
+
+//-----------------------------------------------------------------------------
+// Plots
+//-----------------------------------------------------------------------------
+
+// Plot each individual deviation using the array.get function outside of the loop
+// Manually plot each deviation since 'plot' cannot be used in a loop
+plot(mesh ? norm(array.get(diffs, 0), diffs, den) : na, "Deviation 1", color=array.get(diffs, 0) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 1), diffs, den) : na, "Deviation 2", color=array.get(diffs, 1) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 2), diffs, den) : na, "Deviation 3", color=array.get(diffs, 2) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 3), diffs, den) : na, "Deviation 4", color=array.get(diffs, 3) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 4), diffs, den) : na, "Deviation 5", color=array.get(diffs, 4) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 5), diffs, den) : na, "Deviation 6", color=array.get(diffs, 5) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 6), diffs, den) : na, "Deviation 7", color=array.get(diffs, 6) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 7), diffs, den) : na, "Deviation 8", color=array.get(diffs, 7) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 8), diffs, den) : na, "Deviation 9", color=array.get(diffs, 8) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 9), diffs, den) : na, "Deviation 10", color=array.get(diffs, 9) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 10), diffs, den) : na, "Deviation 11", color=array.get(diffs, 10) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 11), diffs, den) : na, "Deviation 12", color=array.get(diffs, 11) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 12), diffs, den) : na, "Deviation 13", color=array.get(diffs, 12) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 13), diffs, den) : na, "Deviation 14", color=array.get(diffs, 13) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 14), diffs, den) : na, "Deviation 15", color=array.get(diffs, 14) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 15), diffs, den) : na, "Deviation 16", color=array.get(diffs, 15) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 16), diffs, den) : na, "Deviation 17", color=array.get(diffs, 16) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 17), diffs, den) : na, "Deviation 18", color=array.get(diffs, 17) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 18), diffs, den) : na, "Deviation 19", color=array.get(diffs, 18) > 0 ? upCss : dnCss, style=plot.style_histogram)
+
+// Median
+plot(medianValue, 'Median', medianValue > (normalizeMethod == 'Max-Min' ? .5 : 0) ? #90bff9 : #ffcc80)
+
+// Stdev Area
+up = plot(stdevValue, color = na, editable = false)
+dn = plot(-stdevValue, color = na, editable = false)
+fill(up, dn, color.new(#90bff9, 80), title = 'Stdev Area')
+
+//-----------------------------------------------------------------------------
+
+type bar
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+
+type supertrend_
+    float s = na
+    int   d = na
+
+method src(bar b, simple string src) =>
+    float x = switch src
+        'oc2'   => math.avg(b.o, b.c)
+        'hl2'   => math.avg(b.h, b.l)
+        'hlc3'  => math.avg(b.h, b.l, b.c)
+        'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
+        'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
+    x
+
+method atr(bar b, simple int len) =>
+    float tr = 
+         na(b.h[1]) ? 
+         b.h - b.l  : 
+         math.max(
+             math.max(
+                 b.h - b.l, 
+                 math.abs(b.h - b.c[1])), 
+             math.abs    (b.l - b.c[1]))
+    len == 1 ? tr : ta.rma(tr, len)
+
+method st(bar b, simple float factor, simple int len) =>
+    float atr = b.atr(len)
+    float up  = b.src('hl2') + factor * atr
+    up       := up < nz(up[1]) or b.c[1] > nz(up[1]) ? up : nz(up[1])
+    float dn  = b.src('hl2') - factor * atr
+    dn       := dn > nz(dn[1]) or b.c[1] < nz(dn[1]) ? dn : nz(dn[1])
+    
+    float st  = na
+    int   dir = na
+    dir := switch
+        na(atr[1])         => 1
+        st[1] == nz(up[1]) => dir := b.c > up ? -1 : +1
+        =>                    dir := b.c < dn ? +1 : -1
+    st  :=                    dir == -1 ? dn : up
+    
+    supertrend_.new(st, dir)
+
+var string tp = 'Choose an indicator source of which to base the SuperTrend on.'
+var string g1 = "Entry/Exit: SuperTrend Settings", var string gu = "UI Options"
+src  = medianValue
+len  = input.int(10, "Length", inline = '1', group = g1)
+mlt  = input.float(15., "Factor", 1, 20, 0.5, inline = '1', group = g1)
+clbl = input.bool(true, "Contrarian Signals", group = gu)
+colu = input.color(#008cff, "Bull Color", group = gu)
+cold = input.color(#ff4800, "Bear Color", group = gu)
+
+bar        b  = bar.new(nz(src[1]), math.max(nz(src[1]), src), math.min(nz(src[1]), src), src)
+float      tr = b.atr(len)
+supertrend_ st = b.st(mlt, len)
+
+color cst = switch st.d
+    +1 => cold
+    -1 => colu
+    
+t = plot(st.d > 0 ? st.s : na, 'Bear ST', cst, 1, plot.style_linebr)
+d = plot(st.d < 0 ? st.s : na, 'Bull ST', cst, 1, plot.style_linebr)
+i = plot(st.d, 'Direction', display = display.none)
+c = plot(b.src('oc2'), 'Filler', display = display.none)
+
+fill(t, c, color.new(cold, 90))
+fill(d, c, color.new(colu, 90))
+
+bool scon = clbl and math.sign(ta.change(st.d)) ==  1 ? true : false
+bool bcon = clbl and math.sign(ta.change(st.d)) == -1 ? true : false
+
+plotshape(scon ? st.s + tr / 3 : na, 'Sell Signal', shape.labeldown, location.absolute, color.new(cold, 60), 0, '𝓢', chart.fg_color)
+plotshape(bcon ? st.s - tr / 3 : na, 'Buy Signal', shape.labelup, location.absolute, color.new(colu, 60), 0, '𝓑', chart.fg_color)
+
+// Entry/Exit conditions
+enterLongCondition = st.d < 0 and medianValue > 0 
+enterShortCondition = st.d > 0 and medianValue < 0
+
+// Check trade direction choice before executing trade entries.
+if (enterLongCondition and (tradeDirectionChoice == "Long" or tradeDirectionChoice == "Both") and strategy.equity > 0)
+    if (strategy.position_size < 0)
+        strategy.close("Short Position")
+    strategy.entry("Long Position", strategy.long)
+    longEntryTime := time
+    recentlyExitedLong := false
+    recentlyExitedShort := false
+
+if (enterShortCondition and (tradeDirectionChoice == "Short" or tradeDirectionChoice == "Both") and strategy.equity > 0)
+    if (strategy.position_size > 0)
+        strategy.close("Long Position")
+    strategy.entry("Short Position", strategy.short)
+    shortEntryTime := time
+    recentlyExitedShort := false
+    recentlyExitedLong := false
+
+// =============================================================================
+// MULTI-STEP TAKE PROFIT
+// =============================================================================
+
+// Calculate the take profit prices based on the average entry price
+tp_price1_long = strategy.position_avg_price * (1 + tp_level1 / 100) 
+tp_price2_long = strategy.position_avg_price * (1 + tp_level2 / 100) 
+tp_price3_long = strategy.position_avg_price * (1 + tp_level3 / 100) 
+
+tp_price1_short = strategy.position_avg_price * (1 - tp_level1 / 100) 
+tp_price2_short = strategy.position_avg_price * (1 - tp_level2 / 100) 
+tp_price3_short = strategy.position_avg_price * (1 - tp_level3 / 100) 
+
+// Exit portions of the position at each take profit level
+if strategy.position_size > 0
+    strategy.exit("Take Profit 1", from_entry="Long Position", qty_percent=tp_percent1, limit=tp_price1_long)
+    strategy.exit("Take Profit 2", from_entry="Long Position", qty_percent=tp_percent2, limit=tp_price2_long)
+    strategy.exit("Take Profit 3", from_entry="Long Position", qty_percent=tp_percent3, limit=tp_price3_long)
+
+if strategy.position_size < 0
+    strategy.exit("Take Profit 1", from_entry="Short Position", qty_percent=tp_percent1, limit=tp_price1_short)
+    strategy.exit("Take Profit 2", from_entry="Short Position", qty_percent=tp_percent2, limit=tp_price2_short)
+    strategy.exit("Take Profit 3", from_entry="Short Position", qty_percent=tp_percent3, limit=tp_price3_short)
+
+// =============================================================================
+// END
+// =============================================================================
+
+View in Pine Editor・246 lines
+Use on chart
+1.1 K
+3
+12 845
+Aug 13, 2024
+At the heart of this endeavor is a passion for continuous improvement in the art of trading
+
+█ Introduction and How it is Different
+
+The "Multi-Step FlexiSuperTrend - Strategy [presentTrading]" is an advanced trading strategy that integrates the well-known SuperTrend indicator with a nuanced and dynamic approach to market trend analysis. Unlike conventional SuperTrend strategies that rely on static thresholds and fixed parameters, this strategy introduces multi-step take profit mechanisms that allow traders to capitalize on varying market conditions in a more controlled and systematic manner.
+
+What sets this strategy apart is its ability to dynamically adjust to market volatility through the use of an incremental factor applied to the SuperTrend calculation. This adjustment ensures that the strategy remains responsive to both minor and major market shifts, providing a more accurate signal for entries and exits. Additionally, the integration of multi-step take profit levels offers traders the flexibility to scale out of positions, locking in profits progressively as the market moves in their favor.
+
+BTC 6hr Long/Short Performance
+
+
+
+█ Strategy, How it Works: Detailed Explanation
+
+The Multi-Step FlexiSuperTrend strategy operates on the foundation of the SuperTrend indicator, but with several enhancements that make it more adaptable to varying market conditions. The key components of this strategy include the SuperTrend Polyfactor Oscillator, a dynamic normalization process, and multi-step take profit levels.
+
+🔶 SuperTrend Polyfactor Oscillator
+
+The SuperTrend Polyfactor Oscillator is the heart of this strategy. It is calculated by applying a series of SuperTrend calculations with varying factors, starting from a defined "Starting Factor" and incrementing by a specified "Increment Factor." The indicator length and the chosen price source (e.g., HLC3, HL2) are inputs to the oscillator.
+
+The SuperTrend formula typically calculates an upper and lower band based on the average true range (ATR) and a multiplier (the factor). These bands determine the trend direction. In the FlexiSuperTrend strategy, the oscillator is enhanced by iteratively applying the SuperTrend calculation across different factors. The iterative process allows the strategy to capture both minor and significant trend changes.
+
+For each iteration (indexed by `i`), the following calculations are performed:
+
+1. ATR Calculation: The Average True Range (ATR) is calculated over the specified `indicatorLength`:
+
+ATR_i = ATR(indicatorLength)
+
+2. Upper and Lower Bands Calculation: The upper and lower bands are calculated using the ATR and the current factor:
+
+Upper Band_i = hl2 + (ATR_i * Factor_i)
+
+Lower Band_i = hl2 - (ATR_i * Factor_i)
+
+Here, `Factor_i` starts from `startingFactor` and is incremented by `incrementFactor` in each iteration.
+
+3. Trend Determination: The trend is determined by comparing the indicator source with the upper and lower bands:
+
+Trend_i = 1 (uptrend) if IndicatorSource > Upper Band_i
+
+Trend_i = 0 (downtrend) if IndicatorSource < Lower Band_i
+
+Otherwise, the trend remains unchanged from the previous value.
+
+4. Output Calculation: The output of each iteration is determined based on the trend:
+
+Output_i = Lower Band_i if Trend_i = 1
+
+Output_i = Upper Band_i if Trend_i = 0
+
+This process is repeated for each iteration (from 0 to 19), creating a series of outputs that reflect different levels of trend sensitivity.
+
+Local
+
+
+
+🔶 Normalization Process
+
+To make the oscillator values comparable across different market conditions, the deviations between the indicator source and the SuperTrend outputs are normalized. The normalization method can be one of the following:
+
+1. Max-Min Normalization: The deviations are normalized based on the range of the deviations:
+
+Normalized Value_i = (Deviation_i - Min Deviation) / (Max Deviation - Min Deviation)
+
+2. Absolute Sum Normalization: The deviations are normalized based on the sum of absolute deviations:
+
+Normalized Value_i = Deviation_i / Sum of Absolute Deviations
+
+This normalization ensures that the oscillator values are within a consistent range, facilitating more reliable trend analysis.
+
+For more details:
+https://www.tradingview.com/script/y9noW915-FlexiSuperTrend-Strategy-presentTrading/
+
+🔶 Multi-Step Take Profit Mechanism
+
+One of the unique features of this strategy is the multi-step take profit mechanism. This allows traders to lock in profits at multiple levels as the market moves in their favor. The strategy uses three take profit levels, each defined as a percentage increase (for long trades) or decrease (for short trades) from the entry price.
+
+1. First Take Profit Level: Calculated as a percentage increase/decrease from the entry price:
+
+TP_Level1 = Entry Price * (1 + tp_level1 / 100) for long trades
+
+TP_Level1 = Entry Price * (1 - tp_level1 / 100) for short trades
+
+The strategy exits a portion of the position (defined by `tp_percent1`) when this level is reached.
+
+2. Second Take Profit Level: Similar to the first level, but with a higher percentage:
+
+TP_Level2 = Entry Price * (1 + tp_level2 / 100) for long trades
+
+TP_Level2 = Entry Price * (1 - tp_level2 / 100) for short trades
+
+The strategy exits another portion of the position (`tp_percent2`) at this level.
+
+3. Third Take Profit Level: The final take profit level:
+
+TP_Level3 = Entry Price * (1 + tp_level3 / 100) for long trades
+
+TP_Level3 = Entry Price * (1 - tp_level3 / 100) for short trades
+
+The remaining portion of the position (`tp_percent3`) is exited at this level.
+
+This multi-step approach provides a balance between securing profits and allowing the remaining position to benefit from continued favorable market movement.
+
+
+█ Trade Direction
+
+The strategy allows traders to specify the trade direction through the `tradeDirection` input. The options are:
+
+1. Both: The strategy will take both long and short positions based on the entry signals.
+2. Long: The strategy will only take long positions.
+3. Short: The strategy will only take short positions.
+
+This flexibility enables traders to tailor the strategy to their market outlook or current trend analysis.
+
+█ Usage
+
+To use the Multi-Step FlexiSuperTrend strategy, traders need to set the input parameters according to their trading style and market conditions. The strategy is designed for versatility, allowing for various market environments, including trending and ranging markets.
+
+Traders can also adjust the multi-step take profit levels and percentages to match their risk management and profit-taking preferences. For example, in highly volatile markets, traders might set wider take profit levels with smaller percentages at each level to capture larger price movements.
+
+The normalization method and the incremental factor can be fine-tuned to adjust the sensitivity of the SuperTrend Polyfactor Oscillator, making the strategy more responsive to minor market shifts or more focused on significant trends.
+
+█ Default Settings
+
+The default settings of the strategy are carefully chosen to provide a balanced approach between risk management and profit potential. Here is a breakdown of the default settings and their effects on performance:
+
+1. Indicator Length (10): This parameter controls the lookback period for the ATR calculation. A shorter length makes the strategy more sensitive to recent price movements, potentially generating more signals. A longer length smooths out the ATR, reducing sensitivity but filtering out noise.
+
+2. Starting Factor (0.618): This is the initial multiplier used in the SuperTrend calculation. A lower starting factor makes the SuperTrend bands closer to the price, generating more frequent trend changes. A higher starting factor places the bands further away, filtering out minor fluctuations.
+
+3. Increment Factor (0.382): This parameter controls how much the factor increases with each iteration of the SuperTrend calculation. A smaller increment factor results in more gradual changes in sensitivity, while a larger increment factor creates a wider range of sensitivity across the iterations.
+
+4. Normalization Method (None): The default is no normalization, meaning the raw deviations are used. Normalization methods like Max-Min or Absolute Sum can make the deviations more consistent across different market conditions, improving the reliability of the oscillator.
+
+5. Take Profit Levels (2%, 8%, 18%): These levels define the thresholds for exiting portions of the position. Lower levels (e.g., 2%) capture smaller profits quickly, while higher levels (e.g., 18%) allow positions to run longer for more significant gains.
+
+6. Take Profit Percentages (30%, 20%, 15%): These percentages determine how much of the position is exited at each take profit level. A higher percentage at the first level locks in more profit early, reducing exposure to market reversals. Lower percentages at higher levels allow for a portion of the position to benefit from extended trends.
+Aug 13, 2024
+Release Notes
+Try to update to problem about the qty_type, mentioned by some users.

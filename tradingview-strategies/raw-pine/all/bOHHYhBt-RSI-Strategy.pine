@@ -1,0 +1,23 @@
+//@version=4
+strategy("RSI Strategy", overlay=true)
+length = input( 14 )
+overSold = input( 30 )
+overBought = input( 70 )
+price = close
+
+vrsi = rsi(price, length)
+
+if (not na(vrsi))
+    if (crossover(vrsi, overSold))
+        strategy.entry("BUY", strategy.long, comment="BUY")
+    if (crossunder(vrsi, overBought))
+        strategy.entry("SELL", strategy.short, comment="SELL")
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・16 lines
+Use on chart
+7
+3
+3 429
+simplified labels to "BUY" and "SELL"

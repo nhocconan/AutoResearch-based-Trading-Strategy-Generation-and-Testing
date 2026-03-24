@@ -1,0 +1,62 @@
+//@version=6
+strategy("MNQ 1-Min Scalping NY Session", overlay=true, initial_capital=100000, pyramiding=1, commission_type=strategy.commission.cash_per_contract, commission_value=1.4, slippage=1)
+
+// ===== INPUTS =====
+emaLength   = input.int(20, "EMA Length")
+riskPercent = input.float(1.0, "Risk % per Trade", step=0.1)
+takeR       = input.float(2.5, "Take Profit R", step=0.1)
+partialR    = input.float(2.0, "Partial Exit R", step=0.1)
+trailR      = input.float(1.0, "Trailing R", step=0.1)
+
+// ===== EMA TREND =====
+ema = ta.ema(close, emaLength)
+plot(ema, color=color.orange, title="EMA 20")
+
+// ===== SWING HIGHS/LOWS =====
+swingLow  = ta.pivotlow(low, 3, 3)
+swingHigh = ta.pivothigh(high, 3, 3)
+
+var float lastSwingLow  = na
+var float lastSwingHigh = na
+
+if not na(swingLow)
+    lastSwingLow := swingLow
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+
+// ===== NY SESSION FILTER =====
+nySession = (hour(time, "America/New_York") >= 9 and hour(time, "America/New_York") < 16)
+inSession = nySession
+
+// ===== ENTRY CONDITIONS =====
+longCond  = inSession and close > ema and low <= ema
+shortCond = inSession and close < ema and high >= ema
+
+// ===== POSITION SIZE =====
+riskDollar = strategy.equity * (riskPercent / 100)
+longRisk    = close - lastSwingLow
+shortRisk   = lastSwingHigh - close
+longQty     = longRisk > 0 ? riskDollar / longRisk : 0
+shortQty    = shortRisk > 0 ? riskDollar / shortRisk : 0
+
+// ===== ENTRIES =====
+if longCond and longQty > 0
+    strategy.entry("Long", strategy.long, qty=longQty)
+if shortCond and shortQty > 0
+    strategy.entry("Short", strategy.short, qty=shortQty)
+
+// ===== EXITS =====
+// Fixed R TP
+strategy.exit("Long TP", "Long", stop=lastSwingLow, limit=close + longRisk*takeR)
+strategy.exit("Short TP", "Short", stop=lastSwingHigh, limit=close - shortRisk*takeR)
+
+// Partial + Trailing optional
+strategy.exit("Long Partial", "Long", qty_percent=75, limit=close + longRisk*partialR, trail_points=longRisk*trailR)
+strategy.exit("Short Partial", "Short", qty_percent=75, limit=close - shortRisk*partialR, trail_points=shortRisk*trailR)
+
+View in Pine Editor・55 lines
+Use on chart
+4
+5
+1 843
+ai made this nd i have no idea if tis actuallly good or not

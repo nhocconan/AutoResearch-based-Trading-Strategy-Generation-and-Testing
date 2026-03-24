@@ -1,0 +1,81 @@
+//@version=5
+strategy("BTC Mean Reversion - RSI + Bollinger", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- Inputs ---
+rsiLength   = input.int(14, "RSI Length")
+bbLength    = input.int(20, "BB Length")
+bbMult      = input.float(2.0, "BB StdDev Multiplier")
+useShorts   = input.bool(true, "Allow Short Trades?")
+timeFilter  = input.bool(true, "Limit to 24/7 Crypto Session?")
+
+// --- Session Filter (optional, crypto runs 24/7 anyway, but here for structure) ---
+inSession = true
+if timeFilter
+    inSession := session.ismarket
+
+// --- Indicators ---
+rsi = ta.rsi(close, rsiLength)
+basis = ta.sma(close, bbLength)
+dev   = ta.stdev(close, bbLength) * bbMult
+upper = basis + dev
+lower = basis - dev
+
+// --- Entry Conditions ---
+// Long: price oversold & below lower band
+longEntry  = inSession and rsi < 30 and close < lower and strategy.position_size <= 0
+
+// Short: price overbought & above upper band
+shortEntry = inSession and useShorts and rsi > 70 and close > upper and strategy.position_size >= 0
+
+// --- Exit Conditions ---
+// Exit long when RSI recovers or price crosses middle band
+exitLong  = strategy.position_size > 0 and (rsi > 50 or ta.crossover(close, basis))
+
+// Exit short when RSI cools or price crosses middle band down
+exitShort = strategy.position_size < 0 and (rsi < 50 or ta.crossunder(close, basis))
+
+// --- Orders ---
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+// --- Plotting ---
+plot(basis, "BB Basis", color=color.orange)
+plot(upper, "BB Upper", color=color.new(color.blue, 0))
+plot(lower, "BB Lower", color=color.new(color.blue, 0))
+
+View in Pine Editor・55 lines
+Use on chart
+2
+440
+I built a mean-reversion strategy on BTCUSD in TradingView using Pine Script.
+
+For entries I used two IF/THEN conditions with technical indicators:
+
+IF RSI(14) < 30 AND price is below the lower Bollinger Band
+→ THEN enter a long position.
+
+IF RSI(14) > 70 AND price is above the upper Bollinger Band
+→ THEN enter a short position.
+
+For exits I used:
+
+IF I’m long and RSI > 50 OR price crosses back above the middle Bollinger Band
+→ THEN close the long.
+
+IF I’m short and RSI < 50 OR price crosses back below the middle Bollinger Band
+→ THEN close the short.
+
+To meet the requirement of at least 500 trades, I ran the strategy on BTCUSD, 10-second timeframe, over the available data window (Feb 16–23, 2026). That produced:
+
+Total trades: 1,181
+
+Profitable trades: 710 / 1,181 (≈ 60.1%)

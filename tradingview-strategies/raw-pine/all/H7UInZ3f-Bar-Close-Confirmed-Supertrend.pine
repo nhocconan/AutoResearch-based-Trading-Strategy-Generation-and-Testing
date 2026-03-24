@@ -1,0 +1,94 @@
+//@version=6
+strategy("Safe Supertrend Strategy (No Repaint)", overlay=true, margin_long=100, margin_short=100)
+
+// Inputs
+atrLen  = input.int(10, "ATR Length")
+atrMult = input.float(3.0, "ATR Multiplier")
+
+// Core Calculations
+atr   = ta.atr(atrLen)
+ma    = ta.sma(close, atrLen)
+upper = ma + atr * atrMult
+lower = ma - atr * atrMult
+
+// Direction logic (non-repainting)
+// Uses previous bar values ONLY → all flips are confirmed
+var int dir = 0
+
+if close[1] > upper[1]
+    dir := 1
+else if close[1] < lower[1]
+    dir := -1
+else
+    dir := dir[1]  // hold trend
+
+// Plot reversal markers
+plotshape(dir == 1 and dir[1] != 1, 
+     title="Bull Start", location=location.belowbar, 
+     style=shape.triangleup, color=color.new(color.green, 0), size=size.small)
+
+plotshape(dir == -1 and dir[1] != -1, 
+     title="Bear Start", location=location.abovebar, 
+     style=shape.triangledown, color=color.new(color.red, 0), size=size.small)
+
+// Strategy logic
+longSignal  = dir == 1 and dir[1] != 1
+shortSignal = dir == -1 and dir[1] != -1
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+// Optional exit on reverse signals
+if strategy.position_size > 0 and shortSignal
+    strategy.close("Long")
+if strategy.position_size < 0 and longSignal
+    strategy.close("Short")
+
+View in Pine Editor・50 lines
+Use on chart
+2
+3
+1 105
+Overview
+This indicator is a Supertrend-style trend follower that confirms direction changes only after a bar closes. Trend flips are determined using the previous bar’s close relative to the bands, which helps avoid intrabar changes during live candles.
+
+How it works
+
+Computes ATR (Average True Range)
+
+Builds upper/lower bands using ATR and a multiplier
+
+Updates trend direction only when a prior candle confirms a break of the band
+
+
+
+Confirmation logic (bar-close based)
+Trend direction is updated using conditions based on the previous candle, such as:
+
+close[1] > upper[1] → confirm uptrend
+
+close[1] < lower[1] → confirm downtrend
+
+
+Because signals are confirmed on the prior bar, trend changes and markers are displayed only when confirmation exists.
+
+Signals
+
+Uptrend confirmation: prior candle closes above the upper band → bullish marker
+
+Downtrend confirmation: prior candle closes below the lower band → bearish marker
+
+
+
+Inputs
+
+ATR Length (default 10)
+
+ATR Multiplier (default 3.0)
+
+
+
+Notes
+This script is intended for bar-close workflows. Behavior and responsiveness may differ across markets and timeframes depending on volatility and chosen settings.

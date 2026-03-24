@@ -1,0 +1,8 @@
+//@version=4
+lineThickness=##input(defval=2,type='INPUT_INTEGER',##id='in_5')
+upperLevel=##input(defval=1.0,type='INPUT_FLOAT',##id='in_7')
+lowerLevel=##input(defval=-1.0,type='INPUT_FLOAT',##id='in_8')
+##root(root_metainfo,rm_0,upperLevel,input__float)
+##root(root_metainfo,rm_1,lowerLevel,input__float)
+##root(root_metainfo,rm_2,4,input__integer,plot,style)
+##root(root_metainfo,rm_3,lineThickness,input__integer)

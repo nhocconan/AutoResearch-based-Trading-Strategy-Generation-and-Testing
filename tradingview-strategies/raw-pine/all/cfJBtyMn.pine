@@ -1,0 +1,66 @@
+//@version=3
+strategy("no more support, Add VB Strategy + MACD", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=720, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+
+length = input(120, title="no more support")
+gfg = input(120, title="Add VB Strategy + MACD")
+
+strategy.entry("Add VB Strategy + MACD",strategy.long)
+
+View in Pine Editor・7 lines
+Use on chart
+1
+3
+6
+6 092
+Sep 30, 2018
+https://kr.tradingview.com/script/nLcYOH5a/
+VB Indicator
+
+https://kr.tradingview.com/script/IZpF4xgk/
+VB Indicator PRO (with Alarm function)
+
+With this strategy, you can test VB indicator.
+
+This strategy use entry and close price
+entry price = (high price + low price) / 2
+close price = (high price + low price) / 2
+
+
+이 전략으로 VB 지표에 대해 테스트할 수 있습니다.
+
+이 전략의 진입가와 청산가는 아래와 같이 설정합니다.
+진입가 = (고점+저점) / 2
+청산가 = (고점+저점) / 2
+Sep 30, 2018
+Release Notes
+add option of number of contracts
+
+계약 갯수 옵션 추가
+Oct 2, 2018
+Release Notes
+Add function date edit
+표시할 날짜 범위 추가
+Oct 3, 2018
+Release Notes
+Add function
+
+설정에서 양방향 매매 조건 추가
+Oct 11, 2018
+Release Notes
+진입, 청산가 수정
+(저점 + 고점 + 종가) / 3
+Oct 17, 2018
+Release Notes
+Update
+피라미딩 매매 옵션 추가
+- 체크 해제시 물타기 불타기를 하지 않습니다.
+
+첫 진입시 설정한 계약갯수와 상관없이 1계약만 들어가는 오류 수정
+Nov 5, 2018
+Release Notes
+피라미딩 매매 삭제
+Nov 18, 2018
+Release Notes
+no more supprot
+
+Find 'VB strategy + MACD' and Add for use it

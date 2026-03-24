@@ -1,0 +1,229 @@
+//@version=5
+strategy("Swing Failure Pattern Strategy RR 1 to 2 + Trail TP + No Weekend", overlay=true, process_orders_on_close=true)
+
+//==============================
+// Inputs
+//==============================
+len        = input.int(5, "Swings", minval=1)
+bull       = input.bool(true, "Bullish SFP")
+bear       = input.bool(true, "Bearish SFP")
+rr         = input.float(2.0, "Risk Reward", minval=0.5)
+
+// Trailing TP
+useTrail   = input.bool(true, "Enable Trailing TP")
+trailRR   = input.float(0.5, "Trail Distance (R)", step=0.1)
+startRR   = input.float(1.0, "Start Trailing After (R)", step=0.1)
+
+// Weekend filter
+noWeekend = input.bool(true, "No Trade on Saturday & Sunday")
+
+//==============================
+// Time Filter
+//==============================
+allowTrade = not (noWeekend and (dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday))
+
+//==============================
+// Types
+//==============================
+type piv
+    float swing_prc
+    int   swing_bix
+    float oppos_prc
+    int   oppos_bix
+    float wick_prc
+    bool  active
+    bool  confirmed
+
+type swing
+    int   bix
+    float prc
+
+//==============================
+// Variables
+//==============================
+n = bar_index
+var swing swingH = swing.new()
+var swing swingL = swing.new()
+var piv pivH = piv.new()
+var piv pivL = piv.new()
+
+//==============================
+// Pivot detection
+//==============================
+ph = ta.pivothigh(len, 1)
+pl = ta.pivotlow(len, 1)
+
+//==============================
+// BEARISH SFP (SHORT)
+//==============================
+if bear
+    if not na(ph)
+        swingH.bix := n - 1
+        swingH.prc := ph
+
+    sw = swingH.prc
+    bx = swingH.bix
+
+    if allowTrade and high > sw and open < sw and close < sw
+        opposL = sw
+        opposB = n
+        for i = 1 to n - bx - 1
+            if low[i] < opposL
+                opposL := low[i]
+                opposB := n - i
+        pivH := piv.new(sw, bx, opposL, opposB, high, true, false)
+
+    if allowTrade and pivH.active and not pivH.confirmed
+        if close < pivH.oppos_prc
+            pivH.confirmed := true
+            entry = close
+            stop  = pivH.wick_prc
+            risk  = stop - entry
+            tp    = entry - risk * rr
+            strategy.entry("Short", strategy.short)
+            if useTrail
+                strategy.exit("Short Exit", from_entry="Short", stop=stop, limit=tp,
+                              trail_price=entry - risk * startRR, trail_offset=risk * trailRR)
+            else
+                strategy.exit("Short Exit", from_entry="Short", stop=stop, limit=tp)
+
+    if n - pivH.swing_bix > 500 or close > pivH.swing_prc
+        pivH.active := false
+
+//==============================
+// BULLISH SFP (LONG)
+//==============================
+if bull
+    if not na(pl)
+        swingL.bix := n - 1
+        swingL.prc := pl
+
+    sw = swingL.prc
+    bx = swingL.bix
+
+    if allowTrade and low < sw and open > sw and close > sw
+        opposH = sw
+        opposB = n
+        for i = 1 to n - bx - 1
+            if high[i] > opposH
+                opposH := high[i]
+                opposB := n - i
+        pivL := piv.new(sw, bx, opposH, opposB, low, true, false)
+
+    if allowTrade and pivL.active and not pivL.confirmed
+        if close > pivL.oppos_prc
+            pivL.confirmed := true
+            entry = close
+            stop  = pivL.wick_prc
+            risk  = entry - stop
+            tp    = entry + risk * rr
+            strategy.entry("Long", strategy.long)
+            if useTrail
+                strategy.exit("Long Exit", from_entry="Long", stop=stop, limit=tp,
+                              trail_price=entry + risk * startRR, trail_offset=risk * trailRR)
+            else
+                strategy.exit("Long Exit", from_entry="Long", stop=stop, limit=tp)
+
+    if n - pivL.swing_bix > 500 or close < pivL.swing_prc
+        pivL.active := false
+
+View in Pine Editor・128 lines
+Use on chart
+1
+8
+896
+🔍 Overview
+
+The Swing Failure Pattern (SFP) Strategy is a pure price-action trading system designed to capture liquidity sweeps and market reversals around key swing highs and lows.
+It is based on the concept that price often briefly breaks a swing level to trigger stop-losses, then reverses in the opposite direction.
+
+This strategy trades only confirmed SFP setups, ensuring disciplined entries with clearly defined risk.
+
+📈 Bullish SFP (Long Setup)
+
+A Bullish Swing Failure Pattern forms when:
+
+A valid swing low is created
+
+Price wicks below the swing low
+
+The candle closes back above the swing level
+
+Confirmation occurs when price closes above the opposing high
+
+➡️ Action: Enter LONG on the confirmation candle close
+
+📉 Bearish SFP (Short Setup)
+
+A Bearish Swing Failure Pattern forms when:
+
+A valid swing high is created
+
+Price wicks above the swing high
+
+The candle closes back below the swing level
+
+Confirmation occurs when price closes below the opposing low
+
+➡️ Action: Enter SHORT on the confirmation candle close
+
+🛑 Risk Management
+
+Stop Loss
+
+Long → Low of the SFP wick
+
+Short → High of the SFP wick
+
+Take Profit
+
+Fixed Risk : Reward = 1 : 2
+
+All SL and TP levels are fixed at entry (no repainting)
+
+🔁 Trailing Take Profit (Optional)
+
+Trailing TP can be enabled from settings
+
+Trailing starts after 1R profit
+
+Trail distance is R-based and fully adjustable
+
+Works for both long and short trades
+
+⏰ Time Filters
+
+Optional No-Trade on Saturday & Sunday
+
+Prevents new entries during weekends
+
+Active trades continue to manage SL & TP normally
+
+⚙️ Strategy Features
+
+Price-action based (no indicators)
+
+Confirmation-only entries
+
+No repainting logic
+
+Works on all markets and timeframes
+
+Orders executed on candle close
+
+🎯 Best Use Cases
+
+Forex
+
+Indices
+
+Crypto
+
+Futures
+
+Best performance during London & New York sessions
+
+⚠️ Disclaimer
+
+This strategy is intended for educational and backtesting purposes only.
+Always test and manage risk appropriately before live trading.

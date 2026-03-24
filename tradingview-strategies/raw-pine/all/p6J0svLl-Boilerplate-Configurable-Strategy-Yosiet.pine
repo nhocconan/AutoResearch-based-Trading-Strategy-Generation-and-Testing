@@ -1,0 +1,364 @@
+//@version=5
+strategy("Boilerplate Configurable Strategy [Yosiet]", overlay=true, margin_long=100, margin_short=100)
+
+//Strategy Specific inputs 
+strategyType = input.string("SQUEEZE", "Strategy Type", options=["SQUEEZE", "SMA_CROSS"])
+
+// === MODULAR ENTRY/EXIT SYSTEM ===
+
+//You can colapse all code blocks that begins with comments brackets
+//You can DM for any question or comment in the post
+
+// Entry/Exit conditions {
+length = input.int(20, "Length", group="General Strategy Settings")
+// Bollinger Bands Settings
+mult1 = input.float(1.5, "Wide BB Multiplier", step=0.1, group="Squeeze Settings")
+mult2 = input.float(2.0, "Narrow BB Multiplier", step=0.1, group="Squeeze Settings")
+
+// SMA Cross Settings
+maFast = ta.sma(close, length)
+maSlow = ta.sma(open, length)
+
+
+// Bollinger Bands
+[basis1, upper1, lower1] = ta.bb(hlc3, length, mult1)
+[basis2, upper2, lower2] = ta.bb(hlc3, length, mult2)
+// Squeeze Condition
+squeeze = hlc3 < upper2 and hlc3 > lower2
+
+// }
+
+//{ inputs block 
+
+// ********** INPUTS ********** //
+// -- Trading Days Configuration --
+var groupDays = "Trading Days"
+enableMon = input.bool(true, "Monday", group=groupDays)
+enableTue = input.bool(true, "Tuesday", group=groupDays)
+enableWed = input.bool(true, "Wednesday", group=groupDays)
+enableThu = input.bool(true, "Thursday", group=groupDays)
+enableFri = input.bool(true, "Friday", group=groupDays)
+enableSat = input.bool(true, "Saturday", group=groupDays)
+enableSun = input.bool(true, "Sunday", group=groupDays)
+
+// Session Configuration
+sessionInput = input.string("0000-0000", "Trading Session (HHmm-HHmm)", tooltip="24h format", group="Hour Settings")
+var sessionTime = request.security(syminfo.tickerid, "D", time(timeframe.period, sessionInput))
+
+// Hours Exclusions
+exitTime = input.session("1600-1700", "Daily Exit Time", options=["1500-1600", "1600-1700", "1700-1800", "1800-1900"], group="Hour Settings")
+
+// Date Range Filter
+startDate = input.time(timestamp("1 Jan 2024"), "Start Date", group="Data Date Range")
+endDate = input.time(timestamp("31 Jan 2025"), "End Date", group="Data Date Range")
+
+
+
+// -- News Avoidance Configuration --
+var groupNews = "News Filter"
+enableNewsFilter = input.bool(false, "Enable News Filter", group=groupNews)
+newsTime = input.time(timestamp("2023-01-01 14:30"), "News Time (UTC)", group=groupNews)
+newsWindow = input.int(5, "News Window (minutes)", minval=1, group=groupNews)
+
+// Trade Direction Configuration
+var groupTradeConfiguration = "Trade Side Configuration"
+tradeDirection = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=groupTradeConfiguration)
+tradeInverse = input.bool(false, "Inverse Trade Side", group=groupTradeConfiguration)
+
+// Capital Risk Management Parameters
+var groupRisk = "Money Risk Management"
+maxLossPerc = input.float(2.0, "Max Loss per Trade (%)", group=groupRisk) / 100
+maxLosingDays = input.int(3, "Max Consecutive Losing Days", group=groupRisk)
+maxDD = input.float(10.0, "Max Drawdown (%)", group=groupRisk) / 100
+
+// Risk/Reward Configuration
+var groupRRR = "Risk/Reward Ratio"
+rrMode = input.string("ATR", "RR Mode", options=["ATR", "Static"], group=groupRRR)
+atrLength  = input.int(14, "ATR Length", group=groupRRR)
+atrMultiplier = input.float(1.5, "ATR Multiplier", step=0.1, group=groupRRR)
+staticRR = input.float(2.0, "Static RR Ratio", step=0.1, group=groupRRR)
+useTrail   = input.bool(false, "Enable Trailing Stop")
+trailStart = input.float(15, "Trail Activation (%)") / 100
+trailDist  = input.float(0.5, "Trail Distance (%)") / 100
+
+// 7. Strategy Logic
+var int consecutiveLosses = 0
+var float peakEquity = strategy.equity
+var bool drawdownBreached = false
+// }
+
+// { Calculate drawdown
+currentEquity = strategy.equity
+drawdown = (peakEquity - currentEquity) / peakEquity
+if currentEquity > peakEquity
+    peakEquity := currentEquity
+    drawdownBreached := false
+
+if drawdown >= maxDD and not drawdownBreached
+    drawdownBreached := true
+    strategy.close_all("Max DD Reached")
+// }
+
+// { Trading session  and date filter
+inSession = time(timeframe.period, sessionInput)
+
+inDateRange = time >= startDate and time <= endDate
+
+// ********** FUNCTIONS ********** //
+// -- Trading Day Filter --
+isTradingDay() =>
+    day = dayofweek
+    (enableMon and day == dayofweek.monday) or
+     (enableTue and day == dayofweek.tuesday) or
+     (enableWed and day == dayofweek.wednesday) or
+     (enableThu and day == dayofweek.thursday) or
+     (enableFri and day == dayofweek.friday) or 
+     (enableSat and day == dayofweek.saturday) or 
+     (enableSun and day == dayofweek.sunday)
+
+// -- News Avoidance Filter --
+isNewsTime() =>
+    if not enableNewsFilter or na(newsTime)
+        false
+    else
+        windowStart = newsTime - newsWindow * 60 * 1000
+        windowEnd = newsTime + newsWindow * 60 * 1000
+        time >= windowStart and time <= windowEnd
+
+// Exit time filter
+exitPeriod = not na(time(timeframe.period, exitTime))
+// }
+
+// { Risk Reward Calculations 
+// Calculate position size
+positionSize = strategy.equity * maxLossPerc / (ta.atr(14) / close)
+
+// RR calculations
+atr = ta.atr(atrLength)
+stopLoss = rrMode == "ATR" ? atr * atrMultiplier : close * maxLossPerc
+takeProfit = rrMode == "ATR" ? stopLoss * staticRR : stopLoss * staticRR
+// }
+
+// { Entries and Exits execution 
+
+var bool longCondition = false
+var bool shortCondition = false
+
+if strategyType == "SMA_CROSS"
+    longCondition  := ta.crossover(maFast, maSlow)
+    shortCondition := ta.crossunder(maFast, maSlow)
+    
+if strategyType == "SQUEEZE"
+    longCondition  := ta.crossover(hlc3, upper1) and squeeze
+    shortCondition := ta.crossunder(hlc3, lower1) and squeeze
+
+// Strategy logic
+if inSession and inDateRange and not exitPeriod and not drawdownBreached and isTradingDay() and not isNewsTime()
+    // Long entries
+    if (tradeDirection == "Long" or tradeDirection == "Both") and ((longCondition and not tradeInverse) or (tradeInverse and shortCondition))
+        strategy.entry("Long", strategy.long, qty=positionSize/close)
+        strategy.exit("Exit Long", "Long", 
+         stop=close - stopLoss, 
+         limit=close + takeProfit,
+         trail_points = useTrail ? close * trailStart : na,
+         trail_offset = useTrail ? close * trailDist : na)
+    
+    // Short entries
+    if (tradeDirection == "Short" or tradeDirection == "Both") and ((longCondition and tradeInverse) or (not tradeInverse and shortCondition))
+        strategy.entry("Short", strategy.short, qty=positionSize/close)
+        strategy.exit("Exit Short", "Short", 
+         stop=close + stopLoss, 
+         limit=close - takeProfit,
+         trail_points = useTrail ? close * trailStart : na,
+         trail_offset = useTrail ? close * trailDist : na)
+
+// Close all positions during exit period
+if exitPeriod
+    strategy.close_all("Daily Exit")
+
+// Track consecutive losing days
+var float dailyProfit = 0
+if ta.change(time("D"))
+    if dailyProfit < 0
+        consecutiveLosses += 1
+    else
+        consecutiveLosses := 0
+    dailyProfit := 0
+
+if strategy.closedtrades > 0
+    dailyProfit += strategy.closedtrades.profit(strategy.closedtrades - 1)
+
+if consecutiveLosses >= maxLosingDays
+    strategy.close_all("Max Losing Days Reached")
+
+if drawdownBreached
+    strategy.close_all("Drawdown Limit Reached")
+    
+if isNewsTime()
+    strategy.close_all("News Window")
+// }
+
+View in Pine Editor・201 lines
+Use on chart
+9
+6
+2
+2 205
+Feb 17, 2025
+This is a Boilerplate Code!
+
+Hello! First of all, let me introduce myself a little bit. I don't come from the world of finance, but from the world of information and communication technologies (ICT) where we specialize in data processing with the aim of automating it and eliminating all human factors and actors in the processes. You could say that I am an algotrader.
+
+That said, in my journey through trading in recent years I have understood that this world is often shown to be incomplete. All those who want to learn about trading only end up learning a small part of what it really entails, they only seek to learn how to read candlesticks. Therefore, I want to share with the entire community a fraction of what I have really understood it to be.
+
+As a computer scientist, the most important thing is the data, it is the raw material of our work and without data you simply cannot do anything. Entropy is simple: Data in -> Data is transformed -> Data out.
+
+The quality of the outgoing data will directly depend on the incoming data, there is no greater mystery or magic in the process. In trading it is no different, because at the end of the day it is nothing more than data. As we often say, if garbage comes in, garbage comes out.
+
+Most people focus on the results only, on the outgoing data, because in the end we all want the same thing, to make easy money. Very few pay attention to the input data, much less to the process.
+
+Now, I am not here to delude you, because there is no bigger lie than easy money, but I am here to give you a boilerplate code that will help you create strategies where you only have to concentrate on the quality of the incoming data.
+
+To the Point
+The code is a strategy boilerplate that applies the technique that you decide to customize for the criteria for opening a position. It already has the other factors involved in trading programmed and automated.
+
+1. The Entry
+This section of the boilerplate is the one that each individual must customize according to their needs and knowledge. The code is offered with two simple, well-known strategies to exemplify how the code can be reused for your own benefits.
+
+For the purposes of this post on tradingview, I am going to use the simplest of the known strategies in trading for entries: SMA Crossing
+
+
+Pine Script®
+// SMA Cross Settings
+maFast = ta.sma(close, length)
+maSlow = ta.sma(open, length)
+
+
+
+The Strategy Properties for all cases published here:
+
+
+
+For Stock TSLA H1 From 01/01/2025 To 02/15/2025
+
+
+
+For Crypto XMR-USDT 30m From 01/01/2025 To 02/15/2025
+
+
+
+For Forex EUR-USD 5m From 01/01/2025 To 02/15/2025
+
+
+
+But the goal of this post is not to sell you a dream, else to show you that the same Entry decision works very well for some and does not for others and with this boilerplate code you only have to think of entries, not exits.
+
+2. Schedules, Days, Sessions
+As you know, there are an infinite number of markets that are susceptible to the sessions of each country and the news that they announce during those sessions, so the code already offers parameters so that you can condition the days and hours of operation, filter the best time parameters for a specific market and time frame.
+
+3. Data Filtering
+The data offered in trading are numerical series presented in vectors on a time axis where an endless number of mathematical equations can be applied to process them, with matrix calculation and non-linear regressions being the best, in my humble opinion.
+
+4. Read Fundamental Macroeconomic Events, News
+The boilerplate has integration with the tradingview SDK to detect when news will occur and offers parameters so that you can enable an exclusion time margin to not operate anything during that time window.
+
+5. Direction and Sense
+In my experience I have found the peculiarity that the same algorithm works very well for a market in a time frame, but for the same market in another time frame it is only a waste of time and money. So now you can easily decide if you only want to open LONG, SHORT or both side positions and know how effective your strategy really is.
+
+6. Reading the money, THE PURPOSE OF EVERYTHING
+The most important section in trading and the reason why many clients usually hire me as a financial programmer, is reading and controlling the money, because in the end everyone wants to win and no one wants to lose. Now they can easily parameterize how the money should flow and this is the genius of this boilerplate, because it is what will really decide if an algorithm (Indicator: A bunch of math equations) for entries will really leave you good money over time.
+
+7. Managing the Risk, The Ego Destroyer
+Many trades, little money. Most traders focus on making money and none of them know about statistics and the few who do know something about it, only focus on the winrate. Well, with this code you can unlock what really matters, the true success criteria to be able to live off of trading: Profit Factor, Sortino Ratio, Sharpe Ratio and most importantly, will you really make money?
+
+8. Managing Emotions
+Finally, the main reason why many lose money is because they are very bad at managing their emotions, because with this they will no longer need to do so because the boilerplate has already programmed criteria to chase the price in a position, cut losses and maximize profits.
+
+In short, this is a boilerplate code that already has the data processing and data output ready, you only have to worry about the data input.
+
+“And so the trader learned: the greatest edge was not in predicting the storm, but in building a boat that could not sink.”
+
+DISCLAIMER
+This post is intended for programmers and quantitative traders who already have a certain level of knowledge and experience. It is not intended to be financial advice or to sell you any money-making script, if you use it, you do so at your own risk.
+
+Feb 17, 2025
+Release Notes
+This is a Boilerplate Code!
+
+Hello! First of all, let me introduce myself a little bit. I don't come from the world of finance, but from the world of information and communication technologies (ICT) where we specialize in data processing with the aim of automating it and eliminating all human factors and actors in the processes. You could say that I am an algotrader.
+
+That said, in my journey through trading in recent years I have understood that this world is often shown to be incomplete. All those who want to learn about trading only end up learning a small part of what it really entails, they only seek to learn how to read candlesticks. Therefore, I want to share with the entire community a fraction of what I have really understood it to be.
+
+As a computer scientist, the most important thing is the data, it is the raw material of our work and without data you simply cannot do anything. Entropy is simple: Data in -> Data is transformed -> Data out.
+
+The quality of the outgoing data will directly depend on the incoming data, there is no greater mystery or magic in the process. In trading it is no different, because at the end of the day it is nothing more than data. As we often say, if garbage comes in, garbage comes out.
+
+Most people focus on the results only, on the outgoing data, because in the end we all want the same thing, to make easy money. Very few pay attention to the input data, much less to the process.
+
+Now, I am not here to delude you, because there is no bigger lie than easy money, but I am here to give you a boilerplate code that will help you create strategies where you only have to concentrate on the quality of the incoming data.
+
+To the Point
+The code is a strategy boilerplate that applies the technique that you decide to customize for the criteria for opening a position. It already has the other factors involved in trading programmed and automated.
+
+1. The Entry
+This section of the boilerplate is the one that each individual must customize according to their needs and knowledge. The code is offered with two simple, well-known strategies to exemplify how the code can be reused for your own benefits.
+
+For the purposes of this post on tradingview, I am going to use the simplest of the known strategies in trading for entries: SMA Crossing
+
+
+Pine Script®
+// SMA Cross Settings
+maFast = ta.sma(close, length)
+maSlow = ta.sma(open, length)
+
+
+
+The Strategy Properties for all cases published here:
+
+
+
+For Stock TSLA H1 From 01/01/2025 To 02/15/2025
+
+
+
+For Crypto XMR-USDT 30m From 01/01/2025 To 02/15/2025
+
+
+
+For Forex EUR-USD 5m From 01/01/2025 To 02/15/2025
+
+
+
+But the goal of this post is not to sell you a dream, else to show you that the same Entry decision works very well for some and does not for others and with this boilerplate code you only have to think of entries, not exits.
+
+2. Schedules, Days, Sessions
+As you know, there are an infinite number of markets that are susceptible to the sessions of each country and the news that they announce during those sessions, so the code already offers parameters so that you can condition the days and hours of operation, filter the best time parameters for a specific market and time frame.
+
+3. Data Filtering
+The data offered in trading are numerical series presented in vectors on a time axis where an endless number of mathematical equations can be applied to process them, with matrix calculation and non-linear regressions being the best, in my humble opinion.
+
+4. Read Fundamental Macroeconomic Events, News
+The boilerplate has integration with the tradingview SDK to detect when news will occur and offers parameters so that you can enable an exclusion time margin to not operate anything during that time window.
+
+5. Direction and Sense
+In my experience I have found the peculiarity that the same algorithm works very well for a market in a time frame, but for the same market in another time frame it is only a waste of time and money. So now you can easily decide if you only want to open LONG, SHORT or both side positions and know how effective your strategy really is.
+
+6. Reading the money, THE PURPOSE OF EVERYTHING
+The most important section in trading and the reason why many clients usually hire me as a financial programmer, is reading and controlling the money, because in the end everyone wants to win and no one wants to lose. Now they can easily parameterize how the money should flow and this is the genius of this boilerplate, because it is what will really decide if an algorithm (Indicator: A bunch of math equations) for entries will really leave you good money over time.
+
+7. Managing the Risk, The Ego Destroyer
+Many trades, little money. Most traders focus on making money and none of them know about statistics and the few who do know something about it, only focus on the winrate. Well, with this code you can unlock what really matters, the true success criteria to be able to live off of trading: Profit Factor, Sortino Ratio, Sharpe Ratio and most importantly, will you really make money?
+
+8. Managing Emotions
+Finally, the main reason why many lose money is because they are very bad at managing their emotions, because with this they will no longer need to do so because the boilerplate has already programmed criteria to chase the price in a position, cut losses and maximize profits.
+
+In short, this is a boilerplate code that already has the data processing and data output ready, you only have to worry about the data input.
+
+“And so the trader learned: the greatest edge was not in predicting the storm, but in building a boat that could not sink.”
+
+DISCLAIMER
+This post is intended for programmers and quantitative traders who already have a certain level of knowledge and experience. It is not intended to be financial advice or to sell you any money-making script, if you use it, you do so at your own risk.
+
+Feb 17, 2025
+Release Notes
+You can do any question in the comments

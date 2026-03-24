@@ -1,0 +1,120 @@
+//@version=5
+strategy("ICT Midnight Cross Strategy - Refined", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//------------------------------------------------------------------------------
+requiredCrosses = input.int(3, "Crosses Required for Entry", minval = 1)
+exitTime        = input.string("1400", "Exit Time (NY Time)", tooltip = "Default 1400 (2 PM)")
+
+groupEntry = "Entry Timing"
+useEntryDelay   = input.bool(false, "Use Entry Delay?", group = groupEntry)
+delayCandles    = input.int(1, "Delay (Candles after cross)", minval = 1, group = groupEntry)
+
+groupTP = "Targets & Protection"
+useTP           = input.bool(true, "Use Take Profit?", group = groupTP)
+tpTicks         = input.int(40, "Take Profit (Ticks)", minval = 1, group = groupTP)
+useTrailing     = input.bool(true, "Use Trailing Stop?", group = groupTP)
+trailTicks      = input.int(20, "Trailing Stop (Ticks)", minval = 1, group = groupTP)
+
+groupBE = "Breakeven Logic"
+useBE           = input.bool(true, "Use Breakeven?", group = groupBE)
+beTrigger       = input.int(20, "BE Trigger (Ticks In Profit)", minval = 1, group = groupBE)
+beOffset        = input.int(1, "BE Offset (Ticks above entry)", minval = 0, group = groupBE)
+
+//------------------------------------------------------------------------------
+// Midnight Price Detection & State Tracking
+//------------------------------------------------------------------------------
+var float midnightPrice = na
+var int crossCount = 0
+var bool tradeTakenToday = false
+var int lastSide = 0 
+var int crossBarIndex = 0
+
+// New Midnight Price Logic (NY Time)
+isMidnight = hour(time, "America/New_York") == 0 and minute(time, "America/New_York") == 0
+isNewDay = timeframe.change("D")
+
+if isNewDay
+    tradeTakenToday := false
+    crossCount := 0
+    lastSide := 0 
+    crossBarIndex := 0
+    midnightPrice := na
+
+if isMidnight
+    midnightPrice := open
+
+//------------------------------------------------------------------------------
+// Confirmed Close Cross Logic (EXCLUDES Midnight Candle)
+//------------------------------------------------------------------------------
+// The cross counting only starts on candles AFTER the midnight candle
+if not na(midnightPrice) and not isMidnight and not tradeTakenToday
+    // Determine current position relative to midnight price based on CLOSE
+    currentSide = close > midnightPrice ? 1 : close < midnightPrice ? -1 : 0
+    
+    // Increment only if price closed on a different side than before
+    if currentSide != 0 and currentSide != lastSide
+        crossCount += 1
+        lastSide := currentSide
+        if crossCount == requiredCrosses
+            crossBarIndex := bar_index
+
+//------------------------------------------------------------------------------
+// Entry Logic
+//------------------------------------------------------------------------------
+crossRequirementMet = crossCount == requiredCrosses
+waitCondition = useEntryDelay ? (bar_index >= crossBarIndex + delayCandles) : true
+
+canTrade = crossRequirementMet and waitCondition and not tradeTakenToday and strategy.position_size == 0
+
+if canTrade
+    if close > midnightPrice
+        strategy.entry("Long", strategy.long)
+        tradeTakenToday := true
+    else if close < midnightPrice
+        strategy.entry("Short", strategy.short)
+        tradeTakenToday := true
+
+//------------------------------------------------------------------------------
+// Exit Logic
+//------------------------------------------------------------------------------
+exitHour   = math.floor(str.tonumber(exitTime) / 100)
+exitMinute = str.tonumber(exitTime) % 100
+isExitTime = hour(time, "America/New_York") == exitHour and minute(time, "America/New_York") == exitMinute
+
+stopLossLong  = strategy.position_size > 0 and close < midnightPrice
+stopLossShort = strategy.position_size < 0 and close > midnightPrice
+
+if strategy.position_size != 0
+    float tpDist = useTP ? tpTicks * syminfo.mintick : na
+    float trailP = useTrailing ? trailTicks : na
+    
+    if useBE
+        float beTriggerPrice = strategy.position_size > 0 ? strategy.position_avg_price + (beTrigger * syminfo.mintick) : strategy.position_avg_price - (beTrigger * syminfo.mintick)
+        float bePrice = strategy.position_size > 0 ? strategy.position_avg_price + (beOffset * syminfo.mintick) : strategy.position_avg_price - (beOffset * syminfo.mintick)
+        
+        if (strategy.position_size > 0 and high >= beTriggerPrice) or (strategy.position_size < 0 and low <= beTriggerPrice)
+            strategy.exit("BE/Exit", stop = bePrice, limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+        else
+            strategy.exit("BE/Exit", limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+    else
+        strategy.exit("BE/Exit", limit = strategy.position_avg_price + (strategy.position_size > 0 ? tpDist : -tpDist), trail_points = trailP)
+
+if isExitTime or stopLossLong or stopLossShort
+    strategy.close_all("Exit Triggered")
+
+//------------------------------------------------------------------------------
+// Visuals
+//------------------------------------------------------------------------------
+plot(midnightPrice, "Midnight Price Reference", color=color.new(color.teal, 50), style=plot.style_linebr, linewidth = 2)
+
+if not tradeTakenToday and not na(midnightPrice) and ta.change(crossCount)
+    label.new(bar_index, high, "Cross #" + str.tostring(crossCount), color=color.yellow, style=label.style_label_down, size=size.small)
+
+View in Pine Editor・113 lines
+Use on chart
+1
+5
+548
+Choose the number of times price crosses over the midnight price before taking a position or use it to create alerts for crossing the midnight price. Adjust your timeframe for exiting the position. You can confirm momentum with consecutive candle closes and you can add a trailing stop or a break even profit strategy. No signals generated from this script should be considered advice for investment or trading. Created with Gemini.

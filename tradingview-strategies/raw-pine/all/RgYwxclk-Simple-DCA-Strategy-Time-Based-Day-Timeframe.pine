@@ -1,0 +1,133 @@
+//@version=5
+strategy(title = "Simple DCA Strategy Time Based- Day Timeframe", overlay = true, initial_capital = 10000, currency = currency.USD, default_qty_type = strategy.cash, default_qty_value = 500, pyramiding = 500, commission_type = strategy.commission.percent, commission_value = 0.0)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+initial_capital_amt = input.float(1000.0, title = "Initial Capital / First Buy (USD)", minval = 0.0)
+invest_amount       = input.float(500.0,  title = "Regular Investment Amount (USD)", minval = 1)
+start_date          = input.time(timestamp("2020-01-01"), title = "Start Date")
+end_date            = input.time(timestamp("2024-12-31"), title = "End Date")
+freq                = input.string("Monthly", title = "Investment Frequency", options = ["Daily", "Weekly", "Monthly"])
+buy_day_of_week     = input.string("Monday", title = "Buy Day (Weekly)", options = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
+buy_day_of_month    = input.int(1, title = "Buy Day of Month (Monthly, 1-28)", minval = 1, maxval = 28)
+commission_pct      = input.float(0.0, title = "Commission per Buy (%)", minval = 0.0, maxval = 10.0, step = 0.01)
+
+// ─────────────────────────────────────────────
+// DATE FILTER
+// ─────────────────────────────────────────────
+in_window = time >= start_date and time <= end_date
+
+// ─────────────────────────────────────────────
+// DAY OF WEEK MAPPING
+// ─────────────────────────────────────────────
+target_dow = buy_day_of_week == "Monday" ? 2 : buy_day_of_week == "Tuesday" ? 3 : buy_day_of_week == "Wednesday" ? 4 : buy_day_of_week == "Thursday" ? 5 : 6
+
+// ─────────────────────────────────────────────
+// TRIGGER LOGIC
+// ─────────────────────────────────────────────
+is_daily = freq == "Daily"
+
+var int last_weekly_week = na
+is_weekly_trigger = freq == "Weekly" and in_window and dayofweek(time) >= target_dow and (na(last_weekly_week) or weekofyear(time) != last_weekly_week)
+if is_weekly_trigger
+    last_weekly_week := weekofyear(time)
+
+var int last_monthly_month = na
+var int last_monthly_year  = na
+is_new_month_period = na(last_monthly_month) or month(time) != last_monthly_month or year(time) != last_monthly_year
+is_monthly_trigger  = freq == "Monthly" and in_window and is_new_month_period and dayofmonth(time) >= buy_day_of_month
+if is_monthly_trigger
+    last_monthly_month := month(time)
+    last_monthly_year  := year(time)
+
+should_buy = in_window and (is_daily or is_weekly_trigger or is_monthly_trigger)
+
+// ─────────────────────────────────────────────
+// TRACK BUYS
+// First buy uses initial_capital_amt, all subsequent use invest_amount
+// ─────────────────────────────────────────────
+var int   num_buys       = 0
+var float invested_total = 0.0
+var float total_fees     = 0.0
+var float total_shares   = 0.0
+
+if should_buy
+    this_amount    = num_buys == 0 and initial_capital_amt > 0 ? initial_capital_amt + invest_amount : invest_amount
+    fee            = this_amount * (commission_pct / 100)
+    net_amount     = this_amount - fee
+    qty            = net_amount / close
+    num_buys       := num_buys + 1
+    invested_total := invested_total + this_amount
+    total_fees     := total_fees + fee
+    total_shares   := total_shares + qty
+    strategy.entry("DCA", strategy.long, qty = qty, comment = num_buys == 1 ? "Initial" : "DCA")
+
+if time > end_date and strategy.position_size > 0
+    strategy.close_all(comment = "End")
+
+// ─────────────────────────────────────────────
+// CAPTURE PRICE AT END OF WINDOW
+// ─────────────────────────────────────────────
+var float end_price = na
+if in_window
+    end_price := close
+
+// ─────────────────────────────────────────────
+// VISUALS — first buy shown in blue, rest in green
+// ─────────────────────────────────────────────
+is_first_buy = should_buy and num_buys == 1
+bgcolor(should_buy ? color.new(color.green, 85) : na, title = "Buy Bar")
+plotshape(should_buy and not is_first_buy, title = "DCA Entry",     location = location.belowbar, style = shape.triangleup, color = color.green, size = size.small)
+plotshape(is_first_buy,                    title = "Initial Buy",   location = location.belowbar, style = shape.triangleup, color = color.blue,  size = size.normal)
+
+// ─────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 10, bgcolor = color.new(color.black, 70), border_width = 1)
+
+if barstate.islast
+    final_price = na(end_price) ? close : end_price
+    port_value  = total_shares * final_price
+    profit_usd  = port_value - invested_total
+    profit_pct  = invested_total > 0 ? (profit_usd / invested_total) * 100 : 0.0
+
+    table.cell(dash, 0, 0, "DCA Summary",      text_color = color.white,  text_size = size.normal)
+    table.cell(dash, 1, 0, "",                 text_color = color.white)
+
+    table.cell(dash, 0, 1, "Frequency",        text_color = color.silver)
+    table.cell(dash, 1, 1, freq,               text_color = color.yellow)
+
+    table.cell(dash, 0, 2, "Initial Buy",      text_color = color.silver)
+    table.cell(dash, 1, 2, "$" + str.tostring(math.round(initial_capital_amt + invest_amount), "#,###"), text_color = color.aqua)
+
+    table.cell(dash, 0, 3, "# of Buys",        text_color = color.silver)
+    table.cell(dash, 1, 3, str.tostring(num_buys), text_color = color.white)
+
+    table.cell(dash, 0, 4, "Total Invested",   text_color = color.silver)
+    table.cell(dash, 1, 4, "$" + str.tostring(math.round(invested_total), "#,###"), text_color = color.white)
+
+    table.cell(dash, 0, 5, "Fees Paid",        text_color = color.silver)
+    table.cell(dash, 1, 5, "$" + str.tostring(total_fees, "#,###.##"), text_color = total_fees > 0 ? color.orange : color.gray)
+
+    table.cell(dash, 0, 6, "Portfolio Value",  text_color = color.silver)
+    table.cell(dash, 1, 6, "$" + str.tostring(math.round(port_value), "#,###"), text_color = port_value >= invested_total ? color.green : color.red)
+
+    table.cell(dash, 0, 7, "Profit / Loss",    text_color = color.silver)
+    table.cell(dash, 1, 7, "$" + str.tostring(math.round(profit_usd), "#,###"), text_color = profit_usd >= 0 ? color.green : color.red)
+
+    table.cell(dash, 0, 8, "Return %",         text_color = color.silver)
+    table.cell(dash, 1, 8, str.tostring(math.round(profit_pct, 2)) + "%", text_color = profit_pct >= 0 ? color.green : color.red)
+
+    table.cell(dash, 0, 9, "Commission",       text_color = color.silver)
+    table.cell(dash, 1, 9, str.tostring(commission_pct) + "%", text_color = color.orange)
+
+View in Pine Editor・123 lines
+Use on chart
+1
+8
+542
+This is simle Time Based DCA strategy.
+Use Daily Timeframe.
+If you want FEES to be calculated you need to add them in Properties tab and also in Input tab.
+Beta version first test it.

@@ -1,0 +1,67 @@
+//@version=2
+strategy("Buy Every Tuesday Strategy (by ChartArt)", shorttitle="CA_-_Buy_Tuesday_Strat", overlay=true)
+
+// ChartArt's Buy Every Tuesday Strategy
+//
+// Version 1.0
+// Idea by ChartArt on June 15, 2016.
+//
+// This strategy is as simple as possible:
+// Every Tuesday a new long trade is opened,
+// when Monday closed lower than it opened the week.
+//
+// The strategy stays long while the close is higher
+// than the open. All orders are closed when the open is
+// lower than the close.
+//
+// This simple strategy does not have any other
+// stop loss or take profit money management logic.
+//
+// P.S. The strategy code doesn't work on digital assets
+// which are traded every day including Saturday and Sunday.
+//
+// List of my work: 
+// https://www.tradingview.com/u/ChartArt/
+// 
+//  __             __  ___       __  ___ 
+// /  ` |__|  /\  |__)  |   /\  |__)  |  
+// \__, |  | /~~\ |  \  |  /~~\ |  \  |  
+// 
+// 
+
+
+//// Day of the week code (via Chris Moody: https://www.tradingview.com/v/yeeWYrLJ/)
+
+isMon() => dayofweek(time('D')) == monday and close ? 1 : 0
+isTue() => dayofweek(time('D')) == tuesday and close ? 1 : 0
+isWed() => dayofweek(time('D')) == wednesday and close ? 1 : 0
+isThu() => dayofweek(time('D')) == thursday and close ? 1 : 0
+isFri() => dayofweek(time('D')) == friday and close ? 1 : 0
+
+//// Strategy
+
+// Strategy entry condition: Yesterday was Monday (again) and Monday closed lower (compared to the Monday open)
+longCondition = isMon()[20] and isTue()[19] and isWed()[18] and isThu()[17] and isFri()[16] and isMon()[15] and isTue()[14] and isWed()[13] and isThu()[12] and  isFri()[11] and   isMon()[10] and isTue()[9] and isWed()[8] and isThu()[7] and isFri()[6] and isMon()[5] and isTue()[4] and isWed()[3] and isThu()[2] and  isFri()[1] and isMon()  and  open < close
+if (longCondition)
+    strategy.entry("long", strategy.long, comment="Tuesday")
+
+// Strategy close condition: The current bar open is lower than the close
+strategy.close_all(when = open < close )
+
+//// Alert
+alertcondition(longCondition == true , title='Buy Tuesday', message='Buy this Tuesday')
+alertcondition(open < close , title='open < close', message='open < close')
+
+View in Pine Editor・53 lines
+Use on chart
+7
+4
+5
+1
+16 453
+This strategy is as simple as possible: Every Tuesday a new long trade is opened, when Monday (yesterday) closed higher than it opened the week. The strategy closes all orders when the next close is larger than the open.
+
+This strategy does not have any other stop loss or take profit money management logic and is therefore VERY risky, because it always waits to close all orders until the close is larger than the open. I recommend to mainly use it to find stocks or assets which are trending higher and are following this very basic trading idea.
+
+--
+P.S. The code of the strategy does not work on digital assets like Bitcoin, Litecoin or Ethereum, which are traded every day including Saturday and Sunday, because the code checks if Monday was preceded by a Friday (and not by a Sunday and Saturday).

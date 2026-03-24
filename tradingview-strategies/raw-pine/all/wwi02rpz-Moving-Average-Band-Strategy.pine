@@ -1,0 +1,378 @@
+//@version=6
+strategy('Moving Average Band Strategy', shorttitle = 'MA Band strategy', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// MA Type Selection
+maTypeInput = input.string('SMA', 'Moving Average Type', options = ['SMA', 'EMA', 'WMA', 'HMA', 'VWMA', 'RMA'])
+
+// MA Length
+maLength = input.int(40, 'MA Length', minval = 1)
+
+// Band Offset (optional - can add multiplier if needed)
+bandOffset = input.float(0.0, 'Band Offset %', minval = 0.0, step = 0.1) / 100
+
+// Strategy Settings
+longEnabled = input.bool(true, 'Enable Long Trades', group = 'Strategy Settings')
+shortEnabled = input.bool(true, 'Enable Short Trades', group = 'Strategy Settings')
+useRiskReward = input.bool(true, 'Use Risk:Reward Target', group = 'Strategy Settings')
+riskRewardRatio = input.float(3.0, 'Risk:Reward Ratio', minval = 0.5, step = 0.5, group = 'Strategy Settings')
+
+// ============================================================================
+// MOVING AVERAGE FUNCTION
+// ============================================================================
+
+ma(source, length, maType) =>
+    switch maType
+        'SMA' => ta.sma(source, length)
+        'EMA' => ta.ema(source, length)
+        'WMA' => ta.wma(source, length)
+        'HMA' => ta.hma(source, length)
+        'VWMA' => ta.vwma(source, length)
+        'RMA' => ta.rma(source, length)
+        => ta.sma(source, length)
+
+// ============================================================================
+// CALCULATE BANDS
+// ============================================================================
+
+// Upper Band based on HIGH
+upperBand = ma(high, maLength, maTypeInput) * (1 + bandOffset)
+
+// Lower Band based on LOW
+lowerBand = ma(low, maLength, maTypeInput) * (1 - bandOffset)
+
+// Middle Line (optional reference)
+middleLine = (upperBand + lowerBand) / 2
+
+// ============================================================================
+// PRICE POSITION & BAND COLORING
+// ============================================================================
+
+// Determine price position relative to bands
+priceAboveBand = close > upperBand
+priceBelowBand = close < lowerBand
+priceBetweenBand = not priceAboveBand and not priceBelowBand
+
+// Band fill colors based on price position
+bandColor = priceAboveBand ? color.new(color.green, 85) : priceBelowBand ? color.new(color.red, 85) : color.new(color.yellow, 85)
+
+// ============================================================================
+// PLOTTING BANDS
+// ============================================================================
+
+// Plot the upper and lower bands
+p1 = plot(upperBand, title = 'Upper Band', color = color.blue, linewidth = 2)
+p2 = plot(lowerBand, title = 'Lower Band', color = color.blue, linewidth = 2)
+
+// Fill area between bands
+fill(p1, p2, color = bandColor, title = 'Band Fill')
+
+// Plot middle line
+plot(middleLine, title = 'Middle Line', color = color.gray, linewidth = 1, style = plot.style_circles)
+
+// ============================================================================
+// STRATEGY LOGIC
+// ============================================================================
+
+// Entry Conditions - prevent entries in same direction if already in position
+longCondition = ta.crossover(close, upperBand) and longEnabled and strategy.position_size <= 0
+shortCondition = ta.crossunder(close, lowerBand) and shortEnabled and strategy.position_size >= 0
+
+// Variables to store entry price and calculate SL/TP
+var float longEntryPrice = na
+var float shortEntryPrice = na
+var float longStopLoss = na
+var float shortStopLoss = na
+var float longTakeProfit = na
+var float shortTakeProfit = na
+var float exitPrice = na
+
+// Calculate SL and TP for Long trades
+if longCondition
+    longEntryPrice := close
+    longStopLoss := lowerBand // SL at lower band (fixed at entry)
+    riskPerTrade = longEntryPrice - longStopLoss
+    longTakeProfit := useRiskReward ? longEntryPrice + riskPerTrade * riskRewardRatio : na // TP based on risk:reward
+    strategy.entry('Long', strategy.long)
+    // Entry price label
+    label.new(bar_index, longEntryPrice, text = str.tostring(longEntryPrice, format.mintick), style = label.style_none, textcolor = color.green, size = size.small)
+
+// Calculate SL and TP for Short trades
+if shortCondition
+    shortEntryPrice := close
+    shortStopLoss := upperBand // SL at upper band (fixed at entry)
+    riskPerTrade = shortStopLoss - shortEntryPrice
+    shortTakeProfit := useRiskReward ? shortEntryPrice - riskPerTrade * riskRewardRatio : na // TP based on risk:reward
+    strategy.entry('Short', strategy.short)
+    // Entry price label
+    label.new(bar_index, shortEntryPrice, text = str.tostring(shortEntryPrice, format.mintick), style = label.style_none, textcolor = color.red, size = size.small)
+
+// Exit Conditions for Long - using LOW for SL and HIGH for TP (touch based)
+longSLHit = strategy.position_size > 0 and low <= longStopLoss
+longTPHit = useRiskReward and strategy.position_size > 0 and not na(longTakeProfit) and high >= longTakeProfit
+longCrossExit = not useRiskReward and strategy.position_size > 0 and ta.crossunder(close, lowerBand)
+
+// Exit Conditions for Short - using HIGH for SL and LOW for TP (touch based)
+shortSLHit = strategy.position_size < 0 and high >= shortStopLoss
+shortTPHit = useRiskReward and strategy.position_size < 0 and not na(shortTakeProfit) and low <= shortTakeProfit
+shortCrossExit = not useRiskReward and strategy.position_size < 0 and ta.crossover(close, upperBand)
+
+// Execute Exits
+if longSLHit
+    exitPrice = longStopLoss
+    strategy.close('Long', comment = 'SL Hit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.red, size = size.small)
+
+if longTPHit
+    exitPrice = longTakeProfit
+    strategy.close('Long', comment = 'TP Hit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.green, size = size.small)
+
+if longCrossExit
+    exitPrice = close
+    strategy.close('Long', comment = 'Cross Exit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.orange, size = size.small)
+
+if shortSLHit
+    exitPrice = shortStopLoss
+    strategy.close('Short', comment = 'SL Hit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.red, size = size.small)
+
+if shortTPHit
+    exitPrice = shortTakeProfit
+    strategy.close('Short', comment = 'TP Hit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.green, size = size.small)
+
+if shortCrossExit
+    exitPrice = close
+    strategy.close('Short', comment = 'Cross Exit')
+    label.new(bar_index, exitPrice, text = str.tostring(exitPrice, format.mintick), style = label.style_none, textcolor = color.orange, size = size.small)
+
+// Reset levels AFTER exits are processed
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    longStopLoss := na
+    longTakeProfit := na
+    shortStopLoss := na
+    shortTakeProfit := na
+    shortTakeProfit
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Alert conditions
+alertcondition(longCondition, title = 'Long Entry Signal', message = 'MA Band Strategy: LONG Entry - Price crossed above upper band')
+alertcondition(shortCondition, title = 'Short Entry Signal', message = 'MA Band Strategy: SHORT Entry - Price crossed below lower band')
+alertcondition(longSLHit, title = 'Long SL Hit', message = 'MA Band Strategy: Long STOP LOSS Hit')
+alertcondition(longTPHit, title = 'Long TP Hit', message = 'MA Band Strategy: Long TAKE PROFIT Hit')
+alertcondition(longCrossExit, title = 'Long Cross Exit', message = 'MA Band Strategy: Long EXIT - Crossed below lower band')
+alertcondition(shortSLHit, title = 'Short SL Hit', message = 'MA Band Strategy: Short STOP LOSS Hit')
+alertcondition(shortTPHit, title = 'Short TP Hit', message = 'MA Band Strategy: Short TAKE PROFIT Hit')
+alertcondition(shortCrossExit, title = 'Short Cross Exit', message = 'MA Band Strategy: Short EXIT - Crossed above upper band')
+
+// Combined alert for webhook integration
+alertcondition(longCondition or shortCondition or longSLHit or longTPHit or longCrossExit or shortSLHit or shortTPHit or shortCrossExit, title = 'Any Signal', message = '{"strategy":"MA_Band","action":"{{strategy.order.action}}","price":"{{close}}","time":"{{timenow}}"}')
+
+// ============================================================================
+// VISUAL INDICATORS
+// ============================================================================
+
+// Plot entry/exit markers
+plotshape(longCondition, title = 'Long Entry', location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup, size = size.small)
+plotshape(shortCondition, title = 'Short Entry', location = location.abovebar, color = color.new(color.red, 0), style = shape.triangledown, size = size.small)
+plotshape(longSLHit, title = 'Long SL', location = location.abovebar, color = color.new(color.red, 0), style = shape.xcross, size = size.small, text = 'SL')
+plotshape(longTPHit, title = 'Long TP', location = location.abovebar, color = color.new(color.green, 0), style = shape.xcross, size = size.small, text = 'TP')
+plotshape(longCrossExit, title = 'Long Cross Exit', location = location.abovebar, color = color.new(color.orange, 0), style = shape.xcross, size = size.small, text = 'X')
+plotshape(shortSLHit, title = 'Short SL', location = location.belowbar, color = color.new(color.red, 0), style = shape.xcross, size = size.small, text = 'SL')
+plotshape(shortTPHit, title = 'Short TP', location = location.belowbar, color = color.new(color.green, 0), style = shape.xcross, size = size.small, text = 'TP')
+plotshape(shortCrossExit, title = 'Short Cross Exit', location = location.belowbar, color = color.new(color.orange, 0), style = shape.xcross, size = size.small, text = 'X')
+
+// Plot SL and TP lines for active positions
+plot(strategy.position_size > 0 ? longStopLoss : na, title = 'Long SL', color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(strategy.position_size > 0 and useRiskReward ? longTakeProfit : na, title = 'Long TP', color = color.green, linewidth = 2, style = plot.style_linebr)
+plot(strategy.position_size < 0 ? shortStopLoss : na, title = 'Short SL', color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(strategy.position_size < 0 and useRiskReward ? shortTakeProfit : na, title = 'Short TP', color = color.green, linewidth = 2, style = plot.style_linebr)
+
+View in Pine Editor・200 lines
+Use on chart
+1.7 K
+27
+28 265
+Overview
+
+The Moving Average Band Strategy is a fully customizable breakout and trend-continuation system designed for traders who need both simplicity and control.
+The strategy creates adaptive bands around a user-selected moving average and executes trades when price breaks out of these bands, with advanced risk-management settings including optional Risk:Reward targets.
+
+This script is suitable for intraday, swing, and positional traders across all markets — equities, futures, crypto, and forex.
+
+Key Features
+✔ Six Moving Average Types
+
+Choose the MA that best matches your trading style:
+
+SMA
+
+EMA
+
+WMA
+
+HMA
+
+VWMA
+
+RMA
+
+✔ Dynamic Bands
+
+Upper Band built from MA of highs
+
+Lower Band built from MA of lows
+
+Adjustable band offset (%)
+
+Color-coded band fill indicating price position
+
+✔ Configurable Strategy Preferences
+
+Toggle Long and/or Short trades
+
+Toggle Risk:Reward Take-Profit
+
+Adjustable Risk:Reward Ratio
+
+Default position sizing: % of equity (configurable via strategy settings)
+
+Entry Conditions
+Long Entry
+
+A long trade triggers when:
+
+Price crosses above the Upper Band
+
+Long trades are enabled
+
+No existing long position is active
+
+Short Entry
+
+A short trade triggers when:
+
+Price crosses below the Lower Band
+
+Short trades are enabled
+
+No existing short position is active
+
+Clear entry markers and price labels appear on the chart.
+
+Risk Management
+
+This strategy includes a complete set of risk-controls:
+
+Stop-Loss (Fixed at Entry)
+
+Long SL: Lower Band
+
+Short SL: Upper Band
+
+These levels remain constant for the entire trade.
+
+Optional Risk:Reward Take-Profit
+
+Enabled/disabled using a toggle switch.
+
+When enabled:
+
+Long TP = Entry + (Risk × Risk:Reward Ratio)
+
+Short TP = Entry – (Risk × Risk:Reward Ratio)
+
+When disabled:
+
+Exits are handled by reverse crossover signals.
+
+Exit Conditions
+Long Exit
+
+Stop-Loss Hit (touch-based)
+
+Take-Profit Hit (if enabled)
+
+Reverse Band Crossover (if TP disabled)
+
+Short Exit
+
+Stop-Loss Hit (touch-based)
+
+Take-Profit Hit (if enabled)
+
+Reverse Band Crossover (if TP disabled)
+
+Exit markers and price labels are plotted automatically.
+
+Visual Tools
+
+To improve clarity:
+
+Upper & Lower Band (blue, adjustable width)
+
+Middle Line
+
+Dynamic band fill (green/red/yellow)
+
+SL & TP line plotting when in position
+
+Entry/Exit markers
+
+Price labels for all executed trades
+
+These are built to help users visually follow the strategy logic.
+
+Alerts Included
+
+Every trading event is covered:
+
+Long Entry
+
+Short Entry
+
+Long SL / TP / Cross Exit
+
+Short SL / TP / Cross Exit
+
+Combined Alert for webhook/automation (JSON-formatted)
+
+Perfect for algo trading, Discord bots, or automation platforms.
+
+Best For
+
+This strategy performs best in:
+
+Trending markets
+
+Breakout environments
+
+High-momentum instruments
+
+Clean intraday swings
+
+Works seamlessly on:
+
+Stocks
+
+Index futures
+
+Commodities
+
+Crypto
+
+Forex
+
+⚠️ Important Disclaimer
+
+This script is for educational purposes only.
+Trading involves risk. Backtest results are not indicative of future performance.
+Always validate settings and use proper position sizing.

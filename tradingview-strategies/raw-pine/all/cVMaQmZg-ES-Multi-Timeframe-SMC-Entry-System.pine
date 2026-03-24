@@ -1,0 +1,651 @@
+//@version=5
+strategy("ES Multi-Timeframe SMC Entry System", overlay=true, 
+         initial_capital=50000, default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=1, commission_type=strategy.commission.cash_per_contract, 
+         commission_value=2.50, pyramiding=3)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+timeframe_group = "=== TIMEFRAME SELECTION ==="
+enable_daily = input.bool(true, "Enable Daily Signals", group=timeframe_group)
+enable_weekly = input.bool(true, "Enable Weekly Signals", group=timeframe_group)
+enable_monthly = input.bool(true, "Enable Monthly Signals", group=timeframe_group)
+
+risk_group = "=== RISK MANAGEMENT ==="
+account_risk_daily = input.float(1.0, "Daily Risk %", minval=0.1, maxval=5, step=0.1, group=risk_group)
+account_risk_weekly = input.float(0.75, "Weekly Risk %", minval=0.1, maxval=5, step=0.1, group=risk_group)
+account_risk_monthly = input.float(0.5, "Monthly Risk %", minval=0.1, maxval=5, step=0.1, group=risk_group)
+
+daily_stop_points = input.int(12, "Daily Stop (Points)", minval=1, maxval=50, group=risk_group)
+weekly_stop_points = input.int(40, "Weekly Stop (Points)", minval=10, maxval=150, group=risk_group)
+monthly_stop_points = input.int(100, "Monthly Stop (Points)", minval=20, maxval=300, group=risk_group)
+
+daily_rr_ratio = input.float(2.0, "Daily R:R", minval=1.0, maxval=5.0, step=0.5, group=risk_group)
+weekly_rr_ratio = input.float(3.0, "Weekly R:R", minval=1.0, maxval=6.0, step=0.5, group=risk_group)
+monthly_rr_ratio = input.float(4.0, "Monthly R:R", minval=1.0, maxval=10.0, step=0.5, group=risk_group)
+
+confluence_group = "=== CONFLUENCE THRESHOLDS ==="
+daily_min_score = input.int(6, "Daily Min Score", minval=1, maxval=10, group=confluence_group)
+weekly_min_score = input.int(7, "Weekly Min Score", minval=1, maxval=10, group=confluence_group)
+monthly_min_score = input.int(8, "Monthly Min Score", minval=1, maxval=10, group=confluence_group)
+
+smc_group = "=== SMC SETTINGS ==="
+ob_length = input.int(20, "Order Block Lookback", minval=5, maxval=100, group=smc_group)
+fvg_threshold = input.float(0, "FVG Min Size", minval=0, maxval=10, step=0.25, group=smc_group)
+liquidity_lookback = input.int(10, "Liquidity Lookback", minval=3, maxval=50, group=smc_group)
+swing_lookback = input.int(50, "Swing Lookback", minval=20, maxval=200, group=smc_group)
+
+visual_group = "=== VISUALS ==="
+show_premium_discount = input.bool(true, "Premium/Discount Zones", group=visual_group)
+show_daily_levels = input.bool(true, "Daily Levels", group=visual_group)
+show_weekly_levels = input.bool(true, "Weekly Levels", group=visual_group)
+show_monthly_levels = input.bool(true, "Monthly Levels", group=visual_group)
+show_order_blocks = input.bool(true, "Order Blocks", group=visual_group)
+show_fvg = input.bool(true, "Fair Value Gaps", group=visual_group)
+show_confluence_table = input.bool(true, "Confluence Table", group=visual_group)
+show_checklist = input.bool(true, "Checklist", group=visual_group)
+
+// ============================================================================
+// MULTI-TIMEFRAME DATA
+// ============================================================================
+
+ema9_1h = request.security(syminfo.tickerid, "60", ta.ema(close, 9))
+ema21_1h = request.security(syminfo.tickerid, "60", ta.ema(close, 21))
+ema20_4h = request.security(syminfo.tickerid, "240", ta.ema(close, 20))
+ema50_4h = request.security(syminfo.tickerid, "240", ta.ema(close, 50))
+
+ema20_daily = request.security(syminfo.tickerid, "D", ta.ema(close, 20))
+ema50_daily = request.security(syminfo.tickerid, "D", ta.ema(close, 50))
+
+ema20_weekly = request.security(syminfo.tickerid, "W", ta.ema(close, 20))
+ema50_weekly = request.security(syminfo.tickerid, "W", ta.ema(close, 50))
+
+ema12_monthly = request.security(syminfo.tickerid, "M", ta.ema(close, 12))
+ema26_monthly = request.security(syminfo.tickerid, "M", ta.ema(close, 26))
+
+daily_high = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+daily_low = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+weekly_high = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+weekly_low = request.security(syminfo.tickerid, "W", low[1], lookahead=barmerge.lookahead_on)
+
+monthly_high = request.security(syminfo.tickerid, "M", high[1], lookahead=barmerge.lookahead_on)
+monthly_low = request.security(syminfo.tickerid, "M", low[1], lookahead=barmerge.lookahead_on)
+
+atr_daily = request.security(syminfo.tickerid, "D", ta.atr(14))
+
+// ============================================================================
+// MARKET STRUCTURE
+// ============================================================================
+
+var float last_swing_high = na
+var float last_swing_low = na
+
+if ta.pivothigh(high, 3, 3)
+    last_swing_high := high[3]
+if ta.pivotlow(low, 3, 3)
+    last_swing_low := low[3]
+
+is_bullish_bos = not na(last_swing_high) and close > last_swing_high
+is_bearish_bos = not na(last_swing_low) and close < last_swing_low
+
+trend_bullish_1h = close > ema9_1h and ema9_1h > ema21_1h
+trend_bearish_1h = close < ema9_1h and ema9_1h < ema21_1h
+trend_bullish_4h = close > ema20_4h and ema20_4h > ema50_4h
+trend_bearish_4h = close < ema20_4h and ema20_4h < ema50_4h
+trend_bullish_daily = close > ema20_daily and close > ema50_daily
+trend_bearish_daily = close < ema20_daily and close < ema50_daily
+trend_bullish_weekly = close > ema20_weekly and close > ema50_weekly
+trend_bearish_weekly = close < ema20_weekly and close < ema50_weekly
+trend_bullish_monthly = close > ema12_monthly and close > ema26_monthly
+trend_bearish_monthly = close < ema12_monthly and close < ema26_monthly
+
+// ============================================================================
+// PREMIUM/DISCOUNT ZONES
+// ============================================================================
+
+swing_range_high = ta.highest(high, swing_lookback)
+swing_range_low = ta.lowest(low, swing_lookback)
+swing_midpoint = (swing_range_high + swing_range_low) / 2
+
+in_premium = close > swing_midpoint
+in_discount = close < swing_midpoint
+in_equilibrium = math.abs(close - swing_midpoint) < (swing_range_high - swing_range_low) * 0.1
+
+range_position = (swing_range_high != swing_range_low) ? ((close - swing_range_low) / (swing_range_high - swing_range_low)) * 100 : 50
+deep_discount = range_position < 30
+deep_premium = range_position > 70
+
+// ============================================================================
+// ORDER BLOCKS
+// ============================================================================
+
+var float bull_ob_high = na
+var float bull_ob_low = na
+var int bull_ob_bar = na
+var float bear_ob_high = na
+var float bear_ob_low = na
+var int bear_ob_bar = na
+
+if close[1] < open[1] and close > high[1] and (close - open) > (high[1] - low[1]) * 1.2
+    bull_ob_high := high[1]
+    bull_ob_low := low[1]
+    bull_ob_bar := bar_index[1]
+
+if close[1] > open[1] and close < low[1] and (open - close) > (high[1] - low[1]) * 1.2
+    bear_ob_high := high[1]
+    bear_ob_low := low[1]
+    bear_ob_bar := bar_index[1]
+
+in_bullish_ob = not na(bull_ob_high) and low <= bull_ob_high and high >= bull_ob_low and (bar_index - bull_ob_bar) < ob_length
+in_bearish_ob = not na(bear_ob_high) and low <= bear_ob_high and high >= bear_ob_low and (bar_index - bear_ob_bar) < ob_length
+
+bull_ob_fresh = not na(bull_ob_bar) and (bar_index - bull_ob_bar) < 10
+bear_ob_fresh = not na(bear_ob_bar) and (bar_index - bear_ob_bar) < 10
+
+// ============================================================================
+// FAIR VALUE GAPS
+// ============================================================================
+
+bullish_fvg = low > high[2] and (low - high[2]) >= fvg_threshold
+bearish_fvg = high < low[2] and (low[2] - high) >= fvg_threshold
+
+var float last_bull_fvg_top = na
+var float last_bull_fvg_bottom = na
+var float last_bear_fvg_top = na
+var float last_bear_fvg_bottom = na
+
+if bullish_fvg
+    last_bull_fvg_top := low
+    last_bull_fvg_bottom := high[2]
+
+if bearish_fvg
+    last_bear_fvg_top := low[2]
+    last_bear_fvg_bottom := high
+
+near_bullish_fvg = not na(last_bull_fvg_top) and low <= last_bull_fvg_top and high >= last_bull_fvg_bottom
+near_bearish_fvg = not na(last_bear_fvg_top) and low <= last_bear_fvg_top and high >= last_bear_fvg_bottom
+
+if near_bullish_fvg and low <= last_bull_fvg_bottom
+    last_bull_fvg_top := na
+    last_bull_fvg_bottom := na
+
+if near_bearish_fvg and high >= last_bear_fvg_top
+    last_bear_fvg_top := na
+    last_bear_fvg_bottom := na
+
+// ============================================================================
+// LIQUIDITY SWEEPS
+// ============================================================================
+
+sellside_sweep = low < ta.lowest(low[1], liquidity_lookback) and close > open and close > low + (high - low) * 0.6
+buyside_sweep = high > ta.highest(high[1], liquidity_lookback) and close < open and close < high - (high - low) * 0.6
+
+var bool recent_ssl_sweep = false
+var bool recent_bsl_sweep = false
+var int ssl_sweep_bar = 0
+var int bsl_sweep_bar = 0
+
+if sellside_sweep
+    recent_ssl_sweep := true
+    ssl_sweep_bar := bar_index
+
+if buyside_sweep
+    recent_bsl_sweep := true
+    bsl_sweep_bar := bar_index
+
+if bar_index - ssl_sweep_bar > 10
+    recent_ssl_sweep := false
+
+if bar_index - bsl_sweep_bar > 10
+    recent_bsl_sweep := false
+
+// ============================================================================
+// VOLUME & TIME FILTERS
+// ============================================================================
+
+volume_avg = ta.sma(volume, 20)
+volume_confirmation = volume > volume_avg * 1.2
+optimal_entry_time = (hour >= 9 and hour < 12) or (hour >= 14 and hour < 16)
+avoid_time = (hour >= 12 and hour < 14) or (hour == 9 and minute < 35)
+
+// ============================================================================
+// CONFLUENCE SCORING
+// ============================================================================
+
+daily_score = 0
+if (trend_bullish_4h and trend_bullish_daily) or (trend_bearish_4h and trend_bearish_daily)
+    daily_score += 2
+if (in_bullish_ob and in_discount and trend_bullish_4h) or (in_bearish_ob and in_premium and trend_bearish_4h)
+    daily_score += 2
+if recent_ssl_sweep or recent_bsl_sweep
+    daily_score += 1
+if volume_confirmation
+    daily_score += 1
+if optimal_entry_time and not avoid_time
+    daily_score += 1
+if is_bullish_bos or is_bearish_bos
+    daily_score += 1
+if near_bullish_fvg or near_bearish_fvg
+    daily_score += 1
+daily_score += 1
+
+weekly_score = 0
+if (trend_bullish_weekly and trend_bullish_monthly) or (trend_bearish_weekly and trend_bearish_monthly)
+    weekly_score += 2
+if (trend_bullish_daily and trend_bullish_weekly) or (trend_bearish_daily and trend_bearish_weekly)
+    weekly_score += 2
+if (deep_discount and trend_bullish_weekly) or (deep_premium and trend_bearish_weekly)
+    weekly_score += 2
+if recent_ssl_sweep or recent_bsl_sweep
+    weekly_score += 1
+if in_bullish_ob or in_bearish_ob
+    weekly_score += 1
+if bull_ob_fresh or bear_ob_fresh
+    weekly_score += 1
+weekly_score += 1
+
+monthly_score = 0
+if (trend_bullish_monthly and trend_bullish_weekly) or (trend_bearish_monthly and trend_bearish_weekly)
+    monthly_score += 2
+if (in_bullish_ob and deep_discount) or (in_bearish_ob and deep_premium)
+    monthly_score += 2
+if recent_ssl_sweep or recent_bsl_sweep
+    monthly_score += 2
+if (trend_bullish_daily and trend_bullish_weekly and trend_bullish_monthly) or (trend_bearish_daily and trend_bearish_weekly and trend_bearish_monthly)
+    monthly_score += 2
+if range_position < 20 or range_position > 80
+    monthly_score += 1
+monthly_score += 1
+
+// ============================================================================
+// ENTRY CONDITIONS
+// ============================================================================
+
+daily_long_condition = enable_daily and daily_score >= daily_min_score and trend_bullish_4h and in_discount and (in_bullish_ob or recent_ssl_sweep or near_bullish_fvg) and not avoid_time
+daily_short_condition = enable_daily and daily_score >= daily_min_score and trend_bearish_4h and in_premium and (in_bearish_ob or recent_bsl_sweep or near_bearish_fvg) and not avoid_time
+weekly_long_condition = enable_weekly and weekly_score >= weekly_min_score and trend_bullish_weekly and trend_bullish_daily and in_discount and (in_bullish_ob or recent_ssl_sweep)
+weekly_short_condition = enable_weekly and weekly_score >= weekly_min_score and trend_bearish_weekly and trend_bearish_daily and in_premium and (in_bearish_ob or recent_bsl_sweep)
+monthly_long_condition = enable_monthly and monthly_score >= monthly_min_score and trend_bullish_monthly and trend_bullish_weekly and deep_discount and in_bullish_ob
+monthly_short_condition = enable_monthly and monthly_score >= monthly_min_score and trend_bearish_monthly and trend_bearish_weekly and deep_premium and in_bearish_ob
+
+// ============================================================================
+// POSITION SIZING
+// ============================================================================
+
+calculate_position_size(risk_pct, stop_points) =>
+    risk_amount = strategy.equity * (risk_pct / 100)
+    stop_value = stop_points * 50
+    math.max(math.floor(risk_amount / stop_value), 1)
+
+daily_contracts = calculate_position_size(account_risk_daily, daily_stop_points)
+weekly_contracts = calculate_position_size(account_risk_weekly, weekly_stop_points)
+monthly_contracts = calculate_position_size(account_risk_monthly, monthly_stop_points)
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+if daily_long_condition
+    strategy.entry("Daily Long", strategy.long, qty=daily_contracts)
+    strategy.exit("DL Exit", "Daily Long", stop=close - daily_stop_points, limit=close + (daily_stop_points * daily_rr_ratio))
+
+if daily_short_condition
+    strategy.entry("Daily Short", strategy.short, qty=daily_contracts)
+    strategy.exit("DS Exit", "Daily Short", stop=close + daily_stop_points, limit=close - (daily_stop_points * daily_rr_ratio))
+
+if weekly_long_condition
+    strategy.entry("Weekly Long", strategy.long, qty=weekly_contracts)
+    strategy.exit("WL Exit", "Weekly Long", stop=close - weekly_stop_points, limit=close + (weekly_stop_points * weekly_rr_ratio))
+
+if weekly_short_condition
+    strategy.entry("Weekly Short", strategy.short, qty=weekly_contracts)
+    strategy.exit("WS Exit", "Weekly Short", stop=close + weekly_stop_points, limit=close - (weekly_stop_points * weekly_rr_ratio))
+
+if monthly_long_condition
+    strategy.entry("Monthly Long", strategy.long, qty=monthly_contracts)
+    strategy.exit("ML Exit", "Monthly Long", stop=close - monthly_stop_points, limit=close + (monthly_stop_points * monthly_rr_ratio))
+
+if monthly_short_condition
+    strategy.entry("Monthly Short", strategy.short, qty=monthly_contracts)
+    strategy.exit("MS Exit", "Monthly Short", stop=close + monthly_stop_points, limit=close - (monthly_stop_points * monthly_rr_ratio))
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+plot(show_daily_levels ? daily_high : na, "Daily High", color.new(color.red, 0), 2, plot.style_stepline)
+plot(show_daily_levels ? daily_low : na, "Daily Low", color.new(color.green, 0), 2, plot.style_stepline)
+plot(show_weekly_levels ? weekly_high : na, "Weekly High", color.new(color.red, 50), 2, plot.style_circles)
+plot(show_weekly_levels ? weekly_low : na, "Weekly Low", color.new(color.green, 50), 2, plot.style_circles)
+plot(show_monthly_levels ? monthly_high : na, "Monthly High", color.new(color.red, 70), 3, plot.style_cross)
+plot(show_monthly_levels ? monthly_low : na, "Monthly Low", color.new(color.green, 70), 3, plot.style_cross)
+
+p1 = plot(show_premium_discount ? swing_range_high : na, color=na)
+p2 = plot(show_premium_discount ? swing_midpoint : na, "EQ", color.new(color.white, 50), 1)
+p3 = plot(show_premium_discount ? swing_range_low : na, color=na)
+fill(p1, p2, color.new(color.red, 92))
+fill(p2, p3, color.new(color.green, 92))
+
+if show_order_blocks and in_bullish_ob and not na(bull_ob_high)
+    box.new(bull_ob_bar, bull_ob_high, bar_index + 20, bull_ob_low, border_color=color.green, bgcolor=color.new(color.green, 85), text="Bull OB")
+
+if show_order_blocks and in_bearish_ob and not na(bear_ob_high)
+    box.new(bear_ob_bar, bear_ob_high, bar_index + 20, bear_ob_low, border_color=color.red, bgcolor=color.new(color.red, 85), text="Bear OB")
+
+if show_fvg and bullish_fvg
+    box.new(bar_index[2], low, bar_index + 15, high[2], border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 90), text="FVG↑")
+
+if show_fvg and bearish_fvg
+    box.new(bar_index[2], low[2], bar_index + 15, high, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 90), text="FVG↓")
+
+plotshape(daily_long_condition, "D Long", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.small, text="D")
+plotshape(daily_short_condition, "D Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small, text="D")
+plotshape(weekly_long_condition, "W Long", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.normal, text="W")
+plotshape(weekly_short_condition, "W Short", shape.triangledown, location.abovebar, color.new(color.maroon, 0), size=size.normal, text="W")
+plotshape(monthly_long_condition, "M Long", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size=size.large, text="M")
+plotshape(monthly_short_condition, "M Short", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.large, text="M")
+
+plotshape(sellside_sweep, "SSL", shape.labeldown, location.top, color.new(color.yellow, 20), size=size.tiny, text="SSL")
+plotshape(buyside_sweep, "BSL", shape.labelup, location.bottom, color.new(color.yellow, 20), size=size.tiny, text="BSL")
+plotshape(is_bullish_bos, "BOS↑", shape.circle, location.belowbar, color.new(color.lime, 50), size=size.tiny)
+plotshape(is_bearish_bos, "BOS↓", shape.circle, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// ============================================================================
+// TABLES
+// ============================================================================
+
+if show_confluence_table and barstate.islast
+    var t = table.new(position.top_right, 4, 5)
+    table.cell(t, 0, 0, "TF", bgcolor=color.new(color.blue, 30), text_color=color.white)
+    table.cell(t, 1, 0, "SCORE", bgcolor=color.new(color.blue, 30), text_color=color.white)
+    table.cell(t, 2, 0, "STATUS", bgcolor=color.new(color.blue, 30), text_color=color.white)
+    table.cell(t, 3, 0, "SIGNAL", bgcolor=color.new(color.blue, 30), text_color=color.white)
+    
+    table.cell(t, 0, 1, "📊 DAILY", text_color=color.white)
+    table.cell(t, 1, 1, str.tostring(daily_score) + "/10", text_color=daily_score >= daily_min_score ? color.lime : color.orange)
+    table.cell(t, 2, 1, daily_score >= daily_min_score ? "✓" : "✗", text_color=daily_score >= daily_min_score ? color.lime : color.red)
+    table.cell(t, 3, 1, daily_long_condition ? "🔼" : daily_short_condition ? "🔽" : "━", text_color=daily_long_condition ? color.lime : daily_short_condition ? color.red : color.gray)
+    
+    table.cell(t, 0, 2, "📈 WEEKLY", text_color=color.white)
+    table.cell(t, 1, 2, str.tostring(weekly_score) + "/10", text_color=weekly_score >= weekly_min_score ? color.lime : color.orange)
+    table.cell(t, 2, 2, weekly_score >= weekly_min_score ? "✓" : "✗", text_color=weekly_score >= weekly_min_score ? color.lime : color.red)
+    table.cell(t, 3, 2, weekly_long_condition ? "🔼" : weekly_short_condition ? "🔽" : "━", text_color=weekly_long_condition ? color.lime : weekly_short_condition ? color.red : color.gray)
+    
+    table.cell(t, 0, 3, "🌙 MONTHLY", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(monthly_score) + "/10", text_color=monthly_score >= monthly_min_score ? color.lime : color.orange)
+    table.cell(t, 2, 3, monthly_score >= monthly_min_score ? "✓" : "✗", text_color=monthly_score >= monthly_min_score ? color.lime : color.red)
+    table.cell(t, 3, 3, monthly_long_condition ? "🔼" : monthly_short_condition ? "🔽" : "━", text_color=monthly_long_condition ? color.lime : monthly_short_condition ? color.red : color.gray)
+    
+    table.cell(t, 0, 4, "P&L: $" + str.tostring(math.round(strategy.netprofit)), text_color=strategy.netprofit >= 0 ? color.lime : color.red)
+    table.merge_cells(t, 0, 4, 3, 4)
+
+if show_checklist and barstate.islast
+    var c = table.new(position.bottom_right, 2, 13)
+    table.cell(c, 0, 0, "CHECKLIST", bgcolor=color.new(color.blue, 50), text_color=color.yellow)
+    table.cell(c, 1, 0, "✓", bgcolor=color.new(color.blue, 50), text_color=color.yellow)
+    
+    r = 1
+    table.cell(c, 0, r, "━ DAILY ━", text_color=color.aqua)
+    table.merge_cells(c, 0, r, 1, r)
+    r += 1
+    table.cell(c, 0, r, "HTF Trend", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, trend_bullish_4h or trend_bearish_4h ? "✓" : "✗", text_color=trend_bullish_4h or trend_bearish_4h ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "Zone", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, not in_equilibrium ? "✓" : "✗", text_color=not in_equilibrium ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "OB", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, in_bullish_ob or in_bearish_ob ? "✓" : "✗", text_color=in_bullish_ob or in_bearish_ob ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "Liq Sweep", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, recent_ssl_sweep or recent_bsl_sweep ? "✓" : "✗", text_color=recent_ssl_sweep or recent_bsl_sweep ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "Volume", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, volume_confirmation ? "✓" : "✗", text_color=volume_confirmation ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "━ WEEKLY ━", text_color=color.aqua)
+    table.merge_cells(c, 0, r, 1, r)
+    r += 1
+    table.cell(c, 0, r, "W/M Align", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, (trend_bullish_weekly and trend_bullish_monthly) or (trend_bearish_weekly and trend_bearish_monthly) ? "✓" : "✗", text_color=(trend_bullish_weekly and trend_bullish_monthly) or (trend_bearish_weekly and trend_bearish_monthly) ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "Deep Zone", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, deep_discount or deep_premium ? "✓" : "✗", text_color=deep_discount or deep_premium ? color.lime : color.red)
+    r += 1
+    table.cell(c, 0, r, "━ MONTHLY ━", text_color=color.aqua)
+    table.merge_cells(c, 0, r, 1, r)
+    r += 1
+    table.cell(c, 0, r, "M/W/D Align", text_color=color.white, text_size=size.tiny)
+    table.cell(c, 1, r, (trend_bullish_monthly and trend_bullish_weekly and trend_bullish_daily) or (trend_bearish_monthly and trend_bearish_weekly and trend_bearish_daily) ? "✓" : "✗", text_color=(trend_bullish_monthly and trend_bullish_weekly and trend_bullish_daily) or (trend_bearish_monthly and trend_bearish_weekly and trend_bearish_daily) ? color.lime : color.red)
+    r += 1
+    zone_txt = range_position < 30 ? "DEEP DISC" : range_position > 70 ? "DEEP PREM" : range_position < 50 ? "Discount" : "Premium"
+    table.cell(c, 0, r, "Zone: " + zone_txt, text_color=range_position < 30 ? color.lime : range_position > 70 ? color.red : color.orange, text_size=size.tiny)
+    table.merge_cells(c, 0, r, 1, r)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(daily_long_condition, "Daily Long", "🔼 DAILY LONG")
+alertcondition(daily_short_condition, "Daily Short", "🔽 DAILY SHORT")
+alertcondition(weekly_long_condition, "Weekly Long", "🔼 WEEKLY LONG")
+alertcondition(weekly_short_condition, "Weekly Short", "🔽 WEEKLY SHORT")
+alertcondition(monthly_long_condition, "Monthly Long", "🔼 MONTHLY LONG")
+alertcondition(monthly_short_condition, "Monthly Short", "🔽 MONTHLY SHORT")
+
+View in Pine Editor・437 lines
+Use on chart
+2
+9
+1 446
+OverviewThis is a comprehensive Smart Money Concepts (SMC) trading strategy for ES1! (E-mini S&P 500) futures that provides simultaneous buy and sell signals across three timeframes: Daily, Weekly, and Monthly. It incorporates your complete entry checklists, confluence scoring system, and automated risk management.Core Features1. Multi-Timeframe Signal Generation
+
+Daily Signals (D) - For intraday/swing trades (1-3 day holds)
+Weekly Signals (W) - For swing trades (3-10 day holds)
+Monthly Signals (M) - For position trades (weeks to months)
+All three timeframes can trigger simultaneously (pyramiding enabled)
+2. Smart Money Concepts ImplementationOrder Blocks (OB)
+
+Automatically detects bullish and bearish order blocks
+Bullish OB = Down candle before strong impulse up
+Bearish OB = Up candle before strong impulse down
+Validates freshness (< 10 bars = higher quality)
+Visual boxes displayed on chart
+Fair Value Gaps (FVG)
+
+Identifies 3-candle imbalance patterns
+Bullish FVG = Gap between high[2] and current low
+Bearish FVG = Gap between low[2] and current high
+Tracks unfilled gaps as targets/entry zones
+Auto-removes when filled
+Premium/Discount Zones
+
+Calculates 50-period swing range
+Premium = Upper 50% (short from here)
+Discount = Lower 50% (long from here)
+Deep zones (<30% or >70%) for higher quality setups
+Visual shading: Red = Premium, Green = Discount
+Liquidity Sweeps
+
+Sell-Side Sweep (SSL) = False break below lows → reversal up
+Buy-Side Sweep (BSL) = False break above highs → reversal down
+Marked with yellow labels on chart
+Valid for 10 bars after occurrence
+Break of Structure (BOS)
+
+Identifies when price breaks recent swing high/low
+Confirms trend continuation
+Marked with small circles on chart
+3. Confluence Scoring SystemEach timeframe has a 10-point scoring system based on your checklist requirements:Daily Score (10 points max)
+
+HTF Trend Alignment (2 pts) - 4H and Daily EMAs aligned
+SMC Structure (2 pts) - OB in correct zone with HTF bias
+Liquidity Sweep (1 pt) - Recent SSL/BSL occurred
+Volume Confirmation (1 pt) - Volume > 1.2x 20-period average
+Optimal Time (1 pt) - 9:30-12 PM or 2-4 PM ET (avoids lunch)
+Risk-Reward >2:1 (1 pt) - Built into exit strategy
+Clean Price Action (1 pt) - BOS occurred
+FVG Present (1 pt) - Near unfilled fair value gap
+Minimum Required: 6/10 (adjustable)Weekly Score (10 points max)
+
+Weekly/Monthly Alignment (2 pts) - W and M EMAs aligned
+Daily/Weekly Alignment (2 pts) - D and W trends match
+Premium/Discount Correct (2 pts) - Deep zone + trend alignment
+Major Liquidity Event (1 pt) - SSL/BSL sweep
+Order Block Present (1 pt) - Valid OB detected
+Risk-Reward >3:1 (1 pt) - Built into exit
+Fresh Order Block (1 pt) - OB < 10 bars old
+Minimum Required: 7/10 (adjustable)Monthly Score (10 points max)
+
+Monthly/Weekly Alignment (2 pts) - M and W trends match
+Weekly OB in Monthly Zone (2 pts) - OB in deep discount/premium
+Major Liquidity Sweep (2 pts) - Significant SSL/BSL
+Strong Trend Alignment (2 pts) - D, W, M all aligned
+Risk-Reward >4:1 (1 pt) - Built into exit
+Extreme Zone (1 pt) - Price <20% or >80% of range
+Minimum Required: 8/10 (adjustable)4. Entry ConditionsDaily Long Entry
+✅ Daily score ≥ 6/10
+✅ 4H trend bullish (price > EMAs)
+✅ Price in discount zone
+✅ Bullish OB OR SSL sweep OR near bullish FVG
+✅ NOT during avoid times (lunch/first 5 min)Daily Short Entry
+✅ Daily score ≥ 6/10
+✅ 4H trend bearish
+✅ Price in premium zone
+✅ Bearish OB OR BSL sweep OR near bearish FVG
+✅ NOT during avoid timesWeekly Long Entry
+✅ Weekly score ≥ 7/10
+✅ Weekly trend bullish
+✅ Daily trend bullish
+✅ Price in discount
+✅ Bullish OB OR SSL sweepWeekly Short Entry
+✅ Weekly score ≥ 7/10
+✅ Weekly trend bearish
+✅ Daily trend bearish
+✅ Price in premium
+✅ Bearish OB OR BSL sweepMonthly Long Entry
+✅ Monthly score ≥ 8/10
+✅ Monthly trend bullish
+✅ Weekly trend bullish
+✅ Price in DEEP discount (<30%)
+✅ Bullish order block presentMonthly Short Entry
+✅ Monthly score ≥ 8/10
+✅ Monthly trend bearish
+✅ Weekly trend bearish
+✅ Price in DEEP premium (>70%)
+✅ Bearish order block present5. Automated Risk ManagementPosition Sizing (Per Entry)
+
+Daily: 1.0% account risk per trade
+Weekly: 0.75% account risk per trade
+Monthly: 0.5% account risk per trade
+Formula:
+Contracts = (Account Equity × Risk%) ÷ (Stop Points × $50)
+Minimum = 1 contractStop Losses
+
+Daily: 12 points ($600 per contract)
+Weekly: 40 points ($2,000 per contract)
+Monthly: 100 points ($5,000 per contract)
+Profit Targets (Risk:Reward)
+
+Daily: 2:1 = 24 points ($1,200 profit)
+Weekly: 3:1 = 120 points ($6,000 profit)
+Monthly: 4:1 = 400 points ($20,000 profit)
+Example with $50,000 AccountDaily Trade:
+
+Risk = $500 (1% of $50k)
+Stop = 12 points × $50 = $600
+Contracts = $500 ÷ $600 = 0.83 → 1 contract
+Target = 24 points = $1,200 profit
+Weekly Trade:
+
+Risk = $375 (0.75% of $50k)
+Stop = 40 points × $50 = $2,000
+Contracts = $375 ÷ $2,000 = 0.18 → 1 contract
+Target = 120 points = $6,000 profit
+Monthly Trade:
+
+Risk = $250 (0.5% of $50k)
+Stop = 100 points × $50 = $5,000
+Contracts = $250 ÷ $5,000 = 0.05 → 1 contract
+Target = 400 points = $20,000 profit
+6. Visual Elements on ChartKey Levels
+
+Previous Daily High/Low - Red/Green solid lines
+Previous Weekly High/Low - Red/Green circles
+Previous Monthly High/Low - Red/Green crosses
+Equilibrium Line - White dotted line (50% of range)
+Zones
+
+Premium Zone - Light red shading (upper 50%)
+Discount Zone - Light green shading (lower 50%)
+SMC Markings
+
+Bullish Order Blocks - Green boxes with "Bull OB" label
+Bearish Order Blocks - Red boxes with "Bear OB" label
+Bullish FVGs - Green boxes with "FVG↑"
+Bearish FVGs - Red boxes with "FVG↓"
+Liquidity Sweeps - Yellow "SSL" (down) or "BSL" (up) labels
+Break of Structure - Small lime/red circles
+Entry Signals
+
+Daily Long - Small lime triangle ▲ with "D" below price
+Daily Short - Small red triangle ▼ with "D" above price
+Weekly Long - Medium green triangle ▲ with "W" below price
+Weekly Short - Medium maroon triangle ▼ with "W" above price
+Monthly Long - Large aqua triangle ▲ with "M" below price
+Monthly Short - Large fuchsia triangle ▼ with "M" above price
+7. Information TablesConfluence Score Table (Top Right)
+┌──────────┬────────┬────────┬────────┐
+│ TF │ SCORE │ STATUS │ SIGNAL │
+├──────────┼────────┼────────┼────────┤
+│ 📊 DAILY │ 7/10 │ ✓ PASS │ 🔼 │
+│ 📈 WEEKLY│ 6/10 │ ✗ WAIT │ ━ │
+│ 🌙 MONTH │ 9/10 │ ✓ PASS │ 🔽 │
+├──────────┴────────┴────────┴────────┤
+│ P&L: $2,450 │
+└─────────────────────────────────────┘
+Green scores = Pass (meets minimum threshold)
+Orange/Red scores = Fail (wait for better setup)
+🔼 = Long signal active
+🔽 = Short signal active
+━ = No signal
+Entry Checklist Table (Bottom Right)
+┌──────────────┬───┐
+│ CHECKLIST │ ✓ │
+├──────────────┼───┤
+│ ━ DAILY ━ │ │
+│ HTF Trend │ ✓ │
+│ Zone │ ✓ │
+│ OB │ ✗ │
+│ Liq Sweep │ ✓ │
+│ Volume │ ✓ │
+│ ━ WEEKLY ━ │ │
+│ W/M Align │ ✓ │
+│ Deep Zone │ ✗ │
+│ ━ MONTHLY ━ │ │
+│ M/W/D Align │ ✓ │
+│ Zone: Discount│ │
+└──────────────┴───┘
+Green ✓ = Condition met
+Red ✗ = Condition not met
+Real-time updates as market conditions change
+8. Alert SystemIndividual Alerts:
+
+"Daily Long" - Triggers when daily long setup appears
+"Daily Short" - Triggers when daily short setup appears
+"Weekly Long" - Triggers when weekly long setup appears
+"Weekly Short" - Triggers when weekly short setup appears
+"Monthly Long" - Triggers when monthly long setup appears
+"Monthly Short" - Triggers when monthly short setup appears
+Combined Alerts:
+
+"Any Long Signal" - Catches any bullish opportunity (D/W/M)
+"Any Short Signal" - Catches any bearish opportunity (D/W/M)
+Alert Messages Include:
+
+🔼/🔽 Direction indicator
+Timeframe (DAILY/WEEKLY/MONTHLY)
+Current confluence score

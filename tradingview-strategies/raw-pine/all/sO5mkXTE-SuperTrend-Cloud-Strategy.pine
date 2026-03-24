@@ -1,0 +1,99 @@
+//@version=4
+strategy("SuperTrend Cloud Strategy", shorttitle="SuperTrend Cloud Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital = 1000)
+
+//Inputs
+CrossExit = input(false, title="Exit on complete cross of cloud only?")
+multi1 = input(title="Multiplier 1", type=input.float, step=0.1, defval=2.4, minval=1)
+period1 = input(title="Period 1", type=input.integer, step=1, defval=4, minval=1)
+multi2 = input(title="Multiplier 2", type=input.float, step=0.1, defval=4.8, minval=1)
+period2 = input(title="Period 2", type=input.integer, step=1, defval=4, minval=1)
+
+//Date Range
+// From Date Inputs
+fromDay = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+fromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+fromYear = input(defval = 2019, title = "From Year", minval = 1970)
+ 
+// To Date Inputs
+toDay = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+toMonth = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+toYear = input(defval = 2020, title = "To Year", minval = 1970)
+ 
+// Calculate start/end date and time condition
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate
+ 
+getSuperTrend(multi, period) =>
+    up_lev = hl2 - multi * atr(period)
+    dn_lev = hl2 + multi * atr(period)
+    up_trend = 0.0
+    up_trend := close[1] > up_trend[1] ? max(up_lev, up_trend[1]) : up_lev
+    down_trend = 0.0
+    down_trend := close[1] < down_trend[1] ? min(dn_lev, down_trend[1]) : dn_lev
+    trend = 0
+    trend := close > down_trend[1] ? 1: close < up_trend[1] ? -1 : nz(trend[1], 1)
+    st_line = trend == 1 ? up_trend : down_trend
+    [st_line, trend]
+
+[st_line1, trend1] = getSuperTrend(multi1, period1)
+[st_line2, trend2] = getSuperTrend(multi2, period2)
+
+
+// Plotting
+plot1 = plot(st_line1, color = trend1 == 1 ? color.green : color.red, style = plot.style_line, linewidth = 1, title = "SuperTrend 1")
+plot2 = plot(st_line2, color = trend2 == 1 ? color.green : color.red, style = plot.style_line, linewidth = 1, title = "SuperTrend 2")
+fill(plot1, plot2, color = color.aqua, title = "Cloud")
+
+long = crossover(close, st_line1) and close > st_line2 or crossover(close, st_line2) and close > st_line1
+short = crossunder(close, st_line1) and close < st_line2 or crossunder(close, st_line2) and close < st_line1
+cloud = crossunder(close, st_line1) and close > st_line2 or crossover(close, st_line1) and close < st_line2 or crossunder(close, st_line2) and close > st_line1 or crossover(close, st_line2) and close < st_line1
+
+inLong = false
+inLong := long ? true : short ? false : inLong[1]
+inShort = false
+inShort := short ? true : long ? false : inShort[1]
+
+plotshape(cloud and not CrossExit, title = "Close", style = shape.xcross, location = location.abovebar, color = color.red, size=size.small, transp=0)
+
+strategy.entry("long", strategy.long, when = long and time_cond and (not inLong[1] and CrossExit or not CrossExit))
+strategy.entry("short", strategy.short, when = short and time_cond and (not inShort[1] and CrossExit or not CrossExit))
+
+strategy.close("long", when = not CrossExit and cloud)
+strategy.close("short", when = not CrossExit and cloud)
+
+View in Pine Editor・63 lines
+Use on chart
+8
+0
+9
+11
+18 541
+Sep 20, 2019
+Experimental strategy to improve accuracy of SuperTrend Cloud. I am attempting to use STD deviation to manipulate the multiplier of the SuperTrend cloud. Greater STD Deviation = Oscillation in price action which can be applied to multiplier of SuperTrend to filter out bad trades and improve accuracy.
+Sep 21, 2019
+Release Notes
+Many times we make mistakes trading because we become impatient and want to be in a trade due to emotions. This mentality makes it easy to loose money.
+
+Ideally we should only long above the cloud however, I have added longs on oversold RSI conditions + Below SuperTrend Cloud which has done a great job increasing profits and allowing us to maintain accuracy and increase profit potentials.
+Sep 22, 2019
+Release Notes
+-Improved RSI Entry
+-Removed STD Deviation idea.
+Sep 25, 2019
+Release Notes
+-Added short trades.
+-Removed oversold buy
+Oct 6, 2019
+Release Notes
+-Cleaned up code
+-Added inputs for both SuperTrend clouds to make it more adjustable.
+-Added SL line (center of cloud).
+-Added option to only exit after fully crossing cloud.
+
+A good starting point is 5m charts use 10,6,6,10 (Multiplier 1, Period 1, Multiplier 2, Period 2) or 4h Chart 3,10,6,10 (Multiplier 1, Period 1, Multiplier 2, Period 2)
+
+BTC performs well on 4h chart with 2.4,4,4.8,4 (Multiplier 1, Period 1, Multiplier 2, Period 2)
+Oct 8, 2019
+Release Notes
+-Fixed duplicate trade issue

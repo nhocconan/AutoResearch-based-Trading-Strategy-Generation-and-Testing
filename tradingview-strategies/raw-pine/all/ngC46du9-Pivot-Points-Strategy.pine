@@ -1,0 +1,80 @@
+//@version=6
+strategy('Pivot Points Strategy', overlay = true, initial_capital = 10000, commission_type = strategy.commission.percent, commission_value = 0.1, default_qty_type = strategy.percent_of_equity, default_qty_value = 18, slippage = 3, pyramiding = 5, fill_orders_on_standard_ohlc = true)
+
+pivotType = input.string('Traditional', 'Type', options=['Traditional', 'Fibonacci', 'Woodie', 'Classic', 'DM', 'Camarilla'])
+pivotAnchor = timeframe.change(input.timeframe('W', 'Timeframe'))
+
+pivots = ta.pivot_point_levels(pivotType, pivotAnchor)
+
+p = array.get(pivots, 0)
+r1 = array.get(pivots, 1)
+s1 = array.get(pivots, 2)
+r2 = array.get(pivots, 3)
+s2 = array.get(pivots, 4)
+r3 = array.get(pivots, 5)
+s3 = array.get(pivots, 6)
+r4 = array.get(pivots, 7)
+s4 = array.get(pivots, 8)
+r5 = array.get(pivots, 9)
+s5 = array.get(pivots, 10)
+
+var bool valid = true
+
+if high > p and low < p
+    valid := false
+    strategy.cancel_all()
+
+if p != p[1]
+    valid := true
+
+if valid
+    strategy.entry('long1', strategy.long, limit = s1)
+    strategy.entry('long2', strategy.long, limit = s2)
+    strategy.entry('long3', strategy.long, limit = s3)
+    //strategy.entry('long4', strategy.long, limit = s4)
+    //strategy.entry('long5', strategy.long, limit = s5)
+    
+    strategy.entry('short1', strategy.short, limit = r1)
+    strategy.entry('short2', strategy.short, limit = r2)
+    strategy.entry('short3', strategy.short, limit = r3)
+    //strategy.entry('short4', strategy.short, limit = r4)
+    //strategy.entry('short5', strategy.short, limit = r5)
+
+    strategy.exit('close long1', 'long1', limit = p)
+    strategy.exit('close long2', 'long2', limit = p)
+    strategy.exit('close long3', 'long3', limit = p)
+    //strategy.exit('close long4', 'long4', limit = p)
+    //strategy.exit('close long5', 'long5', limit = p)
+    strategy.exit('close short1', 'short1', limit = p)
+    strategy.exit('close short2', 'short2', limit = p)
+    strategy.exit('close short3', 'short3', limit = p)
+    //strategy.exit('close short4', 'short4', limit = p)
+    //strategy.exit('close short5', 'short5', limit = p)
+
+    valid := false
+
+plot(strategy.position_avg_price, 'Average Price', color.gray, 1, plot.style_circles)
+plot(p, 'P', color.white, 1, plot.style_circles)
+plot(r1, 'R1', color.red, 1, plot.style_circles)
+plot(s1, 'S1', color.teal, 1, plot.style_circles)
+plot(r2, 'R2', color.red, 1, plot.style_circles)
+plot(s2, 'S2', color.teal, 1, plot.style_circles)
+plot(r3, 'R3', color.red, 1, plot.style_circles)
+plot(s3, 'S3', color.teal, 1, plot.style_circles)
+plot(r4, 'R4', color.red, 1, plot.style_circles)
+plot(s4, 'S4', color.teal, 1, plot.style_circles)
+plot(r5, 'R5', color.red, 1, plot.style_circles)
+plot(s5, 'S5', color.teal, 1, plot.style_circles)
+
+View in Pine Editor・67 lines
+Use on chart
+3
+8
+3
+5 481
+🟢 It enters long trades near support zones (S1–S3)
+🔴 It enters short trades near resistance zones (R1–R3)
+🎯 All positions aim to exit at the central pivot (P).
+🚫 It avoids trading when price crosses the pivot during the bar.
+🔄 Strategy resets when a new pivot is calculated.
+📊 Supports pyramiding up to 5 positions for scaling in.

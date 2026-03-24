@@ -1,0 +1,38 @@
+//@version=3
+strategy("Advancing Our Basic Strategy", overlay=true)
+
+ema10 = ema(close, 10)
+ema20 = ema(close, 20)
+ema50 = ema(close, 50)
+ema200 = ema(close, 200)
+
+long = ema10 > ema200 and ema20 > ema50
+short = ema10 < ema200 and ema20 < ema50
+longcondition = long and long[10] and not long[11]
+shortcondition = short and short[10] and not short[11]
+
+closelong = ema10 < ema200 or ema20 < ema50 and not long[11]
+closeshort = ema10 > ema200 or ema20 > ema50 and not short[11]
+
+plot(ema10, title="10", color=green, linewidth=2)
+plot(ema20, title="20", color=red, linewidth=3)
+plot(ema50, title="50", color=purple, linewidth=2)
+plot(ema200, title="200", color=blue, linewidth=3)
+
+testPeriodStart = timestamp(2018,8,1,0,0)
+testPeriodStop = timestamp(2018,8,30,0,0)
+
+if time >= testPeriodStart and time <= testPeriodStop
+    strategy.entry("Long", strategy.long, 10000.0, when=longcondition)
+    strategy.entry("Short", strategy.short, 10000.0, when=shortcondition)
+    
+
+strategy.close("Long", when = closelong)
+strategy.close("Short", when = closeshort)
+
+View in Pine Editor・31 lines
+Use on chart
+4
+5
+1 636
+This script advances my previous post in which i created the most basic script i can think of for beginners like myself by adding more parameters and complex situations. I hope this can help anyone starting our with trading views strategy tester :)

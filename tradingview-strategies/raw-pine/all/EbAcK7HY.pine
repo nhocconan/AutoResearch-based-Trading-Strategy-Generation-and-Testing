@@ -1,0 +1,993 @@
+//@version=6
+// ============================================================================
+// MODIFICATIONS EXPLANATION
+// ============================================================================
+// This version has been modified to meet the following requirements:
+//
+// 1. ENTRY/EXIT ON CANDLE CLOSE:
+//    - All strategy entries and exits are executed only when a candle closes
+//    - Uses barstate.isconfirmed to ensure actions happen at bar close
+//    - Prevents intrabar actions (no trades during candle formation)
+//
+// 2. REPAINTING (Visual Updates During Candle):
+//    - Visual elements (lines, labels, Fibonacci levels) update in real-time
+//    - This allows you to see how the trend develops as the candle forms
+//    - Visual updates use current bar data (close[0], high[0], low[0])
+//
+// 3. NO FLICKERING (Stable Signals):
+//    - Entry/exit signals use historical values (close[1], open[2], etc.)
+//    - Trend completion detection uses confirmed previous bar data
+//    - This prevents signals from changing constantly during candle formation
+//    - Signals are calculated once at bar close and remain stable
+//
+// 4. NO INTRABAR ACTIONS:
+//    - All strategy.entry() and strategy.exit() calls are wrapped in
+//      barstate.isconfirmed checks
+//    - Pending signals are stored in variables and executed only at bar close
+//    - This ensures backtesting accuracy and prevents unrealistic executions
+//
+// KEY CHANGES:
+// - Added pending entry/exit variables to store signals until bar close
+// - Modified trend completion logic to use close[1] instead of close[0]
+// - Entry/exit execution moved to a dedicated section that runs only on bar close
+// - Visual updates continue to use current bar data for repainting effect
+// ============================================================================
+
+strategy('Fibonacci 5 Candles Retracement VERSION 2 - Close Bar', 'Fib5CClose', overlay = true, max_labels_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+GREEN = #7bff23
+RED   = #F23645
+YELLOW = #FFD700
+ORANGE = #FFA500
+AZURE = #00CED1
+GREEN_FIB = #00FF00
+
+showLabelsInput = input.bool(true, 'Show Start/End Labels', group = 'VISUALIZATION')
+labelSizeInput = input.string('small', 'Label Size', group = 'VISUALIZATION', options = ['tiny', 'small', 'normal', 'large', 'huge'])
+showStartEndLinesInput = input.bool(true, 'Show Start/End Lines', group = 'VISUALIZATION')
+show50LineInput = input.bool(true, 'Show 50% Line', group = 'VISUALIZATION')
+show25LineInput = input.bool(true, 'Show 25% Line', group = 'VISUALIZATION')
+show618LineInput = input.bool(true, 'Show 60% Line', group = 'VISUALIZATION')
+show786LineInput = input.bool(true, 'Show 70% Line', group = 'VISUALIZATION')
+showPendingOrdersInput = input.bool(true, 'Show Pending Orders', group = 'VISUALIZATION')
+
+colorStartEndLineInput = input.color(color.white, 'Start/End Line Color', group = 'LINE COLORS')
+color50LineInput = input.color(#FFD700, '50% Line Color', group = 'LINE COLORS')
+color25LineInput = input.color(#00FF00, '25% Line Color', group = 'LINE COLORS')
+color60LineInput = input.color(#00CED1, '60% Line Color', group = 'LINE COLORS')
+color70LineInput = input.color(#F23645, '70% Line Color', group = 'LINE COLORS')
+
+pendingOrderLevelInput = input.string('50%', 'Pending Order Level', group = 'STRATEGY', options = ['25%', '50%', '60%', '70%'])
+tpMultiplierInput = input.float(0.0, 'Extended TP (%)', group = 'STRATEGY', minval = 0.0, step = 0.1)
+minTrendPipsInput = input.float(0.0, 'Minimum Trend (pips)', group = 'FILTERS', minval = 0.0, step = 1.0, tooltip = 'If trend is below this value, start/end will be gray and pending order will not be placed')
+useEmaFilterInput = input.bool(false, 'Use EMA Filter', group = 'FILTERS', tooltip = 'If active, open LONG only if EMA50 > EMA200, SHORT only if EMA50 < EMA200')
+extendedTrendInput = input.bool(false, 'Extended Trend', group = 'FILTERS', tooltip = 'If active, trend remains in formation until a candle closes beyond the dynamic 50%. When this happens, end freezes but trend can continue.')
+enableAlertsInput = input.bool(false, 'Enable Alerts', group = 'ALERTS', tooltip = 'If active, sends alerts when a pending order is created/updated or when filled')
+
+getPendingOrderLevel(pointA, pointB) =>
+    float level = na
+    if pendingOrderLevelInput == '25%'
+        level := pointB + (pointA - pointB) * 0.25
+    else if pendingOrderLevelInput == '50%'
+        level := pointB + (pointA - pointB) * 0.50
+    else if pendingOrderLevelInput == '60%'
+        level := pointB + (pointA - pointB) * 0.60
+    else if pendingOrderLevelInput == '70%'
+        level := pointB + (pointA - pointB) * 0.70
+    level
+
+getExtendedTP(pointA, pointB, isBullish) =>
+    float tp = na
+    if tpMultiplierInput > 0.0
+        if isBullish
+            tp := pointA + (pointB - pointA) * (1.0 + tpMultiplierInput / 100.0)
+        else
+            tp := pointB - (pointA - pointB) * (tpMultiplierInput / 100.0)
+    else
+        tp := pointB
+    tp
+
+calculatePips(price1, price2) =>
+    float diff = math.abs(price1 - price2)
+    float pipValue = 0.0001
+    if syminfo.type == "forex"
+        if str.contains(syminfo.ticker, "JPY") or str.contains(syminfo.tickerid, "JPY")
+            pipValue := 0.01
+        else
+            pipValue := 0.0001
+    else
+        pipValue := syminfo.mintick
+    diff / pipValue
+
+isTrendValid(pointA, pointB) =>
+    if minTrendPipsInput <= 0.0
+        true
+    else
+        float trendPips = calculatePips(pointA, pointB)
+        trendPips >= minTrendPipsInput
+
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+isEmaFilterValid(isBullish) =>
+    if not useEmaFilterInput
+        true
+    else
+        if isBullish
+            ema50 > ema200
+        else
+            ema50 < ema200
+
+sendPendingOrderAlert(direction, entryPrice, slPrice, tpPrice, isUpdate) =>
+    if enableAlertsInput
+        string message = isUpdate ? "Pending Updated - " : "Pending Created - "
+        message += direction + "\n"
+        message += "Entry: " + str.tostring(entryPrice, format.mintick) + "\n"
+        message += "SL: " + str.tostring(slPrice, format.mintick) + "\n"
+        message += "TP: " + str.tostring(tpPrice, format.mintick)
+        alert(message, alert.freq_once_per_bar)
+
+sendOrderFilledAlert(direction, entryPrice) =>
+    if enableAlertsInput
+        string message = "Order Opened - " + direction + "\n"
+        message += "Entry: " + str.tostring(entryPrice, format.mintick)
+        alert(message, alert.freq_once_per_bar)
+
+isRedCandle(index) => close[index] < open[index]
+
+isGreenCandle(index) => close[index] > open[index]
+
+isBearishTrend() =>
+    isRedCandle(0) and isRedCandle(1) and isRedCandle(2) and isRedCandle(3) and isRedCandle(4)
+
+isBullishTrend() =>
+    isGreenCandle(0) and isGreenCandle(1) and isGreenCandle(2) and isGreenCandle(3) and isGreenCandle(4)
+
+var bool activeBearishTrend = false
+var bool activeBullishTrend = false
+var float pointA = na
+var float pointB = na
+var int barA = na
+var int barB = na
+var label labelA = na
+var label labelB = na
+var label pendingOrderLabel = na
+var line lineStart = na
+var line lineEnd = na
+var line line50 = na
+var line line25 = na
+var line line618 = na
+var line line786 = na
+var bool trendCompleted = false
+var string pendingOrderId = na
+var bool isBullishOrder = false
+var float finalPointA = na
+var float finalPointB = na
+var float lastLevel50 = na
+var int lastOpenTrades = 0
+var bool currentTrendValid = true
+var bool endFrozen = false
+// New variables for pending entry/exit signals (executed only at bar close)
+var bool pendingShortEntry = false
+var bool pendingLongEntry = false
+var float pendingEntryPrice = na
+var float pendingStopLoss = na
+var float pendingTakeProfit = na
+
+if isBearishTrend() and not isBearishTrend()[1] and (not activeBearishTrend or trendCompleted)
+    activeBearishTrend := true
+    activeBullishTrend := false
+    trendCompleted := false
+    lastOpenTrades := 0
+    endFrozen := false
+    
+    if high[4] >= high[5]
+        pointA := high[4]
+        barA := bar_index - 4
+    else
+        pointA := high[5]
+        barA := bar_index - 5
+    
+    pointB := math.min(low[0], math.min(low[1], math.min(low[2], math.min(low[3], low[4]))))
+    
+    if pointB == low[0]
+        barB := bar_index
+    else if pointB == low[1]
+        barB := bar_index - 1
+    else if pointB == low[2]
+        barB := bar_index - 2
+    else if pointB == low[3]
+        barB := bar_index - 3
+    else if pointB == low[4]
+        barB := bar_index - 4
+    
+    currentTrendValid := isTrendValid(pointA, pointB)
+    
+    if showLabelsInput
+        color labelAColor = currentTrendValid ? RED : color.gray
+        labelA := label.new(barA, pointA, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.white, 
+                           size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge, 
+                           style = label.style_label_down)
+        color labelBColor = currentTrendValid ? RED : color.gray
+        labelB := label.new(barB, pointB, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.white,
+                           size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                           style = label.style_label_up)
+    
+    if showStartEndLinesInput
+        lineStart := line.new(chart.point.from_index(barA, pointA), chart.point.from_index(bar_index, pointA), color = colorStartEndLineInput, width = 1, style = line.style_solid, extend = extend.none)
+        lineEnd := line.new(chart.point.from_index(barB, pointB), chart.point.from_index(bar_index, pointB), color = colorStartEndLineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show50LineInput
+        float level50 = pointB + (pointA - pointB) * 0.50
+        line50 := line.new(chart.point.from_index(barA, level50), chart.point.from_index(bar_index, level50), color = color50LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show25LineInput
+        float level25 = pointB + (pointA - pointB) * 0.25
+        line25 := line.new(chart.point.from_index(barA, level25), chart.point.from_index(bar_index, level25), color = color25LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show618LineInput
+        float level618 = pointB + (pointA - pointB) * 0.60
+        line618 := line.new(chart.point.from_index(barA, level618), chart.point.from_index(bar_index, level618), color = color60LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show786LineInput
+        float level786 = pointB + (pointA - pointB) * 0.70
+        line786 := line.new(chart.point.from_index(barA, level786), chart.point.from_index(bar_index, level786), color = color70LineInput, width = 1, style = line.style_solid, extend = extend.none)
+
+if activeBearishTrend and not trendCompleted
+    float level50 = pointB + (pointA - pointB) * 0.50
+    bool shouldComplete = false
+    
+    // Use historical values to prevent flickering - check completed previous bar
+    if extendedTrendInput
+        if barstate.isconfirmed and close[1] > level50
+            shouldComplete := true
+            endFrozen := true
+    else
+        if barstate.isconfirmed and close[1] > open[2]
+            shouldComplete := true
+    
+    if shouldComplete
+        if not endFrozen
+            trendCompleted := true
+        // Use historical low[1] for stable signal calculation
+        if not endFrozen and low[1] < pointB
+            pointB := low[1]
+            barB := bar_index - 1
+            currentTrendValid := isTrendValid(pointA, pointB)
+            if showLabelsInput
+                if not na(labelA)
+                    label.delete(labelA)
+                    color labelAColor = currentTrendValid ? RED : color.gray
+                    labelA := label.new(barA, pointA, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.white,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_down)
+                if not na(labelB)
+                    label.delete(labelB)
+                    color labelBColor = currentTrendValid ? RED : color.gray
+                    labelB := label.new(barB, pointB, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.white,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_up)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+        
+        finalPointA := pointA
+        finalPointB := pointB
+        
+        // Store entry signal instead of executing immediately - will execute at bar close
+        if currentTrendValid and isEmaFilterValid(false) and barstate.isconfirmed
+            if not na(pendingOrderId)
+                strategy.cancel(pendingOrderId)
+                pendingOrderId := na
+            
+            float entryLevel = getPendingOrderLevel(pointA, pointB)
+            pendingShortEntry := true
+            pendingLongEntry := false
+            pendingEntryPrice := entryLevel
+            pendingStopLoss := pointA
+            pendingTakeProfit := pointB
+            pendingOrderId := "FibShort"
+            isBullishOrder := false
+            lastLevel50 := entryLevel
+            
+            sendPendingOrderAlert("SHORT", entryLevel, pointA, pointB, false)
+            
+            if showPendingOrdersInput
+                if not na(pendingOrderLabel)
+                    label.delete(pendingOrderLabel)
+                float shortPendingOffset = (pointA - pointB) * 0.25
+                float shortPendingPrice = pointB - shortPendingOffset
+                pendingOrderLabel := label.new(bar_index, shortPendingPrice, "SHORT Pending\nEntry: " + str.tostring(entryLevel, format.mintick) + "\nSL: " + str.tostring(pointA, format.mintick) + "\nTP: " + str.tostring(pointB, format.mintick), 
+                                             xloc.bar_index, yloc.price, color.red, textcolor = color.white, style = label.style_label_up, size = size.small)
+        
+        activeBearishTrend := false
+    else
+        // Visual updates during candle (repainting) - uses current bar data
+        if not endFrozen and low[0] < pointB
+            pointB := low[0]
+            barB := bar_index
+            currentTrendValid := isTrendValid(pointA, pointB)
+            if showLabelsInput
+                if not na(labelA)
+                    label.delete(labelA)
+                    color labelAColor = currentTrendValid ? RED : color.gray
+                    labelA := label.new(barA, pointA, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.white,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_down)
+                if not na(labelB)
+                    label.delete(labelB)
+                    color labelBColor = currentTrendValid ? RED : color.gray
+                    labelB := label.new(barB, pointB, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.white,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_up)
+            if showStartEndLinesInput and not na(lineStart)
+                line.set_xy1(lineStart, barA, pointA)
+                line.set_xy2(lineStart, bar_index, pointA)
+            if showStartEndLinesInput and not na(lineEnd)
+                line.set_xy1(lineEnd, barB, pointB)
+                line.set_xy2(lineEnd, bar_index, pointB)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+                if showPendingOrdersInput and not na(pendingOrderLabel) and not isBullishOrder
+                    label.delete(pendingOrderLabel)
+                    float pendingLevel = getPendingOrderLevel(pointA, pointB)
+                    float shortPendingOffset = (pointA - pointB) * 0.25
+                    float shortPendingPrice = pointB - shortPendingOffset
+                    pendingOrderLabel := label.new(bar_index, shortPendingPrice, "SHORT Pending\nEntry: " + str.tostring(pendingLevel, format.mintick) + "\nSL: " + str.tostring(pointA, format.mintick) + "\nTP: " + str.tostring(pointB, format.mintick), 
+                                                 xloc.bar_index, yloc.price, color.red, textcolor = color.white, style = label.style_label_up, size = size.small)
+                    sendPendingOrderAlert("SHORT", pendingLevel, pointA, pointB, true)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+        else
+            if showStartEndLinesInput and not na(lineStart)
+                line.set_xy1(lineStart, barA, pointA)
+                line.set_xy2(lineStart, bar_index, pointA)
+            if showStartEndLinesInput and not na(lineEnd)
+                line.set_xy1(lineEnd, barB, pointB)
+                line.set_xy2(lineEnd, bar_index, pointB)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+
+if isBullishTrend() and not isBullishTrend()[1] and (not activeBullishTrend or trendCompleted)
+    activeBullishTrend := true
+    activeBearishTrend := false
+    trendCompleted := false
+    lastOpenTrades := 0
+    endFrozen := false
+    
+    if low[4] <= low[5]
+        pointA := low[4]
+        barA := bar_index - 4
+    else
+        pointA := low[5]
+        barA := bar_index - 5
+    
+    pointB := math.max(high[0], math.max(high[1], math.max(high[2], math.max(high[3], high[4]))))
+    
+    if pointB == high[0]
+        barB := bar_index
+    else if pointB == high[1]
+        barB := bar_index - 1
+    else if pointB == high[2]
+        barB := bar_index - 2
+    else if pointB == high[3]
+        barB := bar_index - 3
+    else if pointB == high[4]
+        barB := bar_index - 4
+    
+    currentTrendValid := isTrendValid(pointA, pointB)
+    
+    if showLabelsInput
+        float labelAOffset = (pointB - pointA) * 0.10
+        float labelAPrice = pointA - labelAOffset
+        color labelAColor = currentTrendValid ? GREEN : color.gray
+        labelA := label.new(barA, labelAPrice, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.black,
+                           size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                           style = label.style_label_up)
+        float labelBOffset = (pointB - pointA) * 0.15
+        float labelBPrice = pointB + labelBOffset
+        color labelBColor = currentTrendValid ? GREEN : color.gray
+        labelB := label.new(barB, labelBPrice, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.black,
+                           size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                           style = label.style_label_down)
+    
+    if showStartEndLinesInput
+        lineStart := line.new(chart.point.from_index(barA, pointA), chart.point.from_index(bar_index, pointA), color = colorStartEndLineInput, width = 1, style = line.style_solid, extend = extend.none)
+        lineEnd := line.new(chart.point.from_index(barB, pointB), chart.point.from_index(bar_index, pointB), color = colorStartEndLineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show50LineInput
+        float level50 = pointB + (pointA - pointB) * 0.50
+        line50 := line.new(chart.point.from_index(barA, level50), chart.point.from_index(bar_index, level50), color = color50LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show25LineInput
+        float level25 = pointB + (pointA - pointB) * 0.25
+        line25 := line.new(chart.point.from_index(barA, level25), chart.point.from_index(bar_index, level25), color = color25LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show618LineInput
+        float level618 = pointB + (pointA - pointB) * 0.60
+        line618 := line.new(chart.point.from_index(barA, level618), chart.point.from_index(bar_index, level618), color = color60LineInput, width = 1, style = line.style_solid, extend = extend.none)
+    
+    if show786LineInput
+        float level786 = pointB + (pointA - pointB) * 0.70
+        line786 := line.new(chart.point.from_index(barA, level786), chart.point.from_index(bar_index, level786), color = color70LineInput, width = 1, style = line.style_solid, extend = extend.none)
+
+if activeBullishTrend and not trendCompleted
+    float level50 = pointB + (pointA - pointB) * 0.50
+    bool shouldComplete = false
+    
+    // Use historical values to prevent flickering - check completed previous bar
+    if extendedTrendInput
+        if barstate.isconfirmed and close[1] < level50
+            shouldComplete := true
+            endFrozen := true
+    else
+        if barstate.isconfirmed and close[1] < open[2]
+            shouldComplete := true
+    
+    if shouldComplete
+        if not endFrozen
+            trendCompleted := true
+        // Use historical high[1] for stable signal calculation
+        if not endFrozen and high[1] > pointB
+            pointB := high[1]
+            barB := bar_index - 1
+            currentTrendValid := isTrendValid(pointA, pointB)
+            if showLabelsInput
+                if not na(labelA)
+                    label.delete(labelA)
+                    float labelAOffset = (pointB - pointA) * 0.10
+                    float labelAPrice = pointA - labelAOffset
+                    color labelAColor = currentTrendValid ? GREEN : color.gray
+                    labelA := label.new(barA, labelAPrice, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.black,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_up)
+                if not na(labelB)
+                    label.delete(labelB)
+                    float labelBOffset = (pointB - pointA) * 0.15
+                    float labelBPrice = pointB + labelBOffset
+                    color labelBColor = currentTrendValid ? GREEN : color.gray
+                    labelB := label.new(barB, labelBPrice, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.black,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_down)
+            if showStartEndLinesInput and not na(lineStart)
+                line.set_xy1(lineStart, barA, pointA)
+                line.set_xy2(lineStart, bar_index, pointA)
+            if showStartEndLinesInput and not na(lineEnd)
+                line.set_xy1(lineEnd, barB, pointB)
+                line.set_xy2(lineEnd, bar_index, pointB)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+        
+        finalPointA := pointA
+        finalPointB := pointB
+        
+        // Store entry signal instead of executing immediately - will execute at bar close
+        if currentTrendValid and isEmaFilterValid(true) and barstate.isconfirmed
+            if not na(pendingOrderId)
+                strategy.cancel(pendingOrderId)
+                pendingOrderId := na
+            
+            float entryLevel = getPendingOrderLevel(pointA, pointB)
+            pendingLongEntry := true
+            pendingShortEntry := false
+            pendingEntryPrice := entryLevel
+            pendingStopLoss := pointA
+            pendingTakeProfit := pointB
+            pendingOrderId := "FibLong"
+            isBullishOrder := true
+            lastLevel50 := entryLevel
+            
+            sendPendingOrderAlert("LONG", entryLevel, pointA, pointB, false)
+            
+            if showPendingOrdersInput
+                if not na(pendingOrderLabel)
+                    label.delete(pendingOrderLabel)
+                float longPendingOffset = (pointB - pointA) * 0.50
+                float longPendingPrice = pointB + longPendingOffset
+                pendingOrderLabel := label.new(bar_index, longPendingPrice, "LONG Pending\nEntry: " + str.tostring(entryLevel, format.mintick) + "\nSL: " + str.tostring(pointA, format.mintick) + "\nTP: " + str.tostring(pointB, format.mintick), 
+                                             xloc.bar_index, yloc.price, GREEN, textcolor = color.black, style = label.style_label_down, size = size.small)
+        
+        activeBullishTrend := false
+    else
+        // Visual updates during candle (repainting) - uses current bar data
+        if not endFrozen and high[0] > pointB
+            pointB := high[0]
+            barB := bar_index
+            currentTrendValid := isTrendValid(pointA, pointB)
+            if showLabelsInput
+                if not na(labelA)
+                    label.delete(labelA)
+                    float labelAOffset = (pointB - pointA) * 0.10
+                    float labelAPrice = pointA - labelAOffset
+                    color labelAColor = currentTrendValid ? GREEN : color.gray
+                    labelA := label.new(barA, labelAPrice, 'start', xloc.bar_index, yloc.price, labelAColor, textcolor = color.black,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_up)
+                if not na(labelB)
+                    label.delete(labelB)
+                    float labelBOffset = (pointB - pointA) * 0.15
+                    float labelBPrice = pointB + labelBOffset
+                    color labelBColor = currentTrendValid ? GREEN : color.gray
+                    labelB := label.new(barB, labelBPrice, 'end', xloc.bar_index, yloc.price, labelBColor, textcolor = color.black,
+                                       size = labelSizeInput == 'tiny' ? size.tiny : labelSizeInput == 'small' ? size.small : labelSizeInput == 'normal' ? size.normal : labelSizeInput == 'large' ? size.large : size.huge,
+                                       style = label.style_label_down)
+            if showStartEndLinesInput and not na(lineStart)
+                line.set_xy1(lineStart, barA, pointA)
+                line.set_xy2(lineStart, bar_index, pointA)
+            if showStartEndLinesInput and not na(lineEnd)
+                line.set_xy1(lineEnd, barB, pointB)
+                line.set_xy2(lineEnd, bar_index, pointB)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+                if showPendingOrdersInput and not na(pendingOrderLabel) and isBullishOrder
+                    label.delete(pendingOrderLabel)
+                    float pendingLevel = getPendingOrderLevel(pointA, pointB)
+                    float longPendingOffset = (pointB - pointA) * 0.50
+                    float longPendingPrice = pointB + longPendingOffset
+                    pendingOrderLabel := label.new(bar_index, longPendingPrice, "LONG Pending\nEntry: " + str.tostring(pendingLevel, format.mintick) + "\nSL: " + str.tostring(pointA, format.mintick) + "\nTP: " + str.tostring(pointB, format.mintick), 
+                                                 xloc.bar_index, yloc.price, GREEN, textcolor = color.black, style = label.style_label_down, size = size.small)
+                    sendPendingOrderAlert("LONG", pendingLevel, pointA, pointB, true)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+        else
+            if showStartEndLinesInput and not na(lineStart)
+                line.set_xy1(lineStart, barA, pointA)
+                line.set_xy2(lineStart, bar_index, pointA)
+            if showStartEndLinesInput and not na(lineEnd)
+                line.set_xy1(lineEnd, barB, pointB)
+                line.set_xy2(lineEnd, bar_index, pointB)
+            if show50LineInput and not na(line50)
+                level50 := pointB + (pointA - pointB) * 0.50
+                line.set_xy1(line50, barA, level50)
+                line.set_xy2(line50, bar_index, level50)
+            if show25LineInput and not na(line25)
+                float level25 = pointB + (pointA - pointB) * 0.25
+                line.set_xy1(line25, barA, level25)
+                line.set_xy2(line25, bar_index, level25)
+            if show618LineInput and not na(line618)
+                float level618 = pointB + (pointA - pointB) * 0.60
+                line.set_xy1(line618, barA, level618)
+                line.set_xy2(line618, bar_index, level618)
+            if show786LineInput and not na(line786)
+                float level786 = pointB + (pointA - pointB) * 0.70
+                line.set_xy1(line786, barA, level786)
+                line.set_xy2(line786, bar_index, level786)
+
+// Execute entry/exit only at candle close (prevents intrabar actions)
+if barstate.isconfirmed
+    // Execute SHORT entry if there's a pending signal
+    if pendingShortEntry and strategy.opentrades == 0
+        strategy.entry("FibShort", strategy.short, limit = pendingEntryPrice, comment = "Fib " + pendingOrderLevelInput)
+        strategy.exit("FibShortExit", "FibShort", stop = pendingStopLoss, limit = pendingTakeProfit, comment = "Fib Exit")
+        pendingShortEntry := false
+        sendOrderFilledAlert("SHORT", pendingEntryPrice)
+    
+    // Execute LONG entry if there's a pending signal
+    if pendingLongEntry and strategy.opentrades == 0
+        strategy.entry("FibLong", strategy.long, limit = pendingEntryPrice, comment = "Fib " + pendingOrderLevelInput)
+        strategy.exit("FibLongExit", "FibLong", stop = pendingStopLoss, limit = pendingTakeProfit, comment = "Fib Exit")
+        pendingLongEntry := false
+        sendOrderFilledAlert("LONG", pendingEntryPrice)
+    
+    // Handle extended TP exit only at bar close
+    if strategy.opentrades > 0 and lastOpenTrades > 0
+        if strategy.position_size < 0
+            if tpMultiplierInput > 0.0 and not na(finalPointA) and not na(finalPointB)
+                float extendedTP = getExtendedTP(finalPointA, finalPointB, false)
+                strategy.exit("FibShortExit", "FibShort", stop = finalPointA, limit = extendedTP, comment = "Fib Exit")
+        else if strategy.position_size > 0
+            if tpMultiplierInput > 0.0 and not na(finalPointA) and not na(finalPointB)
+                float extendedTP = getExtendedTP(finalPointA, finalPointB, true)
+                strategy.exit("FibLongExit", "FibLong", stop = finalPointA, limit = extendedTP, comment = "Fib Exit")
+
+if strategy.opentrades > 0 and lastOpenTrades == 0
+    float entryPrice = strategy.position_avg_price
+    if strategy.position_size < 0
+        sendOrderFilledAlert("SHORT", entryPrice)
+    else if strategy.position_size > 0
+        sendOrderFilledAlert("LONG", entryPrice)
+
+lastOpenTrades := strategy.opentrades
+
+View in Pine Editor・655 lines
+Use on chart
+1 K
+17
+15 414
+Dec 27, 2025
+
+
+================================================================================
+FIBONACCI 5 CANDLES RETRACEMENT - STRATEGY GUIDE
+================================================================================
+
+WHAT DOES THIS STRATEGY DO?
+---------------------------
+
+This strategy automatically identifies market trends and uses Fibonacci
+retracements to find the best entry points. The idea is simple: when price
+makes a strong movement (trend), it often pulls back before continuing in
+the same direction. The strategy captures these "pullbacks" to enter at the
+right moment.
+
+HOW IT WORKS?
+-------------
+
+1. TREND DETECTION
+The strategy looks for 5 consecutive candles of the same color:
+- 5 red candles = BEARISH trend (price falls)
+- 5 green candles = BULLISH trend (price rises)
+
+2. CALCULATION OF START AND END POINTS
+
+For a BEARISH trend (5 red candles):
+- START: The highest point between the first red candle and the previous one
+- END: The lowest point reached during the 5 candles (and beyond, if the
+trend continues)
+
+For a BULLISH trend (5 green candles):
+- START: The lowest point between the first green candle and the previous one
+- END: The highest point reached during the 5 candles (and beyond, if the
+trend continues)
+
+3. DYNAMIC UPDATE
+The END point updates automatically if price continues to move in the
+direction of the trend, creating new highs (for bullish trends) or new
+lows (for bearish trends).
+
+4. TREND END
+
+Normal Mode:
+- BEARISH trend ends when a candle closes above the previous candle's open
+- BULLISH trend ends when a candle closes below the previous candle's open
+
+"Extended Trend" mode (optional):
+- The trend remains active until a candle closes beyond the dynamic 50%
+retracement level
+- When this happens, the END point "freezes" (stops updating), but the
+trend can continue
+
+5. FIBONACCI RETRACEMENT CALCULATION
+Once START and END are identified, the strategy automatically calculates
+Fibonacci levels. IMPORTANT: for retracements and pending orders, we
+consider START as 100% and END as 0%, because we work on the part of the
+trend that is recovered (the pullback).
+
+The retracement levels are:
+
+- 70% = level closest to START (smallest retracement)
+- 60% = second level
+- 50% = central level (often used for entry)
+- 25% = level closest to END (largest retracement)
+
+
+6. PENDING ORDER PLACEMENT
+When a trend is identified and completed, the strategy automatically places
+a pending order (limit order) at one of the selectable Fibonacci levels.
+
+Available levels:
+- 25%: closest to END
+- 50%: central level (balanced)
+- 60%: closest to START
+- 70%: very close to START
+
+The order direction depends on the trend:
+- BEARISH trend → SHORT order (bet that price falls)
+- BULLISH trend → LONG order (bet that price rises)
+
+Stop Loss and Take Profit (for retracements):
+- Stop Loss: always at START level
+- Take Profit: always at END level
+
+EXTENDED TAKE PROFIT:
+If the order is executed (filled), the strategy can apply an "Extended
+Take Profit" if configured. IMPORTANT: for the extended TP calculation,
+we consider START as 0% and END as 100% (the original trend movement).
+For example, if you set 3%, the Take Profit will be at 103% of the
+original trend movement instead of 100%.
+
+AVAILABLE FILTERS
+-----------------
+
+1. MINIMUM TREND (pips)
+Filters trends that are too small. If a trend is below the set value:
+- START and END labels become gray (instead of red/green)
+- No pending order is placed
+- The trend is still displayed on the chart
+
+Useful for avoiding trading movements that are too small.
+
+2. EMA FILTER
+Uses two moving averages (EMA 50 and EMA 200) to filter direction:
+- If active: places LONG orders only when EMA50 > EMA200 (uptrend)
+- If active: places SHORT orders only when EMA50 < EMA200 (downtrend)
+
+Useful for trading only in the direction of the main trend.
+
+3. EXTENDED TREND
+Modifies how the trend is considered "completed":
+- If disabled: uses normal logic (opposite candle)
+- If active: the trend remains in formation until a candle closes beyond
+the dynamic 50%. When this happens, END freezes but the trend can continue.
+
+Useful for capturing longer trends and extended movements.
+
+VISUALIZATION
+-------------
+
+The strategy displays on the chart:
+
+1. START AND END LABELS
+- Red color for bearish trends
+- Green color for bullish trends
+- Gray color if the trend is not valid (too small)
+- Remain visible even when new trends form
+
+2. START AND END LINES
+- Horizontal lines indicating the start (START) and end (END) points of the trend
+- White color by default, customizable from the settings panel
+- Update dynamically when the END point changes
+- Can be shown or hidden via the "Show Start/End Lines" option
+
+3. FIBONACCI LINES
+The strategy shows horizontal lines at retracement levels:
+- Line at 50% (yellow by default)
+- Line at 25% (green by default)
+- Line at 60% (azure by default)
+- Line at 70% (red by default)
+
+COLOR CUSTOMIZATION:
+All line colors can be customized from the settings panel in the
+"LINE COLORS" section:
+- Start/End Line Color: customize the color of START and END lines
+- 50% Line Color: customize the color of the 50% line
+- 25% Line Color: customize the color of the 25% line
+- 60% Line Color: customize the color of the 60% line
+- 70% Line Color: customize the color of the 70% line
+
+Lines update dynamically when the END point changes and can be shown or
+hidden individually via options in the "VISUALIZATION" section.
+
+4. PENDING ORDER LABELS
+Show pending order information:
+- Direction (LONG or SHORT)
+- Entry price
+- Stop Loss
+- Take Profit
+
+Positioned far from the chart to avoid cluttering the visualization.
+
+ALERTS
+------
+
+If enabled, alerts send notifications when:
+
+1. PENDING ORDER CREATED
+When a new pending order is placed, with all information.
+
+2. PENDING ORDER UPDATED
+When the pending order is updated (for example, if the level changes or
+if the END point moves).
+
+3. ORDER OPENED
+When the pending order is executed (filled) and the position is opened.
+
+Alerts can be configured in TradingView to send notifications via email,
+SMS, or other platforms.
+
+RECOMMENDED SETTINGS
+--------------------
+
+To get started, you can use these settings:
+
+VISUALIZATION:
+- Show all lines and labels to see how it works
+- Show Start/End Lines: true (to display lines at START and END points)
+- Customize line colors in the "LINE COLORS" section according to your preferences
+
+STRATEGY:
+- Pending Order Level: 50% (balanced)
+- Extended TP: 0% (use standard TP at 100%)
+
+FILTERS:
+- Minimum Trend: 0 pips (disabled initially)
+- Use EMA Filter: false (disabled initially)
+- Extended Trend: false (use normal logic)
+
+ALERTS:
+- Enable Alerts: true (if you want to receive notifications)
+
+PRACTICAL EXAMPLE
+-----------------
+
+Scenario: Bearish Trend
+
+1. Price forms 5 consecutive red candles
+2. The strategy identifies:
+- START = 1.2000 (highest point)
+- END = 1.1900 (lowest point)
+- Range = 100 pips
+
+3. Calculates Fibonacci levels (for retracements: START = 100%, END = 0%):
+- 100% = 1.2000 (START)
+- 70% = 1.1930
+- 60% = 1.1940
+- 50% = 1.1950
+- 25% = 1.1975
+- 0% = 1.1900 (END)
+
+4. If you set "Pending Order Level" to 50%:
+- Places a SHORT pending order at 1.1950 (50% retracement)
+- Stop Loss at 1.2000 (START = 100%)
+- Take Profit at 1.1900 (END = 0%)
+
+5. If price rises and touches 1.1950:
+- The order is executed
+- Opens a SHORT position
+- If price falls to 1.1900 → Take Profit (profit)
+- If price rises to 1.2000 → Stop Loss (loss)
+
+IMPORTANT NOTE
+--------------
+
+This strategy is a technical analysis tool. Like all trading strategies,
+it does not guarantee profits. Trading involves risks and you can lose money.
+Always use appropriate risk management and test the strategy on historical
+data before using it with real money.
+
+LICENSE
+-------
+
+This code is open source and available for modification. You are free to
+use, modify, and distribute this strategy. If you republish or share a
+modified version, please kindly mention the original author.
+
+================================================================================
+
+Jan 9
+Release Notes
+================================================================================
+FIBONACCI 5 CANDLES RETRACEMENT - STRATEGY GUIDE (VERSION 2)
+================================================================================
+WHAT DOES THIS STRATEGY DO? This strategy automatically identifies market trends and uses Fibonacci retracements to find optimal entry points during "pullbacks". The core logic is that after a strong price movement (trend), the market often retraces before continuing in its original direction. The strategy captures these retracements to enter at a more favorable price.
++2
+
+HOW THE RETRACEMENT AND PENDING ORDERS WORK The strategy calculates a "discounted" entry point based on the trend's peak using Fibonacci levels:
++1
+
+
+Defining the Range: Once a 5-candle trend is identified, the strategy maps an area from START (100%) to END (0%).
+
+In a Bearish Trend, START is at the high and END is at the low. The order looks for a bounce upward to sell (Short).
++1
+
+In a Bullish Trend, START is at the low and END is at the high. The order looks for a pullback downward to buy (Long).
++1
+
+
+Customizable Entry Levels: You can choose the depth of the retracement via the "Pending Order Level" setting:
++2
+
+
+25%: Aggressive entry; fills quickly but with a lower risk/reward ratio.
++1
+
+
+50%: Balanced entry; the classic mid-point of the trend movement.
++1
+
+
+60% / 70%: Conservative entry; closer to the START point, offering a tighter Stop Loss and higher profit potential.
++1
+
+
+Automatic Updates: If the trend continues to push further before retracing, the strategy automatically updates the pending limit order to the new corrected level, ensuring you never trade based on outdated price ranges.
++1
+
+NEW FEATURES & IMPROVEMENTS IN VERSION 2
+This version has been heavily optimized for stability and backtesting precision:
+
+
+EXECUTION ON CANDLE CLOSE (No Intrabar): All strategy.entry and strategy.exit calls are now wrapped in barstate.isconfirmed checks.
++2
+
+
+Improvement: This eliminates "phantom" trades during candle formation and ensures backtest results perfectly match live execution.
+
+
+STABLE SIGNALS (No Flickering): Trend completion and trading signals now utilize historical data (e.g., close[1], open[2]).
++1
+
+
+Improvement: This prevents signals from "blinking" or disappearing while a candle is live.
+
+
+DYNAMIC VISUAL REPAINTING: While the trading logic is stable on the close, visual elements (lines/labels) continue to update in real-time using high[0] and low[0].
++1
+
+
+Improvement: This allows you to track the trend's evolution visually without compromising the integrity of confirmed orders.
+
+ADVANCED FILTERS:
+
+
+EMA Filter: Restricts trades to follow the long-term trend (EMA 50 vs. EMA 200).
++1
+
+
+Pips Filter: Excludes low-volatility movements to ensure higher-quality setups.
++1
+
+
+EVOLVED ALERT SYSTEM: Includes notifications for when a pending order is created, updated, or filled.
+
+IMPORTANT NOTE This strategy is a technical analysis tool. Like all trading strategies, it does not guarantee profits. Trading involves risks; always use appropriate risk management and test on historical data before using real capital.
+
+LICENSE This code is open source. You are free to use, modify, and distribute it. If you publish a modified version, please kindly mention the original author.
+
+================================================================================

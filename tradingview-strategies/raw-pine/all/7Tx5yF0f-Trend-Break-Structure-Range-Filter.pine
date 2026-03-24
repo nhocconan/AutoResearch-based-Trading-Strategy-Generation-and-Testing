@@ -1,0 +1,159 @@
+//@version=6
+strategy(
+    "Trend Break + Structure + Range Filter",
+    overlay = true,
+    initial_capital = 100000,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 3,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.05,
+    slippage = 1
+)
+
+
+// ─────────────────────
+// INPUTS
+// ─────────────────────
+emaTrendLen = input.int(50, "Trend EMA Length")
+bbLen       = input.int(20, "Range Length")
+bbMult      = input.float(1.8, "BB Multiplier")
+atrLen      = input.int(14, "ATR Length")
+atrMult     = input.float(1.8, "ATR Stop Multiplier")
+rr          = input.float(2.0, "Risk-Reward")
+
+
+// ─────────────────────
+// TREND FILTER
+// ─────────────────────
+emaTrend = ta.ema(close, emaTrendLen)
+trendUp  = close > emaTrend
+trendDown= close < emaTrend
+
+
+// ─────────────────────
+// RANGE FILTER
+// ─────────────────────
+basis   = ta.sma(close, bbLen)
+dev     = bbMult * ta.stdev(close, bbLen)
+upperBB = basis + dev
+lowerBB = basis - dev
+
+
+inRange = close >= lowerBB and close <= upperBB
+
+
+// ─────────────────────
+// STRUCTURE BREAK
+// ─────────────────────
+highestLevel = ta.highest(high, bbLen)
+lowestLevel  = ta.lowest(low, bbLen)
+
+
+breakHigh = ta.crossover(close, highestLevel[1])
+breakLow  = ta.crossunder(close, lowestLevel[1])
+
+
+// ─────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────
+longCond  = breakHigh and trendUp and not inRange
+shortCond = breakLow and trendDown and not inRange
+
+
+if longCond and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+
+if shortCond and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+
+// ─────────────────────
+// RISK MANAGEMENT
+// ─────────────────────
+atrVal = ta.atr(atrLen)
+
+
+longStop   = strategy.position_avg_price - atrVal * atrMult
+longTarget = strategy.position_avg_price + atrVal * atrMult * rr
+
+
+shortStop   = strategy.position_avg_price + atrVal * atrMult
+shortTarget = strategy.position_avg_price - atrVal * atrMult * rr
+
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+
+// ─────────────────────
+// VISUALS
+// ─────────────────────
+plot(emaTrend, color=color.orange, title="Trend EMA")
+plot(upperBB, color=color.green, title="Upper Range")
+plot(lowerBB, color=color.red, title="Lower Range")
+
+View in Pine Editor・97 lines
+Use on chart
+3
+0
+950
+This strategy focuses on trading continuation moves after price breaks recent structure, while filtering out low-momentum conditions. The goal is to participate in directional markets and reduce entries during sideways activity.
+
+Concept Behind the Strategy
+Markets tend to alternate between consolidation and expansion. Instead of reacting to every price movement, this approach waits for a clear break of recent highs or lows, aligned with the prevailing trend.
+By combining structure, trend bias, and range filtering, the strategy aims to improve trade selection quality.
+
+How It Works
+1. Trend Direction (EMA Filter)
+A moving average defines the primary market bias.
+
+Price above the EMA → bullish bias
+
+Price below the EMA → bearish bias
+
+
+Trades are only taken in the direction of this bias.
+
+2. Structure Break
+The system monitors the highest high and lowest low over a defined lookback period.
+A trade is triggered when price breaks beyond that recent structure.
+
+3. Range Filter (Bollinger Logic)
+If price is moving inside a compressed range, entries are avoided.
+This helps reduce signals during low-momentum conditions.
+
+4. Risk Management
+Stop-loss and take-profit levels are based on ATR (Average True Range), which adapts to current volatility.
+A configurable risk-to-reward ratio determines the target distance.
+
+5. Realistic Backtesting Setup
+Commission and slippage are included to simulate more practical conditions.
+
+Key Characteristics
+
+Non-repainting logic
+
+Breakout-based entries
+
+Trend-aligned trade direction
+
+Volatility-adjusted exits
+
+Designed for structured testing
+
+
+
+When It May Perform Better
+
+Markets with sustained directional movement
+
+Volatility expansion phases
+
+Instruments that respect breakout behavior
+
+
+It may underperform during prolonged sideways or low-volatility environments.
+
+Important Note
+This strategy is intended for research and testing purposes. Performance can vary across assets and timeframes. It should be evaluated across different market conditions before considering live use.

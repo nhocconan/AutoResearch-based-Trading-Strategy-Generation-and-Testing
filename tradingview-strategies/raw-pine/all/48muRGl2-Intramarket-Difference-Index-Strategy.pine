@@ -1,0 +1,6 @@
+//@version=5
+type=##input(defval='MA',type='INPUT_STRING',##id='in_1')
+ui_ma_threshold=##input(defval=5.0,type='INPUT_FLOAT',##id='in_5')
+ui_rsi_threshold=##input(defval=20.0,type='INPUT_FLOAT',##id='in_6')
+##root(root_metainfo,rm_0,((type=='MA')?ui_ma_threshold:ui_rsi_threshold),input__float)
+##root(root_metainfo,rm_1,((type=='MA')?(-ui_ma_threshold):(-ui_rsi_threshold)),input__float)

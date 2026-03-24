@@ -1,0 +1,102 @@
+//@version=3
+
+///////////////////////////////////////////////////////////
+//////////////////////// ICHIMOKU /////////////////////////
+///////////////////////////////////////////////////////////
+strategy(title="Ichimoku Cloud", shorttitle="Ichimoku", overlay=true)
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(26, minval=1, title="Displacement")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+tenkan = donchian(conversionPeriods)
+kijun = donchian(basePeriods)
+senkouA = avg(tenkan, kijun)
+senkouB = donchian(laggingSpan2Periods)
+chikou = offset(close, displacement)
+
+//DRAW ICHIMOKU
+plot(tenkan, color=#0496ff, title="Conversion Line")
+plot(kijun, color=#991515, title="Base Line")
+plot(close, offset = -displacement, color=#459915, title="Lagging Span")
+
+p1 = plot(senkouA, offset = displacement, color=green,
+ title="Lead 1")
+p2 = plot(senkouB, offset = displacement, color=red, 
+ title="Lead 2")
+fill(p1, p2, color = senkouA > senkouB ? green : red)
+
+///////////////////////////////////////////////////////////
+//////////////////////// WILLIAM %R ///////////////////////
+///////////////////////////////////////////////////////////
+williamPercentPeriods = input(14, minval=1, title="Williams %R")
+williamPercentUpper = highest(williamPercentPeriods)
+williamPercentLower = lowest(williamPercentPeriods)
+williamPercentLine = 100 * (close - williamPercentUpper) / (williamPercentUpper - williamPercentLower)
+
+
+SMA_WilliamPercentPeriods = input(14, minval=1, title="SMA of William % R")
+SMA_WilliamPercent = sma(williamPercentLine, SMA_WilliamPercentPeriods)
+
+
+///////////////////////////////////////////////////////////
+//////////////////////// SMA  /////////////////////////////
+///////////////////////////////////////////////////////////
+
+largeKijunPeriods = input(156, minval=1, title="Large Kijun")
+largeKijun = sma(close, largeKijunPeriods)
+largeSenkouBPeriods = input(312, minval=1, title="Large Kijun")
+largeSenkouB = sma(close, largeSenkouBPeriods)
+
+///////////////////////////////////////////////////////////
+//////////////////////// SIGNAL /// ///////////////////////
+///////////////////////////////////////////////////////////
+
+
+//ICHIMOKU SIGNAL
+kumoUp = senkouA > senkouB
+kumoDown = senkouA < senkouB
+currentSenkouB = offset(senkouB, displacement)
+lastSenkouB = offset(senkouB, 2 * displacement)
+upTrend = largeKijun > largeSenkouB
+downTrend = largeKijun < largeSenkouB
+
+//LONG REVERSEt SIGNAL
+longReverseSignal1 = crossover(kijun, senkouA) and  (tenkan > kijun)
+longReverseSignal2 = crossover(tenkan, senkouB) 
+longReverseSignal3 = crossover(kijun, senkouB) 
+longReverseSignal4 = crossover(close, currentSenkouB)        //Chikou break SenkouB
+longReverseSignal5 = close > lastSenkouB                    //Chikou break SenkouB
+
+
+//SHORT REVERSEt SIGNAL
+shortReverseSignal1 = crossunder(kijun, senkouA) and (tenkan < kijun)
+shortReverseSignal2 = crossunder(tenkan, senkouB) 
+shortReverseSignal3 = crossunder(kijun, senkouB) 
+shortReverseSignal4 = crossunder(close, currentSenkouB) 
+shortReverseSignal5 = close < lastSenkouB                    //Chikou break SenkouB
+
+
+//BUY SIGNAL
+longSignals = longReverseSignal5 and (kijun > senkouB) and kumoUp
+closeLongSignals = shortReverseSignal1 or shortReverseSignal2
+
+//SEL SIGNAL
+shortSignals = shortReverseSignal5 and (kijun < senkouB) and kumoDown
+closeShortSignals = longReverseSignal1 or longReverseSignal2
+
+strategy.entry("long", strategy.long, when=longSignals)
+strategy.exit("bracket", "long", when=closeLongSignals)
+strategy.entry("short", strategy.short, when=shortSignals)
+strategy.exit("bracket", "short", when=closeShortSignals)
+
+View in Pine Editor・94 lines
+Use on chart
+3
+5
+1
+1 342
+Strategy using twice Ichimoku

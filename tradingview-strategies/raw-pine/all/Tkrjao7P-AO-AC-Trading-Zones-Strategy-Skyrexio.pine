@@ -1,0 +1,332 @@
+//@version=6
+//_______ <licence>
+strategy(title = "AO/AC Trading Zones Strategy [Skyrexio] ", 
+         shorttitle = "Trading Zones Strategy", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 5, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = false, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 10, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen               = color.new(#2ECD99, 0)
+var const color skyrexGray                = color.new(#F2F2F2, 0)
+var const color skyrexWhite               = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var int trend                             = 0
+var float upFractalLevel                  = na
+var float upFractalActivationLevel        = na
+var float downFractalLevel                = na
+var float downFractalActivationLevel      = na
+bool highCrossesUpfractalLevel            = ta.crossover(high, upFractalActivationLevel)
+bool lowCrossesDownFractalLevel           = ta.crossunder(low, downFractalActivationLevel)
+var int qtyGreenBars                      = 0
+var float stopLossLevel                   = na
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2026-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+EMaLength                = input.int(100, minval = 10, step = 10, title = "EMA Length", group = "📈Strategy settings📈")
+
+
+//_______ <function_declarations>
+//@function       Used to calculate Simple moving average for Alligator
+//@param src      Sourse for smma Calculations
+//@param length   Number of bars to calculate smma
+//@returns        The calculated smma value 
+smma(src, length) =>
+    var float smma = na
+    sma_value = ta.sma(src, length)
+    smma := na(smma) ? sma_value : (smma * (length - 1) + src) / length
+    smma
+
+//_______ <calculations>
+
+
+//Upfractal calculation 
+upFractalPrice = ta.pivothigh(2, 2)
+upFractal = not na(upFractalPrice) 
+
+
+//Downfractal calculation 
+downFractalPrice = ta.pivotlow(2, 2)
+downFractal = not na(downFractalPrice)
+
+
+//Calculating Alligator's teeth 
+teeth = smma(hl2, 8)[5]
+
+
+//Calculating upfractal and downfractal levels
+if upFractal 
+    upFractalLevel := upFractalPrice
+else
+    upFractalLevel := upFractalLevel[1]
+
+
+if downFractal
+    downFractalLevel := downFractalPrice
+else
+    downFractalLevel := downFractalLevel[1]
+
+
+//Calculating upfractal activation level, downfractal activation level to approximate the trend and this current trend 
+if upFractalLevel > teeth
+    upFractalActivationLevel := upFractalLevel
+
+if highCrossesUpfractalLevel
+    trend := 1
+    upFractalActivationLevel := na 
+    downFractalActivationLevel := downFractalLevel
+
+
+if downFractalLevel < teeth
+    downFractalActivationLevel := downFractalLevel
+
+if lowCrossesDownFractalLevel
+    trend := -1
+    downFractalActivationLevel := na 
+    upFractalActivationLevel := upFractalLevel
+
+
+if trend == 1
+    upFractalActivationLevel := na
+
+if trend == -1
+    downFractalActivationLevel := na
+
+
+//Calculating filter EMA 
+filterEMA = ta.ema(close, EMaLength)
+
+
+//Сalculating AO and AC 
+ao = ta.sma(hl2,5) - ta.sma(hl2,34)
+ac = ao - ta.sma(ao,5)
+diff = ac - ac[1]
+
+//Calculatign signal condition 
+if close > teeth and ac > ac[1] and ao > ao[1] and close > filterEMA 
+    qtyGreenBars := qtyGreenBars + 1
+else
+    qtyGreenBars := 0
+
+
+
+//_______ <strategy_calls>
+//Defining trade close condition
+if qtyGreenBars == 5
+    stopLossLevel := low
+
+if strategy.opentrades == 0
+    stopLossLevel := na
+
+closeCondition =  trend[1] == 1 and trend == -1 or low < stopLossLevel
+
+
+//Strategy entry
+if (strategy.opentrades == 0 and close > close[1] and qtyGreenBars >= 2 and qtyGreenBars < 7 and time >= lookBackPeriodStart and time <= lookBackPeriodStop)
+    strategy.entry(id = "entry1", direction = strategy.long, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (strategy.opentrades == 1 and close > close[1] and qtyGreenBars >= 2 and qtyGreenBars < 7 and time >= lookBackPeriodStart and time <= lookBackPeriodStop)
+    strategy.entry(id = "entry2", direction = strategy.long, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry2",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (strategy.opentrades == 2 and close > close[1] and qtyGreenBars >= 2 and qtyGreenBars < 7 and time >= lookBackPeriodStart and time <= lookBackPeriodStop)
+    strategy.entry(id = "entry3", direction = strategy.long, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry3",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (strategy.opentrades == 3 and close > close[1] and qtyGreenBars >= 2 and qtyGreenBars < 7 and time >= lookBackPeriodStart and time <= lookBackPeriodStop)
+    strategy.entry(id = "entry4", direction = strategy.long, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry4",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (strategy.opentrades == 4 and close > close[1] and qtyGreenBars >= 2 and qtyGreenBars < 7 and time >= lookBackPeriodStart and time <= lookBackPeriodStop)
+    strategy.entry(id = "entry5", direction = strategy.long, alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry5",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+if (closeCondition)
+    strategy.close_all(alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+//Plotting shapes for adding to current long trades
+gradPercent = if strategy.opentrades == 2
+    90
+else if strategy.opentrades == 3
+    80
+else if strategy.opentrades == 4
+    70
+else if strategy.opentrades == 5
+    60
+
+pricePlot = plot(close, title="Price", color=color.new(color.blue, 100))
+teethPlot = plot(strategy.opentrades > 1 ? teeth : na, title="Teeth", color= skyrexGreen, style=plot.style_linebr, linewidth = 2)
+fill(pricePlot, teethPlot, color = color.new(skyrexGreen, gradPercent))
+if strategy.opentrades != 1 and  strategy.opentrades[1] == strategy.opentrades - 1
+    label.new(bar_index, teeth, style = label.style_label_up, color = color.lime, size = size.tiny, text="Buy More", textcolor = color.black, text_formatting = text.format_bold)
+
+
+//_______ <alerts>
+
+View in Pine Editor・190 lines
+Use on chart
+3
+9
+4
+7 775
+Overview
+AO/AC Trading Zones Strategy [Skyrexio] leverages the combination of Awesome Oscillator (AO), Acceleration/Deceleration Indicator (AC), Williams Fractals, Williams Alligator and Exponential Moving Average (EMA) to obtain the high probability long setups. Moreover, strategy uses multi trades system, adding funds to long position if it considered that current trend has likely became stronger. Combination of AO and AC is used for creating so-called trading zones to create the signals, while Alligator and Fractal are used in conjunction as an approximation of short-term trend to filter them. At the same time EMA (default EMA's period = 100) is used as high probability long-term trend filter to open long trades only if it considers current price action as an uptrend. More information in "Methodology" and "Justification of Methodology" paragraphs. The strategy opens only long trades.
+
+Unique Features
+
+No fixed stop-loss and take profit: Instead of fixed stop-loss level strategy utilizes technical condition obtained by Fractals and Alligator to identify when current uptrend is likely to be over. In some special cases strategy uses AO and AC combination to trail profit (more information in "Methodology" and "Justification of Methodology" paragraphs)
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Multilayer trades opening system: strategy uses only 10% of capital in every trade and open up to 5 trades at the same time if script consider current trend as strong one.
+
+Short and long term trend trade filters: strategy uses EMA as high probability long-term trend filter and Alligator and Fractal combination as a short-term one.
+
+
+
+Methodology
+The strategy opens long trade when the following price met the conditions:
+1. Price closed above EMA (by default, period = 100). Crossover is not obligatory.
+2. Combination of Alligator and Williams Fractals shall consider current trend as an upward (all details in "Justification of Methodology" paragraph)
+3. Both AC and AO shall print two consecutive increasing values. At the price candle close which corresponds to this condition algorithm opens the first long trade with 10% of capital.
+4. If combination of Alligator and Williams Fractals shall consider current trend has been changed from up to downtrend, all long trades will be closed, no matter how many trades has been opened.
+5. If AO and AC both continue printing the rising values strategy opens the long trade on each candle close with 10% of capital while number of opened trades reaches 5.
+6. If AO and AC both has printed 5 rising values in a row algorithm close all trades if candle's low below the low of the 5-th candle with rising AO and AC values in a row.
+
+Script also has additional visuals. If second long trade has been opened simultaneously the Alligator's teeth line is plotted with the green color. Also for every trade in a row from 2 to 5 the label "Buy More" is also plotted just below the teeth line. With every next simultaneously opened trade the green color of the space between teeth and price became less transparent.
+
+Strategy settings
+In the inputs window user can setup strategy setting:
+EMA Length (by default = 100, period of EMA, used for long-term trend filtering EMA calculation).
+User can choose the optimal parameters during backtesting on certain price chart.
+
+Justification of Methodology
+Let's explore the key concepts of this strategy and understand how they work together. We'll begin with the simplest: the EMA.
+The Exponential Moving Average (EMA) is a type of moving average that assigns greater weight to recent price data, making it more responsive to current market changes compared to the Simple Moving Average (SMA). This tool is widely used in technical analysis to identify trends and generate buy or sell signals. The EMA is calculated as follows:
+
+1.Calculate the Smoothing Multiplier:
+Multiplier = 2 / (n + 1), Where n is the number of periods.
+2. EMA Calculation
+EMA = (Current Price) × Multiplier + (Previous EMA) × (1 − Multiplier)
+
+In this strategy, the EMA acts as a long-term trend filter. For instance, long trades are considered only when the price closes above the EMA (default: 100-period). This increases the likelihood of entering trades aligned with the prevailing trend.
+
+Next, let’s discuss the short-term trend filter, which combines the Williams Alligator and Williams Fractals. Williams Alligator
+
+Developed by Bill Williams, the Alligator is a technical indicator that identifies trends and potential market reversals. It consists of three smoothed moving averages:
+
+
+Jaw (Blue Line): The slowest of the three, based on a 13-period smoothed moving average shifted 8 bars ahead.
+
+Teeth (Red Line): The medium-speed line, derived from an 8-period smoothed moving average shifted 5 bars forward.
+
+Lips (Green Line): The fastest line, calculated using a 5-period smoothed moving average shifted 3 bars forward.
+
+
+
+When the lines diverge and align in order, the "Alligator" is "awake," signaling a strong trend. When the lines overlap or intertwine, the "Alligator" is "asleep," indicating a range-bound or sideways market. This indicator helps traders determine when to enter or avoid trades.
+
+Fractals, another tool by Bill Williams, help identify potential reversal points on a price chart. A fractal forms over at least five consecutive bars, with the middle bar showing either:
+
+
+Up Fractal: Occurs when the middle bar has a higher high than the two preceding and two following bars, suggesting a potential downward reversal.
+
+Down Fractal: Happens when the middle bar shows a lower low than the surrounding two bars, hinting at a possible upward reversal.
+
+
+
+Traders often use fractals alongside other indicators to confirm trends or reversals, enhancing decision-making accuracy.
+
+How do these tools work together in this strategy? Let’s consider an example of an uptrend.
+
+When the price breaks above an up fractal, it signals a potential bullish trend. This occurs because the up fractal represents a shift in market behavior, where a temporary high was formed due to selling pressure. If the price revisits this level and breaks through, it suggests the market sentiment has turned bullish.
+
+The breakout must occur above the Alligator’s teeth line to confirm the trend. A breakout below the teeth is considered invalid, and the downtrend might still persist. Conversely, in a downtrend, the same logic applies with down fractals.
+
+In this strategy if the most recent up fractal breakout occurs above the Alligator's teeth and follows the last down fractal breakout below the teeth, the algorithm identifies an uptrend. Long trades can be opened during this phase if a signal aligns. If the price breaks a down fractal below the teeth line during an uptrend, the strategy assumes the uptrend has ended and closes all open long trades.
+
+By combining the EMA as a long-term trend filter with the Alligator and fractals as short-term filters, this approach increases the likelihood of opening profitable trades while staying aligned with market dynamics.
+
+Now let's talk about the trading zones concept and its signals. To understand this we need to briefly introduce what is AO and AC. The Awesome Oscillator (AO), developed by Bill Williams, is a momentum indicator designed to measure market momentum by contrasting recent price movements with a longer-term historical perspective. It helps traders detect potential trend reversals and assess the strength of ongoing trends.
+
+The formula for AO is as follows:
+
+AO = SMA5(Median Price) − SMA34(Median Price)
+
+where:
+Median Price = (High + Low) / 2
+SMA5 = 5-period Simple Moving Average of the Median Price
+SMA 34 = 34-period Simple Moving Average of the Median Price
+
+The Acceleration/Deceleration (AC) Indicator, introduced by Bill Williams, measures the rate of change in market momentum. It highlights shifts in the driving force of price movements and helps traders spot early signs of trend changes. The AC Indicator is particularly useful for identifying whether the current momentum is accelerating or decelerating, which can indicate potential reversals or continuations. For AC calculation we shall use the AO calculated above is the following formula:
+
+AC = AO − SMA5(AO), where SMA5(AO)is the 5-period Simple Moving Average of the Awesome Oscillator
+
+When the AC is above the zero line and rising, it suggests accelerating upward momentum.
+When the AC is below the zero line and falling, it indicates accelerating downward momentum.
+When the AC is below zero line and rising it suggests the decelerating the downtrend momentum. When AC is above the zero line and falling, it suggests the decelerating the uptrend momentum.
+
+Now let's discuss the trading zones concept and how it can create the signal. Zones are created by the combination of AO and AC. We can divide three zone types:
+
+
+Greed zone: when the AO and AC both are rising
+
+Red zone: when the AO and AC both are decreasing
+
+Gray zone: when one of AO or AC is rising, the other is falling
+
+
+
+Gray zone is considered as uncertainty. AC and AO are moving in the opposite direction. Strategy skip such price action to decrease the chance to stuck in the losing trade during potential sideways. Red zone is also not interesting for the algorithm because both indicators consider the trend as bearish, but strategy opens only long trades. It is waiting for the green zone to increase the chance to open trade in the direction of the potential uptrend. When we have 2 candles in a row in the green zone script executes a long trade with 10% of capital.
+
+Two green zone candles in a row is considered by algorithm as a bullish trend, but now so strong, that's the reason why trade is going to be closed when the combination of Alligator and Fractals will consider the the trend change from bullish to bearish. If id did not happens, algorithm starts to count the green zone candles in a row. When we have 5 in a row script change the trade closing condition. Such situation is considered is a high probability strong bull market and all trades will be closed if candle's low will be lower than fifth green zone candle's low. This is used to increase probability to secure the profit. If long trades are initiated, the strategy continues utilizing subsequent signals until the total number of trades reaches a maximum of 5. Each trade uses 10% of capital.
+
+Why we use trading zones signals? If currently strategy algorithm considers the high probability of the short-term uptrend with the Alligator and Fractals combination pointed out above and the long-term trend is also suggested by the EMA filter as bullish. Rising AC and AO values in the direction of the most likely main trend signaling that we have the high probability of the fastest bullish phase on the market. The main idea is to take part in such rapid moves and add trades if this move continues its acceleration according to indicators.
+
+Backtest Results
+Operating window: Date range of backtests is 2023.01.01 - 2024.12.31. It is chosen to let the strategy to close all opened positions.
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+Initial capital: 10000 USDT
+Percent of capital used in every trade: 10%
+Maximum Single Position Loss: -9.49%
+Maximum Single Profit: +24.33%
+Net Profit: +4374.70 USDT (+43.75%)
+Total Trades: 278 (39.57% win rate)
+Profit Factor: 2.203
+Maximum Accumulated Loss: 668.16 USDT (-5.43%)
+Average Profit per Trade: 15.74 USDT (+1.37%)
+Average Trade Duration: 60 hours
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 4h BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+

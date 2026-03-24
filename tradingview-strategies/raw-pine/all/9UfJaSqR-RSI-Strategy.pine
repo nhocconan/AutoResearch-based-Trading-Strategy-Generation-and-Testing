@@ -1,0 +1,37 @@
+//@version=4
+strategy("RSI Strategy", overlay=true)
+length = input( 21 )
+
+BUY = input( 50.5 )
+SELL = input( 45 )
+
+BUY1 = input(42.1 )
+SELL1 = input( 57.9 )
+
+price = close
+
+vrsi = rsi(price, length)
+
+if (not na(vrsi))
+    if (crossover(vrsi, BUY))
+        strategy.entry("BUY", strategy.long, comment="BUY")
+        
+    if (crossunder(vrsi, SELL))
+        strategy.entry("SELL", strategy.short, comment="EXIT")
+        
+//    if (crossover(vrsi, BUY1))
+//        strategy.entry("BUY1", strategy.long, comment="BUY")  
+       
+//    if (crossunder(vrsi, SELL1))
+//        strategy.entry("SELL", strategy.short, comment="SELL")
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・28 lines
+Use on chart
+2
+9
+926
+INTRADAY GO WITH SIGNAL AT THE END OF DAY YOU WILL BE IN PROFITS GURANTEE...............
+
+Just Take Care of one thing only use it for top tarded counters or most volatine scripts...........

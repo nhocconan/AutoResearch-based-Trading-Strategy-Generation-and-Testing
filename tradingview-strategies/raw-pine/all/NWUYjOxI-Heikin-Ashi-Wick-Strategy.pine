@@ -1,0 +1,125 @@
+//@version=5
+strategy("Heikin Ashi Wick Strategy", overlay=true, process_orders_on_close=false, pyramiding=0)
+
+// ─── Heikin Ashi Calculation ─────────────────────────
+ha_close = (open + high + low + close) / 4
+
+var float ha_open = na
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+
+ha_high = math.max(high, math.max(ha_open, ha_close))
+ha_low  = math.min(low, math.min(ha_open, ha_close))
+
+// ─── Wick Calculations ───────────────────────────────
+upper_wick = ha_high - math.max(ha_open, ha_close)
+lower_wick = math.min(ha_open, ha_close) - ha_low
+
+// ─── Candle Direction ────────────────────────────────
+ha_green = ha_close > ha_open
+
+// ─── Entry Condition ─────────────────────────────────
+long_entry = ha_green and upper_wick > 0 and strategy.position_size == 0
+
+// ─── Exit Conditions ─────────────────────────────────
+exit_no_upper_wick   = upper_wick == 0
+exit_lower_dominates = lower_wick > upper_wick
+
+long_exit = strategy.position_size > 0 and (exit_no_upper_wick or exit_lower_dominates)
+
+// ─── Orders (Next Bar Open) ──────────────────────────
+if long_entry
+    strategy.entry("HA Long", strategy.long)
+
+if long_exit
+    strategy.close("HA Long")
+
+// ─── Plot Heikin Ashi Candles ─────────────────────────
+plotcandle(ha_open, ha_high, ha_low, ha_close, title="Heikin Ashi Candles", color=ha_green ? color.green : color.red, wickcolor=ha_green ? color.green : color.red, bordercolor=ha_green ? color.green : color.red)
+
+View in Pine Editor・37 lines
+Use on chart
+6
+2
+0
+11 293
+
+🔥 Heikin Ashi Wick Momentum Strategy
+“Trade momentum decay before the trend breaks.
+
+>> FOCUS ON WICKS, NOT ONLY CANDLE COLOR<<
+
+What Makes This Different (Traffic Driver)
+✔ Uses Heikin Ashi wicks (almost nobody does this correctly)
+✔ Captures trend continuation, not breakouts
+✔ Exits before momentum collapse, not after
+✔ Non-repainting
+✔ Clean charts, instant readability
+
+
+This Strategy Is REALLY Trading
+This is a Heikin Ashi momentum-decay system:
+• Enters when trend is strong but not euphoric
+• Exits when:
+o Trend stops probing higher
+o Sellers gain relative strength
+It avoids:
+• Chasing strong breakout candles
+• Holding through momentum rollovers
+
+Candle Type Used: Heikin Ashi (manually calculated)
+NOTE: The script does not use regular candles.
+It reconstructs Heikin Ashi (HA) candles from raw OHLC:
+• HA Close = average of open, high, low, close
+• HA Open = midpoint of prior HA candle (smoothed)
+• HA High / Low = extremes of HA open/close vs real high/low
+➡️ This filters noise and emphasizes trend structure and momentum.
+
+Strengths
+✅ Works well in strong, smooth trends
+✅ Very clean logic (no indicators)
+✅ Non-repainting
+✅ Early exits protect capital
+
+Best Use
+This works best on:
+• Daily timeframe
+• Strong trend ETFs / megacaps
+o QQQ
+o SPY
+o NVDA, MSFT, AAPL
+• When combined with:
+o EMA 21 trend filter (your preference)
+o Market regime filter (e.g., above 50/200 SMA)
+o Rising 10 EMA and 20 EMA
+
+________________________________________
+8️⃣ Weaknesses (Important)
+⚠️ No stop loss (only structure-based exits)
+⚠️ Can exit too early in explosive trends
+⚠️ Will chop in sideways markets
+⚠️ No volatility filter (ATR, EMA, regime)
+
+How to Avoid the Weaknesses — Summary
+Turn the setup from a concept into a robust strategy by adding these controls:
+1. Trade Only Trends
+o Require price above EMA-21 (optionally EMA-21 > EMA-50)
+o Eliminates chop and sideways markets
+2. Improve Exits (Avoid Leaving Winners Too Early)
+o Partial exit when upper wick disappears
+o Full exit only when lower wick dominates
+o Optional: require 2 consecutive exit candles
+3. Add Risk Protection
+o Use a volatility stop: ~1.5× ATR(14) below entry or below HA swing low
+o Protects against gaps and sudden reversals
+4. Filter Weak Signals
+o Require meaningful wick size (≈30–40% of candle range)
+o Avoids low-quality indecision candles
+5. Avoid Bad Volatility
+o Skip entries when ATR is expanding aggressively
+o Focus on calmer, controllable trends
+6. Limit Time in Trade
+o Add a max bars hold (e.g., 10–15 bars on daily)
+o Prevents capital getting stuck in fading trends
+
+⚠️ Educational use only. Not financial advice. Trading involves risk and losses can exceed expectations. Past performance does not guarantee future results. Use at your own risk.
+

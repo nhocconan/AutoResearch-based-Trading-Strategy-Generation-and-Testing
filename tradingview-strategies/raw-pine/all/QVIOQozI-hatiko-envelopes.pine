@@ -1,0 +1,444 @@
+//@version=4
+// ------------------------------------------------------------------------------------------------------------------ //
+
+strategy(title = "HatiKO Envelopes",shorttitle = "HatiKO Envelopes",overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 4, initial_capital=10, calc_on_order_fills=false)
+
+// ------------------------------------------------------------------------------------------------------------------ //
+
+
+//Settings
+isLotSizeAvg_Envelopes=input(defval = true, title ="Calculate lot size with avgPrice Envelopes (HatiKO  calculate)", type = input.bool)
+PosOpen = input(title = "↓↓↓↓↓↓ Position Open MA Configuration ↓↓↓↓↓↓", defval = false, type = input.bool)
+
+//Shorts Open Config
+is_Short_activate = input(defval = true, title = "Activate Short", type = input.bool)
+lot_mult_Short= input(defval = 1.00, step = 0.01 , title = "Multiplier Lot size Short 1.XX", type = input.float)
+timeFrame_Short =  input(defval = "Current.", options = ["Current.", "1m", "3m", "5m", "10m", "15m", "20m", "30m", "45m", "1H","2H","3H","4H"], title = "Timeframe Short", type = input.string)
+ma_type_Short = input(defval = "1. SMA", options = ["1. SMA", "2. PCMA", "3. EMA", "4. WMA", "5. DEMA", "6. ZLEMA", "7. HMA"], title = "MA Type Short", type = input.string)
+Short_Data_input = input(defval = "7.OHLC4", options = ["1.Open", "2.High", "3.Low", "4.Close", "5.HL2", "6.HLC3", "7.OHLC4", "8.OC2"], title = "Data Short", type = input.string)
+len_Short = input(defval = 3, minval = 1, title = "MA Length Short", type = input.integer)
+offset_Short = input(defval =  0, minval = 0, title = "MA offset Short", type = input.integer)
+
+//Longs Open Config
+is_Long_activate = input(defval = true, title = "Activate Long")
+lot_mult_Long= input(defval = 1.00, step = 0.01 , title = "Multiplier Lot size Long 1.XX", type = input.float)
+timeFrame_Long = input(defval = "Current.", options = ["Current.", "1m", "3m", "5m", "10m", "15m", "20m", "30m", "45m", "1H","2H","3H","4H"], title = "Timeframe Long", type = input.string)
+ma_type_Long = input(defval = "1. SMA", options = ["1. SMA", "2. PCMA", "3. EMA", "4. WMA", "5. DEMA", "6. ZLEMA", "7. HMA"], title = "MA Type Long", type = input.string)
+Long_Data_input = input(defval = "7.OHLC4", options = ["1.Open", "2.High", "3.Low", "4.Close", "5.HL2", "6.HLC3", "7.OHLC4", "8.OC2"], title = "Data Long", type = input.string)
+len_Long = input(defval=3, minval = 1, title = "MA Length Long", type = input.integer)
+offset_Long = input(defval=0, minval = 0, title = "MA offset Long", type = input.integer)
+
+PosClose = input(title = "↓↓↓↓↓↓ Position Close MA Configuration ↓↓↓↓↓↓", defval = false, type = input.bool)
+
+//Shorts Close Config
+isEnableShortCustomClose=input(defval = false, title ="Mode close MA Short")
+timeFrame_close_Short = input(defval = "Current.", options = ["Current.", "1m", "3m", "5m", "10m", "15m", "20m", "30m", "45m", "1H","2H","3H","4H"], title = "Timeframe Short Close", type = input.string)
+ma_type_close_Short = input(defval = "1. SMA", options = ["1. SMA", "2. PCMA", "3. EMA", "4. WMA", "5. DEMA", "6. ZLEMA", "7. HMA"], title = "MA Type Close Short", type = input.string)
+Short_Data_input_close = input(defval = "7.OHLC4", options = ["1.Open", "2.High", "3.Low", "4.Close", "5.HL2", "6.HLC3", "7.OHLC4", "8.OC2"], title = "Data Short Close", type = input.string)
+len_Short_close = input(defval = 3, minval = 1, title = "MA Length Short Close", type = input.integer)
+shortDeviation = input(defval = 0.0, step = 0.1 , title = "Short Deviation %", type = input.float)
+offset_Short_close = input(defval = 0, minval = 0, title = "MA offset Short Close", type = input.integer)
+
+//Longs Close Config
+isEnableLongCustomClose=input(defval = false, title ="Mode close MA Long", type = input.bool)
+timeFrame_close_Long =  input(defval = "Current.", options = ["Current.", "1m", "3m", "5m", "10m", "15m", "20m", "30m", "45m", "1H","2H","3H","4H"], title = "Timeframe Long Close", type = input.string)
+ma_type_close_Long = input(defval = "1. SMA", options = ["1. SMA", "2. PCMA", "3. EMA", "4. WMA", "5. DEMA", "6. ZLEMA", "7. HMA"], title = "MA Type Close Long", type = input.string)
+Long_Data_input_close = input(defval = "7.OHLC4", options = ["1.Open", "2.High", "3.Low", "4.Close", "5.HL2", "6.HLC3", "7.OHLC4", "8.OC2"], title = "Data Long Close", type = input.string)
+len_Long_close = input(defval = 3, minval = 1, title = "MA Length Long Close", type = input.integer)
+longDeviation = input( defval = -0.0, step = 0.1, title = "Long Deviation %", type = input.float)
+offset_Long_close = input(defval = 0, minval = 0, title = "MA offset Long Close", type = input.integer)
+
+ShortEnv = input(title = "↓↓↓↓↓↓ Short Envelopes Configuration ↓↓↓↓↓↓", defval = false, type = input.bool)
+ShortDesc = input(title = "↓↓↓↓↓↓↓↓↓ Set Zero to disabled ↓↓↓↓↓↓↓↓↓", defval = false, type = input.bool)
+
+envelope_Short4_percent = input(defval= 15, step=0.1, minval = 0, title = "Envelope 4", type = input.float)
+envelope_Short3_percent = input(defval= 10, step=0.1, minval = 0, title = "Envelope 3", type = input.float)
+envelope_Short2_percent = input(defval= 7, step=0.1, minval = 0, title = "Envelope 2", type = input.float)
+envelope_Short1_percent = input(defval= 4, step=0.1, minval = 0, title = "Envelope 1", type = input.float)
+isEnableDoubleLot_Envelope3_Short=input(defval=false, title ="Envelope 3 Short Double Size", type = input.bool)
+
+LongEnv = input(title = "↓↓↓↓↓↓ Long Envelopes Configuration ↓↓↓↓↓↓", defval = false, type = input.bool)
+LongDesc = input(title = "↓↓↓↓↓↓↓↓↓ Set Zero to disabled ↓↓↓↓↓↓↓↓↓", defval = false, type = input.bool)
+
+envelope_Long1_percent = input(defval= -4, step=0.1, maxval = 0, title = "Envelope 1", type = input.float)
+envelope_Long2_percent = input(defval= -7, step=0.1, maxval = 0, title = "Envelope 2", type = input.float)
+envelope_Long3_percent = input(defval= -10, step=0.1, maxval = 0, title = "Envelope 3", type = input.float)
+envelope_Long4_percent = input(defval= -15, step=0.1, maxval = 0, title = "Envelope 4", type = input.float)
+isEnableDoubleLot_Envelope3_Long=input(defval=false, title ="Envelope 3 Long Double Size", type = input.bool)
+
+BacktestPeriod = input(title = "↓↓↓↓↓↓ Backtesting Period Configuration ↓↓↓↓↓↓", defval = true, type = input.bool)
+
+year_Start = input( defval = 19, minval = 10, maxval = 99, title = "From Year 20XX", type = input.integer)
+year_End = input(defval = 99, minval = 10, maxval = 99, title = "To Year 20XX", type = input.integer)
+month_Start = input( defval = 01, minval = 01, maxval = 12, title = "From Month", type = input.integer)
+month_End = input(defval = 12, minval = 01, maxval = 12, title = "To Month", type = input.integer)
+day_Start = input(defval = 01, minval = 01, maxval = 31, title = "From day", type = input.integer)
+day_End = input(defval = 31, minval = 01, maxval = 31, title = "To day", type = input.integer)
+
+if(is_Short_activate == false)
+    envelope_Short1_percent:= 0
+    envelope_Short2_percent:= 0
+    envelope_Short3_percent:= 0
+    envelope_Short4_percent:= 0
+
+if(is_Long_activate == false)
+    envelope_Long1_percent:= 0
+    envelope_Long2_percent:= 0
+    envelope_Long3_percent:= 0
+    envelope_Long4_percent:= 0
+    
+count_Envelopes_Long = 0
+count_Envelopes_Long:= envelope_Long1_percent!=0?count_Envelopes_Long+1:count_Envelopes_Long
+count_Envelopes_Long:= envelope_Long2_percent!=0?count_Envelopes_Long+1:count_Envelopes_Long
+count_Envelopes_Long:= envelope_Long3_percent!=0?count_Envelopes_Long+1:count_Envelopes_Long
+count_Envelopes_Long:= envelope_Long4_percent!=0?count_Envelopes_Long+1:count_Envelopes_Long
+
+count_Envelopes_Short = 0
+count_Envelopes_Short:= envelope_Short1_percent!=0?count_Envelopes_Short+1:count_Envelopes_Short
+count_Envelopes_Short:= envelope_Short2_percent!=0?count_Envelopes_Short+1:count_Envelopes_Short
+count_Envelopes_Short:= envelope_Short3_percent!=0?count_Envelopes_Short+1:count_Envelopes_Short
+count_Envelopes_Short:= envelope_Short4_percent!=0?count_Envelopes_Short+1:count_Envelopes_Short
+
+//Functions
+Function_is_backTestPeriod() => BacktestPeriod == false or (time < timestamp(2000+ year_End, month_End, day_End, 23, 59) and time > timestamp(2000+year_Start, month_Start, day_Start, 00, 00))
+
+Function_Round(value)=>
+    multiplier= 1 / syminfo.mintick
+    round(value*multiplier)/multiplier
+    
+Function_Calculate_DeviationLevel(value_MA, DeviationValue) =>
+    DeviationValue !=0 ? Function_Round(value_MA + value_MA * DeviationValue / 100) : value_MA
+
+Function_Calculate_Level(value_MA, envelope_percent) =>
+    envelope_percent !=0 ? Function_Round(value_MA + value_MA * envelope_percent / 100) : na
+
+Function_Convert_userTF_to_minCount(user_input_TF)=>
+    user_input_TF == "4H"?60*4:user_input_TF=="3H"?60*3:user_input_TF=="2H"?60*2:user_input_TF=="1H"?60:user_input_TF=="45m"?45:user_input_TF=="30m"?30:user_input_TF=="20m"?20:user_input_TF=="15m"?15:user_input_TF=="10m"?10:user_input_TF=="5m"?5:user_input_TF=="3m"?3:1
+
+Function_Convert_userDataInput_to_source(user_input_DataSource)=>
+    user_input_DataSource == "1.Open" ? open : user_input_DataSource == "2.High" ? high : user_input_DataSource == "3.Low" ? low : user_input_DataSource == "4.Close" ? close : user_input_DataSource == "5.HL2" ? hl2 : user_input_DataSource == "6.HLC3" ? hlc3 : user_input_DataSource == "7.OHLC4" ? ohlc4 : user_input_DataSource == "8.OC2" ? (open + close) / 2: na
+
+Function_Calculate_MA(user_input_DataSource, user_input_MA_type, MA_lenght)=>
+    source = Function_Convert_userDataInput_to_source(user_input_DataSource)
+    lag = (MA_lenght-1)/2
+    hma_src = user_input_MA_type == "7. HMA" ? 2 * wma(source, floor(MA_lenght / 2)) - wma(source, MA_lenght) : na
+    user_input_MA_type == "1. SMA" ? sma(source, MA_lenght) : user_input_MA_type == "2. PCMA"? (highest(high, MA_lenght) + lowest(low, MA_lenght)) / 2 : user_input_MA_type == "3. EMA" ? ema(source, MA_lenght) : user_input_MA_type == "4. WMA" ? wma(source, MA_lenght) : user_input_MA_type == "5. DEMA" ? (2 * ema(source,MA_lenght) - ema(ema(source,MA_lenght), MA_lenght)) : user_input_MA_type == "6. ZLEMA" ? ema(source + (source - source[lag]), MA_lenght) : user_input_MA_type == "7. HMA" ? wma(hma_src, floor(sqrt(MA_lenght))) : na
+
+Function_endConvert_MA(MA_data, user_input_TF, offset)=>
+    data = (user_input_TF == "Current." ? MA_data : security(syminfo.tickerid, tostring(Function_Convert_userTF_to_minCount(user_input_TF)), MA_data))
+    a = Function_Convert_userTF_to_minCount(user_input_TF)
+    b = Function_Convert_userTF_to_minCount(timeframe.period)
+    off_mult = 1
+    if a == b
+        off_mult := 1
+    else
+        if a > b
+            off_mult := a/b
+        else
+            off_mult := b/a
+    Function_Round(data)[offset*off_mult]
+
+Function_Calculate_EnvelopeNumber(lot_size, isLong)=>
+    isLong? (strategy.position_size > 0 ? round(abs(strategy.position_size) / lot_size) : 0.0) : (strategy.position_size < 0 ? round(abs(strategy.position_size) / lot_size) : 0.0)
+
+//MA
+MA_Short = Function_endConvert_MA( Function_Calculate_MA(Short_Data_input,ma_type_Short,len_Short) , timeFrame_Short , offset_Short)
+MA_Long = Function_endConvert_MA( Function_Calculate_MA(Long_Data_input,ma_type_Long,len_Long) , timeFrame_Long, offset_Long)
+
+//MA_Close
+MA_Short_close= MA_Short
+MA_Long_close= MA_Long
+
+if(isEnableShortCustomClose)
+    MA_Short_close := Function_endConvert_MA( Function_Calculate_MA(Short_Data_input_close,ma_type_close_Short,len_Short_close) , timeFrame_close_Short , offset_Short_close)
+    MA_Short_close := Function_Calculate_DeviationLevel(MA_Short_close,shortDeviation) //addDeviation
+if(isEnableLongCustomClose)
+    MA_Long_close := Function_endConvert_MA( Function_Calculate_MA(Long_Data_input_close,ma_type_close_Long,len_Long_close) , timeFrame_close_Long , offset_Long_close)
+    MA_Long_close := Function_Calculate_DeviationLevel(MA_Long_close,longDeviation) //addDeviation
+
+//Levels 
+Level_Long1 = Function_Calculate_Level(MA_Long, envelope_Long1_percent)
+Level_Long2 = Function_Calculate_Level(MA_Long, envelope_Long2_percent)
+Level_Long3 = Function_Calculate_Level(MA_Long, envelope_Long3_percent)
+Level_Long4 = Function_Calculate_Level(MA_Long, envelope_Long4_percent)
+Level_Short1 = Function_Calculate_Level(MA_Short, envelope_Short1_percent)
+Level_Short2 = Function_Calculate_Level(MA_Short, envelope_Short2_percent)
+Level_Short3 = Function_Calculate_Level(MA_Short, envelope_Short3_percent)
+Level_Short4 = Function_Calculate_Level(MA_Short, envelope_Short4_percent)
+
+//LotSize
+balance = strategy.initial_capital + strategy.netprofit
+lot_Short= is_Short_activate? strategy.equity / close : 0
+lot_Long= is_Long_activate? strategy.equity / close : 0
+if (isLotSizeAvg_Envelopes)
+    avgPriceForLot_EnvelopeShort_Data_input = MA_Short + (MA_Short*((envelope_Short1_percent+envelope_Short2_percent+envelope_Short3_percent+envelope_Short4_percent)/count_Envelopes_Short/100))
+    avgPriceForLot_EnvelopeLong_Data_input = MA_Long + (MA_Long*((envelope_Long1_percent+envelope_Long2_percent+envelope_Long3_percent+envelope_Long4_percent)/count_Envelopes_Long/100))
+    lot_Long := (balance / avgPriceForLot_EnvelopeLong_Data_input)
+    lot_Short := (balance / avgPriceForLot_EnvelopeShort_Data_input)
+
+lot_Short := lot_Short * lot_mult_Short
+lot_Long := lot_Long * lot_mult_Long
+lot_Long := lot_Long>1000000000?1000000000 : lot_Long
+lot_Short := lot_Short>1000000000?1000000000 : lot_Short
+
+//Stratagy Actions
+
+if (Function_is_backTestPeriod() and MA_Short>0 and lot_Short > 0)
+    if (MA_Short_close > close and strategy.position_size < 0)
+        strategy.close_all(when = MA_Short_close > close and strategy.position_size < 0, comment = "close Shorts on open")
+        strategy.entry("Short1", strategy.short, lot_Short, limit = Level_Short1, when = (envelope_Short1_percent!=0))
+        enterenv2s = Function_Calculate_EnvelopeNumber(lot_Long,true)[1] + 1
+        strategy.entry("Short2", strategy.short, lot_Short, limit = Level_Short2, when = (envelope_Short2_percent!=0)) 
+        lotshort3 = isEnableDoubleLot_Envelope3_Short?lot_Short * 2 : lot_Short
+        maxLots_Envelope3 = isEnableDoubleLot_Envelope3_Short? 3 : 2
+        calcmultshort = Function_Calculate_EnvelopeNumber(lot_Short,false) == 4 ? 4 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 8 ? 8 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 6 ? 6 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 5 ? 4 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 9 ? 8 : maxLots_Envelope3
+        strategy.entry("Short3", strategy.short, lotshort3, limit = Level_Short3, when = (envelope_Short3_percent!=0))
+        strategy.entry("Short4", strategy.short, lot_Short, limit = Level_Short4, when = (envelope_Short4_percent!=0)) 
+        strategy.exit( "TakeProfit", limit = MA_Short_close, when = Function_Calculate_EnvelopeNumber(lot_Short,false) !=0)
+    else
+        strategy.entry("Short1", strategy.short, lot_Short, limit = Level_Short1, when = (envelope_Short1_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Short,false) == 0 ))
+        enterenv2s = Function_Calculate_EnvelopeNumber(lot_Long,true)[1] + 1
+        strategy.entry("Short2", strategy.short, lot_Short, limit = Level_Short2, when = (envelope_Short2_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Short,false) <= enterenv2s))
+        lotshort3 = isEnableDoubleLot_Envelope3_Short?lot_Short * 2 : lot_Short
+        maxLots_Envelope3 = isEnableDoubleLot_Envelope3_Short? 3 : 2
+        calcmultshort = Function_Calculate_EnvelopeNumber(lot_Short,false) == 4 ? 4 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 8 ? 8 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 6 ? 6 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 5 ? 4 : Function_Calculate_EnvelopeNumber(lot_Short,false) == 9 ? 8 : maxLots_Envelope3
+        strategy.entry("Short3", strategy.short, lotshort3, limit = Level_Short3, when = (envelope_Short3_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Short,false) <= calcmultshort))
+        strategy.entry("Short4", strategy.short, lot_Short, limit = Level_Short4, when = (envelope_Short4_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Short,false) <= calcmultshort + 1))
+        strategy.exit( "TakeProfit", limit = MA_Short_close, when = Function_Calculate_EnvelopeNumber(lot_Short,false) !=0)
+
+if (Function_is_backTestPeriod() and MA_Long>0 and lot_Long > 0)
+    if (MA_Long_close < close and strategy.position_size > 0)
+        strategy.close_all(when = MA_Long_close < close and strategy.position_size > 0, comment = "close Long on open")
+        strategy.entry("Long1", strategy.long, lot_Long, limit = Level_Long1, when = (envelope_Long1_percent!=0)) //and Function_Calculate_EnvelopeNumber(lot_Long,true) == 0))
+        enterenv2l = Function_Calculate_EnvelopeNumber(lot_Short,false)[1] + 1
+        strategy.entry("Long2", strategy.long, lot_Long, limit = Level_Long2, when = (envelope_Long2_percent!=0)) //and Function_Calculate_EnvelopeNumber(lot_Long,true) <= enterenv2l))
+        lotlong3 = isEnableDoubleLot_Envelope3_Long? lot_Long * 2 : lot_Long 
+        maxLots_Envelope3 = isEnableDoubleLot_Envelope3_Long? 3  : 2
+        calcmultlong = Function_Calculate_EnvelopeNumber(lot_Long,true) == 4 ? 4 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 8 ? 7 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 6 ? 6 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 5 ? 4 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 9 ? 8 : maxLots_Envelope3
+        strategy.entry("Long3", strategy.long, lotlong3, limit = Level_Long3, when = (envelope_Long3_percent!=0)) 
+        strategy.entry("Long4", strategy.long, lot_Long, limit = Level_Long4, when = (envelope_Long4_percent!=0)) 
+        strategy.exit( "TakeProfit", limit = MA_Long_close, when = Function_Calculate_EnvelopeNumber(lot_Long,true) !=0)
+    else
+        strategy.entry("Long1", strategy.long, lot_Long, limit = Level_Long1, when = (envelope_Long1_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Long,true) == 0))
+        enterenv2l = Function_Calculate_EnvelopeNumber(lot_Short,false)[1] + 1
+        strategy.entry("Long2", strategy.long, lot_Long, limit = Level_Long2, when = (envelope_Long2_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Long,true) <= enterenv2l))
+        lotlong3 = isEnableDoubleLot_Envelope3_Long? lot_Long * 2 : lot_Long 
+        maxLots_Envelope3 = isEnableDoubleLot_Envelope3_Long? 3  : 2
+        calcmultlong = Function_Calculate_EnvelopeNumber(lot_Long,true) == 4 ? 4 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 8 ? 7 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 6 ? 6 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 5 ? 4 : Function_Calculate_EnvelopeNumber(lot_Long,true) == 9 ? 8 : maxLots_Envelope3
+        strategy.entry("Long3", strategy.long, lotlong3, limit = Level_Long3, when = (envelope_Long3_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Long,true) <= calcmultlong))
+        strategy.entry("Long4", strategy.long, lot_Long, limit = Level_Long4, when = (envelope_Long4_percent!=0 and Function_Calculate_EnvelopeNumber(lot_Long,true) <= calcmultlong + 1))
+        strategy.exit( "TakeProfit", limit = MA_Long_close, when = Function_Calculate_EnvelopeNumber(lot_Long,true) !=0)
+
+strategy.cancel_all(Function_is_backTestPeriod() == false)
+    
+//Lines
+colorlong = color.green
+colorshort = color.red
+
+value_maShort_close= isEnableShortCustomClose ? MA_Short_close : na
+value_maLong_close= isEnableLongCustomClose ? MA_Long_close : na
+
+plot(value_maShort_close, offset = 1, color = color.orange, title = "MA line Short Close")
+
+plot(Level_Short4, color = colorshort, offset = 1, title = "Short Level 4")
+plot(Level_Short3, color = colorshort, offset = 1, title = "Short Level 3")
+plot(Level_Short2, color = colorshort, offset = 1, title = "Short Level 2")
+plot(Level_Short1, color = colorshort, offset = 1, title = "Short Level 1")
+plot(count_Envelopes_Short > 0 ? MA_Short : na, color = color.purple,offset = 1,  title = "MA line Short")
+plot(count_Envelopes_Long > 0 ? MA_Long : na, color = color.lime, offset = 1, title = "MA line Long")
+plot(Level_Long1, color = colorlong, offset = 1, title = "Long Level 1")
+plot(Level_Long2, color = colorlong, offset = 1, title = "Long Level 2")
+plot(Level_Long3, color = colorlong, offset = 1, title = "Long Level 3")
+plot(Level_Long4, color = colorlong, offset = 1, title = "Long Level 4")
+
+plot(value_maLong_close, offset = 1, color = color.blue, title = "MA line Long Close")
+
+View in Pine Editor・258 lines
+Use on chart
+5
+5
+9
+9
+14 523
+Jan 26, 2020
+Published source code is subject to the terms of the GNU Affero General Public License v3.0
+
+This script describes and provides backtesting functionality to internal strategy of algorithmic crypto trading software "HatiKO bot".
+
+Suitable for backtesting any Cryptocurrency Pair on any Exchange/Platform, any Timeframe.
+
+Core Mechanics of this strategy are based on theory of price always returning to Moving Average + Envelopes indicator (Moving_average_envelope from Wiki)
+
+Developement of this script and trading software is inspired by:
+
+"Essential Technical Analysis: Tools and Techniques to Spot Market Trends" by Leigh Stevens (published on 12th of April 2002)
+"Moving Average Envelopes" by ChartSchool, StockCharts platform (published on 13th of April 2015 or earlier)
+"Коля Колеснік" from Crypto Times channel ("Метод сетка", published on 19th of August 2018)
+"3 ways to use Moving Average Envelopes" by Rich Fitton, published on Trader's Nest (published on 28st of November 2018 or earlier)
+noro's "Robot WhiteBox ShiftMA" strategy v1 script, published on TradingView platform (published on 29th of August 2018)
+"Moving Average Envelopes: A Popular Trading Tool" Investopedia article (published 25th of June 2019)
+and KROOL1980's blogpost on Argolabs ("Гридерство или Сетка как источник прибыли на форекс", published on 27th of February 2015)
+
+Core Features:
+
+1) Up to 4 Envelopes in each direction (Long/Short)
+2) Use any of 6 different basis MAs, optionally use different MAs for Opening and Closure
+3) Use different Timeframes for MA calculation, without any repainting and lookahead bias.
+4) Fixed order size, not Martingale strategy
+5) Close open position earlier by using Deviation parameter
+6) PineScript v4 code
+
+Options description:
+
+Lot - % from your initial balance to use for order size calculation
+
+Timeframe Short - Timeframe to use for Short Opening MA calculation, can be chosen from dropdown list, default is Current Graph Timeframe
+MA Type Short - Type of MA to use for Short Opening MA calculation, can be chosen from dropdown list, default is SMA
+Data Short - Source of Price for Short Opening MA calculation, can be chosen from dropdown list, default is OHLC4
+MA Length Short - Period used for Short Opening MA calculation, should be >=1, default is 3
+MA offset Short - Offset for MA value used for Short Envelopes calculation, should be >= 0, default is 0
+
+Timeframe Long - Timeframe to use for Long Opening MA calculation, can be chosen from dropdown list, default is Current Graph Timeframe
+MA Type Long - Type of MA to use for Long Opening MA calculation, can be chosen from dropdown list, default is SMA
+Data Long - Source of Price for Long Opening MA calculation, can be chosen from dropdown list, default is OHLC4
+MA Length Long - Period used for Long Opening MA calculation, should be >=1, default is 3
+MA offset Long - Offset for MA value used for Long Envelopes calculation, should be >= 0, default is 0
+
+Mode close MA Short - Enable different MA for Short position Closure, default is "false". If false, Closure MA = Opening MA
+
+Timeframe Short Close - Timeframe to use for Short Position Closure MA calculation, can be chosen from dropdown list, default is Current Graph Timeframe
+MA Type Close Short - Type of MA to use for Short Position Closure MA calculation, can be chosen from dropdown list, default is SMA
+Data Short Close - Source of Price for Short Closure MA calculation, can be chosen from dropdown list, default is OHLC4
+MA Length Short Close - Period used for Short Opening MA calculation, should be >=1, default is 3
+Short Deviation - % to move from MA value, used to close position above or beyond MA, can be negative, default is 0
+MA offset Short Close - Offset for MA value used for Short Position Closure calculation, should be >= 0, default is 0
+
+Mode close MA Long - Enable different MA for Long position Closure, default is "false". If false, Closure MA = Opening MA
+
+Timeframe Long Close - Timeframe to use for Long Position Closure MA calculation, can be chosen from dropdown list, default is Current Graph Timeframe
+MA Type Close Long - Type of MA to use for Long Position Closure MA calculation, can be chosen from dropdown list, default is SMA
+Data Long Close - Source of Price for Long Closure MA calculation, can be chosen from dropdown list, default is OHLC4
+MA Length Long Close - Period used for Long Opening MA calculation, should be >=1, default is 3
+Long Deviation - % to move from MA value, used to close position above or beyond MA, can be negative, default is 0
+MA offset Long Close - Offset for MA value used for Long Position Closure calculation, should be >= 0, default is 0
+
+Short Shift 1..4 - % from MA value to put Envelopes at, for Shorts numbers should be positive, the higher is number, the higher should be Shift position, example: "Shift 1 = 1, shift 2 = 2, etc."
+
+Long Shift 1..4 - % from MA value to put Envelopes at, for Longs numbers should be negative, the lower is number, the lower should be Shift position, example: "Shift 1 = -1, shift 2 = -2, etc."
+
+From Year 20XX - Backtesting Starting Year number, only 20xx supported as script is cryptocurrency-oriented.
+To Year 20XX - Backtesting Final Year number, only 20xx supported as script is cryptocurrency-oriented.
+From Month - Years starting Month, optional tweaking, changing not recommended
+To Month - Years ending Month, optional tweaking, changing not recommended
+From day - Months starting day, optional tweaking, changing not recommended
+To day - Months ending day, optional tweaking, changing not recommended
+
+Graph notes:
+
+Green lines - Long Envelopes.
+Red lines - Short Envelopes.
+Orange line - MA for closing of Short positions.
+Lime line - MA for closing of Long positions.
+
+
+**************************************************************************************************************************************************************************************************************
+Опубликованный исходный код регулируется Условиями Стандартной Общественной Лицензии GNU Affero v3.0
+
+Этот скрипт описывает и предоставляет функции бектеста для внутренней стратегии алгоритмического программного обеспечения "HatiKO bot".
+
+Подходит для тестирования любой криптовалютной пары на любой бирже/платформе, на любом таймфрейме.
+
+Кор-механика этой стратегии основана на теории всегда возвращающейся к значению МА цены с использованием индикатора Envelopes (Moving_average_envelope from Wiki)
+
+Разработка этого скрипта и программного обеспечения для торговли вдохновлена следующими источниками:
+Книга "Essential Technical Analysis: Tools and Techniques to Spot Market Trends" Ли Стивенса (опубликовано 12 апреля 2002 года)
+«Moving Average Envelopes» от ChartSchool, платформа StockCharts (опубликовано 13 апреля 2015 года или раньше)
+«Коля Колеснік» с канала Crypto Times («Метод сетка», опубликовано 19 августа 2018 года)
+«3 ways to use Moving Average Envelopes» Рича Фиттона, опубликованные в «Trader's Nest» (опубликовано 28 ноября 2018 года или раньше)
+Скрипт стратегии noro "Robot WhiteBox ShiftMA" v1, опубликованный на платформе TradingView(опубликовано 29 августа 2018 года)
+«Moving Average Envelopes: A Popular Trading Tool», статья Investopedia (опубликовано 25 июня 2019 года)
+Блог KROOL1980 из Argolabs («Гридерство или Сетка как источник прибыли на форекс», опубликовано 27 февраля 2015 года)
+
+Основные особенности:
+
+1) До 4-х Ордеров в каждом из направлении (Лонг / Шорт)
+2) Выбор из 6-ти разных базовых МА, опционально используйте разные МА для открытия и закрытия.
+3) Используйте разные таймфреймы для расчета MA, без перерисовки и "эффекта стеклянного шара".
+4) Фиксированный размер ордера, а не стратегия Мартингейла
+5) Возможность закрытия открытой позиции заблаговременно, используя параметр Deviation
+6) Код реализован на PineScript v4
+
+Описание параметров:
+
+Lot - % от вашего первоначального баланса, используется при расчете размера Ордера
+
+Timeframe Short - таймфрейм, используемый для расчета МА Открытия Шорт позиций, может быть выбран из списка, по умолчанию - таймфрейм текущего графика
+MA Type Short - тип MA, используемый для расчета МА Открытия Шорт позиций, может быть выбран из списка, по умолчанию SMA
+Data Short - источник цены для расчета МА Открытия Шорт позиций, может быть выбран из списка, по умолчанию OHLC4
+MA Length Short - период, используемый для расчета МА Открытия Шорт позиций, должен быть >= 1, по умолчанию 3
+MA Offset Short - смещение значения MA, используемого для расчета Шорт Ордеров, должно быть >= 0, по умолчанию 0
+
+Timeframe Long - таймфрейм, используемый для расчета МА Открытия Лонг позиций, может быть выбран из списка, по умолчанию - таймфрейм текущего графика
+MA Type Long - тип MA, используемый для расчета МА Открытия Лонг позиций, может быть выбран из списка, по умолчанию SMA
+Data Long - источник цены для расчета МА Открытия Лонг позиций, может быть выбран из списка, по умолчанию OHLC4
+MA Length Long - период, используемый для расчета МА Открытия Лонг позиций, должен быть >= 1, по умолчанию 3
+MA Offset Long - смещение значения MA, используемого для расчета Лонг Ордеров, должно быть >= 0, по умолчанию 0
+
+Mode close MA Short - Включает отдельное MA для закрытия Шорт позиции, по умолчанию «false». Если false, MA Закрытия = MA Открытия
+
+Timeframe Short Close - таймфрейм, используемый для расчета МА Закрытия Шорт позиций, может быть выбран из списка, по умолчанию - таймфрейм текущего графика
+MA Type Close Short - тип MA, используемый при расчете МА Закрытия Шорт позиции. Mожно выбрать из списка, по умолчанию SMA
+Data Short Close - источник цены для расчета МА Закрытия Шорт позиций, может быть выбран из списка, по умолчанию OHLC4
+MA Length Short Close - период, используемый для расчета МА Закрытия Шорт позиции, должен быть >= 1, по умолчанию 3
+Short Deviation - % отклонения от значения MA, используется для закрытия позиции выше или ниже рассчитанного значения MA, может быть отрицательным, по умолчанию 0
+MA Offset Short Close - смещение значения MA, используемого для расчета закрытия Шорт позиции, должно быть >= 0, по умолчанию 0
+
+Mode close MA Long - Включает разные MA для закрытия Лонг позиции, по умолчанию «false». Если false, MA Закрытия = MA Открытия
+
+Timeframe Long Close - таймфрейм, используемый для расчета МА Закрытия Лонг позиций, может быть выбран из списка, по умолчанию - таймфрейм текущего графика
+MA Type Close Long - тип MA, используемый при расчете МА Закрытия Лонг позиции. Mожно выбрать из списка, по умолчанию SMA
+Data Long Close - источник цены для расчета МА Закрытия Лонг позиций, может быть выбран из списка, по умолчанию OHLC4
+MA Length Long Close - период, используемый для расчета МА Закрытия Лонг позиции, должен быть >= 1, по умолчанию 3
+Long Deviation -% для перехода от значения MA, используется для закрытия позиции выше или ниже рассчитанного значения MA, может быть отрицательным, по умолчанию 0
+MA Offset Long Close - смещение значения MA, используемого для расчета закрытия Лонг позиции, должно быть >= 0, по умолчанию 0
+
+Short Shift 1..4 - % от значения MA для размещения Ордеров, для Шорт Ордеров должен быть положительным, чем выше номер, тем выше должна располагаться позиция Shift, например: «Shift 1 = 1, Shift 2 = 2 и т.д. "
+Long Shift 1..4 - % от значения MA для размещения Ордеров, для Лонг Ордеров должно быть отрицательным, чем ниже число, тем ниже должна располагаться позиция Shift, например: «Shift 1 = -1, Shift 2 = -2, и т.д."
+
+From Year 20XX - Год начала тестирования, из-за ориентированности на криптовалюты поддерживаются только значения формата 20хх.
+To Year 20XX - Год окончания тестирования, из-за ориентированности на криптовалюты поддерживаются только значения формата 20хх.
+From Month - Начальный месяц, опционально, менять не рекомендуется
+To Month - Конечный месяц, опционально, менять не рекомендуется
+From day - Начальный день месяца, опционально, менять не рекомендуется
+To day - Конечный день месяца, опционально, менять не рекомендуется
+
+Пояснения к графику:
+
+Зеленые линии - Лонг Ордера.
+Красные линии - Шорт Ордера.
+Оранжевая линия - MA Закрытия Шорт позиций.
+Лаймовая линия - MA Закрытия Лонг позиций.
+Feb 1, 2020
+Release Notes
+
+Struct change and bugFix
+Feb 1, 2020
+Release Notes
+For a more correct calculation, the opening Timeframe must match the chart.
+It is not necessary to view and study the development process.
+Stylistic changes.
+Feb 11, 2020
+Release Notes
+Multiplier Lot Size
+Mar 11, 2020
+Release Notes
+
+-Fix
+-new MA type "HMA"
+-Fix offset if used different TimeFrames on open/close MA
+
+Be careful! When using different Timeframes, the graph must match the minimum one.
+
+Mar 12, 2020
+Release Notes
+-Fix "HMA"

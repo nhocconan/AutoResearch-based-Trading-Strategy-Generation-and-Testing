@@ -1,0 +1,79 @@
+//@version=2
+strategy("Stealthy 7 Linear Regression Channel Strategy", overlay=true)
+source = open
+length = input(100, minval=1, type=integer)
+mult1 = input(1, minval=0.001, maxval=50)
+mult2 = input(1, minval=0.001, maxval=50)
+DayTrader = input(title="Range Mode", type=bool, defval=false)
+
+//Making the first least squares line
+sum_x = length * (length + 1) / 2
+sum_y = 0
+sum_xy = 0
+xyproductsum = 0
+sum_xx = 0
+for i = 1 to length
+    sum_y := sum_y + close[i]
+    sum_xy := i * close[i] + sum_xy
+    sum_xx := i * i + sum_xx
+m = (length*sum_xy - (sum_x * sum_y)) / (length * sum_xx - (sum_x * sum_x))
+b = sum_y / length - (m * sum_x / length)
+
+//Finding the first standard deviation from the line
+difference = 0
+for i = 1 to length
+    y = i * m  + b
+    difference := pow(abs(close[i] - y),2) + difference
+STDDEV = sqrt(difference / length)
+
+//Creating trading zones
+dev = mult1 * STDDEV
+dev2 = mult2 * STDDEV
+upper = b + dev
+lower = b - dev2
+middle = b
+
+if DayTrader == false
+    if crossover(source, upper)
+        strategy.entry("RGLONG", strategy.long, oca_name="RegChannel", oca_type=strategy.oca.cancel, comment="RegLong")
+    else
+        strategy.cancel(id="RGLONG")
+
+    if crossunder(source, lower)
+        strategy.entry("RGSHORT", strategy.short, oca_name="RegChannel", oca_type=strategy.oca.cancel, comment="RegShort")
+    else
+        strategy.cancel(id="RGSHORT")
+
+    if crossover(source, middle) and strategy.position_size < 0
+        strategy.close_all()
+    if crossunder(source,middle) and strategy.position_size > 0
+        strategy.close_all()
+
+if DayTrader == true
+    if crossover(source, lower) 
+        strategy.entry("RGLONG", strategy.long, oca_name="RegChannel", oca_type=strategy.oca.cancel, comment="RegLong")
+    else
+        strategy.cancel(id="RGLONG")
+
+    if crossunder(source, upper)
+        strategy.entry("RGSHORT", strategy.short, oca_name="RegChannel", oca_type=strategy.oca.cancel, comment="RegShort")
+    else
+        strategy.cancel(id="RGSHORT")
+
+
+plot(upper, title="UpperBand", color=purple, linewidth=1, style=line)
+plot(lower, title="LowerBand", color=purple, linewidth=1, style=line)
+plot(middle, title="MiddleBand", color=black, linewidth=1, style=line)
+
+View in Pine Editor・66 lines
+Use on chart
+2
+4
+0
+3
+9 302
+This is a Linear Regression Channel tool, similar to the hand tool in the left toolbar, but it automates the drawing. It has a rolling look back. Range mode shorts the upper channel and longs the lower crossover with no closing rules. Trend mode longs the break out and closes at the regression. It draws a linear line between the candles then computes an upper and lower deviation.
+
+I find the tool random. It works sometimes. Eventually I believe Linear Channels will ruin your account. The next time you see someone posting rectangular channels remind them that its all in hindsight. The price won't stay in the rectangle. Every time you get a new candle the regression is redrawn. The range is constantly moving. Not great.
+
+I'm publishing to show that linear regression channel isn't very good and to show people the price won't stay in a range that is tradeable. At the very least you'll have to find superior rules to avoid huge drawdown. I think that price isn't distributed well against a straight line (DUH).

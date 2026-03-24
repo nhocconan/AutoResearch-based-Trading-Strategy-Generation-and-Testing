@@ -1,0 +1,150 @@
+//@version=5
+// ⚠️ 注意：此策略默认启用移动止盈，请勿关闭以保证策略完整性
+strategy("ETH 双模策略 v2.1 - Gate.io 专用（15分钟信号 + 1小时趋势）", 
+     overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.1,
+     margin_long=1.0,
+     margin_short=1.0)
+
+// ====================== 参数设置 ======================
+rsiLen = input.int(2, "CRSI - RSI周期")
+streakLen = input.int(3, "CRSI - Streak周期")
+prcLen = input.int(80, "CRSI - 百分位窗口")
+
+crsiOversold = input.int(25, "CRSI 超卖阈值", minval=10, maxval=40, group="信号阈值")
+crsiOverbought = input.int(75, "CRSI 超买阈值", minval=60, maxval=90, group="信号阈值")
+
+keltnerLength = input.int(18, "Keltner EMA周期")
+keltnerMult = input.float(1.5, "Keltner 乘数")
+
+// 风控参数
+useStopLoss = input.bool(true, "启用止损？", group="风控")
+slAtrMult = input.float(2.2, "止损 ATR 倍数", minval=0.5, maxval=5.0, group="风控")
+useTakeProfit = input.bool(true, "启用止盈？", group="风控")
+tpRatio = input.float(2.5, "盈亏比 (TP/SL)", minval=0.5, maxval=5.0, group="风控")
+useTrailingStop = input.bool(true, "启用移动止盈？", group="风控") // ✅ 默认开启！
+trailActivationMult = input.float(1.5, "追踪激活倍数 (ATR)", minval=0.5, maxval=5.0, group="风控")
+trailOffsetMult = input.float(1.0, "追踪回撤倍数 (ATR)", minval=0.5, maxval=3.0, group="风控")
+
+minDistance = input.int(5, "最小信号间隔（K线数）", minval=1, group="风控")
+minHoldBars = input.int(5, "最小持仓时间（K线数）", minval=1, group="风控")
+
+// ====================== 时间框架 ======================
+signalTf = "15"    // ✅ 15分钟：信号生成周期
+trendTf = "60"     // ✅ 1小时：趋势判断周期
+
+// ====================== CRSI 函数 ======================
+crsiFunc() =>
+    rsi1 = ta.rsi(close, rsiLen)
+    streak = 0
+    streak := close > close[1] ? (streak[1] > 0 ? streak[1] + 1 : 1) :
+                 close < close[1] ? (streak[1] < 0 ? streak[1] - 1 : -1) : 0
+    rsi2 = ta.rsi(streak, streakLen)
+    percentRank = ta.percentrank(close - close[1], prcLen)
+    (rsi1 + rsi2 + percentRank) / 3
+
+// ====================== 多时间框架数据（基于15分钟）=======================
+[crsi_15m, close_15m, open_15m, high_15m, low_15m, atr_15m, basis_15m] = request.security(syminfo.tickerid, signalTf, [crsiFunc(), close, open, high, low, ta.atr(10), ta.ema(close, keltnerLength)])
+
+// 获取1小时CRSI用于趋势判断
+crsi_1h = request.security(syminfo.tickerid, trendTf, crsiFunc())
+
+// 判断是否为15分钟K线的收盘时刻
+isSignalBar = ta.change(time(signalTf)) != 0
+
+// ====================== 原始信号（纯净，无任何限制）=======================
+inRange   = crsi_1h >= 40 and crsi_1h <= 60
+trendBull = crsi_1h > 60
+trendBear = crsi_1h < 40
+
+crsiOversoldSignal = crsi_15m <= crsiOversold
+crsiOverboughtSignal = crsi_15m >= crsiOverbought
+
+bullishCandle = close_15m > open_15m and (close_15m - open_15m) >= (high_15m - low_15m) * 0.3
+bearishCandle = close_15m < open_15m and (open_15m - close_15m) >= (high_15m - low_15m) * 0.3
+
+rangeBuy  = inRange and (low_15m < basis_15m - keltnerMult * atr_15m) and crsiOversoldSignal and bullishCandle
+rangeSell = inRange and (high_15m > basis_15m + keltnerMult * atr_15m) and crsiOverboughtSignal and bearishCandle
+
+trendBuyPullback  = trendBull and crsiOversoldSignal and (close_15m <= (basis_15m - keltnerMult * atr_15m) * 1.02)
+trendSellPullback = trendBear and crsiOverboughtSignal and (close_15m >= (basis_15m + keltnerMult * atr_15m) * 0.98)
+
+trendBuyBreakout  = trendBull and (high_15m > (basis_15m + keltnerMult * atr_15m)[1]) and (close_15m < basis_15m + keltnerMult * atr_15m) and crsiOversoldSignal
+trendSellBreakout = trendBear and (low_15m < (basis_15m - keltnerMult * atr_15m)[1]) and (close_15m > basis_15m - keltnerMult * atr_15m) and crsiOverboughtSignal
+
+trendBuy  = trendBuyPullback or trendBuyBreakout
+trendSell = trendSellPullback or trendSellBreakout
+
+// ✅【关键】原始信号：仅用于显示和警报，不受任何限制
+rawBuySignal  = isSignalBar and (rangeBuy or trendBuy)
+rawSellSignal = isSignalBar and (rangeSell or trendSell)
+
+// ====================== 可视化 & 警报 ======================
+plotshape(rawBuySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, text="BUY", size=size.small)
+plotshape(rawSellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, text="SELL", size=size.small)
+
+// ✅ 警报基于原始信号 → Gate.io 能收到每一个15分钟信号
+alertcondition(rawBuySignal, title="ETH BUY", message="【ETH】15分钟买入信号！")
+alertcondition(rawSellSignal, title="ETH SELL", message="【ETH】15分钟卖出信号！")
+
+// ====================== 交易执行逻辑（带风控）=======================
+var int lastTradeBar = na
+var int longEntryBar = na
+var int shortEntryBar = na
+
+if isSignalBar
+    canTrade = na(lastTradeBar) or (bar_index - lastTradeBar >= minDistance)
+    
+    // 开多
+    if rawBuySignal and canTrade
+        strategy.entry("Long", strategy.long)
+        lastTradeBar := bar_index
+        longEntryBar := bar_index
+        
+        longStop = close_15m - slAtrMult * atr_15m
+        longTarget = close_15m + tpRatio * slAtrMult * atr_15m
+        if useStopLoss
+            strategy.exit("Long Exit", from_entry="Long", 
+                          stop=longStop, 
+                          limit=useTakeProfit ? longTarget : na,
+                          trail_points=useTrailingStop ? trailActivationMult * atr_15m : na,
+                          trail_offset=useTrailingStop ? trailOffsetMult * atr_15m : na)
+    
+    // 开空
+    if rawSellSignal and canTrade
+        strategy.entry("Short", strategy.short)
+        lastTradeBar := bar_index
+        shortEntryBar := bar_index
+        
+        shortStop = close_15m + slAtrMult * atr_15m
+        shortTarget = close_15m - tpRatio * slAtrMult * atr_15m
+        if useStopLoss
+            strategy.exit("Short Exit", from_entry="Short", 
+                          stop=shortStop, 
+                          limit=useTakeProfit ? shortTarget : na,
+                          trail_points=useTrailingStop ? trailActivationMult * atr_15m : na,
+                          trail_offset=useTrailingStop ? trailOffsetMult * atr_15m : na)
+
+// 最小持仓保护
+canCloseLong  = not na(longEntryBar) and (bar_index - longEntryBar >= minHoldBars)
+canCloseShort = not na(shortEntryBar) and (bar_index - shortEntryBar >= minHoldBars)
+
+// 反向平仓（受最小持仓保护）
+if isSignalBar
+    if rawSellSignal and canCloseLong
+        strategy.close("Long")
+    if rawBuySignal and canCloseShort
+        strategy.close("Short")
+
+View in Pine Editor・141 lines
+Use on chart
+1
+1
+383
+Open-source strategy for ETH.
+Signals triggered on 5m chart with higher-timeframe context.
+For personal automation use only.

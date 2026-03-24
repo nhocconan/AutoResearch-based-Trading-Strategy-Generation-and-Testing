@@ -1,0 +1,168 @@
+//@version=6
+strategy("FVG Breakout Lite by tradingbauhaus", overlay = true, max_boxes_count = 500, max_lines_count = 500)
+
+// === Inputs ===
+length = input.int(25, "Trend Period", minval = 5, group = "Core Settings")
+volumeLookback = input.int(20, "Volume Lookback", minval = 5, group = "Core Settings")
+volumeThreshold = input.float(1.2, "Volume Threshold (x Avg)", minval = 1.0, step = 0.1, group = "Core Settings")
+showMitigation = input(true, "Display Mitigation Zones", group = "Mitigation Settings")
+maxDuration = input(75, "Max Zone Life", group = "Mitigation Settings")
+
+// === Style Customization ===
+bullBreakColor = input(color.new(#00cc88, 35), "Bullish Breakout FVG Color", inline = "bullStyle", group = "Visuals")
+bullFVGColor  = input(color.new(#66ffcc, 50), "Bullish FVG Color", inline = "bullStyle", group = "Visuals")
+bearBreakColor = input(color.new(#ff3366, 35), "Bearish Breakout FVG Color", inline = "bearStyle", group = "Visuals")
+bearFVGColor  = input(color.new(#ff9999, 50), "Bearish FVG Color", inline = "bearStyle", group = "Visuals")
+
+// === Risk Management ===
+stopLossPerc = input.float(1.5, "Stop Loss %", minval = 0.2, step = 0.1, group = "Trading Rules")
+takeProfitPerc = input.float(3.0, "Take Profit %", minval = 0.5, step = 0.1, group = "Trading Rules")
+marginRate = input.float(8.74, "Margin Rate % (Webull Default)", minval = 4.74, maxval = 8.74, group = "Trading Rules")
+
+// === Webull Fee Structure ===
+var float secFeeRate = 0.0000278  // SEC fee per $1 of trade value (sell only)
+var float finraFeeRate = 0.000166 // FINRA TAF per share (sell only)
+var float finraFeeMin = 0.01      // Minimum FINRA fee
+var float finraFeeMax = 8.30      // Maximum FINRA fee per trade
+
+// === FVG Detection Logic ===
+var bullBreakLines = array.new<line>(0)
+var bearBreakLines = array.new<line>(0)
+var bullBreakLabels = array.new<label>(0)
+var bearBreakLabels = array.new<label>(0)
+
+upperBand = ta.highest(length)
+lowerBand = ta.lowest(length)
+midLevel = math.avg(upperBand, lowerBand)
+
+currentBar = bar_index
+isBullFVG = low > high[2] and close[1] > high[2]
+isBearFVG = high < low[2] and close[1] < low[2]
+
+var bool isBullBroken = false
+var bool isBearBroken = false
+var float bullTriggerLevel = 0
+var float bearTriggerLevel = 0
+
+// === Volume Filter ===
+avgVolume = ta.sma(volume, volumeLookback)
+isHighVolume = volume > avgVolume * volumeThreshold
+
+// === Fee Calculation Functions ===
+calcSECFee(float tradeValue) =>
+    float fee = tradeValue * secFeeRate
+    math.max(fee, 0.01)
+
+calcFINRAFee(float shares) =>
+    float fee = shares * finraFeeRate
+    math.min(math.max(fee, finraFeeMin), finraFeeMax)
+
+calcMarginCost(float positionSize) =>
+    float cost = positionSize * (marginRate / 100) / 252  // Daily cost assuming 252 trading days
+    cost
+
+// === Bullish Breakout FVG ===
+if low > upperBand[2] and isBullFVG
+    box.new(currentBar-2, high[2], currentBar, low, na, bgcolor = bullBreakColor)
+    isBullBroken := false
+    bullTriggerLevel := high[2]
+    if showMitigation
+        bullBreakLines.unshift(line.new(currentBar-2, high[2], currentBar, high[2], color = bullBreakColor))
+        bullBreakLabels.unshift(label.new(bar_index, high[2], color = color.rgb(0,0,0,90), text = "B", textcolor = bullBreakColor, style = label.style_label_left))
+
+// === Bearish Breakout FVG ===
+if high < lowerBand[2] and isBearFVG
+    box.new(currentBar-2, low[2], currentBar, high, na, bgcolor = bearBreakColor)
+    isBearBroken := false
+    bearTriggerLevel := low[2]
+    if showMitigation
+        bearBreakLines.unshift(line.new(currentBar-2, low[2], currentBar, low[2], color = bearBreakColor))
+        bearBreakLabels.unshift(label.new(bar_index, low[2], color = color.rgb(0,0,0,90), text = "B", textcolor = bearBreakColor, style = label.style_label_left))
+
+bullTriggerLevel := math.max(bullTriggerLevel, midLevel)
+bearTriggerLevel := math.min(bearTriggerLevel, midLevel)
+
+if high > bearTriggerLevel
+    isBearBroken := true
+if low < bullTriggerLevel
+    isBullBroken := true
+
+// === Trading Logic with Fees and Volume Filter ===
+var float entryPrice = 0.0
+var float positionSize = 0.0
+var float marginCost = 0.0
+var float secFee = 0.0
+var float finraFee = 0.0
+
+if (isBullFVG and not isBullBroken and isHighVolume)
+    entryPrice := close
+    positionSize := strategy.position_size * entryPrice
+    marginCost := calcMarginCost(positionSize)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", "Long", stop = entryPrice * (1 - stopLossPerc / 100), limit = entryPrice * (1 + takeProfitPerc / 100))
+
+if (isBearFVG and not isBearBroken and isHighVolume)
+    entryPrice := close
+    positionSize := strategy.position_size * entryPrice
+    marginCost := calcMarginCost(positionSize)
+    sellValue = entryPrice * strategy.position_size
+    secFee := calcSECFee(sellValue)
+    finraFee := calcFINRAFee(strategy.position_size)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", "Short", stop = entryPrice * (1 + stopLossPerc / 100), limit = entryPrice * (1 - takeProfitPerc / 100))
+
+View in Pine Editor・115 lines
+Use on chart
+9
+4
+16 629
+Explanation of "FVG Breakout Lite by tradingbauhaus"
+This script is a trading strategy built for TradingView that helps you spot and trade "Fair Value Gaps" (FVGs)—price areas where the market moved quickly, leaving a gap that might act as support or resistance later. It’s designed to catch breakout opportunities when the price moves strongly in one direction, with extra filters to make trades more reliable. Here’s how it works and how you can use it:
+
+What It Does
+1. Finds Fair Value Gaps (FVGs):
+A "Bullish FVG" happens when the price jumps up quickly, leaving a gap below where it didn’t trade much (e.g., today’s low is higher than the high from two bars ago).
+A "Bearish FVG" is the opposite: the price drops fast, leaving a gap above (e.g., today’s high is lower than the low from two bars ago).
+The script draws colored boxes on your chart to show these gaps: green for bullish, red for bearish.
+2. Spots Breakouts:
+It looks for "strong" FVGs by comparing them to a trend (based on the highest highs and lowest lows over a set period).
+If a bullish gap forms above the recent highs, or a bearish gap below the recent lows, it’s marked as a breakout opportunity.
+3. Adds a Volume Check:
+Trades only happen if the market’s volume is higher than usual (e.g., 1.2x the average volume over the last 20 bars). This helps ensure the breakout has real momentum behind it.
+4. Trades Automatically:
+Long Trades (Buy): If a bullish breakout FVG forms and volume is high, it buys at the current price.
+Short Trades (Sell): If a bearish breakout FVG forms with high volume, it sells short.
+Each trade comes with a stop loss (to limit losses) and a take profit (to lock in gains), both adjustable by you.
+5. Shows Mitigation Lines (Optional):
+If you turn on "Display Mitigation Zones," it draws lines at the edge of each breakout FVG. These lines show where the price might return to "fill" the gap later, helping you see key levels.
+6. Includes Webull Costs:
+The script factors in real trading fees from Webull, like tiny SEC and FINRA fees for selling, and a daily margin cost if you’re borrowing money to trade. These don’t show up on the chart but affect the strategy’s performance in backtesting.
+
+How to Use It
+1. Add to Your Chart:
+Copy the script into TradingView’s Pine Editor, click "Add to Chart," and it’ll start drawing FVGs and running the strategy.
+2. Customize Settings:
+Trend Period (Default: 25): How many bars it looks back to define the trend. Longer periods mean fewer but stronger signals.
+Volume Lookback (Default: 20) & Volume Threshold (Default: 1.2): Adjust how it measures "high volume." Increase the threshold for stricter trades.
+Stop Loss % (Default: 1.5%) & Take Profit % (Default: 3%): Set how much you’re willing to lose or aim to gain per trade.
+Margin Rate % (Default: 8.74%): Webull’s rate for borrowing money—lower it if your account qualifies for a better rate.
+Display Mitigation Zones (Default: On): Toggle this to see or hide the gap lines.
+Colors: Change the green (bullish) and red (bearish) shades to suit your chart.
+3. Backtest It:
+Go to the "Strategy Tester" tab in TradingView to see how it performs on past data. It’ll show trades, profits, losses, and Webull fees included.
+4. Watch It Work:
+Green boxes mean bullish FVGs; red boxes mean bearish FVGs. If volume spikes and the price breaks out, you’ll see trades happen automatically.
+
+What to Expect
+Visuals: You’ll see colored boxes for FVGs and optional lines showing where they start. These help you spot key price zones even if you’re not trading.
+Trades: It’s selective—only trades when FVGs align with a breakout and volume confirms it. Expect fewer trades but with higher potential.
+Risk: The stop loss keeps losses in check, while the take profit aims for a 2:1 reward-to-risk ratio by default (3% gain vs. 1.5% loss).
+Costs: Webull’s fees are small but baked into the results, so you’re seeing a realistic picture of profits.
+
+Tips for Users
+Test it on a small timeframe (like 5-minute charts) for day trading or a larger one (like daily) for swing trading.
+Play with the volume threshold—if you get too few trades, lower it (e.g., 1.1); if too many, raise it (e.g., 1.5).
+Watch how price reacts to the mitigation lines—they’re often support or resistance zones traders target.
+
+This strategy is lightweight, focused, and built for traders who like breakouts with a bit of confirmation. It’s not foolproof (no strategy is!), but it gives you a clear way to trade FVGs with some smart filters.
+

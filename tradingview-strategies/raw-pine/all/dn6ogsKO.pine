@@ -1,0 +1,40 @@
+//@version=4
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ceyhun
+
+strategy("Previous Day High and Low Breakout Strategy", overlay=true)
+D_High = security(syminfo.tickerid, 'D', high[1])
+D_Low = security(syminfo.tickerid, 'D', low[1])
+D_Close = security(syminfo.tickerid, 'D', close[1])
+D_Open = security(syminfo.tickerid, 'D', open[1])
+
+// Go Long - if prev day high is broken and stop loss prev day low
+// Go Short - if prev day low is broken and stop loss prev day high
+plot(timeframe.isintraday ? D_High : na, title="Daily High", style=plot.style_line, color=#0000FF, linewidth=2)
+plot(timeframe.isintraday ? D_Low : na, title="Daily Low", style=plot.style_line, color=#FF0000, linewidth=2)
+
+pos = 0.0
+pos := iff(high > D_High, 1, iff(D_Low > low, -1, nz(pos[1], 0)))
+barcolor(pos == -1 ? #FF0000 : pos == 1 ? #008000 : #000000)
+
+Buy=crossover(high,D_High)
+Sell=crossunder(low,D_Low)
+
+if crossover(high,D_High)
+    strategy.entry("Long", strategy.long,comment="Long")
+
+if crossunder(low,D_Low)
+    strategy.entry("Short", strategy.short,comment="Short")
+
+View in Pine Editor・27 lines
+Use on chart
+9
+2
+0
+12
+47 341
+Jun 5, 2019
+Previous Day High and Low Breakout Strategy
+May 22, 2020
+Release Notes
+bugs fixed

@@ -1,0 +1,83 @@
+//@version=5
+strategy("Bot Scalping XAUUSD v3.0 (Volatilidad + TP Parcial + Modo Intermedio)", 
+     overlay=true, initial_capital=10000, calc_on_every_tick=true, pyramiding=1)
+
+//------------------------------------
+// INDICADORES PRINCIPALES
+//------------------------------------
+ema9  = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+atr   = ta.atr(14)
+atr50 = ta.sma(atr, 50)
+rsi   = ta.rsi(close, 14)
+volRel = volume / ta.sma(volume, 20)
+
+//------------------------------------
+// FILTRO DE VOLATILIDAD
+//------------------------------------
+volatilidadOK = atr > atr50 * 0.8   // modo intermedio
+
+//------------------------------------
+// MICRO-TENDENCIA
+//------------------------------------
+tendenciaAlcista = ema9 > ema20 and ema20 > ema50
+tendenciaBajista = ema9 < ema20 and ema20 < ema50
+
+//------------------------------------
+// MICRO-PULLBACK
+//------------------------------------
+pullbackLong  = tendenciaAlcista and low  <= ema9
+pullbackShort = tendenciaBajista and high >= ema9
+
+//------------------------------------
+// MOMENTUM
+//------------------------------------
+momentumLong  = rsi > 55 and close > open and volRel > 1.1
+momentumShort = rsi < 45 and close < open and volRel > 1.1
+
+//------------------------------------
+// ENTRADAS (modo intermedio)
+//------------------------------------
+entradaLong  = volatilidadOK and pullbackLong  and momentumLong 
+entradaShort = volatilidadOK and pullbackShort and momentumShort
+
+//------------------------------------
+// STOP LOSS Y TAKE PROFIT PARCIAL
+//------------------------------------
+SL = 0.8 * atr
+TP1 = SL * 0.6        // TP parcial rápido
+TP2 = SL * 1.5        // Segundo objetivo
+
+// LONG
+slLong = close - SL
+tp1Long = close + TP1
+tp2Long = close + TP2
+
+// SHORT
+slShort = close + SL
+tp1Short = close - TP1
+tp2Short = close - TP2
+
+//------------------------------------
+// EJECUCIÓN DE ENTRADAS
+//------------------------------------
+if entradaLong
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("TP1 LONG", "LONG", limit=tp1Long, qty_percent=50)
+    strategy.exit("SL LONG", "LONG", stop=slLong)
+
+if entradaShort
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("TP1 SHORT", "SHORT", limit=tp1Short, qty_percent=50)
+    strategy.exit("SL SHORT", "SHORT", stop=slShort)
+
+//-------
+
+View in Pine Editor・75 lines
+Use on chart
+2
+1
+1 384
+Probar un nuevo bot.
+En oro dando entradas para scalping con TP, SL Y BE

@@ -1,0 +1,158 @@
+//@version=6
+strategy("Instant Breakout Strategy with RSI & VWAP", overlay=true)
+
+// Inputs with Tooltips
+int pivot_left = input.int(3, "Left Pivot Bars", minval=1, tooltip="Number of bars to the left to detect pivot highs. Lower values increase sensitivity.")
+int pivot_right = input.int(3, "Right Pivot Bars", minval=1, tooltip="Number of bars to the right to detect pivot highs. Lower values increase sensitivity.")
+float vol_multiplier = input.float(1.5, "Volume Surge Multiplier", minval=1.0, tooltip="Multiplier for volume surge detection. Higher values require stronger volume spikes.")
+float mom_threshold = input.float(0.01, "Momentum Threshold (e.g., 1%)", minval=0.0, tooltip="Minimum percentage price change from bar open to consider momentum. Lower for more signals.")
+float tp_multiplier = input.float(9.0, "Take-Profit ATR Multiplier", minval=0.5, tooltip="Multiplier of ATR for take-profit level. Higher values set farther targets.")
+float sl_multiplier = input.float(1.0, "Stop-Loss ATR Multiplier", minval=0.5, tooltip="Multiplier of ATR for stop-loss level. Lower values tighten stops.")
+bool use_filters = input.bool(false, "Use Volume/Momentum Filters", tooltip="Enable to apply volume, momentum, RSI, and VWAP filters. Disable for basic pivot breakouts.")
+
+// Detect pivot highs and lows
+float pivot_high = ta.pivothigh(high, pivot_left, pivot_right)
+float pivot_low = ta.pivotlow(low, pivot_left, pivot_right)
+
+// Store most recent pivot levels
+var float last_high = na
+var float last_low = na
+if not na(pivot_high)
+    last_high := pivot_high
+if not na(pivot_low)
+    last_low := pivot_low
+
+// Volume average for surge detection
+float vol_sma = ta.sma(volume, 20)
+
+// Intra-bar momentum tracking (price change from bar open)
+varip float bar_open = na
+if barstate.isnew
+    bar_open := open
+bool intra_mom_up = (close - bar_open) / bar_open > mom_threshold
+bool intra_mom_down = (close - bar_open) / bar_open < -mom_threshold
+bool volume_ok = volume > vol_sma * vol_multiplier
+
+// RSI and VWAP for confluence
+float rsi = ta.rsi(close, 3)  // Short period for 1s TF
+float vwap = ta.vwap(close)
+
+// Breakout conditions with RSI and VWAP confluence
+bool bullish_breakout = ta.crossover(close, last_high) and (use_filters ? volume_ok and intra_mom_up and rsi > 50 and close > vwap : true)
+bool bearish_breakout = ta.crossunder(close, last_low) and (use_filters ? volume_ok and intra_mom_down and rsi < 50 and close < vwap : true)
+
+// Calculate ATR for TP/SL
+float atr = ta.atr(14)
+
+// Entry and exit logic
+if bullish_breakout
+    strategy.entry("Long", strategy.long, comment="Bullish Breakout")
+    strategy.exit("Long Exit", "Long", limit=close + atr * tp_multiplier, stop=close - atr * sl_multiplier)
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Close Short on Bullish Breakout")
+
+if bearish_breakout
+    strategy.entry("Short", strategy.short, comment="Bearish Breakout")
+    strategy.exit("Short Exit", "Short", limit=close - atr * tp_multiplier, stop=close + atr * sl_multiplier)
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Close Long on Bearish Breakout")
+
+// Plot signals
+plotshape(bullish_breakout, title="Bullish Breakout", location=location.belowbar, style=shape.triangleup, color=color.green, size=size.small)
+plotshape(bearish_breakout, title="Bearish Breakout", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.small)
+
+// Plot pivot levels for reference
+plot(last_high, "Resistance", color=color.lime, style=plot.style_line, offset=-pivot_right)
+plot(last_low, "Support", color=color.red, style=plot.style_line, offset=-pivot_right)
+
+// Plot confluence indicators
+plot(rsi, title="RSI (3)", color=color.blue, display=display.pane)  // Removed invalid tooltip
+plot(vwap, title="VWAP", color=color.purple, linewidth=2)  // Removed invalid tooltip
+
+View in Pine Editor・70 lines
+Use on chart
+1
+7
+8
+2
+3 406
+Instant Breakout Strategy with RSI & VWAP
+This TradingView strategy (Pine Script v6) trades breakouts using pivot points, with optional filters for volume, momentum, RSI, and VWAP. It’s optimized for the 1-second timeframe.
+Overview
+The strategy identifies breakouts when price crosses above resistance (pivot highs) or below support (pivot lows). It can use basic pivot breakouts or add filters for stronger signals. Take-profit and stop-loss levels are set using ATR, and signals are shown on the chart.
+Inputs
+
+Left/Right Pivot Bars: Bars to detect pivots (default: 3). Lower values increase sensitivity.
+Volume Surge Multiplier: Volume threshold vs. 20-period average (default: 1.5).
+Momentum Threshold: Minimum % price change from bar open (default: 1%).
+Take-Profit ATR Multiplier: ATR multiplier for take-profit (default: 9.0).
+Stop-Loss ATR Multiplier: ATR multiplier for stop-loss (default: 1.0).
+Use Filters: Enable/disable volume, momentum, RSI, and VWAP filters (default: off).
+
+How It Works
+1. Pivot Detection
+
+Finds pivot highs (resistance) and lows (support) using ta.pivothigh and ta.pivotlow.
+Tracks the latest pivot levels.
+
+2. Volume Surge
+
+Compares current volume to a 20-period volume average.
+A surge occurs if volume exceeds the average times the multiplier.
+
+3. Momentum
+
+Measures price change from the bar’s open.
+Bullish: Price rises >1% from open.
+Bearish: Price falls >1% from open.
+
+4. RSI and VWAP
+
+RSI: 3-period RSI. Above 50 is bullish; below 50 is bearish.
+VWAP: Price above VWAP is bullish; below is bearish.
+
+5. ATR
+
+14-period ATR sets take-profit (close ± atr * 9.0) and stop-loss (close ± atr * 1.0).
+
+Trading Rules
+Breakout Conditions
+
+Bullish Breakout:
+Price crosses above the latest pivot high.
+With filters: Volume surge, bullish momentum, RSI > 50, price > VWAP.
+Without filters: Only the crossover is needed.
+
+
+Bearish Breakout:
+Price crosses below the latest pivot low.
+With filters: Volume surge, bearish momentum, RSI < 50, price < VWAP.
+Without filters: Only the crossunder is needed.
+
+
+
+Entries and Exits
+
+Long: Enter on bullish breakout. Set take-profit and stop-loss. Close any short position.
+Short: Enter on bearish breakout. Set take-profit and stop-loss. Close any long position.
+
+Visuals
+
+Signals: Green triangles (bullish) below bars, red triangles (bearish) above bars.
+Pivot Levels: Green line (resistance), red line (support).
+Indicators: RSI (blue, separate pane), VWAP (purple, on chart).
+
+How to Use
+
+Apply to a 1-second chart in TradingView for best results.
+Adjust inputs (e.g., pivot bars, multipliers). Enable filters for stricter signals.
+Watch for buy/sell triangles and monitor RSI/VWAP.
+Use ATR-based take-profit/stop-loss for risk management.
+
+Notes
+
+Best on 1-second timeframe due to fast RSI and responsiveness.
+Disable filters for more signals (less confirmation).
+Backtest before live trading to check performance.
+
+This strategy uses pivots, volume, momentum, RSI, and VWAP for clear breakout trades on the 1-second timeframe.

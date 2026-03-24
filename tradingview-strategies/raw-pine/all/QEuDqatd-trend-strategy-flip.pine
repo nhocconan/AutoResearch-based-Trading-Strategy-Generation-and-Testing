@@ -1,0 +1,385 @@
+//@version=6
+strategy("Trend Strategy Flip", shorttitle="TSF", overlay=true,
+     initial_capital=100000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, pyramiding=0,
+     commission_type=strategy.commission.percent, commission_value=0.01)
+
+// Colors
+color BULL_COLOR = #089981
+color BEAR_COLOR = #f23645
+
+// Marker colors
+color COL_LONG_ENTRY   = color.new(#00ff00, 0)
+color COL_SHORT_ENTRY  = color.new(#ff0000, 0)
+color COL_FLIP_LONG    = color.new(#00ff00, 0)
+color COL_FLIP_SHORT   = color.new(#ff0000, 0)
+color COL_TP_LONG      = color.new(#ffd700, 0)
+color COL_TP_SHORT     = color.new(#ff8c00, 0)
+color COL_BE           = color.new(#0066ff, 0)
+
+// Inputs
+srcInput      = input.source(close, "Source")
+atrMultInput  = input.float(1.5, "ATR Multiplier")
+muInput       = input.float(0.6, "Adaptation Rate (μ)")
+
+entryMode    = input.string("A",  "Entry Mode",       options=["A","B","C"])
+entrySubMode = input.string("B1", "Early Entry Type", options=["B1","B2"])
+
+exitMode  = input.string("By Trend Change", "Exit Mode",
+                         options=["By Trend Change","By Price Cross","Both"])
+useLongs  = input.bool(true,  "Enable Longs")
+useShorts = input.bool(true,  "Enable Shorts")
+
+useBreakeven  = input.bool(true,  "Use Breakeven")
+beTriggerPerc = input.float(0.5,  "BE Trigger %")
+beOffsetPerc  = input.float(0.0,  "BE Offset %")
+
+usePartialTP   = input.bool(true, "Use Partial TP")
+tpPerc         = input.float(2.0, "TP % for Partial Close")
+tpQtyPerc      = input.float(20.0, "Close % at TP")
+
+showHud      = input.bool(true,  "Show HUD")
+
+// ---------------------------------------------------------
+// Persistent variables (fix HUD + Flip tracking)
+// ---------------------------------------------------------
+var float lastEntryPrice = na
+var int   lastEntryBar   = na
+var string lastFlipDir   = "None"
+
+// ---------------------------------------------------------
+// L1 Filter
+// ---------------------------------------------------------
+float atr200    = ta.atr(200)
+float threshold = atr200 * atrMultInput
+var float z = na
+var float v = 0.0
+
+if bar_index == 0
+    z := srcInput
+else
+    float zPrev = z[1]
+    float vPrev = v[1]
+    float zPred = zPrev + vPrev
+    float zTemp = zPred + muInput * (srcInput - zPred)
+    float diff  = zTemp - zPrev
+    v := math.abs(diff) > threshold ? math.sign(diff)*(math.abs(diff)-threshold) : 0
+    z := zPrev + v
+
+// Trend
+var int trend = 0
+if z > z[1]
+    trend := 1
+else if z < z[1]
+    trend := -1
+
+bool upChange   = trend == 1 and trend[1] == -1
+bool downChange = trend == -1 and trend[1] == 1
+
+// ---------------------------------------------------------
+// Entry logic
+// ---------------------------------------------------------
+bool longA  = upChange
+bool shortA = downChange
+
+bool longB1  = srcInput > z and srcInput[1] <= z[1]
+bool shortB1 = srcInput < z and srcInput[1] >= z[1]
+
+bool longB2  = v > 0 and v[1] <= 0
+bool shortB2 = v < 0 and v[1] >= 0
+
+bool longC  = upChange[1]
+bool shortC = downChange[1]
+
+bool longEntryRaw  = entryMode == "A" ? longA  : entryMode == "B" ? (entrySubMode == "B1" ? longB1  : longB2) : longC
+bool shortEntryRaw = entryMode == "A" ? shortA : entryMode == "B" ? (entrySubMode == "B1" ? shortB1 : shortB2) : shortC
+
+bool longEntry  = longEntryRaw  and useLongs
+bool shortEntry = shortEntryRaw and useShorts
+
+bool inLong  = strategy.position_size > 0
+bool inShort = strategy.position_size < 0
+
+// ---------------------------------------------------------
+// Exit logic
+// ---------------------------------------------------------
+bool priceAbove = srcInput > z
+bool priceBelow = srcInput < z
+
+bool exitLong =
+     exitMode == "By Trend Change" ? downChange :
+     exitMode == "By Price Cross"  ? priceBelow :
+                                     (downChange or priceBelow)
+
+bool exitShort =
+     exitMode == "By Trend Change" ? upChange :
+     exitMode == "By Price Cross"  ? priceAbove :
+                                     (upChange or priceAbove)
+
+// ---------------------------------------------------------
+// Breakeven levels
+// ---------------------------------------------------------
+float beLong  = na
+float beShort = na
+
+if useBreakeven and strategy.position_size != 0
+    float entry = strategy.position_avg_price
+    float profit = (close - entry) / entry * 100 * (inLong ? 1 : -1)
+
+    if inLong and profit >= beTriggerPerc
+        beLong := entry * (1 + beOffsetPerc / 100)
+
+    if inShort and profit >= beTriggerPerc
+        beShort := entry * (1 - beOffsetPerc / 100)
+
+// ---------------------------------------------------------
+// Flip logic (fixed HUD update)
+// ---------------------------------------------------------
+bool flipLongToShort = inLong and downChange
+bool flipShortToLong = inShort and upChange
+
+if flipLongToShort
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+    lastFlipDir := "L→S"
+    lastEntryPrice := close
+    lastEntryBar   := bar_index
+
+if flipShortToLong
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+    lastFlipDir := "S→L"
+    lastEntryPrice := close
+    lastEntryBar   := bar_index
+
+// ---------------------------------------------------------
+// Entry tracking
+// ---------------------------------------------------------
+bool newLongEntry  = longEntry  and not inLong  and not inShort
+bool newShortEntry = shortEntry and not inShort and not inLong
+
+if newLongEntry
+    strategy.entry("Long", strategy.long)
+    lastEntryPrice := close
+    lastEntryBar   := bar_index
+
+if newShortEntry
+    strategy.entry("Short", strategy.short)
+    lastEntryPrice := close
+    lastEntryBar   := bar_index
+
+// ---------------------------------------------------------
+// Breakeven exits
+// ---------------------------------------------------------
+if inLong and not na(beLong)
+    strategy.exit("Long BE", from_entry="Long", stop=beLong)
+
+if inShort and not na(beShort)
+    strategy.exit("Short BE", from_entry="Short", stop=beShort)
+
+// ---------------------------------------------------------
+// Partial TP logic
+// ---------------------------------------------------------
+float tpLong  = na
+float tpShort = na
+
+if usePartialTP and strategy.position_size != 0
+    float entry = strategy.position_avg_price
+    if inLong
+        tpLong := entry * (1 + tpPerc / 100)
+    if inShort
+        tpShort := entry * (1 - tpPerc / 100)
+
+if usePartialTP
+    if inLong and not na(tpLong)
+        strategy.exit("Long TP Partial", from_entry="Long", limit=tpLong, qty_percent=tpQtyPerc)
+    if inShort and not na(tpShort)
+        strategy.exit("Short TP Partial", from_entry="Short", limit=tpShort, qty_percent=tpQtyPerc)
+
+// ---------------------------------------------------------
+// Previous position state
+// ---------------------------------------------------------
+bool wasLong  = strategy.position_size[1] > 0
+bool wasShort = strategy.position_size[1] < 0
+
+// ---------------------------------------------------------
+// LuxAlgo Trend Visuals
+// ---------------------------------------------------------
+color zColor = trend == 1 ? BULL_COLOR : BEAR_COLOR
+
+zPlot   = plot(z, "L1 Proximal Filter", color=zColor, linewidth=3)
+srcPlot = plot(srcInput, "Source Plot", color=na)
+
+bool showFill = (trend == 1 and srcInput > z) or (trend == -1 and srcInput < z)
+
+color fillTopColor    = showFill ? color.new(zColor, 50)  : na
+color fillBottomColor = showFill ? color.new(zColor, 100) : na
+
+fill(srcPlot, zPlot, srcInput, z, fillTopColor, fillBottomColor, "Trend Fill")
+
+float switchVal   = (upChange or downChange) ? z[1] : na
+color switchColor = upChange ? BULL_COLOR : BEAR_COLOR
+
+plot(switchVal, "Trend Switch Dot", color=switchColor, style=plot.style_circles, linewidth=4, offset=-1)
+
+// ---------------------------------------------------------
+// TP & BE lines (transparent, disappear when inactive)
+// ---------------------------------------------------------
+float tpLine = inLong ? tpLong : inShort ? tpShort : na
+plot(tpLine, "TP Line", color=color.new(color.yellow, 60), style=plot.style_linebr, linewidth=2)
+
+float beLine = inLong ? beLong : inShort ? beShort : na
+plot(beLine, "BE Line", color=color.new(COL_BE, 60), style=plot.style_linebr, linewidth=2)
+
+// ---------------------------------------------------------
+// BE marker (simple & perfect)
+// ---------------------------------------------------------
+float beLinePrev = beLine[1]
+
+bool beLongHit  = not na(beLinePrev) and na(beLine) and wasLong
+bool beShortHit = not na(beLinePrev) and na(beLine) and wasShort
+
+plotshape(beLongHit,  "Long BE Hit",  shape.square, location.belowbar, COL_BE, size=size.small)
+plotshape(beShortHit, "Short BE Hit", shape.square, location.abovebar, COL_BE, size=size.small)
+
+// ---------------------------------------------------------
+// TP markers (only real partial exits)
+// ---------------------------------------------------------
+bool sizeReducedLong  = wasLong  and strategy.position_size < strategy.position_size[1] and strategy.position_size > 0
+bool sizeReducedShort = wasShort and strategy.position_size > strategy.position_size[1] and strategy.position_size < 0
+
+bool tpLongHit  = sizeReducedLong  and not na(tpLong)
+bool tpShortHit = sizeReducedShort and not na(tpShort)
+
+plotshape(tpLongHit,  "Long TP Partial Hit",  shape.circle, location.abovebar, COL_TP_LONG, size=size.small)
+plotshape(tpShortHit, "Short TP Partial Hit", shape.circle, location.belowbar, COL_TP_SHORT, size=size.small)
+
+// ---------------------------------------------------------
+// Entry markers
+// ---------------------------------------------------------
+plotshape(longEntry,  "Long Entry",  shape.triangleup,   location.belowbar, COL_LONG_ENTRY,  size=size.small)
+plotshape(shortEntry, "Short Entry", shape.triangledown, location.abovebar, COL_SHORT_ENTRY, size=size.small)
+
+// ---------------------------------------------------------
+// Flip markers
+// ---------------------------------------------------------
+plotshape(flipLongToShort, "Flip L→S", shape.diamond, location.abovebar, COL_FLIP_SHORT, size=size.small)
+plotshape(flipShortToLong, "Flip S→L", shape.diamond, location.belowbar, COL_FLIP_LONG, size=size.small)
+
+// ---------------------------------------------------------
+// HUD (fixed)
+// ---------------------------------------------------------
+var table hud = na
+if showHud
+    if na(hud)
+        hud := table.new(position.top_right, 1, 4)
+
+    string posStr = inLong ? "Long" : inShort ? "Short" : "Flat"
+    float entryPrice = strategy.position_size != 0 ? strategy.position_avg_price : na
+    float pnlPerc = strategy.position_size != 0 ? (close - entryPrice) / entryPrice * 100 * (inLong ? 1 : -1) : na
+
+    table.cell(hud, 0, 0, "Pos: " + posStr + " | Entry: " + (strategy.position_size != 0 ? str.tostring(entryPrice, format.mintick) : "n/a"))
+    table.cell(hud, 0, 1, "PnL: " + (strategy.position_size != 0 ? str.tostring(pnlPerc, "#.##") + " %" : "n/a"))
+    table.cell(hud, 0, 2, "Flip: " + lastFlipDir + " | BE: " + (useBreakeven ? "Yes" : "No"))
+    table.cell(hud, 0, 3, "Bars since entry: " + (strategy.position_size != 0 ? str.tostring(bar_index - lastEntryBar) : "n/a"))
+
+// ---------------------------------------------------------
+// Alerts
+// ---------------------------------------------------------
+alertcondition(longEntry,        "Long Entry",        "TSF LONG ENTRY")
+alertcondition(shortEntry,       "Short Entry",       "TSF SHORT ENTRY")
+alertcondition(flipLongToShort,  "Flip Long→Short",   "TSF FLIP SHORT")
+alertcondition(flipShortToLong,  "Flip Short→Long",   "TSF FLIP LONG")
+alertcondition(tpLongHit,        "Long TP Partial",   "TSF LONG TP PARTIAL")
+alertcondition(tpShortHit,       "Short TP Partial",  "TSF SHORT TP PARTIAL")
+alertcondition(beLongHit,        "Long BE",           "TSF LONG BE")
+alertcondition(beShortHit,       "Short BE",          "TSF SHORT BE")
+
+View in Pine Editor・297 lines
+Use on chart
+6
+3
+1 298
+Feb 17
+📌 Trend Strategy Flip — Adaptive Trend‑Following System with Smart Flip Logic
+(Built on the L1 Proximal Filter concept by LuxAlgo)
+
+Trend Strategy Flip is an adaptive trend‑following system built on top of the L1 Proximal Filter, a concept originally introduced by LuxAlgo.
+This strategy expands the idea with multi‑mode entries, smart flip logic, breakeven automation, and a clean visual HUD for real‑time decision support.
+
+The result is a lightweight, responsive trend engine suitable for both discretionary and automated trading.
+
+🔍 Core Concept
+The system uses the L1 Proximal Filter to extract a smooth, noise‑resistant trend line (z) and its velocity (v).
+This allows the strategy to detect:
+
+Confirmed trend reversals (Mode A)
+
+Early entries via price cross or velocity shift (Mode B1/B2)
+
+Next‑bar confirmation entries (Mode C)
+
+When the trend flips, the strategy can automatically reverse the position.
+
+✨ Key Features
+✔ Built on the L1 Proximal Filter (LuxAlgo concept)
+A robust, adaptive trend extraction method.
+
+✔ Multiple Entry Modes
+Choose between confirmed, early, or next‑bar entries.
+
+✔ Smart Flip Logic
+Automatically reverses positions on trend change.
+
+✔ Breakeven Protection
+Dynamic breakeven activation with a semi‑transparent BE line.
+
+✔ Compact HUD (Top‑Right Corner)
+Displays:
+
+Current position
+
+Entry price
+
+Live PnL (%)
+
+Last flip direction
+
+Breakeven status
+
+Bars since entry
+
+✔ Optional Trend Background
+Soft diagonal gradient (lightweight imitation) for visual trend context.
+
+✔ Clean Visual Markers
+Entry arrows, flip markers, trend line, and BE line.
+
+✔ Alerts Included
+Ready for automation or webhook‑based execution.
+
+🎯 Use Cases
+Trend‑following systems
+
+Reversal/flip strategies
+
+Automated execution via alerts
+
+Swing and intraday trading
+
+Strategy research and optimization
+
+⚠️ Notes
+This strategy is based on the L1 Proximal Filter concept by LuxAlgo, extended with additional logic and visualization.
+
+For educational and research purposes only.
+
+Always test before using in live trading.
+Feb 17
+Release Notes
+Added partial take‑profit functionality to help reduce drawdowns and improve overall trade stability.
+
+Introduced enhanced visual elements, including trend‑based shading and clearer event markers, to make the script’s behavior easier to understand at a glance.
+Feb 17
+Release Notes
+Added transparent Take‑Profit and Break‑Even lines to improve clarity and provide better visual tracking of trade management levels. These levels now appear dynamically and disappear when no longer active, making the chart easier to read and interpret.

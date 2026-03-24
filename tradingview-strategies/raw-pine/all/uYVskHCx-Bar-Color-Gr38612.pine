@@ -1,0 +1,22 @@
+//@version=5
+strategy("Bar Color", overlay=true, process_orders_on_close = true)
+ 
+long_condition  = close>open
+short_condition = close<open
+ 
+plotshape(long_condition,  color = color.green)
+plotshape(short_condition, color = color.red)
+ 
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+    strategy.close("Short")    
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+    strategy.close("Long")
+
+View in Pine Editor・15 lines
+Use on chart
+1
+6
+1 324
+I could not find a script to try this so I created one.

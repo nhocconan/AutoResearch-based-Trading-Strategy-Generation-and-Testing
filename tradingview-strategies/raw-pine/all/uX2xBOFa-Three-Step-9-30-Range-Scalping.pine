@@ -1,0 +1,260 @@
+//@version=5
+strategy("Three-Step 9:30 Range Scalping (Backtest)", overlay=true, calc_on_every_tick=false, process_orders_on_close=true,
+     initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=0)
+
+// -------------------- Inputs
+enableBreak    = input.bool(true,  "Enable Break Entry")
+enableTrap     = input.bool(false, "Enable Trap Entry")
+enableReversal = input.bool(true, "Enable Reversal Entry")
+rr             = input.float(2.0,  "Take-Profit R Multiple", step=0.25, minval=0.25)
+oneTradePerDay = input.bool(false,  "One Trade Per Day")
+showRange      = input.bool(true,  "Show 9:30 5m Range")
+
+// Risk management
+riskPct        = input.float(1.0,  "Risk % of Equity per Trade", step=0.1, minval=0.1, maxval=100.0)
+sizeMode       = input.string("Risk %", "Position Sizing Mode", options=["Risk %", "Fixed contracts"])
+fixedContracts = input.int(1, "Fixed Contracts", minval=1)
+
+// Optional: warn if not on 1-minute chart (execution timeframe per PRD)
+onOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+
+// -------------------- Time helpers (chart is assumed New York time)
+newDay   = ta.change(time("D")) != 0
+// Trade the first hour only: 9:30:00 to 10:29:59
+inWindow = (hour == 9 and minute >= 30) or (hour == 10 and minute <= 29)
+// Holiday blackout window: Do not trade Dec 15 – Jan 15
+inBlackout = (month == 12 and dayofmonth >= 15) or (month == 1 and dayofmonth <= 15)
+
+// -------------------- First 5-min range (use the actual 9:30 5m candle via security())
+var float rangeHi = na
+var float rangeLo = na
+var bool  haveRange = false
+
+// -------------------- State for entries
+var bool  breakUpFound           = false
+var bool  breakDownFound         = false
+var float initBreakUpLow         = na    // for Break/Trap long SL
+var float initBreakDownHigh      = na    // for Break/Trap short SL
+var bool  trapUpRetestedInside   = false
+var bool  trapDownRetestedInside = false
+var bool  tradedToday            = false
+
+// Reset daily state at midnight (chart timezone)
+if newDay
+    rangeHi := na
+    rangeLo := na
+    haveRange := false
+    breakUpFound := false
+    breakDownFound := false
+    initBreakUpLow := na
+    initBreakDownHigh := na
+    trapUpRetestedInside := false
+    trapDownRetestedInside := false
+    tradedToday := false
+
+// Pull the 5-minute bar that STARTS at 9:30 (value available on its close at 9:35)
+sess0930Hi = request.security(syminfo.tickerid, "5", (hour == 9 and minute == 30) ? high : na, barmerge.gaps_off, barmerge.lookahead_off)
+sess0930Lo = request.security(syminfo.tickerid, "5", (hour == 9 and minute == 30) ? low  : na, barmerge.gaps_off, barmerge.lookahead_off)
+
+// Lock the range when the 9:30 5m candle closes (value appears non-na exactly then)
+if not haveRange and not na(sess0930Hi) and not na(sess0930Lo)
+    rangeHi := sess0930Hi
+    rangeLo := sess0930Lo
+    haveRange := true
+    // reset session-specific flags at start of trading window
+    breakUpFound := false
+    breakDownFound := false
+    initBreakUpLow := na
+    initBreakDownHigh := na
+    trapUpRetestedInside := false
+    trapDownRetestedInside := false
+    tradedToday := false
+
+// -------------------- Visuals
+plot(showRange and haveRange ? rangeHi : na, "Range High", color=color.new(color.teal, 0), style=plot.style_linebr, linewidth=2)
+plot(showRange and haveRange ? rangeLo : na, "Range Low",  color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=2)
+
+plotchar(not onOneMinute, title="Use 1-minute chart", char="⚠", location=location.top, color=color.new(color.red, 0), size=size.tiny)
+plotchar(inBlackout, title="Holiday blackout (Dec 15–Jan 15)", char="⛔", location=location.top, color=color.new(color.red, 0), size=size.tiny)
+
+// -------------------- Convenience conditions
+closeAbove  = haveRange and close > rangeHi
+closeBelow  = haveRange and close < rangeLo
+closeInside = haveRange and close <= rangeHi and close >= rangeLo
+
+// Track first body-close outside the range in each direction (initial break-close)
+if haveRange and inWindow and not tradedToday
+    if not breakUpFound and closeAbove
+        breakUpFound := true
+        initBreakUpLow := low
+        trapUpRetestedInside := false
+    if not breakDownFound and closeBelow
+        breakDownFound := true
+        initBreakDownHigh := high
+        trapDownRetestedInside := false
+
+// Trap retest flags (retest back inside after first break)
+if haveRange and inWindow and not tradedToday
+    if breakUpFound and not trapUpRetestedInside and closeInside
+        trapUpRetestedInside := true
+    if breakDownFound and not trapDownRetestedInside and closeInside
+        trapDownRetestedInside := true
+
+// -------------------- FVG detectors (three-candle imbalance)
+// Simple wick-gap definition, preserved through the third candle
+// Bullish: gap exists if Candle C low > Candle A high AND Candle B low > Candle A high
+// Bearish: gap exists if Candle C high < Candle A low  AND Candle B high < Candle A low
+bullFVG = not na(high[2]) and (low[1] > high[2]) and (low > high[2])
+bearFVG = not na(low[2])  and (high[1] < low[2])  and (high < low[2])
+
+// -------------------- Entry gating
+allowEntry = haveRange and inWindow and not inBlackout and strategy.position_size == 0 and (not oneTradePerDay or not tradedToday)
+
+// Calculate contracts based on selected sizing mode
+calcOrderQty(entryPrice, stopPrice) =>
+    qty = 0
+    if sizeMode == "Fixed contracts"
+        qty := fixedContracts
+    else
+        riskCash = strategy.equity * riskPct / 100.0
+        riskPerContract = math.abs(entryPrice - stopPrice) * syminfo.pointvalue
+        qty := riskPerContract > 0 ? math.floor(riskCash / riskPerContract) : 0
+    qty
+
+// -------------------- BREAK Entries (needs FVG and ANY of the 3 bars closes outside)
+if enableBreak and allowEntry
+    // Long BREAK
+    breakLongOk  = bullFVG and (close > rangeHi or close[1] > rangeHi or close[2] > rangeHi)
+    if breakLongOk
+        // Stop at the FIRST candle that closed outside among the 3 FVG candles
+        float stopL = na
+        stopL := close[2] > rangeHi ? low[2] : stopL
+        stopL := na(stopL) and close[1] > rangeHi ? low[1] : stopL
+        stopL := na(stopL) and close > rangeHi ? low : stopL
+        entryL = close
+        if entryL > stopL
+            tpL = entryL + rr * (entryL - stopL)
+            qtyL = calcOrderQty(entryL, stopL)
+            if qtyL > 0
+                strategy.entry("LONG_BREAK", strategy.long, qty=qtyL)
+                strategy.exit("LONG_BREAK_TP/SL", from_entry="LONG_BREAK", stop=stopL, limit=tpL)
+                tradedToday := oneTradePerDay ? true : tradedToday
+    // Short BREAK
+    breakShortOk = bearFVG and (close < rangeLo or close[1] < rangeLo or close[2] < rangeLo)
+    if breakShortOk
+        // Stop at the FIRST candle that closed outside among the 3 FVG candles
+        float stopS = na
+        stopS := close[2] < rangeLo ? high[2] : stopS
+        stopS := na(stopS) and close[1] < rangeLo ? high[1] : stopS
+        stopS := na(stopS) and close < rangeLo ? high : stopS
+        entryS = close
+        if entryS < stopS
+            tpS = entryS - rr * (stopS - entryS)
+            qtyS = calcOrderQty(entryS, stopS)
+            if qtyS > 0
+                strategy.entry("SHORT_BREAK", strategy.short, qty=qtyS)
+                strategy.exit("SHORT_BREAK_TP/SL", from_entry="SHORT_BREAK", stop=stopS, limit=tpS)
+                tradedToday := oneTradePerDay ? true : tradedToday
+
+// -------------------- TRAP Entries (Break → Retest inside → Reclose outside; FVG not required)
+if enableTrap and allowEntry
+    // Long TRAP
+    if breakUpFound and trapUpRetestedInside and closeAbove
+        stopL  = na(initBreakUpLow) ? low : initBreakUpLow
+        entryL = close
+        if entryL > stopL
+            tpL = entryL + rr * (entryL - stopL)
+            qtyL = calcOrderQty(entryL, stopL)
+            if qtyL > 0
+                strategy.entry("LONG_TRAP", strategy.long, qty=qtyL)
+                strategy.exit("LONG_TRAP_TP/SL", from_entry="LONG_TRAP", stop=stopL, limit=tpL)
+                tradedToday := oneTradePerDay ? true : tradedToday
+    // Short TRAP
+    if breakDownFound and trapDownRetestedInside and closeBelow
+        stopS  = na(initBreakDownHigh) ? high : initBreakDownHigh
+        entryS = close
+        if entryS < stopS
+            tpS = entryS - rr * (stopS - entryS)
+            qtyS = calcOrderQty(entryS, stopS)
+            if qtyS > 0
+                strategy.entry("SHORT_TRAP", strategy.short, qty=qtyS)
+                strategy.exit("SHORT_TRAP_TP/SL", from_entry="SHORT_TRAP", stop=stopS, limit=tpS)
+                tradedToday := oneTradePerDay ? true : tradedToday
+
+// -------------------- REVERSAL Entries (Failed break + opposite FVG back into range)
+if enableReversal and allowEntry
+    // After bearish break, bullish FVG back into range → LONG
+    if breakDownFound and bullFVG and closeInside
+        stopL  = low[2]  // first candle of the FVG
+        entryL = close
+        if entryL > stopL
+            tpL = entryL + rr * (entryL - stopL)
+            qtyL = calcOrderQty(entryL, stopL)
+            if qtyL > 0
+                strategy.entry("LONG_REV", strategy.long, qty=qtyL)
+                strategy.exit("LONG_REV_TP/SL", from_entry="LONG_REV", stop=stopL, limit=tpL)
+                tradedToday := oneTradePerDay ? true : tradedToday
+    // After bullish break, bearish FVG back into range → SHORT
+    if breakUpFound and bearFVG and closeInside
+        stopS  = high[2] // first candle of the FVG
+        entryS = close
+        if entryS < stopS
+            tpS = entryS - rr * (stopS - entryS)
+            qtyS = calcOrderQty(entryS, stopS)
+            if qtyS > 0
+                strategy.entry("SHORT_REV", strategy.short, qty=qtyS)
+                strategy.exit("SHORT_REV_TP/SL", from_entry="SHORT_REV", stop=stopS, limit=tpS)
+                tradedToday := oneTradePerDay ? true : tradedToday
+
+// -------------------- Markers
+plotshape(enableBreak and (bullFVG and (close > rangeHi or close[1] > rangeHi or close[2] > rangeHi)) and allowEntry,  title="Break Long",  style=shape.triangleup,   color=color.new(color.teal, 0),   size=size.tiny, location=location.belowbar, text="Break")
+plotshape(enableBreak and (bearFVG and (close < rangeLo or close[1] < rangeLo or close[2] < rangeLo)) and allowEntry,  title="Break Short", style=shape.triangledown, color=color.new(color.orange, 0), size=size.tiny, location=location.abovebar, text="Break")
+plotshape(enableTrap  and breakUpFound   and trapUpRetestedInside   and closeAbove and allowEntry,  title="Trap Long",  style=shape.circle, color=color.new(color.teal, 0),   size=size.tiny, location=location.belowbar, text="Trap")
+plotshape(enableTrap  and breakDownFound and trapDownRetestedInside and closeBelow and allowEntry,  title="Trap Short", style=shape.circle, color=color.new(color.orange, 0), size=size.tiny, location=location.abovebar, text="Trap")
+plotshape(enableReversal and breakDownFound and bullFVG and closeInside and allowEntry, title="Reversal Long",  style=shape.diamond, color=color.new(color.teal, 0),   size=size.tiny, location=location.belowbar, text="Rev")
+plotshape(enableReversal and breakUpFound   and bearFVG and closeInside and allowEntry, title="Reversal Short", style=shape.diamond, color=color.new(color.orange, 0), size=size.tiny, location=location.abovebar, text="Rev")
+
+View in Pine Editor・215 lines
+Use on chart
+1
+0
+6
+4
+2 393
+# Three-Step 9:30 Range Scalping Strategy Rules
+
+## Step 1: Mark the Levels (9:30 AM)
+- Wait for the **first 5-minute candle** starting at 9:30 AM EST to close
+- Mark the **HIGH** and **LOW** of this candle
+- Switch to **1-minute chart** for trading
+
+## Step 2: Find Your Entry (Trade for 1 hour only: 9:30-10:30 AM)
+
+### BREAK Entry
+- Need: **Fair Value Gap (FVG)** + **ANY** of the 3 FVG candles closes outside the range
+- FVG = Gap between candle wicks (3-candle pattern)
+
+### TRAP Entry
+- Need: Break outside range → Retest back inside → Close back outside again
+
+### REVERSAL Entry
+- Need: Failed break in one direction → Opposite FVG back into the range
+
+## Step 3: Trade Management
+
+### Stop Loss:
+- **Break/Trap**: Low/High of first candle that closed outside the range
+- **Reversal**: Low/High of first candle in the FVG pattern
+
+### Take Profit:
+- **Always 2:1 risk-to-reward ratio**
+- If you risk $100, you make $200
+
+## Key Rules:
+- ✅ **Body close** outside range (not just wicks)
+- ✅ Trade on **1-minute chart** only
+- ✅ Only trade **first hour** (9:30-10:30 AM EST)
+- ✅ **Fixed 2:1** take profit every time
+- ✅ One strategy, stay consistent
+
+**That's it. No complicated indicators, no higher timeframe bias, no guesswork.**

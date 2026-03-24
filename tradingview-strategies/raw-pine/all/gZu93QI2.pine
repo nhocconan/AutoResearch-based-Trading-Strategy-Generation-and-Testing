@@ -1,0 +1,165 @@
+//@version=6
+strategy('HalfTrend + Hull + BB (Pure Arrow Mode)', overlay = true, initial_capital = 100000)
+
+// ==========================================
+// 1. 回測時間設定
+// ==========================================
+backtest_year = input.int(title = '回測年份', defval = 2023)
+backtest_month = input.int(title = '回測月份', defval = 1)
+backtest_date = input.int(title = '回測日期', defval = 1)
+backtest_start_time = timestamp(backtest_year, backtest_month, backtest_date, 0, 0, 0)
+
+// ==========================================
+// 2. HalfTrend 核心運算
+// ==========================================
+amplitude = input.int(title = 'HT Amplitude', defval = 2)
+channelDeviation = input.float(title = 'HT Deviation', defval = 2)
+
+var int trend = 0, var int nextTrend = 0
+var float maxLowPrice = nz(low[1], low), var float minHighPrice = nz(high[1], high)
+var float up = 0.0, var float down = 0.0
+float arrowUp = na, float arrowDown = na
+
+atr2 = ta.atr(100) / 2
+dev = channelDeviation * atr2
+highPrice = high[math.abs(ta.highestbars(amplitude))]
+lowPrice = low[math.abs(ta.lowestbars(amplitude))]
+
+if nextTrend == 1
+    maxLowPrice := math.max(lowPrice, maxLowPrice)
+    if ta.sma(high, amplitude) < maxLowPrice and close < nz(low[1], low)
+        trend := 1, nextTrend := 0, minHighPrice := highPrice
+else
+    minHighPrice := math.min(highPrice, minHighPrice)
+    if ta.sma(low, amplitude) > minHighPrice and close > nz(high[1], high)
+        trend := 0, nextTrend := 1, maxLowPrice := lowPrice
+
+if trend == 0
+    up := na(trend[1]) or trend[1] != 0 ? (na(down[1]) ? down : down[1]) : (na(up[1]) ? maxLowPrice : math.max(maxLowPrice, up[1]))
+    arrowUp := (not na(trend[1]) and trend[1] != 0) ? up - atr2 : na
+else
+    down := na(trend[1]) or trend[1] != 1 ? (na(up[1]) ? up : up[1]) : (na(down[1]) ? minHighPrice : math.min(minHighPrice, down[1]))
+    arrowDown := (not na(trend[1]) and trend[1] != 1) ? down + atr2 : na
+
+buySignal = not na(arrowUp) and trend == 0 and trend[1] == 1
+sellSignal = not na(arrowDown) and trend == 1 and trend[1] == 0
+
+// ==========================================
+// 3. Hull Suite 通道與收斂邏輯
+// ==========================================
+hull_length = input.int(55, title = 'Hull Length')
+HMA(_src, _len) => ta.wma(2 * ta.wma(_src, _len / 2) - ta.wma(_src, _len), math.round(math.sqrt(_len)))
+
+MHULL = HMA(close, hull_length)
+SHULL = MHULL[2]
+
+isHullGreen = MHULL > SHULL
+isHullRed   = not isHullGreen
+
+hullGap = math.abs(MHULL - SHULL)
+isConverging = hullGap < hullGap[1] and hullGap[1] < hullGap[2]
+
+// ==========================================
+// 4. 布林通道運算 (Bollinger Bands)
+// ==========================================
+bb_length = input.int(20, "BB Length", minval = 1)
+bb_maType = input.string("SMA", "BB Basis MA Type", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"])
+bb_src    = input(close, "BB Source")
+bb_mult   = input.float(2.0, "BB StdDev", minval = 0.001, maxval = 50)
+bb_offset = input.int(0, "BB Offset", minval = -500, maxval = 500, display = display.none)
+
+ma_logic(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+bb_basis = ma_logic(bb_src, bb_length, bb_maType)
+bb_dev   = bb_mult * ta.stdev(bb_src, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+// ==========================================
+// 5. 進場與出場條件定義 (原始邏輯保留)
+// ==========================================
+entry_2 = buySignal and isHullGreen                // 共振買入 (優先級高)
+entry_3 = buySignal and isHullRed and isConverging  // 收斂進場 (優先級高)
+entry_1 = buySignal and not entry_2 and not entry_3 // 藍色多頭 (普通)
+
+exit_2 = sellSignal and isHullRed                  // 共振賣出 (優先級高)
+exit_1 = sellSignal and not exit_2                 // 紅色平倉 (普通)
+
+longcondition = buySignal
+
+// ==========================================
+// 6. 視覺化繪圖
+// ==========================================
+// A. HalfTrend 線條
+plot(trend == 0 ? up : down, title = 'HT Line', linewidth = 2, color = trend == 0 ? color.blue : color.red)
+
+// B. Hull Suite 通道
+hullLineColor = isHullGreen ? #00ff00 : #ff0000
+hullFillColor = isHullGreen ? color.new(#00ff00, 90) : color.new(#ff0000, 90)
+hPlot1 = plot(MHULL, title = 'MHULL', color = hullLineColor, linewidth = 1)
+hPlot2 = plot(SHULL, title = 'SHULL', color = hullLineColor, linewidth = 1)
+fill(hPlot1, hPlot2, title = 'Hull Band Filler', color = hullFillColor)
+
+// C. 布林通道繪圖
+plot(bb_basis, "BB Basis", color=#2962FF, offset = bb_offset)
+p1 = plot(bb_upper, "BB Upper", color=#F23645, offset = bb_offset)
+p2 = plot(bb_lower, "BB Lower", color=#089981, offset = bb_offset)
+fill(p1, p2, title = "BB Background", color=color.rgb(33, 150, 243, 95))
+
+// D. 進場箭頭 (下方)
+plotshape(entry_1, title="藍色多頭建倉", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small)
+plotshape(entry_2, title="共振買入", style=shape.triangleup, location=location.belowbar, color=#00ff00, size=size.small)
+plotshape(entry_3, title="收斂進場", style=shape.triangleup, location=location.belowbar, color=#9b59b6, size=size.small)
+
+// E. 出場箭頭 (上方)
+plotshape(exit_1, title="紅色訊號平倉", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(exit_2, title="共振賣出", style=shape.triangledown, location=location.abovebar, color=color.orange, size=size.small)
+
+// ==========================================
+// 7. 策略執行 (原始邏輯保留)
+// ==========================================
+if time >= backtest_start_time
+    if buySignal
+        msg = entry_2 ? "共振買入" : entry_3 ? "收斂進場" : "藍色建倉"
+        strategy.entry('Long', strategy.long, comment = msg)
+    
+    strategy.exit('SL', 'Long', stop = 0.94 * strategy.position_avg_price, comment = '損6%')
+    
+    if sellSignal
+        exit_msg = exit_2 ? "共振賣出" : "紅色平倉"
+        strategy.close('Long', comment = exit_msg)
+
+View in Pine Editor・136 lines
+Use on chart
+1
+2
+548
+Core Indicators
+HalfTrend (HT): Used to identify major trend reversals and dynamic support/resistance levels.
+
+Hull Suite (HMA): Used to determine market momentum and identify price convergence via channel gap analysis.
+
+Entry Logic (Long)
+When the HalfTrend indicator switches from Bearish to Bullish, an entry is triggered based on the following prioritized conditions:
+
+Blue Arrow (Standard Entry): HT turns bullish, but Hull Suite remains red without significant convergence.
+
+Green Arrow (Resonance Buy): HT turns bullish, and the Hull Suite is already Green (Trend confirmation).
+
+Purple Arrow (Convergence Entry): HT turns bullish while the Hull Suite is still red, but the channel gap has narrowed for two consecutive bars (Anticipatory reversal entry).
+
+Exit and Risk Management
+Red Arrow (Standard Exit): Triggered when HalfTrend switches from Bullish to Bearish.
+
+Orange Arrow (Resonance Sell): Triggered when HT turns bearish AND the Hull Suite is also Red (Momentum weakness confirmed).
+
+Hard Stop Loss: A mandatory stop loss is set at 6% below the average entry price.
+
+
++BBAND 20

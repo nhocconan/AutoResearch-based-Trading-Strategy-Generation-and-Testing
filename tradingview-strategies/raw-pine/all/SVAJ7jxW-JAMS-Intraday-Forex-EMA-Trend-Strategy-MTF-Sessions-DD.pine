@@ -1,0 +1,117 @@
+//@version=5
+strategy("Intraday Forex EMA Trend Strategy (MTF + Sessions + DD)", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, pyramiding=0)
+
+// ─────────────────────────────
+// Inputs
+// ─────────────────────────────
+riskPercent = input.float(1.0, "Risk per Trade (%)", step = 0.1)
+emaFastLen  = input.int(9, "Fast EMA Length")
+emaSlowLen  = input.int(20, "Slow EMA Length")
+atrMult     = input.float(1.0, "ATR Multiplier for Stop")
+
+maxDailyDD  = input.float(10.0, "Max Daily Drawdown (%)")
+
+// ─────────────────────────────
+// Session Filters (UTC)
+// ─────────────────────────────
+londonSession = not na(time(timeframe.period, "0700-1600"))
+nySession     = not na(time(timeframe.period, "1300-2200"))
+
+tradeSession = londonSession or nySession
+
+// ─────────────────────────────
+// 5 Minute EMAs
+// ─────────────────────────────
+emaFast_5m = ta.ema(close, emaFastLen)
+emaSlow_5m = ta.ema(close, emaSlowLen)
+
+longCross_5m  = ta.crossover(emaFast_5m, emaSlow_5m)
+shortCross_5m = ta.crossunder(emaFast_5m, emaSlow_5m)
+
+// ─────────────────────────────
+// 1 Hour HTF Data
+// ─────────────────────────────
+emaFast_1h = request.security(syminfo.tickerid, "60", ta.ema(close, emaFastLen))
+emaSlow_1h = request.security(syminfo.tickerid, "60", ta.ema(close, emaSlowLen))
+vwap_1h    = request.security(syminfo.tickerid, "60", ta.vwap(close))
+atr_1h     = request.security(syminfo.tickerid, "60", ta.atr(14))
+close_1h   = request.security(syminfo.tickerid, "60", close)
+
+// ─────────────────────────────
+// Track LAST EMA Cross on 1H
+// ─────────────────────────────
+var int htfTrend = 0
+
+if ta.crossover(emaFast_1h, emaSlow_1h)
+    htfTrend := 1
+else if ta.crossunder(emaFast_1h, emaSlow_1h)
+    htfTrend := -1
+
+// ─────────────────────────────
+// DAILY DRAWDOWN CONTROL
+// ─────────────────────────────
+var float dayStartEquity = na
+newDay = ta.change(time("D"))
+
+if newDay
+    dayStartEquity := strategy.equity
+
+dailyDD = (dayStartEquity - strategy.equity) / dayStartEquity * 100
+dailyDDHit = dailyDD >= maxDailyDD
+
+// ─────────────────────────────
+// Final Entry Conditions
+// ─────────────────────────────
+longCondition =
+     longCross_5m and
+     htfTrend == 1 and
+     close_1h > vwap_1h and
+     tradeSession and
+     not dailyDDHit
+
+shortCondition =
+     shortCross_5m and
+     htfTrend == -1 and
+     close_1h < vwap_1h and
+     tradeSession and
+     not dailyDDHit
+
+// ─────────────────────────────
+// Risk & Position Size
+// ─────────────────────────────
+riskAmount = strategy.equity * (riskPercent / 100)
+
+stopDistance = atr_1h * atrMult
+takeDistance = stopDistance * 2
+
+positionSize = riskAmount / stopDistance
+
+// ─────────────────────────────
+// Orders
+// ─────────────────────────────
+if longCondition
+    strategy.entry("Long", strategy.long, qty = positionSize)
+    strategy.exit("Long Exit",from_entry = "Long",stop = close - stopDistance,limit = close + takeDistance)
+
+if shortCondition
+    strategy.entry("Short", strategy.short, qty = positionSize)
+    strategy.exit("Short Exit",from_entry = "Short",stop = close + stopDistance,limit = close - takeDistance)
+
+// ─────────────────────────────
+// Alerts
+// ─────────────────────────────
+alertcondition(longCondition, title="Long Entry", message="LONG entry signal on {{ticker}}")
+alertcondition(shortCondition, title="Short Entry", message="SHORT entry signal on {{ticker}}")
+alertcondition(dailyDDHit, title="Daily DD Hit", message="Max daily drawdown reached. Trading disabled.")
+
+// ─────────────────────────────
+// Plotting
+// ─────────────────────────────
+plot(emaFast_5m, color=color.orange, title="EMA 9 (5m)")
+plot(emaSlow_5m, color=color.blue, title="EMA 20 (5m)")
+
+View in Pine Editor・111 lines
+Use on chart
+8
+559
+Strategy focused on following current trend with triple confirmation based on EMAs and VWAPs

@@ -1,0 +1,117 @@
+//@version=5
+strategy("Recursive WMA Angle Strategy", shorttitle="WMA Angle Strat", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.03)
+
+// --- 1. MA Settings ---
+GRP_MA = "MA Settings"
+fmal = input.int(1, "First Moving Average Length", minval=1, group=GRP_MA)
+smal = input.int(1, "Second Moving Average Length", minval=1, group=GRP_MA)
+
+// --- 2. Angle & Exit Settings ---
+GRP_ANGLE = "Angle & Exit Settings"
+angleBuyThreshold = input.float(0.2, title="Min Angle for BUY", step=0.1, group=GRP_ANGLE, tooltip="Buys if the upward trend strength (angle) is greater than this value.")
+angleSellThreshold = input.float(-0.2, title="Min Angle for SELL (Exit)", maxval=0.0, step=0.1, group=GRP_ANGLE, tooltip="Sells/Exits if the downward trend strength is lower (more negative) than this value.")
+angleLookback = input.int(3, title="Angle Lookback Period", minval=1, group=GRP_ANGLE)
+
+// --- 3. Date Filter Settings ---
+GRP_TIME = "Backtest Date Range"
+useDateFilter = input.bool(true, "Use Date Filter", group=GRP_TIME)
+// Default: From Jan 1, 2023 to Dec 31, 2030
+startTime = input.time(timestamp("1 Jan 2023 00:00 +0000"), "Start Date", group=GRP_TIME)
+endTime = input.time(timestamp("31 Dec 2030 23:59 +0000"), "End Date", group=GRP_TIME)
+
+inDateRange = useDateFilter ? (time >= startTime and time <= endTime) : true
+
+// --- 4. Recursive WMA Calculation ---
+// Calculating lengths for the recursive structure
+tmal = fmal + smal
+Fmal = smal + tmal
+Ftmal = tmal + Fmal
+Smal = Fmal + Ftmal
+
+// Data sufficiency check to prevent errors on the first few bars
+isValidBar = bar_index > Smal
+
+M1 = ta.wma(close, fmal)
+M2 = ta.wma(M1, smal)
+M3 = ta.wma(M2, tmal)
+M4 = ta.wma(M3, Fmal)
+M5 = ta.wma(M4, Ftmal)
+MAVW = ta.wma(M5, Smal) // The final smoothed Moving Average
+
+// --- 5. Angle Calculation ---
+// Check previous value to prevent repainting and errors
+mavwPrev = MAVW[angleLookback]
+mavwChange = MAVW - mavwPrev
+
+// Prevent division by zero error
+changePercent = (not na(mavwPrev) and mavwPrev != 0) ? (mavwChange / mavwPrev) * 100 : 0
+
+// Calculate angle in degrees
+angleRad = math.atan(changePercent / angleLookback)
+mavwAngleDeg = angleRad * (180 / math.pi)
+
+// --- 6. Strategy Logic ---
+
+// Conditions
+isStrongBuy = mavwAngleDeg > angleBuyThreshold      // Strong Upward Trend
+isStrongSell = mavwAngleDeg < angleSellThreshold    // Strong Downward Trend
+
+if inDateRange and isValidBar
+    // BUY Signal
+    if isStrongBuy and strategy.opentrades == 0
+        strategy.entry("Long", strategy.long, comment="BUY: " + str.tostring(mavwAngleDeg, "#.##") + "°")
+        
+    // SELL (Exit) Signal
+    if isStrongSell and strategy.position_size > 0
+        strategy.close("Long", comment="EXIT: Trend Reversal")
+
+// --- 7. Visualization ---
+
+// Plot the Moving Average
+colStrategy = strategy.position_size > 0 ? color.lime : color.gray
+plot(MAVW, "Recursive WMA", color=colStrategy, linewidth=3)
+
+// Plot Signals on Chart for Visual Verification
+//plotshape(isStrongBuy and strategy.opentrades == 0 and inDateRange, title="Buy Signal", location=location.belowbar, color=color.lime, style=shape.labelup, text="BUY", textcolor=color.white, size=size.tiny)
+//plotshape(isStrongSell and strategy.position_size > 0 and inDateRange, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL", textcolor=color.white, size=size.tiny)
+
+// Information Table (Bottom Right)
+var table infoTable = table.new(position.bottom_right, 2, 3, border_width=1, bgcolor=color.new(color.black, 60))
+
+// Update table only on the last bar to save resources
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Current Angle", text_color=color.white)
+    angleColor = mavwAngleDeg > 0 ? color.lime : (mavwAngleDeg < 0 ? color.red : color.gray)
+    table.cell(infoTable, 1, 0, str.tostring(mavwAngleDeg, "#.##") + "°", text_color=angleColor)
+    
+    table.cell(infoTable, 0, 1, "Status", text_color=color.white)
+    posText = strategy.position_size > 0 ? "LONG" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.lime : color.gray
+    table.cell(infoTable, 1, 1, posText, text_color=posColor)
+
+View in Pine Editor・94 lines
+Use on chart
+2
+9
+933
+Description: This strategy utilizes a recursive Weighted Moving Average (WMA) calculation to determine the trend direction and strength based on the slope (angle) of the curve. By calculating the angle of the smoothed moving average in degrees, the script filters out noise and aims to enter trades only during strong momentum phases.
+
+How it Works:
+
+Recursive WMA: The script calculates a series of nested WMAs (M1 to M5), creating a very smooth yet responsive curve.
+
+Angle Calculation: It measures the rate of change of this curve over a user-defined lookback period and converts it into an angle (in degrees).
+
+Entry Condition (Long): A long position is opened when the calculated angle exceeds the Min Angle for BUY threshold (default: 0.2), indicating a strong upward trend.
+
+Exit Condition: The position is closed when the angle drops below the Min Angle for SELL threshold (default: -0.2), indicating a sharp trend reversal.
+
+Settings:
+
+MA Settings: Adjust the base lengths for the recursive calculation.
+
+Angle Settings: Fine-tune the sensitivity by changing the Buy/Sell angle thresholds.
+
+Date Filter: Restrict the backtest to a specific date range.
+
+Note: This strategy is designed for Long-Only setups.

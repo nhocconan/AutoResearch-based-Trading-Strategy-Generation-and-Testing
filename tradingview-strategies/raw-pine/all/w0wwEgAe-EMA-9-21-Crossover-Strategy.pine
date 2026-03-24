@@ -1,0 +1,37 @@
+//@version=5
+strategy("EMA 9-21 Crossover Strategy", 
+     overlay=true, 
+     initial_capital=50000,       // Starting Capital = ₹50,000
+     currency=currency.INR,
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100)       // Use 100% of capital each trade
+
+// === Inputs ===
+emaFastLen = input.int(9, "Fast EMA Length")
+emaSlowLen = input.int(21, "Slow EMA Length")
+
+// === EMA Calculation ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// === Plot EMAs ===
+plot(emaFast, color=color.yellow, title="EMA 9")
+plot(emaSlow, color=color.red, title="EMA 21")
+
+// === Entry Conditions ===
+longCondition  = ta.crossover(emaFast, emaSlow)   // Buy when 9 EMA crosses above 21
+shortCondition = ta.crossunder(emaFast, emaSlow)  // Sell when 9 EMA crosses below 21
+
+// === Strategy Execution ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・30 lines
+Use on chart
+1
+8
+1 199
+09 EMA cross above 21 EMA Buy and 09 EMA crosses below 21 EMA sell

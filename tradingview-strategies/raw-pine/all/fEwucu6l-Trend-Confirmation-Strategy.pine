@@ -1,0 +1,13 @@
+//@version=5
+col_macd=##input(defval=#2962FF,type='INPUT_COLOR',##id='in_6')
+col_signal=##input(defval=#FF6D00,type='INPUT_COLOR',##id='in_7')
+col_grow_above=##input(defval=#26A69A,type='INPUT_COLOR',##id='in_8')
+col_fall_above=##input(defval=#B2DFDB,type='INPUT_COLOR',##id='in_9')
+col_grow_below=##input(defval=#FFCDD2,type='INPUT_COLOR',##id='in_10')
+col_fall_below=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_11')
+##root(root_metainfo,plot_0_0,col_grow_above,input__color)
+##root(root_metainfo,plot_0_1,col_fall_above,input__color)
+##root(root_metainfo,plot_0_2,col_grow_below,input__color)
+##root(root_metainfo,plot_0_3,col_fall_below,input__color)
+##root(root_metainfo,plot_1_0,col_macd,input__color)
+##root(root_metainfo,plot_2_0,col_signal,input__color)

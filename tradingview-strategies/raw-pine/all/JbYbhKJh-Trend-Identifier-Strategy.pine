@@ -1,0 +1,82 @@
+//@version=5
+
+strategy(title="Trend Idemtifier Strategy", shorttitle="Trend Identifier Strategy", format=format.price, precision=4, overlay = false, initial_capital = 1000, pyramiding = 10, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03)
+
+//start-end time
+startyear = input.int(2017,"start year")
+startmonth = input.int(1,"start month")
+startday = input.int(1,"start day")
+endyear = input.int(2030,"end year")
+endmonth = input.int(1,"end month")
+endday = input.int(1,"end day")
+
+timeEnd = time <= timestamp(syminfo.timezone,endyear,endmonth,endday,0,0)
+timeStart = time >= timestamp(syminfo.timezone,startyear,startmonth,startday,0,0)
+choosetime = input(true,"Choose Time Interval")
+condTime = (choosetime ? (timeStart and timeEnd) : true)
+c = input.float(1.00, "Parameter Coefficient", minval=-2.00, maxval=2.00, step=0.02)
+indexb = input.int(80, "Only buy while index is less than", minval=-0, maxval=100, step=2)
+indexs = input.int(10, "Only sell while index is more than", minval=-0, maxval=100, step=2)
+indb = input.float(0.4, "Only buy while ind is less than", minval=-1, maxval=1, step=0.02)
+inds = input.float(-0.1, "Only sell while ind is more than", minval=-1, maxval=1, step=0.02)
+
+// time frame?
+tfc = 1
+if timeframe.isdaily
+    tfc := 24
+
+// indicators: price normalized alma, and its 1st and 2nd derivatives
+ema = ta.alma(close,140,1.1,6)
+dema = (ema-ema[1])/ema
+stodema = ta.ema(ta.ema(ta.stoch(dema,dema,dema,100),3),3)
+
+d2ema = ta.ema(dema-dema[1],5)
+stod2ema = ta.ema(ta.ema(ta.stoch(d2ema,d2ema,d2ema,100),3),3)
+
+ind = (close-ta.ema(close,120*24/tfc))/close
+heat = ta.ema(ta.stoch(ind,ind,ind,120*24/tfc),3)
+index = ta.ema(heat,7*24/tfc)
+
+//plot graph
+green = color.rgb(20,255,100)
+yellow = color.yellow
+red = color.red
+blue = color.rgb(20,120,255)
+tcolor = (dema>0) and (d2ema>0)? green : (dema>0) and (d2ema<0) ? yellow : (dema < 0) and (d2ema<0) ? red : (dema < 0) and (d2ema>0) ? blue : color.black
+demaema = ta.ema(dema,21)
+plot(demaema*60, color = tcolor)
+
+//pi cycle indicator
+pi = (ta.sma(close*2,365)-ta.ema(close,116))/ta.ema(close,116)
+piplot = pi/1.53-0.69
+//plot(piplot,color = color.green)
+
+//Long MA
+longma = ta.alma(close/2+open/2,1400,1,1.5)
+longmaplot = ( 1/(close/longma)) - 0.9
+//plot(longmaplot, color = color.yellow)
+
+//strategy buy-sell conditions
+cond1a = strategy.position_size <= 0
+cond1b = strategy.position_size > 0
+
+
+if (condTime and cond1a and ( (false and tcolor[1] == blue and tcolor[0]==blue and demaema[0]>demaema[1] and demaema <-0.01*c) or (((tcolor[1] == red and demaema<0.02*c) or (tcolor[1] == blue and demaema < 0.02*c) or (tcolor[1] == yellow and demaema>-0.02*c) ) and tcolor == green) or (true and (tcolor[1] == red and tcolor == blue and demaema < -0.01*c)) ) and index<indexb and ind<indb)
+    strategy.entry("buy",strategy.long, (strategy.equity-strategy.position_size*close)/1/close)
+    
+if (condTime and cond1b and not (longmaplot>0.2) and( (tcolor[1] == yellow and tcolor[0]==yellow and demaema[0]<demaema[1] and demaema > 0.018*c) or (((tcolor[1] == yellow and demaema >-0.02*c) or (tcolor[1] == blue and demaema > -0.02*c) or (tcolor[1] == green and demaema < 0*c) ) and tcolor == red) or (tcolor[1] == green and tcolor == yellow and demaema > 0.02*c) ) and index>indexs and ind>inds)
+    strategy.order("sell",strategy.short, strategy.position_size)
+
+View in Pine Editor・71 lines
+Use on chart
+1
+9
+3
+4
+6 580
+Aug 25, 2022
+Trend Identifier Strategy for 1D BTC.USD
+The indicator smoothens a closely following moving average into a polynomial like plot and assumes 4 staged cycles based on the first and the second derivatives. This is an optimized strategy for long term buying and selling with a Sortino Ratio above 3. It is designed to be a more profitable alternative to HODLing. It can be combined with 'Accumulation/Distribution Bands & Signals' and 'Exponential Top and Bottom Finder'.
+Mar 25, 2025
+Release Notes
+Additional sell/buy conditions were added

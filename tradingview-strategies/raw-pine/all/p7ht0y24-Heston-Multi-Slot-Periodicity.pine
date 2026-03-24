@@ -1,0 +1,326 @@
+//@version=5
+strategy("Heston Multi-Slot Periodicity", overlay=true, pyramiding=3, default_qty_value=1, default_qty_type=strategy.fixed)
+
+// ============================================================================
+// MULTI-SLOT HESTON PERIODICITY - V3
+// ============================================================================
+// Tests MULTIPLE half-hour slots throughout the day
+// Takes signals from ALL profitable time windows
+// Maximizes trade frequency while maintaining 60%+ WR
+// ============================================================================
+
+// === SLOT DEFINITIONS ===
+// Enable/disable specific time slots
+useSlot1 = input.bool(true, "Slot 1: 9:30-10:00 AM (Opening Hour)")
+useSlot2 = input.bool(true, "Slot 2: 10:00-10:30 AM (Post-Open)")
+useSlot3 = input.bool(true, "Slot 3: 11:00-11:30 AM (Mid-Morning)")
+useSlot4 = input.bool(true, "Slot 4: 1:00-1:30 PM (Post-Lunch)")
+useSlot5 = input.bool(true, "Slot 5: 2:00-2:30 PM (Afternoon Flow)")
+useSlot6 = input.bool(true, "Slot 6: 3:00-3:30 PM (Close Approach)")
+
+// === RISK MANAGEMENT ===
+stopLoss = input.int(30, "Stop Loss (Points)")
+takeProfit = input.int(90, "Take Profit (Points)")
+trailOffset = input.int(20, "Trail Offset (Points)")
+
+longsOnly = input.bool(true, "Longs Only (Proven 61% WR)")
+
+// === SLOT 1: 9:30-10:00 AM ===
+var float slot1_open = na
+var float slot1_close = na
+var float slot1_return = na
+var bool slot1_entered = false
+
+inSlot1 = (hour == 9 and minute >= 30) or (hour == 10 and minute == 0)
+atSlot1Start = hour == 9 and minute == 30
+atSlot1End = hour == 10 and minute == 0
+
+if atSlot1Start
+    slot1_open := open
+    slot1_entered := false
+
+if atSlot1End and not na(slot1_open)
+    slot1_close := close
+    slot1_return := slot1_close - slot1_open
+
+// === SLOT 2: 10:00-10:30 AM ===
+var float slot2_open = na
+var float slot2_close = na
+var float slot2_return = na
+var bool slot2_entered = false
+
+inSlot2 = hour == 10 and minute >= 0 and minute < 30
+atSlot2Start = hour == 10 and minute == 0
+atSlot2End = hour == 10 and minute == 30
+
+if atSlot2Start
+    slot2_open := open
+    slot2_entered := false
+
+if atSlot2End and not na(slot2_open)
+    slot2_close := close
+    slot2_return := slot2_close - slot2_open
+
+// === SLOT 3: 11:00-11:30 AM ===
+var float slot3_open = na
+var float slot3_close = na
+var float slot3_return = na
+var bool slot3_entered = false
+
+inSlot3 = hour == 11 and minute >= 0 and minute < 30
+atSlot3Start = hour == 11 and minute == 0
+atSlot3End = hour == 11 and minute == 30
+
+if atSlot3Start
+    slot3_open := open
+    slot3_entered := false
+
+if atSlot3End and not na(slot3_open)
+    slot3_close := close
+    slot3_return := slot3_close - slot3_open
+
+// === SLOT 4: 1:00-1:30 PM ===
+var float slot4_open = na
+var float slot4_close = na
+var float slot4_return = na
+var bool slot4_entered = false
+
+inSlot4 = hour == 13 and minute >= 0 and minute < 30
+atSlot4Start = hour == 13 and minute == 0
+atSlot4End = hour == 13 and minute == 30
+
+if atSlot4Start
+    slot4_open := open
+    slot4_entered := false
+
+if atSlot4End and not na(slot4_open)
+    slot4_close := close
+    slot4_return := slot4_close - slot4_open
+
+// === SLOT 5: 2:00-2:30 PM ===
+var float slot5_open = na
+var float slot5_close = na
+var float slot5_return = na
+var bool slot5_entered = false
+
+inSlot5 = hour == 14 and minute >= 0 and minute < 30
+atSlot5Start = hour == 14 and minute == 0
+atSlot5End = hour == 14 and minute == 30
+
+if atSlot5Start
+    slot5_open := open
+    slot5_entered := false
+
+if atSlot5End and not na(slot5_open)
+    slot5_close := close
+    slot5_return := slot5_close - slot5_open
+
+// === SLOT 6: 3:00-3:30 PM ===
+var float slot6_open = na
+var float slot6_close = na
+var float slot6_return = na
+var bool slot6_entered = false
+
+inSlot6 = hour == 15 and minute >= 0 and minute < 30
+atSlot6Start = hour == 15 and minute == 0
+atSlot6End = hour == 15 and minute == 30
+
+if atSlot6Start
+    slot6_open := open
+    slot6_entered := false
+
+if atSlot6End and not na(slot6_open)
+    slot6_close := close
+    slot6_return := slot6_close - slot6_open
+
+// === ENTRY LOGIC - SLOT 1 ===
+if useSlot1 and atSlot1Start and not slot1_entered and not na(slot1_return)
+    if slot1_return > 0
+        strategy.entry("LONG_S1", strategy.long, comment="S1 Long")
+        strategy.exit("Exit_S1", "LONG_S1", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot1_entered := true
+    else if slot1_return < 0 and not longsOnly
+        strategy.entry("SHORT_S1", strategy.short, comment="S1 Short")
+        strategy.exit("Exit_S1", "SHORT_S1", profit=takeProfit, loss=stopLoss)
+        slot1_entered := true
+
+if atSlot1End
+    strategy.close("LONG_S1", comment="S1 End")
+    strategy.close("SHORT_S1", comment="S1 End")
+
+// === ENTRY LOGIC - SLOT 2 ===
+if useSlot2 and atSlot2Start and not slot2_entered and not na(slot2_return)
+    if slot2_return > 0
+        strategy.entry("LONG_S2", strategy.long, comment="S2 Long")
+        strategy.exit("Exit_S2", "LONG_S2", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot2_entered := true
+    else if slot2_return < 0 and not longsOnly
+        strategy.entry("SHORT_S2", strategy.short, comment="S2 Short")
+        strategy.exit("Exit_S2", "SHORT_S2", profit=takeProfit, loss=stopLoss)
+        slot2_entered := true
+
+if atSlot2End
+    strategy.close("LONG_S2", comment="S2 End")
+    strategy.close("SHORT_S2", comment="S2 End")
+
+// === ENTRY LOGIC - SLOT 3 ===
+if useSlot3 and atSlot3Start and not slot3_entered and not na(slot3_return)
+    if slot3_return > 0
+        strategy.entry("LONG_S3", strategy.long, comment="S3 Long")
+        strategy.exit("Exit_S3", "LONG_S3", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot3_entered := true
+    else if slot3_return < 0 and not longsOnly
+        strategy.entry("SHORT_S3", strategy.short, comment="S3 Short")
+        strategy.exit("Exit_S3", "SHORT_S3", profit=takeProfit, loss=stopLoss)
+        slot3_entered := true
+
+if atSlot3End
+    strategy.close("LONG_S3", comment="S3 End")
+    strategy.close("SHORT_S3", comment="S3 End")
+
+// === ENTRY LOGIC - SLOT 4 ===
+if useSlot4 and atSlot4Start and not slot4_entered and not na(slot4_return)
+    if slot4_return > 0
+        strategy.entry("LONG_S4", strategy.long, comment="S4 Long")
+        strategy.exit("Exit_S4", "LONG_S4", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot4_entered := true
+    else if slot4_return < 0 and not longsOnly
+        strategy.entry("SHORT_S4", strategy.short, comment="S4 Short")
+        strategy.exit("Exit_S4", "SHORT_S4", profit=takeProfit, loss=stopLoss)
+        slot4_entered := true
+
+if atSlot4End
+    strategy.close("LONG_S4", comment="S4 End")
+    strategy.close("SHORT_S4", comment="S4 End")
+
+// === ENTRY LOGIC - SLOT 5 ===
+if useSlot5 and atSlot5Start and not slot5_entered and not na(slot5_return)
+    if slot5_return > 0
+        strategy.entry("LONG_S5", strategy.long, comment="S5 Long")
+        strategy.exit("Exit_S5", "LONG_S5", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot5_entered := true
+    else if slot5_return < 0 and not longsOnly
+        strategy.entry("SHORT_S5", strategy.short, comment="S5 Short")
+        strategy.exit("Exit_S5", "SHORT_S5", profit=takeProfit, loss=stopLoss)
+        slot5_entered := true
+
+if atSlot5End
+    strategy.close("LONG_S5", comment="S5 End")
+    strategy.close("SHORT_S5", comment="S5 End")
+
+// === ENTRY LOGIC - SLOT 6 ===
+if useSlot6 and atSlot6Start and not slot6_entered and not na(slot6_return)
+    if slot6_return > 0
+        strategy.entry("LONG_S6", strategy.long, comment="S6 Long")
+        strategy.exit("Exit_S6", "LONG_S6", profit=takeProfit, loss=stopLoss, trail_offset=trailOffset, trail_points=trailOffset)
+        slot6_entered := true
+    else if slot6_return < 0 and not longsOnly
+        strategy.entry("SHORT_S6", strategy.short, comment="S6 Short")
+        strategy.exit("Exit_S6", "SHORT_S6", profit=takeProfit, loss=stopLoss)
+        slot6_entered := true
+
+if atSlot6End
+    strategy.close("LONG_S6", comment="S6 End")
+    strategy.close("SHORT_S6", comment="S6 End")
+
+// === VISUALS ===
+bgcolor(inSlot1 ? color.new(color.blue, 95) : na, title="Slot 1")
+bgcolor(inSlot2 ? color.new(color.green, 95) : na, title="Slot 2")
+bgcolor(inSlot3 ? color.new(color.orange, 95) : na, title="Slot 3")
+bgcolor(inSlot4 ? color.new(color.purple, 95) : na, title="Slot 4")
+bgcolor(inSlot5 ? color.new(color.red, 95) : na, title="Slot 5")
+bgcolor(inSlot6 ? color.new(color.yellow, 95) : na, title="Slot 6")
+
+// === INFO TABLE ===
+var table infoTable = table.new(position.top_right, 3, 8, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(infoTable, 0, 0, "Slot", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 1, 0, "Time", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 2, 0, "Yesterday", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    
+    // Slot 1
+    table.cell(infoTable, 0, 1, "S1", bgcolor=color.new(color.blue, 80))
+    table.cell(infoTable, 1, 1, "9:30-10:00", bgcolor=color.new(color.blue, 80))
+    table.cell(infoTable, 2, 1, not na(slot1_return) ? str.tostring(slot1_return, "#.0") : "N/A", bgcolor=color.new(color.blue, 80))
+    
+    // Slot 2
+    table.cell(infoTable, 0, 2, "S2", bgcolor=color.new(color.green, 80))
+    table.cell(infoTable, 1, 2, "10:00-10:30", bgcolor=color.new(color.green, 80))
+    table.cell(infoTable, 2, 2, not na(slot2_return) ? str.tostring(slot2_return, "#.0") : "N/A", bgcolor=color.new(color.green, 80))
+    
+    // Slot 3
+    table.cell(infoTable, 0, 3, "S3", bgcolor=color.new(color.orange, 80))
+    table.cell(infoTable, 1, 3, "11:00-11:30", bgcolor=color.new(color.orange, 80))
+    table.cell(infoTable, 2, 3, not na(slot3_return) ? str.tostring(slot3_return, "#.0") : "N/A", bgcolor=color.new(color.orange, 80))
+    
+    // Slot 4
+    table.cell(infoTable, 0, 4, "S4", bgcolor=color.new(color.purple, 80))
+    table.cell(infoTable, 1, 4, "1:00-1:30", bgcolor=color.new(color.purple, 80))
+    table.cell(infoTable, 2, 4, not na(slot4_return) ? str.tostring(slot4_return, "#.0") : "N/A", bgcolor=color.new(color.purple, 80))
+    
+    // Slot 5
+    table.cell(infoTable, 0, 5, "S5", bgcolor=color.new(color.red, 80))
+    table.cell(infoTable, 1, 5, "2:00-2:30", bgcolor=color.new(color.red, 80))
+    table.cell(infoTable, 2, 5, not na(slot5_return) ? str.tostring(slot5_return, "#.0") : "N/A", bgcolor=color.new(color.red, 80))
+    
+    // Slot 6
+    table.cell(infoTable, 0, 6, "S6", bgcolor=color.new(color.yellow, 80))
+    table.cell(infoTable, 1, 6, "3:00-3:30", bgcolor=color.new(color.yellow, 80))
+    table.cell(infoTable, 2, 6, not na(slot6_return) ? str.tostring(slot6_return, "#.0") : "N/A", bgcolor=color.new(color.yellow, 80))
+    
+    // Stats
+    table.cell(infoTable, 0, 7, "R:R", bgcolor=color.new(color.white, 70))
+    table.cell(infoTable, 1, 7, str.tostring(takeProfit/stopLoss, "#.#") + ":1", bgcolor=color.new(color.white, 70))
+    table.cell(infoTable, 2, 7, longsOnly ? "LONGS" : "BOTH", bgcolor=color.new(color.white, 70))
+
+View in Pine Editor・276 lines
+Use on chart
+9
+488
+HESTON INTRADAY PERIODICITY STRATEGY
+
+ACADEMIC BASIS:
+Based on research by Heston, Korajczyk & Sadka (Journal of Finance, 2010).
+Finding: "Stock returns in a specific half-hour window show continuation at the SAME time window the next day, persisting for 40+ trading days."
+
+CORE CONCEPT:
+If NQ went UP during 10:00-10:30 AM yesterday → likely goes UP during 10:00-10:30 AM today
+If NQ went DOWN during 10:00-10:30 AM yesterday → likely goes DOWN during 10:00-10:30 AM today
+
+WHY IT WORKS:
+- Institutional VWAP trading (Volume Weighted Average Price algorithms)
+- Index rebalancing flows occur at predictable times
+- Market-on-close orders create patterns
+- Institutions CAUSE the pattern but can't arbitrage it (position size, slippage, mandate restrictions)
+
+STRATEGY RULES:
+1. Track yesterday's return in 6 specific half-hour slots
+2. At start of each slot today, if yesterday was UP → GO LONG
+3. Exit: 30pt stop loss, 90pt target (3:1 R:R), or slot end (whichever first)
+4. Longs only (proven 60%+ win rate vs shorts 50%)
+
+TIME SLOTS:
+S1: 9:30-10:00 AM (opening flows)
+S2: 10:00-10:30 AM (post-open institutional)
+S3: 11:00-11:30 AM (mid-morning)
+S4: 1:00-1:30 PM (post-lunch)
+S5: 2:00-2:30 PM (afternoon rebalancing)
+S6: 3:00-3:30 PM (approaching close)
+
+BACKTEST PERFORMANCE (5 months):
+- Win Rate: 60.36%
+- Profit Factor: 2.537
+- Total Trades: 338
+- Avg Win: $241 vs Avg Loss: $148 (1.6:1)
+- Max Drawdown: $1,240 (0.12%)
+
+EXECUTION:
+- 3-6 setups per day
+- Fully mechanical (no discretion)
+- Scalable to multiple accounts
+- Works on NQ futures (NASDAQ 100)
+
+ACADEMIC REFERENCE:
+Heston, S.L., Korajczyk, R.A., Sadka, R. (2010). "Intraday Patterns in the Cross-Section of Stock Returns." Journal of Finance, 65(4), 1369-1407.

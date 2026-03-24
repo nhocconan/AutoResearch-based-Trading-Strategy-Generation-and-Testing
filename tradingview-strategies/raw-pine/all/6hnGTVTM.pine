@@ -1,0 +1,536 @@
+//@version=5
+///strategy("Youtube ABCD Harmonic Patterns [theEccentricTrader] + Hook", overlay=true, max_lines_count=500, max_labels_count=250, pyramiding=0, process_orders_on_close=true)
+
+
+strategy(shorttitle="ABCD Harmonic Pattern Strategy (Bull + Bear) with Confluence Filters", title="ABCD Harmonic Pattern Strategy (Bull + Bear) with Confluence Filters", overlay=true, initial_capital=100, calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=false, pyramiding=0)
+
+
+// =====================================================
+// EMA SUPPORT (kept as-is, currently not used for filters)
+// =====================================================
+ema10  = ta.ema(close, 10)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// =====================================================
+// ABCD MODULE (Bearish + Bullish ABCD)
+// =====================================================
+
+// --- Swing High detection (SH) ---
+shCond1 = close[1] >= open[1] and close < open and high >= high[1] and barstate.isconfirmed
+shCond2 = close[1] >= open[1] and close < open and high <= high[1] and barstate.isconfirmed
+
+shPivotPrice = shCond1 ? high : shCond2 ? high[1] : na
+shPivotBar   = shCond1 ? bar_index : shCond2 ? (bar_index - 1) : na
+
+peakPrice     = ta.valuewhen(not na(shPivotPrice), shPivotPrice, 0)
+peakBarIndex  = ta.valuewhen(not na(shPivotPrice), shPivotBar, 0)
+shPivotPrice1 = ta.valuewhen(not na(shPivotPrice), shPivotPrice, 1)
+shPivotBar1   = ta.valuewhen(not na(shPivotBar),   shPivotBar,   1)
+
+// --- Swing Low detection (SL) ---
+slCond1 = close[1] < open[1] and close >= open and low <= low[1] and barstate.isconfirmed
+slCond2 = close[1] < open[1] and close >= open and low >= low[1] and barstate.isconfirmed
+
+slPivotPrice = slCond1 ? low : slCond2 ? low[1] : na
+slPivotBar   = slCond1 ? bar_index : slCond2 ? (bar_index - 1) : na
+
+troughPrice     = ta.valuewhen(not na(slPivotPrice), slPivotPrice, 0)
+troughBarIndex  = ta.valuewhen(not na(slPivotPrice), slPivotBar, 0)
+slPivotPrice1   = ta.valuewhen(not na(slPivotPrice), slPivotPrice, 1)
+slPivotBar1     = ta.valuewhen(not na(slPivotBar),   slPivotBar,   1)
+
+// --- Trend flags ---
+returnLineUptrend   = ta.valuewhen(not na(shPivotPrice), shPivotPrice, 0) > ta.valuewhen(not na(shPivotPrice), shPivotPrice, 1)
+uptrend             = ta.valuewhen(not na(slPivotPrice), slPivotPrice, 0) > ta.valuewhen(not na(slPivotPrice), slPivotPrice, 1)
+downtrend           = ta.valuewhen(not na(shPivotPrice), shPivotPrice, 0) < ta.valuewhen(not na(shPivotPrice), shPivotPrice, 1)
+returnLineDowntrend = ta.valuewhen(not na(slPivotPrice), slPivotPrice, 0) < ta.valuewhen(not na(slPivotPrice), slPivotPrice, 1)
+
+// --- Ratios (both directions) ---
+slRangeRatio = (peakPrice - troughPrice) / (peakPrice - troughPrice[1]) * 100
+shRangeRatio = (peakPrice - troughPrice) / (peakPrice[1] - troughPrice) * 100
+
+slRangeRatio0 = ta.valuewhen(not na(slPivotPrice), slRangeRatio, 0)
+shRangeRatio0 = ta.valuewhen(not na(shPivotPrice), shRangeRatio, 0)
+
+// --- Inputs ---
+grpTol = "Tolerances"
+bcLowerTolerance = input.int(defval=10, title="BC Lower Tolerance (%)", group=grpTol)
+bcUpperTolerance = input.int(defval=10, title="BC Upper Tolerance (%)", group=grpTol)
+cdLowerTolerance = input.int(defval=10, title="CD Lower Tolerance (%)", group=grpTol)
+cdUpperTolerance = input.int(defval=10, title="CD Upper Tolerance (%)", group=grpTol)
+
+// --- Bearish pattern ---
+bearishABCD =
+     not na(shPivotPrice) and returnLineUptrend and uptrend and
+     slRangeRatio0 >= 61.8 - bcLowerTolerance and slRangeRatio0 <= 78.6 + bcUpperTolerance and
+     shRangeRatio  >= 127.2 - cdLowerTolerance and shRangeRatio  <= 161.8 + cdUpperTolerance
+
+// --- Bullish pattern ---
+bullishABCD =
+     not na(slPivotPrice) and returnLineDowntrend and downtrend and
+     shRangeRatio0 >= 61.8 - bcLowerTolerance and shRangeRatio0 <= 78.6 + bcUpperTolerance and
+     slRangeRatio  >= 127.2 - cdLowerTolerance and slRangeRatio  <= 161.8 + cdUpperTolerance
+
+// =====================================================
+// DRAWING SETTINGS
+// =====================================================
+grpLine = "Line Styling"
+patternColor     = input.color(defval=color.blue, title="Pattern Color", group=grpLine)
+showProjections  = input.bool(defval=true, title="Show Projections", group=grpLine)
+
+grpLabel = "Label Styling"
+labelColor       = input.color(defval=color.blue, title="Label Text Color", group=grpLabel)
+
+grpExt = "Projection Extension"
+selectProjectionExtend = input.string(title="Extend Current Projection Lines",defval="None", options=["None", "Right", "Left", "Both"], group=grpExt)
+
+extendProjectionLines =
+     selectProjectionExtend == "None"  ? extend.none  :
+     selectProjectionExtend == "Right" ? extend.right :
+     selectProjectionExtend == "Left"  ? extend.left  :
+     selectProjectionExtend == "Both"  ? extend.both  : extend.none
+
+// Persistent projection lines (updated on new bearish patterns)
+var line currentPatternPeak            = line.new(na, na, na, na, extend=extendProjectionLines, color=color.green, style=line.style_dashed)
+var line currentPatternTrough          = line.new(na, na, na, na, extend=extendProjectionLines, color=color.red,   style=line.style_dashed)
+var line currentPatternUpperProjection = line.new(na, na, na, na, extend=extendProjectionLines, color=color.green, style=line.style_dashed)
+var line currentPatternLowerProjection = line.new(na, na, na, na, extend=extendProjectionLines, color=color.red,   style=line.style_dashed)
+
+// =====================================================
+// GLOBAL ARRAYS FOR OBJECT MANAGEMENT (IMPORTANT FOR PUBLISH)
+// =====================================================
+var line[]  linesStore  = array.new_line()
+var label[] labelsStore = array.new_label()
+
+f_storeLine(line ln) =>
+    array.push(linesStore, ln)
+    if array.size(linesStore) > 500
+        line old = array.shift(linesStore)
+        line.delete(old)
+
+f_storeLabel(label lb) =>
+    array.push(labelsStore, lb)
+    if array.size(labelsStore) > 250
+        label old = array.shift(labelsStore)
+        label.delete(old)
+
+// =====================================================
+// BEARISH DRAWING
+// =====================================================
+if bearishABCD
+    // AB=BC=CD lines 
+    line lineOne   = line.new(slPivotBar1, slPivotPrice1, shPivotBar1, shPivotPrice1, color=patternColor, width=2)
+    line lineTwo   = line.new(shPivotBar1, shPivotPrice1, troughBarIndex, troughPrice, color=patternColor, width=2)
+    line lineThree = line.new(troughBarIndex, troughPrice, shPivotBar, shPivotPrice, color=patternColor, width=2)
+    line lineFour  = line.new(shPivotBar1, shPivotPrice1, shPivotBar, shPivotPrice, color=patternColor, style=line.style_dashed)
+    line lineFive  = line.new(slPivotBar1, slPivotPrice1, troughBarIndex, troughPrice, color=patternColor, style=line.style_dashed)
+
+    label labelOne   = label.new(slPivotBar1, slPivotPrice1, color=color.rgb(54, 58, 69, 100), style=label.style_label_up,   text="A", textcolor=labelColor)
+    label labelTwo   = label.new(shPivotBar1, shPivotPrice1, color=color.rgb(54, 58, 69, 100), style=label.style_label_down, text="B", textcolor=labelColor)
+    label labelThree = label.new(troughBarIndex, troughPrice, color=color.rgb(54, 58, 69, 100), style=label.style_label_up,
+         text="C (" + str.tostring(math.round(slRangeRatio0, 2)) + ")", textcolor=labelColor)
+    label labelFour  = label.new(shPivotBar, shPivotPrice, color=color.rgb(54, 58, 69, 100), style=label.style_label_down,
+         text="D (" + str.tostring(math.round(shRangeRatio, 2)) + ")", textcolor=labelColor)
+
+    // Projections
+    line patternPeak = line.new(showProjections ? troughBarIndex : na, showProjections ? peakPrice : na,
+         showProjections ? bar_index : na, showProjections ? peakPrice : na, color=color.green, style=line.style_dashed)
+    line patternTrough = line.new(showProjections ? troughBarIndex : na, showProjections ? troughPrice : na,
+         showProjections ? bar_index : na, showProjections ? troughPrice : na, color=color.red, style=line.style_dashed)
+
+    float projDelta = (shPivotPrice1 - slPivotPrice1)
+    line patternUpperProjection = line.new(showProjections ? troughBarIndex : na, showProjections ? peakPrice + projDelta : na,
+         showProjections ? bar_index : na, showProjections ? peakPrice + projDelta : na, color=color.green, style=line.style_dashed)
+    line patternLowerProjection = line.new(showProjections ? troughBarIndex : na, showProjections ? troughPrice - projDelta : na,
+         showProjections ? bar_index : na, showProjections ? troughPrice - projDelta : na, color=color.red, style=line.style_dashed)
+
+    // Store and manage object limits safely
+    f_storeLine(lineOne), f_storeLine(lineTwo), f_storeLine(lineThree), f_storeLine(lineFour), f_storeLine(lineFive)
+    f_storeLine(patternPeak), f_storeLine(patternTrough), f_storeLine(patternUpperProjection), f_storeLine(patternLowerProjection)
+
+    f_storeLabel(labelOne), f_storeLabel(labelTwo), f_storeLabel(labelThree), f_storeLabel(labelFour)
+
+    // Update persistent projection lines
+    line.set_xy1(currentPatternPeak, showProjections ? troughBarIndex : na, showProjections ? peakPrice : na)
+    line.set_xy2(currentPatternPeak, showProjections ? bar_index : na, showProjections ? peakPrice : na)
+    line.set_xy1(currentPatternTrough, showProjections ? troughBarIndex : na, showProjections ? troughPrice : na)
+    line.set_xy2(currentPatternTrough, showProjections ? bar_index : na, showProjections ? troughPrice : na)
+    line.set_xy1(currentPatternUpperProjection, showProjections ? troughBarIndex : na, showProjections ? peakPrice + projDelta : na)
+    line.set_xy2(currentPatternUpperProjection, showProjections ? bar_index : na, showProjections ? peakPrice + projDelta : na)
+    line.set_xy1(currentPatternLowerProjection, showProjections ? troughBarIndex : na, showProjections ? troughPrice - projDelta : na)
+    line.set_xy2(currentPatternLowerProjection, showProjections ? bar_index : na, showProjections ? troughPrice - projDelta : na)
+
+// =====================================================
+// BULLISH DRAWING (mirrored)
+// Visual note: A=previous peak, B=previous trough, C=current peak, D=current trough
+// =====================================================
+if bullishABCD
+    line lineOneB   = line.new(shPivotBar1, shPivotPrice1, slPivotBar1, slPivotPrice1, color=patternColor, width=2)
+    line lineTwoB   = line.new(slPivotBar1, slPivotPrice1, peakBarIndex, peakPrice, color=patternColor, width=2)
+    line lineThreeB = line.new(peakBarIndex, peakPrice, troughBarIndex, troughPrice, color=patternColor, width=2)
+    line lineFourB  = line.new(slPivotBar1, slPivotPrice1, troughBarIndex, troughPrice, color=patternColor, style=line.style_dashed)
+    line lineFiveB  = line.new(shPivotBar1, shPivotPrice1, peakBarIndex, peakPrice, color=patternColor, style=line.style_dashed)
+
+    label labelOneB   = label.new(shPivotBar1, shPivotPrice1, color=color.rgb(54, 58, 69, 100), style=label.style_label_down, text="A", textcolor=labelColor)
+    label labelTwoB   = label.new(slPivotBar1, slPivotPrice1, color=color.rgb(54, 58, 69, 100), style=label.style_label_up,   text="B", textcolor=labelColor)
+    label labelThreeB = label.new(peakBarIndex, peakPrice, color=color.rgb(54, 58, 69, 100), style=label.style_label_down,
+         text="C (" + str.tostring(math.round(shRangeRatio0, 2)) + ")", textcolor=labelColor)
+    label labelFourB  = label.new(troughBarIndex, troughPrice, color=color.rgb(54, 58, 69, 100), style=label.style_label_up,
+         text="D (" + str.tostring(math.round(slRangeRatio, 2)) + ")", textcolor=labelColor)
+
+    line patternPeakB = line.new(showProjections ? peakBarIndex : na, showProjections ? peakPrice : na,
+         showProjections ? bar_index : na, showProjections ? peakPrice : na, color=color.green, style=line.style_dashed)
+    line patternTroughB = line.new(showProjections ? peakBarIndex : na, showProjections ? troughPrice : na,
+         showProjections ? bar_index : na, showProjections ? troughPrice : na, color=color.red, style=line.style_dashed)
+
+    float projDeltaB = (shPivotPrice1 - slPivotPrice1)
+    line patternUpperProjectionB = line.new(showProjections ? peakBarIndex : na, showProjections ? peakPrice + projDeltaB : na,
+         showProjections ? bar_index : na, showProjections ? peakPrice + projDeltaB : na, color=color.green, style=line.style_dashed)
+    line patternLowerProjectionB = line.new(showProjections ? peakBarIndex : na, showProjections ? troughPrice - projDeltaB : na,
+         showProjections ? bar_index : na, showProjections ? troughPrice - projDeltaB : na, color=color.red, style=line.style_dashed)
+
+    f_storeLine(lineOneB), f_storeLine(lineTwoB), f_storeLine(lineThreeB), f_storeLine(lineFourB), f_storeLine(lineFiveB)
+    f_storeLine(patternPeakB), f_storeLine(patternTroughB), f_storeLine(patternUpperProjectionB), f_storeLine(patternLowerProjectionB)
+
+    f_storeLabel(labelOneB), f_storeLabel(labelTwoB), f_storeLabel(labelThreeB), f_storeLabel(labelFourB)
+
+// =====================================================
+// FINAL SIGNALS
+// =====================================================
+bearishABCDSignal = bearishABCD and barstate.isconfirmed
+bullishABCDSignal = bullishABCD and barstate.isconfirmed
+
+alertcondition(bearishABCDSignal, title="Bearish ABCD", message="Bearish ABCD")
+alertcondition(bullishABCDSignal, title="Bullish ABCD", message="Bullish ABCD")
+
+plotshape(bearishABCDSignal, title="Bearish ABCD Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="ABCD-")
+plotshape(bullishABCDSignal, title="Bullish ABCD Signal", style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="ABCD+")
+
+// =====================================================
+// ENTRY FILTERS (confluence) WITHOUT REMOVING ABCD SHAPES
+// =====================================================
+grpEntry = "Entry Filters (Confluence)"
+
+enableEntries = input.bool(true, "Enable entries (strategy.entry)", group=grpEntry)
+
+// 1) HTF trend filter
+useHTFTrend   = input.bool(true, "Use HTF trend (EMA)", group=grpEntry)
+htfTf         = input.timeframe("240", "HTF timeframe", group=grpEntry)
+htfEmaLen     = input.int(200, "HTF EMA length", minval=1, group=grpEntry)
+htfEma        = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), barmerge.gaps_off, barmerge.lookahead_off)
+trendLongOk   = close > htfEma
+trendShortOk  = close < htfEma
+
+// 2) RSI filter
+useRSI      = input.bool(true, "Use RSI filter", group=grpEntry)
+rsiLen      = input.int(14, "RSI length", minval=1, group=grpEntry)
+rsiLongMax  = input.int(55, "RSI max for LONG (lower = stricter)", minval=1, maxval=100, group=grpEntry)
+rsiShortMin = input.int(45, "RSI min for SHORT (higher = stricter)", minval=1, maxval=100, group=grpEntry)
+rsiVal      = ta.rsi(close, rsiLen)
+rsiLongOk   = rsiVal <= rsiLongMax
+rsiShortOk  = rsiVal >= rsiShortMin
+
+// 3) Volume filter
+useVolume = input.bool(false, "Use volume above SMA", group=grpEntry)
+volLen    = input.int(20, "Volume SMA length", minval=1, group=grpEntry)
+volMult   = input.float(1.0, "Volume SMA multiplier", minval=0.1, step=0.1, group=grpEntry)
+volSma    = ta.sma(volume, volLen)
+volumeOk  = not useVolume or (volume >= volSma * volMult)
+
+// 4) ATR filter
+useATR    = input.bool(true, "Use minimum ATR (%)", group=grpEntry)
+atrLen    = input.int(14, "ATR length", minval=1, group=grpEntry)
+minAtrPct = input.float(0.15, "Minimum ATR % of price", minval=0.0, step=0.01, group=grpEntry)
+atrVal    = ta.atr(atrLen)
+atrPct    = atrVal / close * 100
+atrOk     = not useATR or (atrPct >= minAtrPct)
+
+// 5) Candle confirmation
+useCandleConf = input.bool(true, "Use candle confirmation", group=grpEntry)
+minBodyRatio  = input.float(0.35, "Body/Range minimum", minval=0.0, maxval=1.0, step=0.05, group=grpEntry)
+rng           = math.max(high - low, syminfo.mintick)
+body          = math.abs(close - open)
+bodyRatio     = body / rng
+bullCandleOk  = close > open and bodyRatio >= minBodyRatio
+bearCandleOk  = close < open and bodyRatio >= minBodyRatio
+candleLongOk  = not useCandleConf or bullCandleOk
+candleShortOk = not useCandleConf or bearCandleOk
+
+// 6) Minimum bounce from D
+useBounce    = input.bool(true, "Use minimum bounce from D", group=grpEntry)
+minBouncePct = input.float(0.10, "Minimum bounce % from D", minval=0.0, step=0.01, group=grpEntry)
+
+bullBouncePct = troughPrice != 0 ? (close - troughPrice) / troughPrice * 100 : 0.0
+bullBounceOk  = not useBounce or (bullBouncePct >= minBouncePct)
+
+bearBouncePct = shPivotPrice != 0 ? (shPivotPrice - close) / shPivotPrice * 100 : 0.0
+bearBounceOk  = not useBounce or (bearBouncePct >= minBouncePct)
+
+// Entry signals
+longEntrySignal  = bullishABCDSignal and candleLongOk and bullBounceOk and volumeOk and atrOk and (not useRSI or rsiLongOk) and (not useHTFTrend or trendLongOk)
+shortEntrySignal = bearishABCDSignal and candleShortOk and bearBounceOk and volumeOk and atrOk and (not useRSI or rsiShortOk) and (not useHTFTrend or trendShortOk)
+
+plotshape(longEntrySignal,  title="LONG Entry (Confluence)",  style=shape.labelup,   location=location.belowbar, text="L", size=size.tiny)
+plotshape(shortEntrySignal, title="SHORT Entry (Confluence)", style=shape.labeldown, location=location.abovebar, text="S", size=size.tiny)
+
+// =====================================================
+// TRADE MANAGEMENT ()
+// =====================================================
+var bool takeCareTrade = false
+
+isLong() =>
+    strategy.position_size > 0
+
+isShort() =>
+    strategy.position_size < 0
+
+isFlat() =>
+    strategy.position_size == 0
+
+barsSinceFirstEntry() =>
+    bar_index - strategy.opentrades.entry_bar_index(0)
+
+// Inputs
+grpRisk = "TP/SL"
+botActive       = input.bool(false, title="Bot strategy mode", defval=true, group=grpRisk)
+showStrategyBg  = input.bool(true, title="Show strategy colors", defval=true, group=grpRisk)
+
+stopLossPct     = input.float(4.5, "Stop Loss (%)", minval=0, group=grpRisk)
+takeProfitPct   = input.float(1.5, "Take Profit (%)", minval=0, group=grpRisk)
+
+useTrailing     = input.bool(true, "Use trailing stop", group=grpRisk)
+trailPct        = input.float(0.05, "Trailing offset (%) of entry price", minval=0, step=0.01, group=grpRisk)
+
+useTakeCare     = input.bool(false, title="Enable take-care profit", defval=true, group=grpRisk)
+takeCareProfit  = input.float(1.5, title="Take-care profit threshold", minval=0.1, step=0.1, defval=0.5, group=grpRisk)
+takeCareBars    = input.int(1, title="Bars before take-care can trigger", minval=1, defval=2, group=grpRisk)
+
+fearClose       = input.bool(false, title="Fear close", defval=true, group=grpRisk)
+bgOnEntry       = input.bool(true, title="Background on entry", defval=true, group=grpRisk)
+
+// Choose entry confirmation (kept from your logic)
+fiveLong  = bullishABCDSignal
+fiveShort = bearishABCDSignal
+
+longConfirm  = fiveLong
+shortConfirm = fiveShort
+
+var string entryTag = "None"
+if fiveLong or fiveShort
+    entryTag := "Five"
+
+// Re-entry control
+tradeClosedOnThisBar = strategy.closedtrades > strategy.closedtrades[1]
+var int lastPositionBar = na
+barsSinceLastPosition = na(lastPositionBar) ? 0 : bar_index - lastPositionBar
+canOpenNewPosition = na(lastPositionBar) or barsSinceLastPosition >= 2
+
+if not isFlat() or tradeClosedOnThisBar
+    lastPositionBar := bar_index
+
+isEntryBlocked = tradeClosedOnThisBar or not canOpenNewPosition
+
+// Entries
+if enableEntries and longConfirm and isFlat() and barstate.isconfirmed and not isEntryBlocked
+    strategy.entry("long", strategy.long, comment="Buy " + entryTag, alert_message="ok buy")
+    if not botActive
+        alert("Long on " + entryTag + " " + syminfo.basecurrency + " SL " + str.tostring(stopLossPct) + " TP " + str.tostring(takeProfitPct), alert.freq_once_per_bar_close)
+    else
+        alert("Long on", alert.freq_once_per_bar_close)
+
+if enableEntries and shortConfirm and isFlat() and barstate.isconfirmed and not isEntryBlocked
+    strategy.entry("short", strategy.short, comment="Short " + entryTag, alert_message="ok sell")
+    if not botActive
+        alert("Short on " + entryTag + " " + syminfo.basecurrency + " SL " + str.tostring(stopLossPct) + " TP " + str.tostring(takeProfitPct), alert.freq_once_per_bar_close)
+    else
+        alert("Short on", alert.freq_once_per_bar_close)
+
+// Background colors
+bgcolor(isFlat() and longConfirm  and bgOnEntry ? color.new(#ffffff, 31) : na)
+bgcolor(isFlat() and shortConfirm and bgOnEntry ? color.new(#000000, 23) : na)
+
+// Current profit helper (points)
+curProfitInPts() =>
+    if strategy.position_size > 0
+        high - strategy.position_avg_price
+    else if strategy.position_size < 0
+        strategy.position_avg_price - low
+    else
+        0.0
+
+checkCloseLong  = strategy.position_size[1] > 0 and strategy.position_size == 0
+checkCloseShort = strategy.position_size[1] < 0 and strategy.position_size == 0
+
+bgcolor(showStrategyBg and not isFlat() and barsSinceFirstEntry() > 0 and strategy.position_size > 0 and bgOnEntry ? color.new(#fff82b, 72) : na)
+bgcolor(showStrategyBg and not isFlat() and barsSinceFirstEntry() > 0 and strategy.position_size < 0 and bgOnEntry ? color.new(#ff2877, 73) : na)
+bgcolor(checkCloseLong  and bgOnEntry ? color.new(#5fff2a, 58) : na)
+bgcolor(checkCloseShort and bgOnEntry ? color.new(#ff2a2a, 27) : na)
+
+// Single exit logic (renamed variables to avoid collision with pivots)
+if strategy.position_size != 0
+    bool longPos = strategy.position_size > 0
+    float avgPrice = strategy.position_avg_price
+
+    float tradeSL = longPos ? avgPrice * (1 - stopLossPct / 100) : avgPrice * (1 + stopLossPct / 100)
+    float tradeTP = longPos ? avgPrice * (1 + takeProfitPct / 100) : avgPrice * (1 - takeProfitPct / 100)
+
+    if useTrailing
+        strategy.exit(longPos ? "exit_buy" : "exit_sell",longPos ? "long" : "short",stop=tradeSL,trail_price=tradeTP,trail_offset=(avgPrice * (trailPct / 100)) / syminfo.mintick,comment=longPos ? "exit_buy" : "exit_sell",alert_message=longPos ? "exit_buy" : "exit_sell")
+    else
+        strategy.exit(longPos ? "exit_buy" : "exit_sell",longPos ? "long" : "short",stop=tradeSL,limit=tradeTP,comment=longPos ? "exit_buy" : "exit_sell",alert_message=longPos ? "exit_buy" : "exit_sell")
+
+// Take-care profit logic
+if strategy.openprofit >= takeCareProfit and barsSinceFirstEntry() > takeCareBars
+    takeCareTrade := true
+
+if useTakeCare and not isFlat() and takeCareTrade and isShort()
+    strategy.close("short", qty_percent=100, comment="Take-care short")
+    alert("Take-care short", alert.freq_once_per_bar_close)
+
+if useTakeCare and not isFlat() and takeCareTrade and isLong()
+    strategy.close("long", qty_percent=100, comment="Take-care long")
+    alert("Take-care long", alert.freq_once_per_bar_close)
+
+// =====================================================
+// TP/SL LINES (kept, but renamed; draws only when in position)
+// =====================================================
+var int extendBars = 25
+var line takeProfitLine = na
+var line stopLossLine   = na
+var label takeProfitLabel = na
+var label stopLossLabel   = na
+
+var color tpColor = color.green
+var color slColor = color.red
+
+// Delete previous objects each bar
+if bar_index != bar_index[1]
+    line.delete(takeProfitLine)
+    line.delete(stopLossLine)
+    label.delete(takeProfitLabel)
+    label.delete(stopLossLabel)
+
+// Compute prices only when position is open
+float tpLinePrice = na
+float slLinePrice = na
+
+if isLong()
+    tpLinePrice := strategy.position_avg_price * (1 + takeProfitPct / 100)
+    slLinePrice := strategy.position_avg_price * (1 - stopLossPct / 100)
+else if isShort()
+    tpLinePrice := strategy.position_avg_price * (1 - takeProfitPct / 100)
+    slLinePrice := strategy.position_avg_price * (1 + stopLossPct / 100)
+
+if not na(tpLinePrice)
+    takeProfitLine  := line.new(bar_index, tpLinePrice, bar_index + extendBars, tpLinePrice, color=tpColor, width=2)
+    takeProfitLabel := label.new(bar_index + extendBars, tpLinePrice, text="TP", style=label.style_label_up, color=tpColor, size=size.small)
+
+if not na(slLinePrice)
+    stopLossLine  := line.new(bar_index, slLinePrice, bar_index + extendBars, slLinePrice, color=slColor, width=2)
+    stopLossLabel := label.new(bar_index + extendBars, slLinePrice, text="SL", style=label.style_label_down, color=slColor, size=size.small)
+
+View in Pine Editor・431 lines
+Use on chart
+6
+0
+1 742
+This script is a strategy implementation of the classic ABCD Harmonic Pattern, designed for market structure analysis, backtesting, and educational research.
+
+The ABCD pattern is one of the foundational harmonic price patterns in technical analysis. Its Fibonacci ratio relationships were formalized and standardized within harmonic trading theory by Scott M. Carney, whose work helped define modern harmonic pattern rules.
+
+This strategy is conceptually inspired by educational ABCD pattern logic shared by the TradingView author theEccentricTrader.
+The code, structure, execution logic, filters, and risk management have been independently developed, reconstructed, and extended into a complete TradingView strategy.
+
+What this strategy does
+
+Detects bullish and bearish ABCD harmonic patterns based on price structure and Fibonacci ratios.
+
+Reconstructs ABCD market structure logic for both directions instead of using a simple visual inversion.
+
+Draws the ABCD legs, structure labels (A, B, C, D), and projection levels directly on the chart.
+
+Generates long and short trade entries using confirmed ABCD structures.
+
+Includes optional confluence filters, such as:
+
+Higher-timeframe EMA trend filter
+
+RSI strength filter
+
+ATR volatility filter
+
+Volume confirmation
+
+Candle body confirmation
+
+Minimum bounce distance from point D
+
+Provides built-in risk management, including:
+
+Configurable Stop Loss
+
+Configurable Take Profit
+
+Optional trailing stop
+
+Designed for backtesting, parameter optimization, and analytical research.
+
+Why this strategy is different
+
+This script is not a simple indicator conversion nor a basic bullish/bearish mirror.
+The ABCD pattern logic has been recreated at the structural level to better reflect how bullish and bearish market formations behave in real price action.
+
+Key differences
+
+Reconstructed bullish and bearish structures
+Bullish and bearish ABCD patterns are independently defined using market structure logic, not just inverted visually.
+Each direction has its own pivot relationships and validation rules to produce a more faithful representation of the ABCD pattern.
+
+Structure-aware pattern validation
+Pattern confirmation is based on price swings, structure continuity, and Fibonacci alignment, helping reduce distorted or forced patterns.
+
+Strategy-based execution
+Unlike indicator-only ABCD tools that only visualize patterns, this script uses strategy.entry and strategy.exit, enabling full backtesting and performance analysis.
+
+Confluence-driven entries
+Trade entries can require multiple confirmation layers beyond the pattern itself, helping reduce low-quality signals and overtrading.
+
+Integrated risk management
+Stop Loss, Take Profit, and optional trailing logic are applied consistently for both long and short positions.
+
+Non-repainting design
+Pattern detection and entries rely on confirmed bars (barstate.isconfirmed) and higher-timeframe data with lookahead_off, ensuring signals do not repaint historically.
+
+Improved and controlled visualization
+Pattern drawings, projections, and entry markers are managed with strict object limits to comply with TradingView performance and publishing requirements.
+
+How to use
+
+Add the strategy to a chart and select a symbol and timeframe.
+
+Enable or disable filters under “Entry Filters (Confluence)”.
+
+Configure Stop Loss, Take Profit, and trailing behavior under “TP/SL”.
+
+Use pattern drawings and entry markers as visual and analytical confirmation, not as standalone trade signals.
+
+Important notes
+
+This script is provided for educational and research purposes only.
+
+It does not provide financial or investment advice.
+
+No profitability or performance is implied or guaranteed.
+
+Past performance does not indicate future results.
+
+Always test across multiple markets and timeframes and apply proper risk management.
+
+Credits
+
+ABCD Harmonic Pattern: Harmonic trading principles as formalized by Scott M. Carney.
+
+Conceptual inspiration: Educational ABCD pattern logic shared by theEccentricTrader on TradingView.
+
+Pattern reconstruction, strategy logic, and risk management: Independent development.

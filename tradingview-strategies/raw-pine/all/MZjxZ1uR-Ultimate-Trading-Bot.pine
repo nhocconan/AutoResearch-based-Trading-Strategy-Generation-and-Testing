@@ -1,0 +1,93 @@
+//@version=6
+strategy("Ultimate Trading Bot", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Input parameters
+rsiLength = input(14, title="RSI Length")
+rsiOverbought = input(70, title="RSI Overbought Level")
+rsiOversold = input(30, title="RSI Oversold Level")
+maLength = input(50, title="Moving Average Length")
+stochLength = input(14, title="Stochastic Length")
+macdFast = input(12, title="MACD Fast Length")
+macdSlow = input(26, title="MACD Slow Length")
+macdSignal = input(9, title="MACD Signal Length")
+
+// Indicators
+rsi = ta.rsi(close, rsiLength)
+ma = ta.sma(close, maLength)
+k = ta.sma(ta.stoch(close, high, low, stochLength), 3)
+d = ta.sma(k, 3)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// Entry Conditions
+longCondition = ta.crossover(rsi, rsiOversold) and close > ma and ta.crossover(macdLine, signalLine) and ta.crossover(k, d)
+shortCondition = ta.crossunder(rsi, rsiOverbought) and close < ma and ta.crossunder(macdLine, signalLine) and ta.crossunder(k, d)
+
+// Execute Trades
+if longCondition
+    strategy.entry("Long", strategy.long)
+if shortCondition
+    strategy.close("Long")
+
+// Plot Indicators
+plot(ma, title="Moving Average", color=color.blue)
+hline(rsiOverbought, "Overbought", color=color.red)
+hline(rsiOversold, "Oversold", color=color.green)
+plot(rsi, title="RSI", color=color.purple)
+plot(macdLine, title="MACD Line", color=color.blue)
+plot(signalLine, title="MACD Signal", color=color.orange)
+plot(k, title="Stochastic K", color=color.aqua)
+plot(d, title="Stochastic D", color=color.yellow)
+
+// Display Buy/Sell Signals
+plotshape(series=longCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal")
+plotshape(series=shortCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal")
+
+View in Pine Editor・43 lines
+Use on chart
+1
+5
+1
+4 675
+How the "Ultimate Trading Bot" Works:
+This Pine Script trading bot executes buy and sell trades based on a combination of technical indicators:
+
+Indicators Used:
+RSI (Relative Strength Index)
+
+Measures momentum and determines overbought (70) and oversold (30) levels.
+A crossover above 30 suggests a potential buy, and a cross below 70 suggests a potential sell.
+Moving Average (MA)
+
+A simple moving average (SMA) of 50 periods to track the trend.
+Prices above the MA indicate an uptrend, while prices below indicate a downtrend.
+Stochastic Oscillator (%K and %D)
+
+Identifies overbought and oversold conditions using a smoothed stochastic formula.
+A crossover of %K above %D signals a buy, and a crossover below %D signals a sell.
+MACD (Moving Average Convergence Divergence)
+
+Uses a 12-period fast EMA and a 26-period slow EMA, with a 9-period signal line.
+A crossover of MACD above the signal line suggests a bullish move, and a cross below suggests bearish movement.
+Trade Execution:
+Buy (Long Entry) Conditions:
+
+RSI crosses above 30 (indicating recovery from an oversold state).
+The closing price is above the 50-period moving average (showing an uptrend).
+The MACD line crosses above the signal line (indicating upward momentum).
+The Stochastic %K crosses above %D (indicating bullish momentum).
+→ If all conditions are met, the bot enters a long (buy) position.
+
+Sell (Exit Trade) Conditions:
+
+RSI crosses below 70 (indicating overbought conditions).
+The closing price is below the 50-period moving average (downtrend).
+The MACD line crosses below the signal line (bearish signal).
+The Stochastic %K crosses below %D (bearish momentum).
+→ If all conditions are met, the bot closes the long position.
+
+Visuals:
+The bot plots the moving average, RSI, MACD, and Stochastic indicators for reference.
+It also displays buy/sell signals with arrows:
+Green arrow (Buy Signal) → When all buy conditions are met.
+Red arrow (Sell Signal) → When all sell conditions are met.
+How to Use It in TradingView:

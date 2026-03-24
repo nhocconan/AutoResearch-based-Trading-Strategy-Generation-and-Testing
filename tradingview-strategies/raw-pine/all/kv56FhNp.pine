@@ -1,0 +1,7 @@
+//@version=5
+upperline=##input(defval=150,type='INPUT_INTEGER',##id='in_4')
+lowline=##input(defval=-150,type='INPUT_INTEGER',##id='in_5')
+##root(root_metainfo,rm_0,upperline,input__float)
+##root(root_metainfo,rm_1,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_2,lowline,input__float)
+##root(root_metainfo,rm_3,hline.style_dashed,cb__hline_style__integer,hline,linestyle)

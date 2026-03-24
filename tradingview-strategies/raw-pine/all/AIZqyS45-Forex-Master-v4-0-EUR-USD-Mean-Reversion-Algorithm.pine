@@ -1,0 +1,65 @@
+//@version=2
+strategy("Forex Master v4.0", overlay=true)
+
+Price = close
+
+Length = input(20)
+Mult = input(1.5)
+Basis = sma(Price, Length)
+StdDev = Mult * stdev(Price, Length)
+Upper = Basis + StdDev
+Lower = Basis - StdDev
+
+ADX_Length = input(50)
+TrueRange = max(max(high-low, abs(high-nz(close[1]))), abs(low-nz(close[1])))
+DirectionalMovementPlus = high-nz(high[1]) > nz(low[1])-low ? max(high-nz(high[1]), 0): 0
+DirectionalMovementMinus = nz(low[1])-low > high-nz(high[1]) ? max(nz(low[1])-low, 0): 0
+SmoothedTrueRange = nz(SmoothedTrueRange[1]) - (nz(SmoothedTrueRange[1])/ADX_Length) + TrueRange
+SmoothedDirectionalMovementPlus = nz(SmoothedDirectionalMovementPlus[1]) - (nz(SmoothedDirectionalMovementPlus[1])/ADX_Length) + DirectionalMovementPlus
+SmoothedDirectionalMovementMinus = nz(SmoothedDirectionalMovementMinus[1]) - (nz(SmoothedDirectionalMovementMinus[1])/ADX_Length) + DirectionalMovementMinus
+DIPlus = SmoothedDirectionalMovementPlus / SmoothedTrueRange * 100
+DIMinus = SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100
+DX = abs(DIPlus - DIMinus) / (DIPlus + DIMinus)*100
+SmoothedADX1 = ema(DX, input(6))
+SmoothedADX2 = ema(DX, input(12))
+
+Condition1 = crossover(Price, Lower) and SmoothedADX1 < SmoothedADX2
+Condition2 = crossunder(Price, Upper) and SmoothedADX1 < SmoothedADX2
+
+Take_Profit = input(500)
+Stop_Loss = input(500)
+
+strategy.entry("LongEntry", true, when = Condition1)
+strategy.exit("LongExit", "LongEntry", profit = Take_Profit, loss = Stop_Loss)
+
+strategy.entry("ShortEntry", false, when = Condition2)
+strategy.exit("ShortExit", "ShortEntry", profit = Take_Profit, loss = Stop_Loss)
+
+View in Pine Editor・36 lines
+Use on chart
+3.1 K
+16
+103 785
+DESCRIPTION
+
+Forex Master v4.0 is a mean-reversion algorithm currently optimized for trading the EUR/USD pair on the 5M chart interval. All indicator inputs use the period's closing price and all trades are executed at the open of the period following the period where the trade signal was generated.
+
+There are 3 main components that make up Forex Master v4.0:
+
+I. Trend Filter
+
+The algorithm uses a version of the ADX indicator as a trend filter to trade only in certain time periods where price is more likely to be range-bound (i.e., mean-reverting). This indicator is composed of a Fast ADX and a Slow ADX, both using the same look-back period of 50. However, the Fast ADX is smoothed with a 6-period EMA and the Slow ADX is smoothed with a 12-period EMA. When the Fast ADX is above the Slow ADX, the algorithm does not trade because this indicates that price is likelier to trend, which is bad for a mean-reversion system. Conversely, when the Fast ADX is below the Slow ADX, price is likelier to be ranging so this is the only time when the algorithm is allowed to trade.
+
+II. Bollinger Bands
+
+When allowed to trade by the Trend Filter, the algorithm uses the Bollinger Bands indicator to enter long and short positions. The Bolliger Bands indicator has a look-back period of 20 and a standard deviation of 1.5 for both upper and lower bands. When price crosses over the lower band, a Long Signal is generated and a long position is entered. When price crosses under the upper band, a Short Signal is generated and a short position is entered.
+
+III. Money Management
+
+Rule 1 - Each trade will use a limit order for a fixed quantity of 50,000 contracts (0.50 lot). The only exception is Rule
+
+Rule 2 - Order pyramiding is enabled and up to 10 consecutive orders of the same signal can be executed (for example: 14 consecutive Long Signals are generated over 8 hours and the algorithm sends in 10 different buy orders at various prices for a total of 350,000 contracts).
+
+Rule 3 - Every order will include a bracket with both TP and SL set at 50 pips (note: the algorithm only closes the current open position and does not enter the opposite trade once a TP or SL has been hit).
+
+Rule 4 - When a new opposite trade signal is generated, the algorithm sends in a larger order to close the current open position as well as open a new one (for example: 14 consecutive Long Signals are generated over 8 hours and the algorithm sends in 10 different buy orders at various prices for a total of 350,000 contracts. A Short Signal is generated shortly after the 14th Long Signal. The algorithm then sends in a sell order for 400,000 contracts to close the 350,000 contracts long position and open a new short position of 50,000 contracts).

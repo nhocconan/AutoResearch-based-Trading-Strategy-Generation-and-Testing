@@ -1,0 +1,97 @@
+//@version=2
+strategy("Days Trader 1.0", "title = Days Trader", overlay=true)
+
+// 2016 Boffin Hollow Lab
+// author: Tarzan
+
+//this program allows you to trade on specific days of the week to test for patterns
+//monday =1    8 =special purpose
+
+// short = 1 long = 0
+// monday is the lightest bar
+
+
+c = navy
+
+//(dayofmonth == 1 )       ? color(black, 54) :
+
+bgColor = (dayofweek == monday)    ? color(c, 94) :
+          (dayofweek == tuesday)   ? color(c, 90) :
+          (dayofweek == wednesday) ? color(c, 86) :
+          (dayofweek == thursday)  ? color(c, 84) :
+          (dayofweek == friday)    ? color(c, 82) : na
+          
+          
+bgcolor(color = bgColor)
+
+dom = input(title = "Day of month if nz", defval = 0)
+cmday = input(0)
+gapp = input(2)
+longorshort = input(title = "0 for short 1 for long", defval=0)
+openday = input(title ="trade open day of week", defval=1)
+//oday = input (float)
+closeday = input (title = "trade close day of week", defval=2)
+
+oday = (openday == 3) ? monday : 
+       (openday == 4) ? tuesday :
+       (openday == 5) ? wednesday : 
+       (openday == 1) ? thursday : 
+       (openday == 7) ? friday : 
+       (openday == 6) ? saturday : 
+       (openday == 2) ? sunday : 
+       (openday == 8) ? abs(second(time)/10) : na
+       
+cday = (closeday == 3) ? monday : 
+       (closeday == 4) ? tuesday :
+       (closeday == 5) ? wednesday : 
+       (closeday == 6) ? thursday : 
+       (closeday == 7) ? friday : 
+       (closeday == 1) ? saturday : 
+       (closeday == 2) ? sunday : 
+       (closeday == 8) ? (oday + 1) : na
+       
+      
+
+
+if (longorshort == 0 and dom == 0)
+    strategy.entry("tradez", strategy.long, when = (dayofweek == oday))
+    
+if (longorshort == 1 and dom == 0)
+    strategy.entry("tradez", strategy.short, when = (dayofweek == oday))
+    
+if (longorshort == 2 and dom == 0)
+    strategy.entry("tradez", strategy.long, when = (dayofweek[3] == (oday)))  
+    
+if (longorshort == 2 and dom == 0)
+    strategy.entry("tradez", strategy.short, when = (dayofweek[3] == (oday+gapp)))    
+   
+strategy.close_all(when = (dayofweek == cday and dom == 0 ))
+
+//if (dayofweek == cday and dom == 0 )
+  // strategy.order("tradez", strategy.short, 1, limit = na, stop = na)
+  
+// strategy.order("tradez", strategy.short, 1, comment = "stratorder", when =  dayofweek == cday and dom == 0 and longorshort == 0)
+
+// strategy.order("tradez", strategy.long, 1, comment = "stratorder", when =  dayofweek == cday and dom == 0 and longorshort == 1)
+
+if (longorshort == 0 and dom != 0)
+    strategy.entry("tradez", strategy.long, when = (dayofmonth == dom ))
+    
+if (longorshort == 1 and dom != 0)
+    strategy.entry("tradez", strategy.short, when = (dayofmonth == dom ))
+   
+
+strategy.close("tradez", when = (dayofmonth == cmday and dom != 0 ))
+
+View in Pine Editor・84 lines
+Use on chart
+4
+2
+0
+1
+17 915
+Simple program to look for day of week or day of month patterns in chart data.
+
+All original work by Boffin Hollow Lab
+
+Author: Tarzan

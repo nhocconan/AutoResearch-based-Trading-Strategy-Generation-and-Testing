@@ -1,0 +1,496 @@
+//@version=6
+strategy("RSI Strategy (AutoTune Len)", overlay=true,
+     initial_capital = 100000, pyramiding = 0,
+     commission_type = strategy.commission.percent, commission_value = 0.0,
+     max_bars_back = 5000)
+
+//────────────────────────────────────────────────────────────────────
+// Inputs
+//────────────────────────────────────────────────────────────────────
+RSI_src        = input.source(close, "Source", group="RSI Settings")
+RSI_lenManual  = input.int(14, "Length (manual)", minval=1, group="RSI Settings")
+RSI_overSold   = input.int(30, "Oversold", group="RSI Settings")
+RSI_overBought = input.int(70, "Overbought", group="RSI Settings")
+
+grpAT = "AutoTune"
+RSI_autoTune  = input.bool(false, "Auto-tune RSI Length on Profit Factor (internal sim)", group=grpAT)
+RSI_lenMinIn  = input.int(5,  "Len min",  minval=1, group=grpAT)
+RSI_lenMaxIn  = input.int(14, "Len max",  minval=1, group=grpAT)
+RSI_lenStepIn = input.int(1,  "Len step", minval=1, group=grpAT)
+
+//────────────────────────────────────────────────────────────────────
+// AutoTune state (internal sim)
+//────────────────────────────────────────────────────────────────────
+var bool RSI_built = false
+var bool RSI_hasLast = false
+
+var bool RSI_lastAutoTune = false
+var int  RSI_lastMin  = 0
+var int  RSI_lastMax  = 0
+var int  RSI_lastStep = 0
+
+var array<int>   RSI_lenList = array.new_int()
+
+// per-candidate RSI calc state (Wilder init + RMA)
+var array<int>   RSI_cnt    = array.new_int()
+var array<float> RSI_sumG   = array.new_float()
+var array<float> RSI_sumL   = array.new_float()
+var array<float> RSI_avgG   = array.new_float()
+var array<float> RSI_avgL   = array.new_float()
+var array<float> RSI_prev   = array.new_float()
+
+// per-candidate trade sim state
+var array<int>   RSI_pos    = array.new_int()
+var array<float> RSI_entry  = array.new_float()
+var array<float> RSI_gp     = array.new_float()
+var array<float> RSI_gl     = array.new_float()
+var array<int>   RSI_tr     = array.new_int()
+
+var int   RSI_bestLen = na
+var float RSI_bestPF  = na
+var int   RSI_bestTR  = na
+
+// sanitize
+int RSI_lenMin  = math.min(RSI_lenMinIn, RSI_lenMaxIn)
+int RSI_lenMax  = math.max(RSI_lenMinIn, RSI_lenMaxIn)
+int RSI_lenStep = math.max(RSI_lenStepIn, 1)
+
+bool RSI_paramsChanged =
+     not RSI_hasLast or
+     RSI_lastAutoTune != RSI_autoTune or
+     RSI_lastMin      != RSI_lenMin  or
+     RSI_lastMax      != RSI_lenMax  or
+     RSI_lastStep     != RSI_lenStep
+
+bool RSI_needBuild =
+     RSI_autoTune and (
+         RSI_paramsChanged or
+         not RSI_built or
+         array.size(RSI_lenList) == 0
+     )
+
+//────────────────────────────────────────────────────────────────────
+// BUILD candidates
+//────────────────────────────────────────────────────────────────────
+if RSI_needBuild
+    RSI_lastAutoTune := RSI_autoTune
+    RSI_lastMin      := RSI_lenMin
+    RSI_lastMax      := RSI_lenMax
+    RSI_lastStep     := RSI_lenStep
+    RSI_hasLast      := true
+
+    RSI_bestLen := na
+    RSI_bestPF  := na
+    RSI_bestTR  := na
+
+    array.clear(RSI_lenList)
+
+    int L = RSI_lenMin
+    while L <= RSI_lenMax
+        array.push(RSI_lenList, L)
+        L += RSI_lenStep
+
+    int nCand = array.size(RSI_lenList)
+
+    RSI_cnt   := array.new_int(nCand, 0)
+    RSI_sumG  := array.new_float(nCand, 0.0)
+    RSI_sumL  := array.new_float(nCand, 0.0)
+    RSI_avgG  := array.new_float(nCand, 0.0)
+    RSI_avgL  := array.new_float(nCand, 0.0)
+    RSI_prev  := array.new_float(nCand, na)
+
+    RSI_pos   := array.new_int(nCand, 0)
+    RSI_entry := array.new_float(nCand, na)
+    RSI_gp    := array.new_float(nCand, 0.0)
+    RSI_gl    := array.new_float(nCand, 0.0)
+    RSI_tr    := array.new_int(nCand, 0)
+
+    RSI_built := (nCand > 0 and array.size(RSI_tr) == nCand)
+
+if not RSI_autoTune
+    RSI_built := false
+
+//────────────────────────────────────────────────────────────────────
+// Per-bar internal sim update
+//────────────────────────────────────────────────────────────────────
+int  RSI_nCand = array.size(RSI_lenList)
+bool RSI_ready = RSI_autoTune and RSI_built and RSI_nCand > 0
+
+if RSI_ready and bar_index >= 1
+    float x  = nz(RSI_src, close)
+    float x1 = nz(RSI_src[1], x)
+    float ch = x - x1
+    float g  = math.max(ch, 0.0)
+    float l  = math.max(-ch, 0.0)
+
+    int k = 0
+    while k < RSI_nCand
+        int lenK = array.get(RSI_lenList, k)
+
+        int   cnt   = array.get(RSI_cnt, k)
+        float sumG  = array.get(RSI_sumG, k)
+        float sumL  = array.get(RSI_sumL, k)
+        float avgG  = array.get(RSI_avgG, k)
+        float avgL  = array.get(RSI_avgL, k)
+        float rPrev = array.get(RSI_prev, k)
+
+        if cnt < lenK
+            cnt += 1
+            sumG += g
+            sumL += l
+            if cnt == lenK
+                avgG := sumG / lenK
+                avgL := sumL / lenK
+                float rs0  = avgL == 0.0 ? 999999.0 : (avgG / avgL)
+                float rsi0 = 100.0 - (100.0 / (1.0 + rs0))
+                rPrev := rsi0
+        else
+            float a = 1.0 / lenK
+            avgG := (1.0 - a) * avgG + a * g
+            avgL := (1.0 - a) * avgL + a * l
+            float rs  = avgL == 0.0 ? 999999.0 : (avgG / avgL)
+            float rsi = 100.0 - (100.0 / (1.0 + rs))
+
+            bool crossUp = (not na(rPrev)) and (rPrev <= RSI_overSold) and (rsi > RSI_overSold)
+            bool crossDn = (not na(rPrev)) and (rPrev >= RSI_overBought) and (rsi < RSI_overBought)
+
+            int   pos   = array.get(RSI_pos, k)
+            float entry = array.get(RSI_entry, k)
+            float gp    = array.get(RSI_gp, k)
+            float gl    = array.get(RSI_gl, k)
+            int   tr    = array.get(RSI_tr, k)
+
+            if crossUp
+                if pos != 0 and not na(entry)
+                    float pnl = pos == 1 ? (close - entry) : (entry - close)
+                    tr += 1
+                    if pnl > 0
+                        gp += pnl
+                    else
+                        gl += -pnl
+                pos := 1
+                entry := close
+
+            if crossDn
+                if pos != 0 and not na(entry)
+                    float pnl = pos == 1 ? (close - entry) : (entry - close)
+                    tr += 1
+                    if pnl > 0
+                        gp += pnl
+                    else
+                        gl += -pnl
+                pos := -1
+                entry := close
+
+            array.set(RSI_pos, k, pos)
+            array.set(RSI_entry, k, entry)
+            array.set(RSI_gp, k, gp)
+            array.set(RSI_gl, k, gl)
+            array.set(RSI_tr, k, tr)
+
+            rPrev := rsi
+
+        array.set(RSI_cnt,  k, cnt)
+        array.set(RSI_sumG, k, sumG)
+        array.set(RSI_sumL, k, sumL)
+        array.set(RSI_avgG, k, avgG)
+        array.set(RSI_avgL, k, avgL)
+        array.set(RSI_prev, k, rPrev)
+
+        k += 1
+
+// Force-close all simulated open positions on the last bar
+if RSI_ready and barstate.islastconfirmedhistory
+    int k2 = 0
+    while k2 < RSI_nCand
+        int   pos2   = array.get(RSI_pos, k2)
+        float entry2 = array.get(RSI_entry, k2)
+        float gp2    = array.get(RSI_gp, k2)
+        float gl2    = array.get(RSI_gl, k2)
+        int   tr2    = array.get(RSI_tr, k2)
+
+        if pos2 != 0 and not na(entry2)
+            float pnl2 = pos2 == 1 ? (close - entry2) : (entry2 - close)
+            tr2 += 1
+            if pnl2 > 0
+                gp2 += pnl2
+            else
+                gl2 += -pnl2
+
+            array.set(RSI_pos, k2, 0)
+            array.set(RSI_entry, k2, na)
+            array.set(RSI_gp, k2, gp2)
+            array.set(RSI_gl, k2, gl2)
+            array.set(RSI_tr, k2, tr2)
+
+        k2 += 1
+
+// Pick best PF at end
+if RSI_ready and barstate.islastconfirmedhistory
+    float bestPF = -1.0
+    int bestK = na
+
+    int k3 = 0
+    while k3 < RSI_nCand
+        float gp = array.get(RSI_gp, k3)
+        float gl = array.get(RSI_gl, k3)
+        float pf = gl > 0 ? gp / gl : (gp > 0 ? 999999.0 : 0.0)
+
+        if pf > bestPF
+            bestPF := pf
+            bestK := k3
+
+        k3 += 1
+
+    if not na(bestK)
+        RSI_bestLen := array.get(RSI_lenList, bestK)
+        RSI_bestPF  := bestPF
+        RSI_bestTR  := array.get(RSI_tr, bestK)
+
+//────────────────────────────────────────────────────────────────────
+// Live RSI (custom Wilder) that accepts series length
+//────────────────────────────────────────────────────────────────────
+RSI_wilder_series(float _src, int _len) =>
+    var int   _lastLen = na
+    var int   _cnt = 0
+    var float _sumG = 0.0
+    var float _sumL = 0.0
+    var float _avgG = 0.0
+    var float _avgL = 0.0
+    var float _rsi  = na
+    var float _prev = na
+
+    if na(_lastLen) or _len != _lastLen
+        _lastLen := _len
+        _cnt := 0
+        _sumG := 0.0
+        _sumL := 0.0
+        _avgG := 0.0
+        _avgL := 0.0
+        _rsi := na
+        _prev := na
+
+    float s  = nz(_src, close)
+    float s1 = nz(_src[1], s)
+    float ch = s - s1
+    float g  = math.max(ch, 0.0)
+    float l  = math.max(-ch, 0.0)
+
+    if bar_index >= 1
+        if _cnt < _len
+            _cnt += 1
+            _sumG += g
+            _sumL += l
+            if _cnt == _len
+                _avgG := _sumG / _len
+                _avgL := _sumL / _len
+                float rs0  = _avgL == 0.0 ? 999999.0 : (_avgG / _avgL)
+                _rsi := 100.0 - (100.0 / (1.0 + rs0))
+        else
+            float a = 1.0 / _len
+            _avgG := (1.0 - a) * _avgG + a * g
+            _avgL := (1.0 - a) * _avgL + a * l
+            float rs  = _avgL == 0.0 ? 999999.0 : (_avgG / _avgL)
+            _rsi := 100.0 - (100.0 / (1.0 + rs))
+
+    _rsi
+
+int RSI_lenUsed = (RSI_autoTune and not na(RSI_bestLen)) ? RSI_bestLen : RSI_lenManual
+
+float RSI_val  = RSI_wilder_series(RSI_src, RSI_lenUsed)
+float RSI_prevVal = RSI_val[1]
+
+bool RSI_co = (not na(RSI_val) and not na(RSI_prevVal)) and (RSI_prevVal <= RSI_overSold) and (RSI_val > RSI_overSold)
+bool RSI_cu = (not na(RSI_val) and not na(RSI_prevVal)) and (RSI_prevVal >= RSI_overBought) and (RSI_val < RSI_overBought)
+
+if not na(RSI_val)
+    if RSI_co
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if RSI_cu
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+//────────────────────────────────────────────────────────────────────
+// Plots + status box
+//────────────────────────────────────────────────────────────────────
+//plot(RSI_val, "RSI", color=color.new(color.aqua, 0))
+//hline(RSI_overSold,   "Oversold",   color=color.new(color.green, 40))
+//hline(RSI_overBought, "Overbought", color=color.new(color.red, 40))
+
+var label RSI_lbl = na
+if barstate.islastconfirmedhistory
+    label.delete(RSI_lbl)
+
+    string atLine =
+         "AT=" + (RSI_autoTune ? "ON" : "OFF") +
+         " built=" + (RSI_built ? "Y" : "N") +
+         " cand=" + str.tostring(RSI_nCand)
+
+    string bestLine =
+         (RSI_autoTune and not na(RSI_bestLen)) ?
+         ("Best Len=" + str.tostring(RSI_bestLen) +
+          "\nPF=" + str.tostring(RSI_bestPF, "#.###") +
+          "  TR=" + str.tostring(RSI_bestTR)) :
+         ("Manual Len=" + str.tostring(RSI_lenManual))
+
+    RSI_lbl := label.new(bar_index, high, atLine + "\n" + bestLine,
+         style=label.style_label_down, textcolor=color.white, color=color.new(color.black, 0))
+
+View in Pine Editor・336 lines
+Use on chart
+6
+1
+625
+# RSI Auto‑Tuner Strategy — How To Use
+
+This document explains **how to use** the RSI Auto‑Tuner strategy. It intentionally avoids math and implementation details. Follow this as an operating guide.
+
+---
+
+## 1. What This Tool Is For
+
+This strategy helps you:
+
+* Discover **which RSI length works best** on a given ticker and timeframe
+* Measure performance using **Profit Factor (PF)**
+* Improve RSI performance on noisy markets by **transforming price first**
+
+The auto‑tuner is a **research tool**, not a live trading signal generator.
+
+---
+
+## 2. Two Modes You Must Treat Differently
+
+### Research Mode
+
+Used to explore and discover parameters.
+
+* Auto‑Tune: **ON**
+* Parameters are allowed to change
+* Results may look very good
+* Overfitting risk is real
+
+### Trading Mode
+
+Used for forward testing or live trading.
+
+* Auto‑Tune: **OFF**
+* Parameters are fixed
+* Behavior is stable and repeatable
+* This is the only acceptable mode for live use
+
+**Never trade live with Auto‑Tune enabled.**
+
+---
+
+## 3. Manual Mode (Trading Mode)
+
+Use this after parameters are finalized.
+
+Steps:
+
+1. Set **Auto‑Tune = OFF**
+2. Choose:
+
+* Source (raw price or transformed price)
+* RSI Length (manual, default 14)
+* Oversold / Overbought levels
+3. The strategy will:
+
+* Enter long when RSI crosses up through Oversold
+* Enter short when RSI crosses down through Overbought
+* Flip positions on opposite signals
+
+This mode is predictable and safe for forward testing.
+
+---
+
+## 4. Auto‑Tune Mode (Research Mode)
+
+Use this to find optimal RSI lengths.
+
+Steps:
+
+1. Set **Auto‑Tune = ON**
+2. Configure the search range:
+
+* Minimum Length (default 5)
+* Maximum Length (default 14)
+* Step Size (default 1)
+3. The strategy will:
+
+* Internally simulate trades for each RSI length
+* Track gross profit, gross loss, and trades
+* Select the length with the highest Profit Factor
+4. The best length is applied automatically
+
+Auto‑Tune evaluates historical data only.
+
+---
+
+## 5. Using a Transform on Price (Critical)
+
+RSI does **not** have to run on raw price.
+
+You can significantly improve results by:
+
+* Applying a **price transform** first
+* Feeding the transformed series into the RSI Source input
+
+Examples of transforms:
+
+* Moving averages
+* Low‑pass filters
+* Butterworth filters
+* Any smoother or denoiser
+
+Why this works:
+
+* Busy, wicky markets cause RSI to whipsaw
+* Transforms remove micro‑noise
+* RSI responds to structure instead of chaos
+* Profit Factor often increases dramatically
+
+Best practice:
+
+* Auto‑tune on raw price
+* Auto‑tune on transformed price
+* Compare PF, trade count, and stability
+
+---
+
+## 6. Reading the Status Label
+
+At the last bar, the on‑chart label shows:
+
+* Whether Auto‑Tune is ON or OFF
+* Whether candidates were built successfully
+* Number of RSI lengths tested
+* Best RSI length found
+* Profit Factor and trade count
+
+If Auto‑Tune is OFF, the label shows the manual length.
+
+---
+
+## 7. Recommended Workflow
+
+1. Choose ticker and timeframe
+2. Enable Auto‑Tune on **raw price**
+3. Record best RSI length and PF
+4. Enable Auto‑Tune on **transformed price**
+5. Compare results
+6. Lock parameters
+7. Disable Auto‑Tune
+8. Forward test
+
+---
+
+## 8. Warnings and Discipline
+
+* High PF with few trades is unreliable
+* Transforms can hide execution costs
+* Always validate on a different period
+* Auto‑Tune is a **lens**, not an edge
+
+Treat this tool as a research microscope, not an autopilot.
+

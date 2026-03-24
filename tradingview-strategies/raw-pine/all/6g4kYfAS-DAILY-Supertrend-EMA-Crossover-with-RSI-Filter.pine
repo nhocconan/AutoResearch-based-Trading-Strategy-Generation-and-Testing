@@ -1,0 +1,11 @@
+//@version=5
+rsiOverbought=##input(defval=65.0,type='INPUT_FLOAT',##id='in_6')
+rsiOversold=##input(defval=30.0,type='INPUT_FLOAT',##id='in_7')
+##root(root_metainfo,rm_0,rsiOverbought,input__float)
+##root(root_metainfo,rm_1,rsiOversold,input__float)
+##root(root_metainfo,rm_2,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_5,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_6,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_7,'tiny',const__string,plotshape,size)

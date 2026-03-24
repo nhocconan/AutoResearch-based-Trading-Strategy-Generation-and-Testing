@@ -1,0 +1,144 @@
+//@version=6
+strategy("TheWaveStrategy v6 - QQE + ATR (Optional Trailing)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1, calc_on_every_tick=true)
+
+// === INPUTS ===
+atrMultiplierForNoise = input.float(2.5, "ATR Multiplier (Noise Filter)")
+sma5Period = input.int(5, "SMA Period (chart TF - entries)")
+sma15Period = input.int(50, "SMA Period (15m bias)")
+atrPeriod = input.int(14, "ATR Period")
+minAtrForTrade = input.float(0.0001, "Min ATR For Trade")
+
+// QQE inputs
+qqeRSIPeriod = input.int(14, "QQE RSI Period", group="QQE")
+qqeSmooth    = input.int(5, "QQE RSI Smoothing", group="QQE")
+qqeRmaPeriod = input.int(14, "QQE ATR-of-RSI Smoothing", group="QQE")
+qqeFastMult  = input.float(3.0, "QQE Fast Multiplier", group="QQE")
+qqeSlowMult  = input.float(2.0, "QQE Slow Multiplier", group="QQE")
+qqeConfirmTF = input.timeframe("30", "QQE Confirm TF", group="QQE")
+
+// Trading session NY
+sessionNY = input.string("0945-1559", "Trading Session (NY)")
+nyTimezone = "America/New_York"
+inNYTrading = not na(time(timeframe.period, sessionNY, nyTimezone))
+
+// Stop-loss settings
+fixedStopPercIn = input.float(2.0, "Fixed Stop % (0=ATR stop)", minval=0.0)
+fixedStopPerc = math.min(fixedStopPercIn, 15.0)
+useFixedStop = fixedStopPerc > 0.0
+
+useATRStop       = input.bool(true, "Use ATR-based Stop (if fixed stop = 0)")
+atrStopMultiplier= input.float(1.5, "ATR Stop multiplier")
+useTrailingATR   = input.bool(true, "Use Trailing ATR Stop")
+trailingAtrMult  = input.float(1.2, "Trailing ATR multiplier")
+
+// === FUNCTIONS ===
+f_qqe(_src, _rsiPeriod, _smooth, _rmaPeriod, _fastMult, _slowMult) =>
+    rsiVal = ta.rsi(_src, _rsiPeriod)
+    rsiSm = ta.rma(rsiVal, _smooth)
+    absDelta = math.abs(rsiSm - nz(rsiSm[1]))
+    atrRsi = ta.rma(absDelta, _rmaPeriod)
+    fastTL = rsiSm - _fastMult * atrRsi
+    slowTL = rsiSm - _slowMult * atrRsi
+    fastTL := rsiSm < nz(rsiSm[1]) ? rsiSm + _fastMult * atrRsi : fastTL
+    slowTL := rsiSm < nz(rsiSm[1]) ? rsiSm + _slowMult * atrRsi : slowTL
+    [rsiSm, fastTL, slowTL, atrRsi]
+
+f_qqe_tf(_tf) =>
+    request.security(syminfo.tickerid, _tf, f_qqe(close, qqeRSIPeriod, qqeSmooth, qqeRmaPeriod, qqeFastMult, qqeSlowMult))
+
+// === DATA ===
+// 15m SMA bias
+sma15_15m = request.security(syminfo.tickerid, "15", ta.sma(close, sma15Period))
+close15m  = request.security(syminfo.tickerid, "15", close)
+biasBull15 = close15m > sma15_15m
+biasBear15 = close15m < sma15_15m
+
+// ATR spike/noise on 5m
+atr5 = request.security(syminfo.tickerid, "5", ta.atr(atrPeriod))
+atr5 := atr5 < minAtrForTrade ? minAtrForTrade : atr5
+high5 = request.security(syminfo.tickerid, "5", high)
+low5  = request.security(syminfo.tickerid, "5", low)
+isSpike = (high5 - low5) > atrMultiplierForNoise * atr5
+
+// Chart TF SMA5
+sma5_chart = ta.sma(close, sma5Period)
+crossAbove = ta.crossover(close, sma5_chart)
+crossBelow = ta.crossunder(close, sma5_chart)
+
+// QQE chart TF + 30m confirmation
+[q_sm_chart, q_ftl_chart, q_stl_chart, q_atr_chart] = f_qqe(close, qqeRSIPeriod, qqeSmooth, qqeRmaPeriod, qqeFastMult, qqeSlowMult)
+[q_sm_30, q_ftl_30, q_stl_30, q_atr_30] = f_qqe_tf(qqeConfirmTF)
+qqeBull_conf = (q_sm_chart > q_stl_chart) and (q_sm_30 > q_stl_30)
+qqeBear_conf = (q_sm_chart < q_stl_chart) and (q_sm_30 < q_stl_30)
+
+// === ENTRY CONDITIONS ===
+enterLong = inNYTrading and not isSpike and biasBull15 and crossAbove and qqeBull_conf
+enterShort = inNYTrading and not isSpike and biasBear15 and crossBelow and qqeBear_conf
+
+// === INITIAL STOP FUNCTIONS ===
+getInitialStopLong() =>
+    useFixedStop ? close*(1-fixedStopPerc/100) : (useATRStop ? close - atr5*atrStopMultiplier : na)
+getInitialStopShort() =>
+    useFixedStop ? close*(1+fixedStopPerc/100) : (useATRStop ? close + atr5*atrStopMultiplier : na)
+
+// === VARIABLES ===
+var float trailStop = na
+var float entryPrice = na
+
+// === LONG ENTRY & STOP ===
+if enterLong and strategy.position_size == 0
+    sl = getInitialStopLong()
+    entryPrice := close
+    trailStop := entryPrice - (atr5*trailingAtrMult)
+    strategy.entry("Long", strategy.long)
+    if not na(sl)
+        strategy.exit("Long Exit", from_entry="Long", stop=sl)
+
+// === SHORT ENTRY & STOP ===
+if enterShort and strategy.position_size == 0
+    sl = getInitialStopShort()
+    entryPrice := close
+    trailStop := entryPrice + (atr5*trailingAtrMult)
+    strategy.entry("Short", strategy.short)
+    if not na(sl)
+        strategy.exit("Short Exit", from_entry="Short", stop=sl)
+
+// === TRAILING STOP ===
+if useTrailingATR and strategy.position_size > 0
+    newTrail = close - atr5*trailingAtrMult
+    if newTrail > nz(trailStop)
+        trailStop := newTrail
+        strategy.exit("Long Exit", from_entry="Long", stop=trailStop)
+
+if useTrailingATR and strategy.position_size < 0
+    newTrailS = close + atr5*trailingAtrMult
+    if newTrailS < nz(trailStop)
+        trailStop := newTrailS
+        strategy.exit("Short Exit", from_entry="Short", stop=trailStop)
+
+// === MARKET EXIT (QQE flip / session end) ===
+if strategy.position_size > 0 and (q_sm_chart < q_stl_chart)
+    strategy.close("Long", comment="QQE flip exit")
+if strategy.position_size < 0 and (q_sm_chart > q_stl_chart)
+    strategy.close("Short", comment="QQE flip exit")
+
+afterSession = not na(time(timeframe.period, "1600-2359", nyTimezone))
+if afterSession and strategy.position_size != 0
+    strategy.close_all(comment="Session End Close")
+
+// === PLOTS ===
+plot(sma5_chart, title="SMA5", color=color.blue)
+plotshape(enterLong, title="Enter Long", location=location.belowbar, color=color.green, style=shape.triangleup)
+plotshape(enterShort, title="Enter Short", location=location.abovebar, color=color.red, style=shape.triangledown)
+
+View in Pine Editor・132 lines
+Use on chart
+1
+6
+851
+New Version Of the wave with QQE and ATR
+• Compiles cleanly in Pine v6.
+• Optional trailing stop toggle via useTrailingATR.
+• Market exit uses strategy.close() properly.
+• ATR spike filter uses 5m ATR.
+• QQE confluence with 30m timeframe included.

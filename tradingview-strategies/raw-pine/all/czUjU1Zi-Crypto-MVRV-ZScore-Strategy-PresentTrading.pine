@@ -1,0 +1,5 @@
+//@version=5
+longEntryThreshold=##input(defval=0.382,type='INPUT_FLOAT',##id='in_2')
+shortEntryThreshold=##input(defval=-0.382,type='INPUT_FLOAT',##id='in_3')
+##root(root_metainfo,rm_0,longEntryThreshold,input__float)
+##root(root_metainfo,rm_1,shortEntryThreshold,input__float)

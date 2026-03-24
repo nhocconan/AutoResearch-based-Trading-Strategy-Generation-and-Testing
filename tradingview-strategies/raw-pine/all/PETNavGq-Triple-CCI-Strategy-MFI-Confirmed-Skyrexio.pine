@@ -1,0 +1,280 @@
+//@version=6
+//_______ <licence>
+strategy(title = "Triple CCI Strategy MFI Confirmed [Skyrexio]", 
+         shorttitle = "Triple CCI", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 1, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = false, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 50, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen       = color.new(#2ECD99, 0)
+var const color skyrexGray        = color.new(#F2F2F2, 0)
+var const color skyrexWhite       = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var float stopLossLevel                = na
+var float takeProfitLevel              = na 
+var float tralingProfitActivationLevel = na
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2025-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+stopLossAtrNum                 = input.float(defval = 1.75, title = "ATR Stop Loss", step = 0.25, group = "📈Strategy settings📈")
+tralingProfitActivationNum     = input.float(defval = 2.25, title = "ATR Traling Profit Activation Level", step = 0.25, group = "📈Strategy settings📈")
+cciFastPeriod                  = input.int(title = "CCI Fast Length", defval = 14, minval = 1, group = "📈Strategy settings📈")
+cciMiddlePeriod                = input.int(title = "CCI Middle Length", defval = 25, minval = 1, group = "📈Strategy settings📈")
+cciSlowPeriod                  = input.int(title = "CCI Slow Length", defval = 50, minval = 1, group = "📈Strategy settings📈")
+MFIlength                      = input.int(title = "MFI Length", defval=14, minval=1, maxval=2000, group = "📈Strategy settings📈")
+EMaLength                      = input.int(50, minval = 10, title = "EMA Length", group = "📈Strategy settings📈")
+trailingEmaLength              = input.int(20, minval = 10, title = "Trailing EMA Length", group = "📈Strategy settings📈")
+
+//_______ <function_declarations>
+
+
+//_______ <calculations>
+//Calculating fast, middle and slow CCI
+fastCci = ta.cci(hlc3, cciFastPeriod)
+middleCci = ta.cci(hlc3, cciMiddlePeriod)
+slowCci = ta.cci(hlc3, cciSlowPeriod)
+
+//Calculating Money Flow Index (MFI)
+mfi = ta.mfi(hlc3, MFIlength)
+
+//Average true range (ATR) calculations
+ATR = ta.atr(14)
+
+//Calculating EMA
+trailingEma = ta.ema(close, trailingEmaLength)
+
+//Calculating exponential moving average 
+ema = ta.ema(close, EMaLength)
+
+
+//Calculating stop loss level
+stopLossLevel := strategy.position_avg_price - stopLossAtrNum * ATR
+
+
+//Calculating traling profit activation level
+tralingProfitActivationLevel := strategy.position_avg_price + tralingProfitActivationNum * ATR
+
+
+//Calculating dynamic traling take profit level
+condition1 = ta.barssince(strategy.opentrades == 1 and strategy.opentrades[1] == 0) < ta.barssince((high[1] < tralingProfitActivationLevel[1] or na(tralingProfitActivationLevel[1])) and high > tralingProfitActivationLevel)
+condition2 = na(ta.barssince((high[1] < tralingProfitActivationLevel[1] or na(tralingProfitActivationLevel[1])) and high > tralingProfitActivationLevel))
+if strategy.opentrades == 0 or condition1 or condition2
+    takeProfitLevel := na
+else
+    takeProfitLevel := trailingEma
+
+//_______ <strategy_calls>
+//Defining long condition
+longCondition =  ta.crossover(fastCci, 0) and close > ema and middleCci > 0 and slowCci > 0 and mfi > 50
+
+//Defining trade close condition
+closeCondition =  close < takeProfitLevel or low <= stopLossLevel 
+
+
+//Strategy entry
+//Scrip places the stop order at the upFractalActivationLevel if longCondition is true
+if (longCondition and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+if (closeCondition)
+    strategy.close(id = "entry1",immediately = true , alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+pricePlot = plot(close, title="Price", color=color.new(color.blue, 100))
+emaPlot = plot(takeProfitLevel, title="EMA", color=skyrexGreen, style=plot.style_linebr, linewidth = 3)
+plot(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? takeProfitLevel : na, title="EMA", color=skyrexGreen, join = false, style=plot.style_circles, linewidth = 6)
+fill(pricePlot, emaPlot, color=color.new(skyrexGreen, 70))
+plotshape(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? true: false,text="Trailing Activated",size=size.small,offset=0,color=color.new(skyrexGreen, 0),textcolor=skyrexWhite,style=shape.triangleup,location=location.belowbar)
+
+
+//_______ <alerts>
+
+View in Pine Editor・120 lines
+Use on chart
+8
+6
+8
+13 569
+Overview
+Triple CCI Strategy MFI Confirmed [Skyrexio] leverages 3 different periods Commodity Channel Index (CCI) indicator in conjunction Money Flow Index (MFI) and Exponential Moving Average (EMA) to obtain the high probability setups. Fast period CCI is used for having the high probability to enter in the direction of short term trend, middle and slow period CCI are used for confirmation, if market now likely in the mid and long-term uptrend. MFI is used to confirm trade with the money inflow/outflow with the high probability. EMA is used as an additional trend filter. Moreover, strategy uses exponential moving average (EMA) to trail the price when it reaches the specific level. More information in "Methodology" and "Justification of Methodology" paragraphs. The strategy opens only long trades.
+
+Unique Features
+
+Dynamic stop-loss system: Instead of fixed stop-loss level strategy utilizes average true range (ATR) multiplied by user given number subtracted from the position entry price as a dynamic stop loss level.
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Four layers trade filtering system: Strategy utilizes two different period CCI indicators, MFI and EMA indicators to confirm the signals produced by fast period CCI.
+
+Trailing take profit level: After reaching the trailing profit activation level scrip activate the trailing of long trade using EMA. More information in methodology.
+
+
+
+Methodology
+The strategy opens long trade when the following price met the conditions:
+
+
+Fast period CCI shall crossover the zero-line.
+
+Slow and Middle period CCI shall be above zero-lines.
+
+Price shall close above the EMA. Crossover is not obligatory
+
+MFI shall be above 50
+
+
+
+When long trade is executed, strategy set the stop-loss level at the price ATR multiplied by user-given value below the entry price. This level is recalculated on every next candle close, adjusting to the current market volatility.
+At the same time strategy set up the trailing stop validation level. When the price crosses the level equals entry price plus ATR multiplied by user-given value script starts to trail the price with EMA. If price closes below EMA long trade is closed. When the trailing starts, script prints the label “Trailing Activated”.
+
+Strategy settings
+In the inputs window user can setup the following strategy settings:
+
+
+ATR Stop Loss (by default = 1.75)
+
+ATR Trailing Profit Activation Level (by default = 2.25)
+
+CCI Fast Length (by default = 14, used for calculation short term period CCI)
+
+CCI Middle Length (by default = 25, used for calculation short term period CCI)
+
+CCI Slow Length (by default = 50, used for calculation long term period CCI)
+
+MFI Length (by default = 14, used for calculation MFI
+
+EMA Length (by default = 50, period of EMA, used for trend filtering EMA calculation)
+
+Trailing EMA Length (by default = 20)
+
+
+
+
+User can choose the optimal parameters during backtesting on certain price chart.
+
+Justification of Methodology
+Before understanding why this particular combination of indicator has been chosen let's briefly explain what is CCI, MFI and EMA.
+
+The Commodity Channel Index (CCI) is a momentum-based technical indicator that measures the deviation of a security's price from its average price over a specific period. It helps traders identify overbought or oversold conditions and potential trend reversals.
+The CCI formula is:
+CCI = (Typical Price − SMA) / (0.015 × Mean Deviation)
+
+
+Typical Price (TP): This is calculated as the average of the high, low, and closing prices for the period.
+
+Simple Moving Average (SMA): This is the average of the Typical Prices over a specific number of periods.
+
+Mean Deviation: This is the average of the absolute differences between the Typical Price and the SMA.
+
+
+
+The result is a value that typically fluctuates between +100 and -100, though it is not bounded and can go higher or lower depending on the price movement.
+
+The Money Flow Index (MFI) is a technical indicator that measures the strength of money flowing into and out of a security. It combines price and volume data to assess buying and selling pressure and is often used to identify overbought or oversold conditions. The formula for MFI involves several steps:
+
+1. Calculate the Typical Price (TP):
+TP = (high + low + close) / 3
+
+2. Calculate the Raw Money Flow (RMF):
+Raw Money Flow = TP × Volume
+
+3. Determine Positive and Negative Money Flow:
+
+If the current TP is greater than the previous TP, it's Positive Money Flow.
+
+If the current TP is less than the previous TP, it's Negative Money Flow.
+
+
+
+4. Calculate the Money Flow Ratio (MFR):
+Money Flow Ratio = Sum of Positive Money Flow (over n periods) / Sum of Negative Money Flow (over n periods)
+
+5. Calculate the Money Flow Index (MFI):
+MFI = 100 − (100 / (1 + Money Flow Ratio))
+
+MFI above 80 can be considered as overbought, below 20 - oversold.
+
+The Exponential Moving Average (EMA) is a type of moving average that places greater weight and significance on the most recent data points. It is widely used in technical analysis to smooth price data and identify trends more quickly than the Simple Moving Average (SMA).
+​Formula:
+1. Calculate the multiplier
+Multiplier = 2 / (n + 1), Where n is the number of periods.
+
+2. EMA Calculation
+EMA = (Current Price) × Multiplier + (Previous EMA) × (1 − Multiplier)
+
+This strategy leverages Fast period CCI, which shall break the zero line to the upside to say that probability of short term trend change to the upside increased. This zero line crossover shall be confirmed by the Middle and Slow periods CCI Indicators. At the moment of breakout these two CCIs shall be above 0, indicating that there is a high probability that price is in middle and long term uptrend. This approach increases chances to have a long trade setup in the direction of mid-term and long-term trends when the short-term trend starts to reverse to the upside.
+
+Additionally strategy uses MFI to have a greater probability that fast CCI breakout is confirmed by this indicator. We consider the values of MFI above 50 as a higher probability that trend change from downtrend to the uptrend is real. Script opens long trades only if MFI is above 50. As you already know from the MFI description, it incorporates volume in its calculation, therefore we have another one confirmation factor.
+
+Finally, strategy uses EMA an additional trend filter. It allows to open long trades only if price close above EMA (by default 50 period). It increases the probability of taking long trades only in the direction of the trend.
+
+ATR is used to adjust the strategy risk management to the current market volatility. If volatility is low, we don’t need the large stop loss to understand the there is a high probability that we made a mistake opening the trade. User can setup the settings ATR Stop Loss and ATR Trailing Profit Activation Level to realize his own risk to reward preferences, but the unique feature of a strategy is that after reaching trailing profit activation level strategy is trying to follow the trend until it is likely to be finished instead of using fixed risk management settings. It allows sometimes to be involved in the large movements. It’s also important to make a note, that script uses another one EMA (by default = 20 period) as a trailing profit level.
+
+Backtest Results
+
+Operating window: Date range of backtests is 2022.04.01 - 2024.11.25. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 50%
+
+Maximum Single Position Loss: -4.13%
+
+Maximum Single Profit: +19.66%
+
+Net Profit: +5421.21 USDT (+54.21%)
+
+Total Trades: 108 (44.44% win rate)
+
+Profit Factor: 2.006
+
+Maximum Accumulated Loss: 777.40 USDT (-7.77%)
+
+Average Profit per Trade: 50.20 USDT (+0.85%)
+
+Average Trade Duration: 44 hours
+
+
+
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 2h BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation
+
+
+

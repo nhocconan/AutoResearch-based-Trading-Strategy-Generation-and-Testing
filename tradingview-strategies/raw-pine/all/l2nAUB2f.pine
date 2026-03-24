@@ -1,0 +1,221 @@
+//@version=5
+strategy("RATE OF CHANGE STRATEGY", shorttitle="ROC STRATEGY", overlay=false, precision=3, initial_capital=1000, default_qty_type=strategy.cash, default_qty_value=950, commission_type=strategy.commission.percent, commission_value=0.18, slippage=3)
+
+
+//--------------------------------TOOL TIPS-----------------------------------//
+
+t1 = "Rate of Change length. We compare the current price with that of the selected length ago."
+t2 = "The Rate of Change value which indicates that we are in a bubble. This value varies according to the financial products."
+t3 = "Stop Loss value in percentage. This is the maximum loss a trade can incur."
+t4 = "Each gain or losse (relative to the previous reference) in an amount equal to this fixed ratio will change quantity of orders."
+t5 = "The amount of money to be added to or subtracted from orders once the fixed ratio has been reached."
+
+
+//--------------------------------FUNCTIONS-----------------------------------//
+
+//@function Displays text passed to `txt` when called.
+debugLabel(txt, color, loc) =>
+    label.new(bar_index, loc, text = txt, color=color, style = label.style_label_lower_right, textcolor = color.black, size = size.small)
+
+//@function which looks if the close date of the current bar falls inside the date range
+inBacktestPeriod(start, end) => (time >= start) and (time <= end)
+
+
+//----------------------------------USER INPUTS----------------------------------//
+
+//Technical parameters
+rocLength = input.int(defval=365, minval=0, title='ROC Length', group="Technical parameters", tooltip=t1)
+bubbleValue = input.int(defval=180, minval=0, title="ROC Bubble signal", group="Technical parameters", tooltip=t2)
+//Risk management
+stopLossInput = input.float(defval=6, minval=0, title="Stop Loss (in %)", group="Risk Management", tooltip=t3)
+//Money management
+fixedRatio = input.int(defval=400, minval=1, title="Fixed Ratio Value ($)", group="Money Management", tooltip=t4)
+increasingOrderAmount = input.int(defval=200, minval=1, title="Increasing Order Amount ($)", group="Money Management", tooltip=t5)
+//Backtesting period
+startDate = input.time(title="Start Date", defval=timestamp("1 Jan 2017 00:00:00"), group="Backtesting Period")
+endDate = input.time(title="End Date", defval=timestamp("1 July 2024 00:00:00"), group="Backtesting Period")
+
+
+//-------------------------------------VARIABLES INITIALISATION-----------------------------//
+
+roc = (close/close[rocLength] - 1)*100
+midlineConst = 0
+var bool inBubble = na
+bool shortBubbleCondition = na
+equity = math.abs(strategy.equity - strategy.openprofit)
+var float capital_ref = strategy.initial_capital
+var float cashOrder = strategy.initial_capital * 0.95
+bool inRange = na
+
+
+//------------------------------CHECKING SOME CONDITIONS ON EACH SCRIPT EXECUTION-------------------------------//
+
+//Checking if the date belong to the range
+inRange := inBacktestPeriod(startDate, endDate)
+
+//Checking if we are in a bubble
+if roc > bubbleValue and not inBubble
+    inBubble := true
+
+//Checking if the bubble is over
+if roc < 0 and inBubble
+    inBubble := false
+
+//Checking the condition to short the bubble : The ROC must be above the bubblevalue for at least 1 week
+if roc[1]>bubbleValue and roc[2]>bubbleValue and roc[3]>bubbleValue and roc[4]>bubbleValue and roc[5]>bubbleValue and roc[6]>bubbleValue and roc[7]>bubbleValue
+    shortBubbleCondition := true
+
+//Checking performances of the strategy
+if equity > capital_ref + fixedRatio
+    spread = (equity - capital_ref)/fixedRatio
+    nb_level = int(spread)
+    increasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder + increasingOrder
+    capital_ref := capital_ref + nb_level*fixedRatio
+if equity < capital_ref - fixedRatio
+    spread = (capital_ref - equity)/fixedRatio
+    nb_level = int(spread)
+    decreasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder - decreasingOrder
+    capital_ref := capital_ref - nb_level*fixedRatio
+
+//Checking if we close all trades in case where we exit the backtesting period
+if strategy.position_size!=0 and not inRange
+    debugLabel("END OF BACKTESTING PERIOD : we close the trade", color=color.rgb(116, 116, 116), loc=roc)
+    strategy.close_all()
+
+
+//-------------------------------LONG/SHORT CONDITION-------------------------------//
+
+//Long condition
+//We reduce noise by taking signal only if the last roc value is in the same side as the current one
+if (strategy.position_size<=0 and ta.crossover(roc, midlineConst)[1] and roc>0 and inRange)
+    //If we were in a short position, we pass to a long position
+    qty = cashOrder/close
+    strategy.entry("Long", strategy.long, qty)
+    stopLoss = close * (1-stopLossInput/100)
+    strategy.exit("Long Risk Managment", "Long", stop=stopLoss)
+
+//Short condition
+//We take a short position if we are in a bubble and roc is decreasing
+if (strategy.position_size>=0 and ta.crossunder(roc, midlineConst)[1] and roc<0 and inRange) or 
+     (strategy.position_size>=0 and inBubble and ta.crossunder(roc, bubbleValue) and shortBubbleCondition and inRange)
+    //If we were in a long position, we pass to a short position
+    qty = cashOrder/close
+    strategy.entry("Short", strategy.short, qty)
+    stopLoss = close * (1+stopLossInput/100)
+    strategy.exit("Short Risk Managment", "Short", stop=stopLoss)
+
+
+//--------------------------------RISK MANAGEMENT--------------------------------------//
+
+//We manage our risk and change the sense of position after SL is hitten
+if strategy.position_size == 0 and inRange
+    //We find the direction of the last trade
+    id = strategy.closedtrades.entry_id(strategy.closedtrades-1)
+    if id == "Short"
+        qty = cashOrder/close
+        strategy.entry("Long", strategy.long, qty)
+        stopLoss = close * (1-stopLossInput/100)
+        strategy.exit("Long Risk Managment", "Long", stop=stopLoss)
+    else if id =="Long"
+        qty = cashOrder/close
+        strategy.entry("Short", strategy.short, qty)
+        stopLoss = close * (1+stopLossInput/100)
+        strategy.exit("Short Risk Managment", "Short", stop=stopLoss)
+
+
+//---------------------------------PLOTTING ELEMENTS---------------------------------------//
+
+//Plotting of ROC
+rocPlot = plot(roc, "ROC", color=#7E57C2)
+midline = hline(0, "ROC Middle Band", color=color.new(#787B86, 25))
+midLinePlot = plot(0, color = na, editable = false, display = display.none)
+fill(rocPlot, midLinePlot, 40, 0, top_color = strategy.position_size>0 ? color.new(color.green, 0) : strategy.position_size<0 ? color.new(color.red, 0) : na, bottom_color = strategy.position_size>0 ? color.new(color.green, 100) : strategy.position_size<0 ? color.new(color.red, 100) : na,  title = "Positive area")
+fill(rocPlot, midLinePlot, 0,  -40,  top_color = strategy.position_size<0 ? color.new(color.red, 100) : strategy.position_size>0 ? color.new(color.green, 100) : na, bottom_color = strategy.position_size<0 ? color.new(color.red, 0) : strategy.position_size>0 ? color.new(color.green, 0) : na, title = "Negative area")
+
+View in Pine Editor・140 lines
+Use on chart
+2
+3
+1
+2
+6 273
+Rate of Change Strategy :
+
+
+INTRODUCTION :
+
+This strategy is based on the Rate of Change indicator. It compares the current price with that of a user-defined period of time ago. This makes it easy to spot trends and even speculative bubbles. The strategy is long term and very risky, which is why we've added a Stop Loss. There's also a money management method that allows you to reinvest part of your profits or reduce the size of your orders in the event of substantial losses.
+
+
+RATE OF CHANGE (ROC) :
+
+As explained above, the ROC is used to situate the current price compared to that of a certain period of time ago. The formula for calculating ROC in relation to the previous year is as follows :
+
+ROC (365) = (close/close (365) - 1) * 100
+
+With this formula we can find out how many percent the change in the current price is compared with 365 days ago, and thus assess the trend.
+
+
+PARAMETERS :
+
+
+ROC Length : Length of the ROC to be calculated. The current price is compared with that of the selected length ago.
+
+ROC Bubble Signal : ROC value indicating that we are in a bubble. This value varies enormously depending on the financial product. For example, in the equity market, a bubble exists when ROC = 40, whereas in cryptocurrencies, a bubble exists when ROC = 150.
+
+Stop Loss (in %) : Stop Loss value in percentage. This is the maximum trade value percentage that can be lost in a single trade.
+
+Fixed Ratio : This is the amount of gain or loss at which the order quantity is changed. The default is 400, which means that for each $400 gain or loss, the order size is increased or decreased by an amount chosen by the user.
+
+Increasing Order Amount : This is the amount to be added to or subtracted from orders when the fixed ratio is reached. The default is $200, which means that for every $400 gain, $200 is reinvested in the strategy. On the other hand, for every $400 loss, the order size is reduced by $200.
+
+Initial capital : $1000
+
+Fees : Interactive Broker fees apply to this strategy. They are set at 0.18% of the trade value.
+
+Slippage : 3 ticks or $0.03 per trade. Corresponds to the latency time between the moment the signal is received and the moment the order is executed by the broker.
+
+Important : A bot has been used to test the different parameters and determine which ones maximize return while limiting drawdown. This strategy is the most optimal on 
+BTCUSD
+ in 1D timeframe with the following parameters :
+
+
+ROC Length = 365
+ROC Bubble Signal = 180
+Stop Loss (in %) = 6
+
+
+LONG CONDITION :
+
+We are in a LONG position if ROC (365) > 0 for at least two days. This allows us to limit noise and irrelevant signals to ensure that the ROC remains positive.
+
+
+SHORT CONDITION :
+
+We are in a SHORT position if ROC (365) < 0 for at least two days. We also open a SHORT position when the speculative bubble is about to burst. If ROC (365) > 180, we're in a bubble. If the bubble has been in existence for at least a week and the ROC falls back below this threshold, we can expect the asset to return to reasonable prices, and thus a downward trend. So we're opening a SHORT position to take advantage of this upcoming decline.
+
+
+EXIT RULES FOR WINNING TRADE :
+
+The strategy is self-regulating. We don't exit a LONG trade until a SHORT signal has arrived, and vice versa. So, to exit a winning position, you have to wait for the entry signal of the opposite position.
+
+
+RISK MANAGEMENT :
+
+This strategy is very risky, and we can easily end up on the wrong side of the trade. That's why we're going to manage our risk with a Stop Loss, limiting our losses as a percentage of the trade's value. By default, this percentage is set at 6%. Each trade will therefore take a maximum loss of 6%.
+If the SL has been triggered, it probably means we were on the wrong side. This is why we change the direction of the trade when a SL is triggered. For example, if we were SHORT and lost 6% of the trade value, the strategy will close this losing trade and open a long position without taking into account the ROC value. This allows us to be in position all the time and not miss the best opportunities.
+
+
+MONEY MANAGEMENT :
+
+The fixed ratio method was used to manage our gains and losses. For each gain of an amount equal to the value of the fixed ratio, we increase the order size by a value defined by the user in the "Increasing order amount" parameter. Similarly, each time we lose an amount equal to the value of the fixed ratio, we decrease the order size by the same user-defined value. This strategy increases both performance and drawdown.
+
+
+NOTE :
+
+Please note that the strategy is backtested from 2017-01-01. As the timeframe is 1D, this strategy is a medium/long-term strategy. That's why only 34 trades were closed. Be careful, as the test sample is small and performance may not necessarily reflect what may happen in the future.
+
+
+Enjoy the strategy and don't forget to take the trade :)

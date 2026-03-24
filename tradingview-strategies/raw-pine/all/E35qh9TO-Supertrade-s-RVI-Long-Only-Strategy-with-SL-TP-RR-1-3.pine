@@ -1,0 +1,42 @@
+//@version=6
+strategy("Supertrade's RVI Long-Only Strategy with SL/TP (RR 1:3)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === RVI Calculation ===
+length = input.int(10, minval=1)
+len = 14
+src = close
+stddev = ta.stdev(src, length)
+upper = ta.ema(ta.change(src) <= 0 ? 0 : stddev, len)
+lower = ta.ema(ta.change(src) > 0 ? 0 : stddev, len)
+rvi = upper / (upper + lower) * 100
+
+plot(rvi, title="RVI", color=color.purple)
+
+// === Strategy Logic (Long Only) ===
+longCond = ta.crossover(rvi, 20)
+
+// === SL/TP Logic ===
+risk = input.float(1.0, title="Stop Loss (%)", minval=0.1, step=0.1)  // % from entry
+rewardRatio = 3.0  // R:R = 1:3
+
+longSL = close * (1 - risk / 100)
+longTP = close * (1 + (risk * rewardRatio) / 100)
+
+// === Long Entry and Exit ===
+if (longCond)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+View in Pine Editor・28 lines
+Use on chart
+3
+5
+1 603
+This strategy, titled "Supertrade’s RVI Long-Only Strategy with SL/TP (RR 1:3)", is designed to capitalize on potential bullish reversals using the Relative Vigor Index (RVI) as its core signal generator. It is best optimized for trading XAUUSD on the 15-minute timeframe, where it has demonstrated favorable historical performance.
+
+The RVI is calculated using a 10-period standard deviation of the closing price, with smoothing applied through a 14-period exponential moving average. This approach helps to distinguish between uptrend and downtrend volatility, allowing the strategy to identify momentum shifts with precision. A long position is triggered when the RVI crosses above the 20 level, suggesting a potential transition from a weak to a stronger bullish phase.
+
+Risk management is embedded through a user-defined stop-loss (default set at 1% below the entry price) and a fixed reward-to-risk ratio of 1:3. This means that for every 1% of capital risked, the strategy targets a 3% gain, maintaining favorable risk-reward dynamics throughout its execution. Once a position is entered, it will exit automatically at either the stop-loss or take-profit level, depending on which is reached first.
+
+This strategy is meant for educational and research purposes only. While it has performed well historically on specific assets and timeframes, past performance is not indicative of future results. Market conditions can change, and no strategy guarantees success in all environments. Please exercise proper risk management and test thoroughly before applying in live markets.
+

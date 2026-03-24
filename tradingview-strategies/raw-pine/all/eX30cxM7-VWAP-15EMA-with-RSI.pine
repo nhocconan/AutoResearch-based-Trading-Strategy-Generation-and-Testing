@@ -1,0 +1,7 @@
+//@version=5
+showBand_1=##input(defval=true,type='INPUT_BOOL',##id='in_7')
+##root(root_metainfo,rm_0,(showBand_1?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_1,(showBand_1?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_2,(showBand_1?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_3,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'AboveBar',input__string,plotshape,location)

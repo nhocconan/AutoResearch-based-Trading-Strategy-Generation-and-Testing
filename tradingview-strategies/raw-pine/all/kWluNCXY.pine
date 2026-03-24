@@ -1,0 +1,5 @@
+//@version=5
+overboughtLevel=##input(defval=61,type='INPUT_INTEGER',##id='in_2')
+oversoldLevel=##input(defval=42,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,overboughtLevel,input__float)
+##root(root_metainfo,rm_1,oversoldLevel,input__float)

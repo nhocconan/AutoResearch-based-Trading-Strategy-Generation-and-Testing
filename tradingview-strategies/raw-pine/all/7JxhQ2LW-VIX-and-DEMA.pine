@@ -1,0 +1,75 @@
+//@version=2
+
+strategy("VIX and DEMA", overlay=false,default_qty_type = strategy.percent_of_equity, default_qty_value = 100,commission_type=strategy.commission.percent,commission_value=0.01,initial_capital=100000)
+pd = input(22, title="LookBack Period Standard Deviation High")
+bbl = input(20, title="Bolinger Band Length")
+multupper = input(2.0    , minval=1, maxval=5, title="Bollinger Band Standard Devaition Up")
+multlow = input(2.0,minval=1,maxval=5,title="BB STD LOW")
+lb = input(50  , title="Look Back Period Percentile High")
+ph = input(.85, title="Highest Percentile - 0.90=90%, 0.95=95%, 0.99=99%")
+pl = input(1.01, title="Lowest Percentile - 1.10=90%, 1.05=95%, 1.01=99%")
+hp = input(false, title="Show High Range - Based on Percentile and LookBack Period?")
+sd = input(false, title="Show Standard Deviation Line?")
+
+wvf = ((highest(close, pd)-low)/(highest(close, pd)))*100
+
+sDevupper = multupper * stdev(wvf, bbl)
+sDevlow = multlow *stdev(wvf,bbl)
+midLine = sma(wvf, bbl)
+lowerBand = midLine - sDevlow
+upperBand = midLine + sDevupper
+
+rangeHigh = (highest(wvf, lb)) * ph
+rangeLow = (lowest(wvf, lb)) * pl
+
+col = wvf >= upperBand or wvf >= rangeHigh ? lime : gray
+price=close 
+
+
+plot(hp and rangeHigh ? rangeHigh : na, title="Range High Percentile", style=line, linewidth=4, color=orange)
+plot(hp and rangeLow ? rangeLow : na, title="Range High Percentile", style=line, linewidth=4, color=orange)
+plot(wvf, title="Williams Vix Fix", style=histogram, linewidth = 4, color=col)
+plot(sd and upperBand ? upperBand : na, title="Upper Band", style=line, linewidth = 3, color=aqua)
+
+yearfrom = input(2018)
+yearuntil =input(2021)
+monthfrom =input(1)
+monthuntil =input(12)
+dayfrom=input(1)
+dayuntil=input(31)
+
+
+lengthema = input(50, minval=1)
+src = input(close, title="Source")
+e1 = ema(src, lengthema)
+e2 = ema(e1, lengthema)
+dema = 2 * e1 - e2
+plot(dema, color=green)
+
+
+if ((crossunder(wvf,upperBand) ) and (price<dema)   and  year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil) 
+    strategy.entry("MMAL", strategy.long, stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="AL")
+    
+else
+    strategy.cancel(id="MMAL")
+
+
+if   ((( (wvf<lowerBand) ) and  (price>dema) ) and  year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil) 
+
+    strategy.entry("MMSAT", strategy.short,stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="SAT")
+else
+    strategy.cancel(id="MMSAT")
+
+View in Pine Editor・61 lines
+Use on chart
+3
+5
+1
+4
+11 699
+Aug 25, 2018
+I combine "
+" strategy with DEMA
+Mar 10, 2020
+Release Notes
+Update strategy default parameters

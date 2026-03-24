@@ -1,0 +1,91 @@
+//@version=6
+strategy("4-EMA & RSI Trend Pullback [Binary Options_20260320]", shorttitle="4EMA+RSI", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_value=0.04)
+
+// =========================================================================
+// 1. Inputs (EMA & RSI)
+// =========================================================================
+// EMA Settings
+len7   = input.int(7,   title="EMA 7 (Fast Trigger)", group="EMA Settings")
+len21  = input.int(21,  title="EMA 21 (Slow Trigger)", group="EMA Settings")
+len50  = input.int(50,  title="EMA 50 (Trend & Dynamic Stop)", group="EMA Settings")
+len200 = input.int(200, title="EMA 200 (Macro Trend)", group="EMA Settings")
+
+// RSI Settings
+rsi_len = input.int(14, title="RSI Length", group="RSI Settings")
+rsi_ob  = input.int(70, title="RSI Overbought (Max for Longs)", group="RSI Settings")
+rsi_os  = input.int(30, title="RSI Oversold (Min for Shorts)", group="RSI Settings")
+rsi_mid = input.int(50, title="RSI Centerline (Momentum Shift)", group="RSI Settings")
+
+// =========================================================================
+// 2. Calculations (EMA & RSI)
+// =========================================================================
+ema7   = ta.ema(close, len7)
+ema21  = ta.ema(close, len21)
+ema50  = ta.ema(close, len50)
+ema200 = ta.ema(close, len200)
+
+rsi_val = ta.rsi(close, rsi_len)
+
+// =========================================================================
+// 3. Visuals (EMA on Chart)
+// =========================================================================
+plot(ema7,   color=color.new(color.blue, 0),   title="EMA 7",   linewidth=1)
+plot(ema21,  color=color.new(color.orange, 0), title="EMA 21",  linewidth=2)
+plot(ema50,  color=color.new(color.green, 0),  title="EMA 50",  linewidth=2)
+plot(ema200, color=color.new(color.red, 0),    title="EMA 200", linewidth=3)
+
+// =========================================================================
+// 4. Logic & Filters
+// =========================================================================
+// Macro Trend Filter
+bullish_macro = ema50 > ema200
+bearish_macro = ema50 < ema200
+
+// RSI Filter Logic (Momentum + Exhaustion Check)
+// Long: RSI must be bullish (>50) but not exhausted (<70)
+rsi_long_ok  = rsi_val > rsi_mid and rsi_val < rsi_ob
+// Short: RSI must be bearish (<50) but not exhausted (>30)
+rsi_short_ok = rsi_val < rsi_mid and rsi_val > rsi_os
+
+// Entry Triggers (EMA Cross + RSI Confirmation)
+long_trigger  = ta.crossover(ema7, ema21) and rsi_long_ok
+short_trigger = ta.crossunder(ema7, ema21) and rsi_short_ok
+
+// Exit Signals
+long_exit  = ta.crossunder(ema7, ema21) or close < ema50
+short_exit = ta.crossover(ema7, ema21)  or close > ema50
+
+// =========================================================================
+// 5. Strategy Execution & Alerts
+// =========================================================================
+if bullish_macro and long_trigger
+    strategy.entry("Long", strategy.long, comment="Buy")
+    alert("🟢 [LONG ENTRY] 7/21 EMA Cross UP + RSI Confirmed. Trend Bullish.", alert.freq_once_per_bar_close)
+
+if strategy.position_size > 0 and long_exit
+    strategy.close("Long", comment="Exit Long")
+    alert("🔴 [LONG EXIT] Momentum shifted down or 50 EMA broken.", alert.freq_once_per_bar_close)
+
+if bearish_macro and short_trigger
+    strategy.entry("Short", strategy.short, comment="Sell")
+    alert("🔴 [SHORT ENTRY] 7/21 EMA Cross DOWN + RSI Confirmed. Trend Bearish.", alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and short_exit
+    strategy.close("Short", comment="Exit Short")
+    alert("🟢 [SHORT EXIT] Momentum shifted up or 50 EMA broken.", alert.freq_once_per_bar_close)
+
+// =========================================================================
+// 6. Background Highlights
+// =========================================================================
+perfect_bull = ema7 > ema21 and ema21 > ema50 and ema50 > ema200
+perfect_bear = ema7 < ema21 and ema21 < ema50 and ema50 < ema200
+bgcolor(perfect_bull ? color.new(color.green, 90) : perfect_bear ? color.new(color.red, 90) : na)
+
+View in Pine Editor・82 lines
+Use on chart
+3
+137
+based on EMA Cross 7 21 50 200 + RSI
+Running test on 10s chart and 15s chart
+
+

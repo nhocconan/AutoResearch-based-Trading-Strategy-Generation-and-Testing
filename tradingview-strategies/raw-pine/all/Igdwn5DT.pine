@@ -1,0 +1,171 @@
+//@version=6
+strategy("Ratchet Exit Trend Strategy with VIX Filter", 
+     overlay = true, 
+     initial_capital = 10000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 100, 
+     pyramiding = 1, 
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.1,
+     currency = currency.USD)
+
+// ─────────────────────
+// 1. Inputs
+// ─────────────────────
+sma25Len  = input.int(25,  "SMA 25 (Momentum)", group="SMAs")
+sma50Len  = input.int(50,  "SMA 50 (Trend)",    group="SMAs")
+sma100Len = input.int(100, "SMA 100 (Medium)",  group="SMAs")
+sma200Len = input.int(200, "SMA 200 (Long)",    group="SMAs")
+
+// VIX Filter Inputs
+group_vix = "VIX Filter"
+useVixFilter = input.bool(true, "VIX Filter aktivieren?", group=group_vix)
+vixThreshold = input.float(32.0, "VIX Schwellenwert", group=group_vix, tooltip="Kein Entry über diesem Wert. Sofort Exit über diesem Wert.")
+
+// Exit Einstellungen
+group_exit    = "Exit Logic (Ratchet System)"
+slInitialPerc = input.float(10.0, "Initial Stop Loss %",        group=group_exit)
+profitStep1   = input.float(10.0, "Trigger für Stufe 1 (+%)",   group=group_exit)
+slStep1Perc   = input.float(8.0,  "Fixierter SL Stufe 1 (-%)",  group=group_exit)
+profitStep2   = input.float(15.0, "Trigger für Stufe 2 (+%)",   group=group_exit)
+trailPerc     = input.float(8.0,  "Trailing Abstand (%)",       group=group_exit)
+
+// ─────────────────────
+// 2. Datenabruf & Indikatoren
+// ─────────────────────
+// VIX Daten holen (Tagesbasis ist meist am stabilsten)
+vixClose = request.security("CBOE:VIX", "D", close)
+
+sma25  = ta.sma(close, sma25Len)
+sma50  = ta.sma(close, sma50Len)
+sma100 = ta.sma(close, sma100Len)
+sma200 = ta.sma(close, sma200Len)
+
+plot(sma25, "SMA 25", color=color.purple)
+plot(sma50, "SMA 50", color=color.green, linewidth=2)
+plot(sma100, "SMA 100", color=color.blue)
+plot(sma200, "SMA 200", color=color.orange, linewidth=2)
+
+// ─────────────────────
+// 3. Entry Logik
+// ─────────────────────
+entryCross  = ta.crossover(sma25, sma50)
+f_threeBarBreak(float _sma) => close > _sma and close[1] > _sma[1] and close[2] > _sma[2] and close[3] < _sma[3]
+
+breakout50  = f_threeBarBreak(sma50)
+breakout100 = f_threeBarBreak(sma100)
+breakout200 = f_threeBarBreak(sma200)
+
+// VIX Bedingung: Ist der VIX OK? (Kleiner als Threshold ODER Filter deaktiviert)
+vixCondition = (not useVixFilter) or (vixClose < vixThreshold)
+
+// Entries nur ausführen, wenn VIX Bedingung erfüllt ist
+if vixCondition
+    if entryCross
+        strategy.entry("Long", strategy.long, comment="Entry: 25x50")
+    if breakout50
+        strategy.entry("Long", strategy.long, comment="Entry: SMA50")
+    if breakout100
+        strategy.entry("Long", strategy.long, comment="Entry: SMA100")
+    if breakout200
+        strategy.entry("Long", strategy.long, comment="Entry: SMA200")
+
+// ─────────────────────
+// 4. VIX PANIC EXIT
+// ─────────────────────
+// Wenn VIX zu hoch ist, sofort raus (Hard Exit)
+if useVixFilter and vixClose > vixThreshold
+    strategy.close_all(comment = "VIX Panic Exit (> " + str.tostring(vixThreshold) + ")")
+
+// ─────────────────────
+// 5. STATE MACHINE EXIT LOGIK (Ratchet)
+// ─────────────────────
+// (Wird nur ausgeführt, wenn wir nicht gerade durch den VIX Panic Exit geschlossen wurden)
+
+var int exitStage = 0         
+var float activeStopPrice = 0.0 
+var float highestHigh = 0.0    
+float plotStop = na
+
+if strategy.position_size == 0
+    exitStage := 0
+    activeStopPrice := 0.0
+    highestHigh := 0.0
+
+if strategy.position_size > 0
+    float avgEntry = strategy.position_avg_price
+    float currentProfitPerc = (close - avgEntry) / avgEntry * 100.0
+    
+    if highestHigh == 0.0
+        highestHigh := high
+    else
+        highestHigh := math.max(highestHigh, high)
+
+    if exitStage < 1 and currentProfitPerc >= profitStep1
+        exitStage := 1 
+    
+    if exitStage < 2 and currentProfitPerc >= profitStep2
+        exitStage := 2
+
+    float potentialStop = 0.0
+    string commentText = ""
+
+    if exitStage == 0
+        potentialStop = avgEntry * (1 - slInitialPerc / 100.0)
+        commentText := "Initial Stop"
+    else if exitStage == 1
+        potentialStop = avgEntry * (1 - slStep1Perc / 100.0)
+        commentText := "Secured (-8%)"
+    else if exitStage == 2
+        potentialStop = highestHigh * (1 - trailPerc / 100.0)
+        commentText := "Trailing"
+
+    if strategy.position_size[1] == 0
+        activeStopPrice := potentialStop
+    else
+        activeStopPrice := math.max(activeStopPrice, potentialStop)
+
+    plotStop := activeStopPrice
+    strategy.exit("Ratchet Exit", stop = activeStopPrice, comment_loss = commentText)
+
+// Dead Cross Backup
+if ta.crossunder(sma25, sma50)
+    strategy.close_all(comment = "Dead Cross")
+
+plot(plotStop, "Active Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・135 lines
+Use on chart
+3
+490
+This strategy is a trend-following system designed specifically for volatile markets. Instead of focusing solely on the "perfect entry," this script emphasizes intelligent trade management using a custom **"Ratchet Exit System."**
+
+Additionally, it integrates a volatility filter based on the CBOE Volatility Index (VIX) to minimize risk during extreme market phases.
+
+### 🎯 The Concept: Ratchet Exit
+The "Ratchet" system operates like a mechanical ratchet tool: the Stop Loss can only move in one direction (up, for long trades) and "locks" into specific stages. The goal is to give the trade "room to breathe" initially to avoid being stopped out by noise, then aggressively reduce risk as the trade moves into profit.
+
+The exit logic moves through 3 distinct phases:
+
+1. **Phase 0 (Initial Risk):** At the start of the trade, a wide Stop Loss is set (Default: 10%) to tolerate normal market volatility.
+2. **Phase 1 (Risk Reduction):** Once the trade reaches a specific floating profit (Default: +10%), the Stop Loss is raised and "pinned" to a fixed value (Default: -8% from entry). This drastically reduces risk while keeping the trade alive.
+3. **Phase 2 (Trailing Mode):** If the trend extends to a higher profit zone (Default: +15%), the Stop switches to a dynamic Trailing Mode. It follows the **Highest High** at a fixed percentage distance (Default: 8%).
+
+### 🛡️ VIX Filter & Panic Exit
+High volatility is often the enemy of trend-following strategies.
+* **Entry Filter:** The system will not enter new positions if the VIX is above a user-defined threshold (Default: 32). This helps avoid entering "falling knife" markets.
+* **Panic Exit:** If the VIX spikes above the threshold (32) while a trade is open, the position is closed immediately to protect capital (Emergency Exit).
+
+### 📈 Entry Signals
+The strategy trades **LONG only** and uses Simple Moving Averages (SMAs) to identify trends:
+* **Golden Cross:** SMA 25 crosses over SMA 50.
+* **3-Bar Breakouts:** A confirmation logic where the price must close above the SMA 50, 100, or 200 for 3 consecutive bars.
+
+### ⚙️ Settings (Inputs)
+All parameters are fully customizable via the settings menu:
+* **SMAs:** Lengths for the trend indicators (Default: 25, 50, 100, 200).
+* **VIX Filter:** Toggle the filter on/off and adjust the panic threshold.
+* **Ratchet Settings:** Percentages for Initial Stop, Trigger Levels for Stages 1 & 2, and the Trailing Distance.
+
+### ⚠️ Technical Note & Risk Warning
+This script uses `request.security` to fetch VIX data. Please ensure you understand the risks associated with trading leveraged or volatile assets. Past performance is not indicative of future results.

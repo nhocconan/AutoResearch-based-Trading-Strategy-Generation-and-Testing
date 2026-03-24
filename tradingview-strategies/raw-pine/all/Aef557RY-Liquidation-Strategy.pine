@@ -1,0 +1,52 @@
+//@version=6
+strategy('Liquidation Strategy', commission_type = strategy.commission.percent, commission_value = 0.1, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 99)
+
+import TradingView/ta/10
+
+setup = input.string('Read tooltip', tooltip = 'First add the Liquidation script under Financials from TradingView on a Bybit or OKX chart, then change the 2 sources below to the long and short liquidation series from the Liquidations indicator respectively. You can also overlay this strategy over the Liquidations indicator.')
+tradeLong = input.bool(true, 'Long Liquidation Data', inline = 'long')
+longLiquidationSource = input.source(close, '', inline = 'long', active = tradeLong)
+tradeShort = input.bool(true, 'Short Liquidation Data', inline = 'short')
+shortLiquidationSource = input.source(close, '', inline = 'short', active = tradeShort)
+liqMaFilter = input.bool(false, 'Liquidation Moving Average Filter')
+liquidationLength = input.int(21, 'Length', active = liqMaFilter, tooltip = 'Moving Average Length of the liquidation values')
+liqFilterMultiplier = input.float(5, 'Multiplier', active = liqMaFilter, tooltip = 'Enter only if Liquidation Value > MA * Multiplier')
+threshold = input.float(2500, 'Threshold', tooltip = 'The liquidation value has to be above this value for long liquidation and below the negative of this value for short liquidations')
+rsiLength = input.int(13, 'RSI Length', tooltip = 'Exit the trade when RSI(n) < MA(RSI(n), n) for long liquidation, or RSI(n) > MA(RSI(n), n) for short liquidation')
+
+longEma = ta.ema(longLiquidationSource, liquidationLength)
+shortEma = ta.ema(shortLiquidationSource, liquidationLength)
+
+if longLiquidationSource > threshold and tradeLong and (longLiquidationSource > longEma * liqFilterMultiplier or not liqMaFilter)
+    strategy.entry('long', strategy.long)
+
+if shortLiquidationSource < -threshold and tradeShort and (shortLiquidationSource < shortEma * liqFilterMultiplier or not liqMaFilter)
+    strategy.entry('short', strategy.short)
+
+rsi = ta.rsi(close, rsiLength)
+rsiSmoothed = ta.rsi(rsi, rsiLength)
+
+if ta.crossunder(rsi, rsiSmoothed)
+    strategy.close('long')
+
+if ta.crossover(rsi, rsiSmoothed)
+    strategy.close('short')
+
+hline(threshold, display = display.none)
+hline(-threshold, display = display.none)
+plot(longEma, 'Long Liq. EMA', display = display.none)
+plot(shortEma, 'Short Liq. EMA', display = display.none)
+plot(rsi, 'RSI', color.purple, display = display.none)
+plot(rsiSmoothed, 'Smoothed RSI', color.yellow, display = display.none)
+
+View in Pine Editor・43 lines
+Use on chart
+8
+8
+1 709
+📈 It enters a long trade when long liquidation spikes above a set threshold.
+📉 It enters a short trade when short liquidation drops below the negative threshold.
+🧮 It optionally filters entries using an EMA multiplier.
+🔁 It exits long when RSI crosses below its smoothed version.
+🔄 It exits short when RSI crosses above its smoothed version.
+🔗 It requires linking to the Liquidations indicator on Bybit or OKX charts.

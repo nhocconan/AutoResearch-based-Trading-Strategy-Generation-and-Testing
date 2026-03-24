@@ -1,0 +1,87 @@
+//@version=6
+strategy("Recovery Strategy", overlay=true, pyramiding=5, margin_long=20)
+
+// Input parameters
+lookback_period = input.int(126, "Lookback Period for High Peak (bars)", minval=1, tooltip="Number of bars to look back for recent high (default: ~6 months)")
+drop_percent = input.float(10.0, "Initial Drop Percentage to Buy (%)", minval=0.1, step=0.1, tooltip="Percentage drop from recent high to trigger initial buy")
+additional_drop_percent = input.float(2.0, "Additional Drop Percentage to Buy (%)", minval=0.1, step=0.1, tooltip="Further drop percentage from recent high to add to position")
+holding_period = input.int(126, "Holding Period (bars)", minval=1, tooltip="Number of bars to hold each position before selling (default: ~6 months)")
+order_size_percent = input.float(100.0, "Order Size (% of Equity)", minval=0.1, maxval=100.0, step=0.1, tooltip="Percentage of equity to use per trade (e.g., 100 for full equity, 50 for half)")
+margin_percent = input.float(20.0, "Margin for Long Positions (%)", minval=1.0, maxval=100.0, step=0.1, tooltip="Percentage of position value covered by equity (e.g., 20 = 5:1 leverage)")
+
+// Find the highest high in the lookback period
+recent_high = ta.highest(high, lookback_period)
+
+// Define initial buy condition: price drops by drop_percent or more from recent high
+buy_condition = close <= recent_high * (1 - drop_percent / 100)
+
+// Define additional buy condition: price drops by an additional_drop_percent increment
+var float last_entry_level = na
+if strategy.position_size == 0
+    last_entry_level := na  // Reset when no position is open
+if buy_condition and strategy.position_size > 0
+    if close <= recent_high * (1 - (drop_percent + additional_drop_percent * (strategy.opentrades + 1)) / 100)
+        last_entry_level := close
+
+// Enter long position when buy condition is met (initial or additional)
+if buy_condition and (strategy.position_size == 0 or (strategy.position_size > 0 and close <= recent_high * (1 - (drop_percent + additional_drop_percent * (strategy.opentrades + 1)) / 100)))
+    strategy.entry("Buy" + str.tostring(strategy.opentrades + 1), strategy.long, qty=strategy.equity * order_size_percent / 100 / close)
+
+// Set exit: sell each position after its own holding_period bars, regardless of profit or loss
+if strategy.position_size > 0
+    for i = 0 to strategy.opentrades - 1
+        bars_since_entry = bar_index - strategy.opentrades.entry_bar_index(i)
+        if bars_since_entry >= holding_period
+            strategy.close("Buy" + str.tostring(i + 1), comment="Time Exit Trade " + str.tostring(i + 1))
+
+// Draw a label at the recent high when it changes, without text
+if ta.change(recent_high) != 0
+    label.new(bar_index, recent_high, "", color=color.new(color.blue, 0), style=label.style_label_down)
+
+View in Pine Editor・39 lines
+Use on chart
+7
+708
+Description:
+The Recovery Strategy is a long-only trading system designed to capitalize on significant price drops from recent highs. It enters a position when the price falls 10% or more from the highest high over a 6-month lookback period and adds positions on further 2% drops, up to a maximum of 5 positions. Each trade is held for 6 months before exiting, regardless of profit or loss. The strategy uses margin to amplify position sizes, with a default leverage of 5:1 (20% margin requirement). All key parameters are customizable via inputs, allowing flexibility for different assets and timeframes. Visual markers indicate recent highs for reference.
+How It Works:
+
+Entry: Buys when the closing price drops 10% or more from the recent high (highest high in the lookback period, default 126 bars ~6 months). If already in a position, additional buys occur on further 2% drops (e.g., 12%, 14%, 16%, 18%), up to 5 positions (pyramiding).
+Exit: Each trade exits after its own holding period (default 126 bars ~6 months), regardless of profit or loss. No stop loss or take-profit is used.
+Margin: Uses leverage to control larger positions (default 20% margin, 5:1 leverage). The order size is a percentage of equity (default 100%), adjustable via inputs.
+Visualization: Displays blue markers (without text) at new recent highs to highlight reference levels.
+
+Inputs:
+
+Lookback Period for High Peak (bars): Number of bars to look back for the recent high (default: 126, ~6 months on daily charts).
+Initial Drop Percentage to Buy (%): Percentage drop from recent high to trigger the first buy (default: 10.0%).
+Additional Drop Percentage to Buy (%): Further drop percentage to add positions (default: 2.0%).
+Holding Period (bars): Number of bars to hold each position before selling (default: 126, ~6 months).
+Order Size (% of Equity): Percentage of equity used per trade (default: 100%).
+Margin for Long Positions (%): Percentage of position value covered by equity (default: 20%, equivalent to 5:1 leverage).
+
+Usage:
+
+Timeframe: Designed for daily charts (126 bars ~6 months). Adjust Lookback Period and Holding Period for other timeframes (e.g., 1008 hours for hourly charts, assuming 8 trading hours/day).
+Assets: Suitable for stocks, ETFs, or other assets with significant price volatility. Test thoroughly on your chosen asset.
+Settings: Customize inputs in the strategy settings to match your risk tolerance and market conditions. For example, lower Margin for Long Positions (e.g., to 10% for 10:1 leverage) to increase position sizes, but beware of higher risk.
+Backtesting: Use TradingView’s Strategy Tester to evaluate performance. Check the “List of Trades” for skipped trades due to insufficient equity or margin requirements.
+
+Risks and Considerations:
+
+No Stop Loss: The strategy holds trades for the full 6 months without a stop loss, exposing it to significant drawdowns in prolonged downtrends.
+Margin Risk: Leverage (default 5:1) amplifies both profits and losses. Ensure sufficient equity to cover margin requirements to avoid skipped trades or simulated margin calls.
+Pyramiding: Up to 5 positions can be open simultaneously, increasing exposure. Adjust pyramiding in the code if fewer positions are desired (e.g., change to pyramiding=3).
+Market Conditions: Performance depends on price drops and recoveries. Test on historical data to assess effectiveness in your market.
+Broker Emulator: TradingView’s paper trading simulates margin but does not execute real margin trading. Results may differ in live trading due to broker-specific margin rules.
+
+How to Use:
+
+Add the strategy to your chart in TradingView.
+Adjust input parameters in the settings panel to suit your asset, timeframe, and risk preferences.
+Run a backtest in the Strategy Tester to evaluate performance.
+Monitor open positions and margin levels in the Trading Panel to manage risk.
+For live trading, consult your broker’s margin requirements and leverage policies, as TradingView’s simulation may not match real-world conditions.
+
+Disclaimer:
+This strategy is for educational purposes only and does not constitute financial advice. Trading involves significant risk, especially with leverage and no stop loss. Always backtest thoroughly and consult a financial advisor before using any strategy in live trading.

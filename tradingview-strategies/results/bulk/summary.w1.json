@@ -1,0 +1,74 @@
+[
+  {
+    "slug": "btc-candle-correlation",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/Bp053p4R-BTC-Candle-Correlation-Strategy/",
+    "python_file": "python-strategies/bulk/btc-candle-correlation.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-eth-long-v2",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/VQqkfWR5-BTC-and-ETH-Long-strategy-version-2/",
+    "python_file": "python-strategies/bulk/btc-eth-long-v2.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-3x-pair-hull-ma",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/QzkRRL0T-BTC-3X-PAIR-HULL-MA/",
+    "python_file": "python-strategies/bulk/btc-3x-pair-hull-ma.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "adx-for-btc-pineindicators",
+    "classification": "direct",
+    "chart_url": "https://www.tradingview.com/script/9tlkyuHL-ADX-for-BTC-PineIndicators/",
+    "python_file": "python-strategies/bulk/adx-for-btc-pineindicators.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-volatility-band",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/LDCIPS8i-BTC-Volatility-Band-Strategy/",
+    "python_file": "python-strategies/bulk/btc-volatility-band.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag",
+    "classification": "unsupported",
+    "chart_url": "https://www.tradingview.com/script/u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag/",
+    "python_file": null,
+    "import_ok": null,
+    "backtested": false
+  },
+  {
+    "slug": "kozlod-rsi-1m",
+    "classification": "direct",
+    "chart_url": "https://www.tradingview.com/script/MNyc30Ki-Kozlod-RSI-Strategy-1-minute-ETHUSD/",
+    "python_file": "python-strategies/bulk/kozlod-rsi-1m.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "btc-cap-dominance-rsi",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/r2LyZ0JA/",
+    "python_file": "python-strategies/bulk/btc-cap-dominance-rsi.py",
+    "import_ok": true,
+    "backtested": true
+  },
+  {
+    "slug": "ultimate-stochastics-nhbprod",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC/",
+    "python_file": "python-strategies/bulk/ultimate-stochastics-nhbprod.py",
+    "import_ok": true,
+    "backtested": true
+  }
+]

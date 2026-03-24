@@ -1,0 +1,9 @@
+//@version=5
+ma1_color=##input(defval=#f6c309,type='INPUT_COLOR',##id='in_4')
+ma2_color=##input(defval=#fb9800,type='INPUT_COLOR',##id='in_9')
+ma3_color=##input(defval=#fb6500,type='INPUT_COLOR',##id='in_14')
+ma4_color=##input(defval=#f60c0c,type='INPUT_COLOR',##id='in_19')
+##root(root_metainfo,plot_0_0,ma1_color,input__color)
+##root(root_metainfo,plot_1_0,ma2_color,input__color)
+##root(root_metainfo,plot_2_0,ma3_color,input__color)
+##root(root_metainfo,plot_3_0,ma4_color,input__color)

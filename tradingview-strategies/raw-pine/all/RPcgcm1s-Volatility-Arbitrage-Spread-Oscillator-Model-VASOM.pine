@@ -1,0 +1,68 @@
+//@version=6
+strategy("Volatility Arbitrage Spread Oscillator Model (VASOM)", overlay=true, 
+     initial_capital=20000, slippage=1, commission_type=strategy.commission.percent, 
+     commission_value=0.01, default_qty_type=strategy.fixed, default_qty_value=5)
+
+// Inputs
+vixFrontTicker = input.symbol("CBOE:VX1!", "VIX Front Month")
+vixSecondTicker = input.symbol("CBOE:VX2!", "VIX Second Month")
+
+longThreshold = input.int(46, "RSI Threshold for Long Entry", minval=1, maxval=100)
+exitThreshold = input.int(76, "RSI Threshold for Exit", minval=1, maxval=100)
+rsiPeriod = input.int(2, "RSI Period", minval=1)
+
+// Fetch data for front and second month VIX futures
+vixFront = request.security(vixFrontTicker, timeframe.period, close)
+vixSecond = request.security(vixSecondTicker, timeframe.period, close)
+
+// Spread calculation
+spread = vixFront - vixSecond
+
+// RSI Calculation on Spread
+spreadRSI = ta.rsi(spread, rsiPeriod)
+
+// Plot the spread and its RSI for visualization
+plot(spreadRSI, title="Spread RSI", color=color.white)
+
+// Trading logic
+if (spreadRSI < longThreshold)
+    strategy.entry("Long", strategy.long)
+
+if (spreadRSI > exitThreshold)
+    strategy.close("Long")
+
+// Debugging plots
+hline(longThreshold, "Long Threshold", color=color.green)
+hline(exitThreshold, "Exit Threshold", color=color.red)
+
+View in Pine Editor・36 lines
+Use on chart
+6
+4
+1
+2 260
+The Volatility Arbitrage Spread Oscillator Model (VASOM) is a systematic approach to capitalizing on price inefficiencies in the VIX futures term structure. By analyzing the differential between front-month and second-month VIX futures contracts, we employ a momentum-based oscillator (Relative Strength Index, RSI) to signal potential market reversion opportunities. Our research builds upon existing financial literature on volatility risk premia and contango/backwardation dynamics in the volatility markets (Zhang & Zhu, 2006; Alexander & Korovilas, 2012).
+
+Volatility derivatives have become essential tools for managing risk and engaging in speculative trades (Whaley, 2009). The Chicago Board Options Exchange (CBOE) Volatility Index (VIX) measures the market’s expectation of 30-day forward-looking volatility derived from S&P 500 option prices (CBOE, 2018). Term structures in VIX futures often exhibit contango or backwardation, depending on macroeconomic and market conditions (Alexander & Korovilas, 2012).
+
+This strategy seeks to exploit the spread between the front-month and second-month VIX futures as a proxy for term structure dynamics. The spread’s momentum, quantified by the RSI, serves as a signal for entry and exit points, aligning with empirical findings on mean reversion in volatility markets (Zhang & Zhu, 2006).
+
+• Entry Signal: When RSI_t falls below the user-defined threshold (e.g., 30), indicating a potential undervaluation in the spread.
+
+• Exit Signal: When RSI_t exceeds a threshold (e.g., 70), suggesting mean reversion has occurred.
+
+Empirical Justification
+
+The strategy aligns with findings that suggest predictable patterns in volatility futures spreads (Alexander & Korovilas, 2012). Furthermore, the use of RSI leverages insights from momentum-based trading models, which have demonstrated efficacy in various asset classes, including commodities and derivatives (Jegadeesh & Titman, 1993).
+
+References
+
+• Alexander, C., & Korovilas, D. (2012). The Hazards of Volatility Investing. Journal of Alternative Investments, 15(2), 92-104.
+
+• CBOE. (2018). The VIX White Paper. Chicago Board Options Exchange.
+
+• Jegadeesh, N., & Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. The Journal of Finance, 48(1), 65-91.
+
+• Zhang, C., & Zhu, Y. (2006). Exploiting Predictability in Volatility Futures Spreads. Financial Analysts Journal, 62(6), 62-72.
+
+• Whaley, R. E. (2009). Understanding the VIX. The Journal of Portfolio Management, 35(3), 98-105.

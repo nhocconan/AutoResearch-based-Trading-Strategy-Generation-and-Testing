@@ -1,0 +1,262 @@
+//@version=6
+strategy("Trendline Breakout Strategy [KedArc Quant] ",
+     overlay = true,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     pyramiding = 0,
+     calc_on_every_tick = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10)
+
+//@author: [KedArc Quant]
+//@createdOn:[15-Sep-2025]
+
+//====================== Inputs ======================
+pivLR   = input.int(5,  "Pivot left/right bars", minval = 1, maxval = 20)
+useMA   = input.bool(true, "Use MA filter (longs only above MA; shorts only below MA)")
+maLen   = input.int(200, "MA length", minval = 1)
+atrLen  = input.int(14, "ATR length", minval = 1)
+atrMult = input.float(2.0, "ATR stop × ATR", minval = 0.1, step = 0.1)
+tpR     = input.float(2.0, "Take profit (R multiple of stop)", minval = 0.1, step = 0.1)
+longs   = input.bool(true, "Enable Longs")
+shorts  = input.bool(true, "Enable Shorts")
+// --- add near other inputs ---
+showHLLH = input.bool(true, "Show HL/LH labels")
+
+// --- add near your var declarations ---
+var label labHL1 = na
+var label labHL2 = na
+var label labLH1 = na
+var label labLH2 = na
+
+
+//====================== Helpers =====================
+ma  = ta.ema(close, maLen)
+atr = ta.atr(atrLen)
+
+// Confirmed pivots (confirmed after 'pivLR' bars)
+pl = ta.pivotlow(low, pivLR, pivLR)    // pivot low price
+ph = ta.pivothigh(high, pivLR, pivLR)  // pivot high price
+
+// Arrays to store recent pivots (bar_index & price)
+var int[]   pl_x = array.new<int>()
+var float[] pl_y = array.new<float>()
+var int[]   ph_x = array.new<int>()
+var float[] ph_y = array.new<float>()
+
+f_trim_arrays() =>
+    while array.size(pl_x) > 20
+        array.shift(pl_x), array.shift(pl_y)
+    while array.size(ph_x) > 20
+        array.shift(ph_x), array.shift(ph_y)
+
+// Record new pivot lows (x is the bar_index where pivot confirmed)
+if not na(pl)
+    array.push(pl_x, bar_index - pivLR)
+    array.push(pl_y, pl)
+    f_trim_arrays()
+
+// Record new pivot highs
+if not na(ph)
+    array.push(ph_x, bar_index - pivLR)
+    array.push(ph_y, ph)
+    f_trim_arrays()
+
+//====================== Trendline construction =====================
+var line upTL   = na   // uptrend line from two most recent higher lows
+var line downTL = na   // downtrend line from two most recent lower highs
+
+// v6-safe: don't mutate function parameter; use a local 'res' and return it
+f_update_line(line id, int x1, float y1, int x2, float y2, bool isUp) =>
+    line res = id
+    if na(res)
+        res := line.new(x1, y1, x2, y2, extend = extend.right, width = 2, color = isUp ? color.teal : color.red)
+    else
+        line.set_xy1(res, x1, y1)
+        line.set_xy2(res, x2, y2)
+        line.set_extend(res, extend.right)
+        line.set_color(res, isUp ? color.teal : color.red)
+    res
+
+// Build/refresh the uptrend line using the last two pivot lows if they form higher lows
+// === Uptrend line from two most recent higher lows
+if array.size(pl_x) >= 2
+    ux1  = array.get(pl_x, array.size(pl_x) - 2)
+    uy1  = array.get(pl_y, array.size(pl_y) - 2)
+    ux2  = array.get(pl_x, array.size(pl_x) - 1)
+    uy2  = array.get(pl_y, array.size(pl_y) - 1)
+    if uy2 > uy1 and ux2 > ux1
+        upTL := f_update_line(upTL, ux1, uy1, ux2, uy2, true)
+
+        // Label the exact higher lows used for the teal line
+        if showHLLH
+            if not na(labHL1)
+                label.delete(labHL1)
+            if not na(labHL2)
+                label.delete(labHL2)
+            labHL1 := label.new(ux1, uy1, text="HL1", style=label.style_label_up,                                color=color.new(color.teal, 0), textcolor=color.white, size=size.tiny)            
+            labHL2 := label.new(ux2, uy2, text="HL2", style=label.style_label_up,                                color=color.new(color.teal, 0), textcolor=color.white, size=size.tiny)
+
+// === Downtrend line from two most recent lower highs
+if array.size(ph_x) >= 2
+    dx1  = array.get(ph_x, array.size(ph_x) - 2)
+    dy1  = array.get(ph_y, array.size(ph_y) - 2)
+    dx2  = array.get(ph_x, array.size(ph_x) - 1)
+    dy2  = array.get(ph_y, array.size(ph_y) - 1)
+    if dy2 < dy1 and dx2 > dx1
+        downTL := f_update_line(downTL, dx1, dy1, dx2, dy2, false)
+
+        // Label the exact lower highs used for the red line
+        if showHLLH
+            if not na(labLH1)
+                label.delete(labLH1)
+            if not na(labLH2)
+                label.delete(labLH2)
+            labLH1 := label.new(dx1, dy1, text="LH1", style=label.style_label_down,                                color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+            labLH2 := label.new(dx2, dy2, text="LH2", style=label.style_label_down,                                color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+
+//====================== Signals =====================
+upPrice   = na(upTL)   ? na : line.get_price(upTL, bar_index)
+downPrice = na(downTL) ? na : line.get_price(downTL, bar_index)
+
+// Compute crossover/crossunder EVERY bar (v6 consistency requirement)
+crossAboveDown = ta.crossover(close, downPrice)
+crossBelowUp   = ta.crossunder(close, upPrice)
+
+// Gate the signals with your other conditions
+longBreak  = longs  and not na(downPrice) and crossAboveDown and (not useMA or close > ma)
+shortBreak = shorts and not na(upPrice)   and crossBelowUp   and (not useMA or close < ma)
+
+//====================== Orders & Risk =====================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// One-bar defined stop and target based on ATR at signal
+longStop  = close - atrMult * atr
+longTP    = close + tpR * atrMult * atr
+shortStop = close + atrMult * atr
+shortTP   = close - tpR * atrMult * atr
+
+if longBreak and not inLong
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long-Exit", "Long", stop = longStop, limit = longTP)
+
+if shortBreak and not inShort
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short-Exit", "Short", stop = shortStop, limit = shortTP)
+
+// Optional quick flip on opposite signal
+if inLong and shortBreak
+    strategy.close("Long", comment = "Opp signal")
+
+if inShort and longBreak
+    strategy.close("Short", comment = "Opp signal")
+
+//====================== Plots & Alerts =====================
+plot(useMA ? ma : na, title = "EMA", color = color.new(color.blue, 0))
+plotshape(longBreak,  title="Long breakout",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.teal, text="▲")
+plotshape(shortBreak, title="Short breakdown",style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.red,  text="▼")
+
+alertcondition(longBreak,  title="Long breakout",  message="Price broke above downtrend line")
+alertcondition(shortBreak, title="Short breakdown", message="Price broke below uptrend line")
+
+View in Pine Editor・163 lines
+Use on chart
+8
+3
+2
+11 574
+Description
+
+A single, rule-based system that builds two trendlines from confirmed swing pivots and trades their breakouts, with optional retest, trend-regime gates (EMA / HTF EMA), and ATR-based risk. All parts serve one decision flow: structure → breakout → gated entry → managed risk.
+
+What it does (for traders)
+
+Draws Up line (teal) through the last two Higher Lows and Down line (red) through the last two Lower Highs, then extends them forward.
+Long when price breaks above red; Short when price breaks below teal.
+Optional Retest entry: after a break, wait for a pullback toward the broken line within an ATR-scaled buffer.
+Uses ATR stop and R-multiple target so risk is consistent across symbols/timeframes.
+Labels HL1/HL2/LH1/LH2 so non-coders can verify which pivots built each line.
+
+Why these components are combined
+
+Pure breakout systems on trendlines suffer from three practical issues:
+False breaks in chop → solved by trend-regime gates (EMA / HTF EMA) that only allow trades aligned with the prevailing trend.
+Uneven volatility across markets/timeframes → solved by ATR-based stop/target, normalizing distance so R-multiples are comparable.
+First break whipsaws near wedge apices → mitigated by the optional retest rule that demands a pullback/hold before entry.
+These modules are not separate indicators with their own signals. They are support roles inside one method.
+The pivot engine defines structure, the breakout detector defines signal, the regime gates decide if we’re allowed to take that signal, and the ATR module sizes risk.
+Together they make the trendline breakout usable, testable, and explainable.
+
+How it works (mechanism; each component explained)
+
+1) Pivot engine (structure, non-repainting)
+Swings are confirmed with ta.pivotlow/high(L, R). A pivot only exists after R bars (no look-ahead), so once plotted, the line built from those pivots will not repaint.
+2) Trendline builder (geometry)
+Teal line updates when two consecutive pivot lows satisfy HL2.price > HL1.price (and HL2 occurs after HL1).
+Red line updates when two consecutive pivot highs satisfy LH2.price < LH1.price.
+Lines are extended right and their current value is read every bar via line.get_price().
+3) Breakout detector (signal)
+On every bar, compute:
+crossover(close, redLine) ⇒ Long breakout
+crossunder(close, tealLine) ⇒ Short breakdown
+
+4) Regime gates (trend filters, not separate signals)
+EMA gate: allow longs only if close > EMA(len), shorts only if close < EMA(len).
+HTF EMA gate (optional): same rule on a higher timeframe to avoid fighting the larger trend.
+These do not create entries; they simply permit or block the breakout signal.
+
+5) Retest module (optional confirmation)
+After a breakout, record the line price. A valid retest occurs if price pulls back within an ATR-scaled buffer toward that broken line and then closes back in the breakout direction.
+This reduces first-tick fakeouts.
+
+6) Risk module (position exit)
+Initial stop = ATR(len) × atrMult from entry.
+Target = tpR × (ATR × atrMult) (e.g., 2R).
+This keeps results consistent across instruments/timeframes.
+
+Entries & exits
+
+Long entry
+Base: close breaks above red and passes EMA/HTF gates.
+Retest (if enabled): after the break, price pulls back near the broken red line (within the ATR buffer) and holds; then enter.
+
+Short entry
+Mirror logic with teal (break below & gates), optionally with a retest.
+
+Exit
+strategy.exit places ATR stop & R-multiple target automatically.
+Optional “flip”: close if the opposite base signal triggers.
+
+How to use it (step-by-step)
+
+Timeframe: 1–15m for intraday, 1–4h for swing.
+Start defaults: Pivot L/R = 5, EMA len = 200, ATR len = 14, ATR mult = 2, TP = 2R, Retest = ON.
+
+Tune sensitivity:
+
+Faster lines (more trades): set L/R = 3–4.
+Fewer counter-trend trades: enable HTF EMA (e.g., 60-min or Daily).
+Visual audit: labels HL1/HL2 & LH1/LH2 show which pivots built each line—verify by eye.
+
+Alerts: use Long breakout, Short breakdown, and Retest alerts to automate.
+
+Originality (why it merits publication)
+
+Trades the visualization: many “auto-trendline” tools only draw lines; this one turns them into testable, alertable rules.
+Integrated design: each component has a defined role in the same pipeline—no unrelated indicators bolted together.
+Transparent & non-repainting: pivot confirmation removes look-ahead; labels let non-coders understand the setup that produced each signal.
+
+Notes & limitations
+
+Lines update only after pivot confirmation; that lag is intentional to avoid repainting.
+Breakouts near an apex can whipsaw; prefer Retest and/or HTF gate in choppy regimes.
+Backtests are idealized; forward-test and size risk appropriately.
+
+
+⚠️ Disclaimer
+This script is provided for educational purposes only.
+Past performance does not guarantee future results.
+Trading involves risk, and users should exercise caution and use proper risk management when applying this strategy.

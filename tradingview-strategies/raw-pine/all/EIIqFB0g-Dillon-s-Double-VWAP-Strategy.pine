@@ -1,0 +1,9 @@
+//@version=5
+##root(root_metainfo,rm_0,plot.style_stepline,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_2,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_3,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_5,plot.style_stepline,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_6,plot.style_stepline,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_7,plot.style_stepline,cb__plot_style__integer,plot,style)

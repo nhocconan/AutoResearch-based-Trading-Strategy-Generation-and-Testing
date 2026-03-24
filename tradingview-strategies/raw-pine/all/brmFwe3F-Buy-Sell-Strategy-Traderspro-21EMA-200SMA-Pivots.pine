@@ -1,0 +1,40 @@
+//@version=3
+strategy("Buy/Sell Strategy Traderspro", overlay=true)
+fastLength = input(21)
+slowLength = input(200)
+price = close
+mafast = ema(price, fastLength)
+maslow = sma(price, slowLength)
+src = input(close)
+//Variable Definition
+fast = ema(src, 8)
+slow21 = ema(src, 21)
+slow55 = ema(src, 55)
+slow200 = sma(src, 200)
+//Variable definition for pivot points
+daily      = offset(security(tickerid,"D",   hlc3[0], barmerge.gaps_off, barmerge.lookahead_off),2)
+weekly      = offset(security(tickerid,"W",   hlc3[0], barmerge.gaps_off, barmerge.lookahead_off),2)
+monthly     = offset(security(tickerid,"M",   hlc3[0], barmerge.gaps_off, barmerge.lookahead_off),2)
+yearly      = offset(security(tickerid,"12M", hlc3[0], barmerge.gaps_off, barmerge.lookahead_off),2)
+
+
+if (price>mafast) and  (price>maslow) and (price>weekly) and (price>monthly)
+    strategy.entry("BUY", strategy.long, comment="BUY")
+alertcondition(close >= open, title='Alert on Green Bar', message='BUY')
+
+if (price<mafast) and (price<maslow) and (price<weekly) and (price<monthly)
+    strategy.entry("SELL", strategy.short, comment="SELL")
+alertcondition(close <= open, title='Alert on Red Bar', message='SELL')
+//plot(strategy.equity, title="equity", color=green, linewidth=2, style=areabr)
+
+View in Pine Editor・28 lines
+Use on chart
+1
+0
+8
+1
+7 196
+Buy Signal: If price closes over EMA 21 and SMA 200 and over Montly and weekly pivots.
+Sell Signal: If price closes below EMA 21 and SMA 200 and below Montly and weekly pivots.
+Use buystops sellstops over signal bar close
+For EURUSD Daily Timeframe works better. Check other pairs to see which timeframe has better profits. I apreciate your comments

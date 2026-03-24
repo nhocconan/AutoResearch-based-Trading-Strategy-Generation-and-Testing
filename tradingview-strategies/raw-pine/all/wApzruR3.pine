@@ -1,0 +1,240 @@
+//@version=5
+strategy("Post-Open Long Strategy with ATR-based Stop Loss and Take Profit (Separate Alerts)", overlay=true)
+
+// Parametri per Bande di Bollinger ed EMA
+lengthBB = 14
+mult = 1.5  // Bande di Bollinger più strette per timeframe inferiori
+emaLength = 10  // EMA più breve per una rilevazione di trend più rapida
+emaLongLength = 200  // EMA a lungo termine per il filtraggio del trend
+
+// Parametri per RSI
+lengthRSI = 7
+rsiThreshold = 30
+
+// Parametri per ADX
+adxLength = 7
+adxSmoothing = 7
+adxThreshold = 10
+
+// Filtro temporale - Solo durante l'apertura dei mercati tedesco e USA
+daxOpen = (hour >= 8 and hour < 12)
+usOpen = (hour == 15 and minute >= 30) or (hour >= 16 and hour < 19)
+
+// Calcolo delle Bande di Bollinger
+smaBB = ta.sma(close, lengthBB)
+basis = smaBB
+dev = mult * ta.stdev(close, lengthBB)
+upperBand = basis + dev
+lowerBand = basis - dev
+
+// Calcolo delle EMA (breve e lungo termine)
+ema = ta.ema(close, emaLength)  // EMA più breve
+emaLong = ta.ema(close, emaLongLength)  // EMA a lungo termine per il filtraggio del trend
+
+// Calcolo RSI
+rsi = ta.rsi(close, lengthRSI)
+
+// Calcolo ADX
+[plusDI, minusDI, adx] = ta.dmi(adxLength, adxSmoothing)
+
+// Calcolo ATR per Stop Loss e Take Profit dinamici
+atrLength = 14
+atrStopLossMultiplier = 2.0  // Moltiplicatore per Stop Loss
+atrTakeProfitMultiplier = 4.0  // Moltiplicatore per Take Profit modificato a 4.0
+atrValue = ta.atr(atrLength)  // Valore ATR calcolato qui
+
+// Condizione di lateralizzazione - Prezzo vicino alla SMA delle Bande di Bollinger
+lateralization = math.abs(close - smaBB) < (0.01 * close) and (daxOpen or usOpen)
+
+// Identificazione della resistenza e del breakout
+var float resistanceLevel = na
+resistanceTouches = 0
+
+for i = 1 to 20
+    if high[i] > high[i+1] and high[i] > high[i-1]
+        resistanceLevel := high[i]
+        resistanceTouches := resistanceTouches + 1
+
+// Condizione di Breakout: Il prezzo attuale supera la resistenza identificata
+breakoutCondition = close > resistanceLevel and resistanceTouches >= 2
+
+// Filtro di mercato rialzista a lungo termine - Entrare solo se il prezzo è sopra la EMA a 200 periodi
+bullMarket = close > emaLong
+
+// Filtro di trend a breve termine
+trendFilter = ta.ema(close, emaLength)  // Filtro di trend a breve termine
+trendDown = close < trendFilter  // Condizione di downtrend basata sul trend a breve termine
+
+// Evitare l'entrata durante un pullback - Verifica se le due candele precedenti sono rosse
+firstRedCandle = close[1] < open[1]  // La prima candela precedente è rossa
+secondRedCandle = close[2] < open[2]  // La seconda candela precedente è rossa
+avoidPullbackCondition = not (firstRedCandle and secondRedCandle)  // Entrare solo se non entrambe sono rosse
+
+// Condizione Panic Candle - La candela deve chiudere negativa
+panicCandle = close < open and (daxOpen or usOpen)
+
+// Condizione di Entrata Long
+longCondition = breakoutCondition and lateralization and close > ema and rsi > rsiThreshold and adx > adxThreshold and not trendDown and avoidPullbackCondition and bullMarket and panicCandle
+
+// Stop Loss e Take Profit dinamici basati su ATR
+atrStopLoss = close - (atrValue * atrStopLossMultiplier)  // Stop Loss dinamico usando ATR con moltiplicatore 2.0
+atrTakeProfit = close + (atrValue * atrTakeProfitMultiplier)  // Take Profit dinamico usando ATR con moltiplicatore 4.0
+
+// Entrata Long: Ordine eseguito alla chiusura della candela
+if (longCondition and strategy.opentrades == 0 and barstate.isconfirmed)
+    strategy.entry("Long", strategy.long)
+
+// Disegna linee per Stop Loss e Take Profit
+line.new(x1=bar_index, y1=atrStopLoss, x2=bar_index + 1, y2=atrStopLoss, color=color.red, width=2, style=line.style_solid)  // Linea di Stop Loss (rossa)
+line.new(x1=bar_index, y1=atrTakeProfit, x2=bar_index + 1, y2=atrTakeProfit, color=color.green, width=2, style=line.style_solid)  // Linea di Take Profit (verde)
+
+// Uscita: Stop Loss o Take Profit raggiunti
+if (strategy.opentrades > 0)
+    strategy.exit("Exit Long", "Long", stop=atrStopLoss, limit=atrTakeProfit)
+
+// Alert: Differenziati per Entrata e Uscita utilizzando strategy.order.action
+alert_message = "Azione: {{strategy.order.action}}, Prezzo: {{close}}, Dimensione Posizione: {{strategy.position_size}}"
+
+View in Pine Editor・96 lines
+Use on chart
+8
+4
+1
+3 635
+The "Post-Open Long Strategy with ATR-Based Stop Loss and Take Profit" is designed to identify buying opportunities after the German and US markets open. It combines various technical indicators to filter entry signals, focusing on breakout moments following price lateralization periods.
+
+Key Components and Their Interaction:
+
+Bollinger Bands (BB):
+
+Description: Uses BB with a 14-period length and standard deviation multiplier of 1.5, creating narrower bands for lower timeframes.
+Role in the Strategy: Identifies low volatility phases (lateralization). The lateralization condition is met when the price is near the simple moving average of the BB, suggesting an imminent increase in volatility.
+
+Exponential Moving Averages (EMA):
+
+10-period EMA: Quickly detects short-term trend direction.
+200-period EMA: Filters long-term trends, ensuring entries occur in a bullish market.
+Interaction: Positions are entered only if the price is above both EMAs, indicating a consolidated positive trend.
+Relative Strength Index (RSI):
+
+Description: 7-period RSI with a threshold above 30.
+Role in the Strategy: Confirms the market is not oversold, supporting the validity of the buy signal.
+
+Average Directional Index (ADX):
+
+Description: 7-period ADX with 7-period smoothing and a threshold above 10.
+Role in the Strategy: Assesses trend strength. An ADX above 10 indicates sufficient momentum to justify entry.
+
+Average True Range (ATR) for Dynamic Stop Loss and Take Profit:
+
+Description: 14-period ATR with multipliers of 2.0 for Stop Loss and 4.0 for Take Profit.
+Role in the Strategy: Adjusts exit levels based on current volatility, enhancing risk management.
+Resistance Identification and Breakout:
+
+Description: Analyzes the highs of the last 20 candles to identify resistance levels with at least two touches.
+Role in the Strategy: A breakout above this level signals a potential continuation of the bullish trend.
+
+Time Filters and Market Conditions:
+
+Trading Hours: Operates only during the opening of the German market (8:00 - 12:00) and US market (15:30 - 19:00).
+Panic Candle: The current candle must close negative, leveraging potential emotional reactions in the market.
+
+Avoiding Entry During Pullbacks:
+
+Description: Checks that the two previous candles are not both bearish.
+Role in the Strategy: Avoids entering during a potential pullback, improving trade success probability.
+
+
+Post-Open Long Strategy with ATR-Based Stop Loss and Take Profit
+
+The "Post-Open Long Strategy with ATR-Based Stop Loss and Take Profit" is designed to identify buying opportunities after the German and US markets open. It combines various technical indicators to filter entry signals, focusing on breakout moments following price lateralization periods.
+
+Key Components and Their Interaction:
+
+Bollinger Bands (BB):
+
+Description: Uses BB with a 14-period length and standard deviation multiplier of 1.5, creating narrower bands for lower timeframes.
+Role in the Strategy: Identifies low volatility phases (lateralization). The lateralization condition is met when the price is near the simple moving average of the BB, suggesting an imminent increase in volatility.
+Exponential Moving Averages (EMA):
+
+10-period EMA: Quickly detects short-term trend direction.
+200-period EMA: Filters long-term trends, ensuring entries occur in a bullish market.
+Interaction: Positions are entered only if the price is above both EMAs, indicating a consolidated positive trend.
+Relative Strength Index (RSI):
+
+Description: 7-period RSI with a threshold above 30.
+Role in the Strategy: Confirms the market is not oversold, supporting the validity of the buy signal.
+Average Directional Index (ADX):
+
+Description: 7-period ADX with 7-period smoothing and a threshold above 10.
+Role in the Strategy: Assesses trend strength. An ADX above 10 indicates sufficient momentum to justify entry.
+Average True Range (ATR) for Dynamic Stop Loss and Take Profit:
+
+Description: 14-period ATR with multipliers of 2.0 for Stop Loss and 4.0 for Take Profit.
+Role in the Strategy: Adjusts exit levels based on current volatility, enhancing risk management.
+Resistance Identification and Breakout:
+
+Description: Analyzes the highs of the last 20 candles to identify resistance levels with at least two touches.
+Role in the Strategy: A breakout above this level signals a potential continuation of the bullish trend.
+
+Time Filters and Market Conditions:
+
+Trading Hours: Operates only during the opening of the German market (8:00 - 12:00) and US market (15:30 - 19:00).
+Panic Candle: The current candle must close negative, leveraging potential emotional reactions in the market.
+Avoiding Entry During Pullbacks:
+
+Description: Checks that the two previous candles are not both bearish.
+Role in the Strategy: Avoids entering during a potential pullback, improving trade success probability.
+Entry and Exit Conditions:
+
+Long Entry:
+
+The price breaks above the identified resistance.
+The market is in a lateralization phase with low volatility.
+The price is above the 10 and 200-period EMAs.
+RSI is above 30, and ADX is above 10.
+No short-term downtrend is detected.
+The last two candles are not both bearish.
+The current candle is a "panic candle" (negative close).
+Order Execution: The order is executed at the close of the candle that meets all conditions.
+Exit from Position:
+
+Dynamic Stop Loss: Set at 2 times the ATR below the entry price.
+Dynamic Take Profit: Set at 4 times the ATR above the entry price.
+The position is automatically closed upon reaching the Stop Loss or Take Profit.
+
+How to Use the Strategy:
+
+Application on Volatile Instruments:
+
+Ideal for financial instruments that show significant volatility during the target market opening hours, such as indices or major forex pairs.
+Recommended Timeframes:
+
+Intraday timeframes, such as 5 or 15 minutes, to capture significant post-open moves.
+Parameter Customization:
+
+The default parameters are optimized but can be adjusted based on individual preferences and the instrument analyzed.
+Backtesting and Optimization:
+
+Backtesting is recommended to evaluate performance and make adjustments if necessary.
+Risk Management:
+
+Ensure position sizing respects risk management rules, avoiding risking more than 1-2% of capital per trade.
+Originality and Benefits of the Strategy:
+
+Unique Combination of Indicators: Integrates various technical metrics to filter signals, reducing false positives.
+
+Volatility Adaptability: The use of ATR for Stop Loss and Take Profit allows the strategy to adapt to real-time market conditions.
+
+Focus on Post-Lateralization Breakout: Aims to capitalize on significant moves following consolidation periods, often associated with strong directional trends.
+
+Important Notes:
+
+Commissions and Slippage: Include commissions and slippage in settings for more realistic simulations.
+
+Capital Size: Use a realistic trading capital for the average user.
+Number of Trades: Ensure backtesting covers a sufficient number of trades to validate the strategy (ideally more than 100 trades).
+
+Warning: Past results do not guarantee future performance. The strategy should be used as part of a comprehensive trading approach.
+
+With this strategy, traders can identify and exploit specific market opportunities supported by a robust set of technical indicators and filters, potentially enhancing their trading decisions during key times of the day.

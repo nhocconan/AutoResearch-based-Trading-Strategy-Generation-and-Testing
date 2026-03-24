@@ -1,0 +1,239 @@
+//@version=6
+strategy("Gold Futures Prop-Firm Strategy (GC) 1-18-2026 – Optimized v5",
+     overlay               = true,
+     default_qty_type      = strategy.fixed,
+     default_qty_value     = 1,
+     pyramiding            = 0,
+     calc_on_order_fills   = true,
+     calc_on_every_tick    = false)
+
+// ── Inputs ────────────────────────────────────────────────
+contracts       = input.int(1, "Contracts (1–2)", minval=1, maxval=2)
+
+// ── Sessions (exchange/NY time for GC) ────────────────────
+ny_session    = input.session("0830-1500", "NY Session")
+asia_session  = input.session("1800-0200", "Asia Session")
+ny_am_session = input.session("0830-1130", "NY AM")
+ny_pm_session = input.session("1130-1500", "NY PM")
+
+news_1 = input.session("0820-0840", "CPI / NFP blackout")
+news_2 = input.session("0955-1010", "ISM / Fed blackout")
+news_3 = input.session("1355-1415", "FOMC blackout")
+
+// ── Risk Controls (optimized) ─────────────────────────────
+daily_loss_limit = input.float(600.0, "Daily Loss Limit ($)", step=50)  // Tightened
+max_ny_trades    = input.int(2,      "Max NY Trades per day")  // Reduced for NY
+max_asia_trades  = input.int(2,      "Max Asia Trades per day")
+
+// ── Indicators (optimized) ────────────────────────────────
+ema_fast_len   = input.int(21,  "Fast EMA")
+ema_slow_len   = input.int(55,  "Slow EMA")
+ema_filter_len = input.int(200, "Trend Filter EMA")
+
+atr_len        = input.int(14,   "ATR Length")
+stop_atr_mult  = input.float(1.7, "Initial Stop ATR ×", step=0.1)  // Tightened
+trail_atr_mult = input.float(1.0, "Trail Activation ATR ×", step=0.1)  // Tightened
+
+adx_len    = input.int(14, "ADX Length")
+adx_thresh = input.int(30, "ADX Trend Threshold")  // Raised for stronger trends
+
+bb_len  = input.int(20, "BB Length")
+bb_mult = input.float(2.0, "BB Mult", step=0.1)
+
+rsi_len = input.int(14, "RSI Length")
+rsi_ob  = input.int(75, "RSI Overbought")  // Tightened
+rsi_os  = input.int(25, "RSI Oversold")    // Tightened
+
+vol_mult = input.float(1.4, "Volume Spike × SMA(20)")  // Raised
+
+// ── Session & Time Flags ──────────────────────────────────
+in_ny    = not na(time(timeframe.period, ny_session))
+in_asia  = not na(time(timeframe.period, asia_session))
+in_am    = not na(time(timeframe.period, ny_am_session))
+in_pm    = not na(time(timeframe.period, ny_pm_session))
+
+in_news = not na(time(timeframe.period, news_1)) or
+          not na(time(timeframe.period, news_2)) or
+          not na(time(timeframe.period, news_3))
+
+// ── New Day Detection ─────────────────────────────────────
+bool new_day = ta.change(time("D")) != 0
+
+// ── Daily PnL Tracking ────────────────────────────────────
+var float  day_pnl          = 0.0
+var int    last_trade_count = 0
+
+if new_day
+    day_pnl := 0.0
+    last_trade_count := strategy.closedtrades
+
+if strategy.closedtrades > last_trade_count
+    for i = last_trade_count to strategy.closedtrades - 1
+        day_pnl += strategy.closedtrades.profit(i)
+    last_trade_count := strategy.closedtrades
+
+bool daily_stop_hit = day_pnl <= -daily_loss_limit
+
+// ── Trade Counters ────────────────────────────────────────
+var int ny_trades   = 0
+var int asia_trades = 0
+
+if new_day
+    ny_trades   := 0
+    asia_trades := 0
+
+if in_ny and not in_ny[1]
+    ny_trades := 0
+if in_asia and not in_asia[1]
+    asia_trades := 0
+
+// ── Indicators ────────────────────────────────────────────
+float atr = ta.atr(atr_len) * 0.85
+
+ema_fast   = ta.ema(close, ema_fast_len)
+ema_slow   = ta.ema(close, ema_slow_len)
+ema_filter = ta.ema(close, ema_filter_len)
+
+[diplus, diminus, adx] = ta.dmi(adx_len, adx_len)
+
+bb_basis = ta.sma(close, bb_len)
+bb_dev   = bb_mult * ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+rsi = ta.rsi(close, rsi_len)
+
+vol_sma   = ta.sma(volume, 20)
+vol_spike = volume > vol_sma * vol_mult
+
+hh20 = ta.highest(high, 20)
+ll20 = ta.lowest(low, 20)
+
+// ── Regime & Signals ──────────────────────────────────────
+bool trending    = adx > adx_thresh
+bool bull_regime = ema_fast > ema_slow and close > ema_filter
+
+bool ema_cross_up   = ta.crossover(ema_fast, ema_slow)
+
+// ── NY AM: Trend / Breakout (long-only, stronger filters) ─
+bool trend_long  = in_am and trending and bull_regime and ema_cross_up   and vol_spike
+bool break_long  = in_am and trending and close > hh20[1] and vol_spike and close > ema_filter  // Added trending filter
+
+// ── NY PM + Asia: Mean Reversion (long-only) ──────────────
+bool mean_long  = (in_pm or in_asia) and not trending and close < bb_lower and rsi < rsi_os
+
+// ── Permission Checks ─────────────────────────────────────
+bool can_trade_ny   = in_ny   and ny_trades   < max_ny_trades
+bool can_trade_asia = in_asia and asia_trades < max_asia_trades
+
+bool trade_allowed = not in_news and not daily_stop_hit and strategy.position_size == 0
+
+// ── Final Entry Conditions (long-only) ────────────────────
+bool long_condition  = trade_allowed and (
+    (can_trade_ny   and (trend_long  or break_long)) or
+    (can_trade_asia and mean_long))
+
+// ── Execution (long-only) ─────────────────────────────────
+if long_condition
+    strategy.entry("Long", strategy.long, qty = contracts)
+    float stop_dist  = atr * stop_atr_mult
+    float trail_dist = atr * trail_atr_mult
+    strategy.exit("LX", "Long",
+         stop        = close - stop_dist,
+         trail_price = close + trail_dist,              // price where trailing activates
+         trail_points = trail_dist / syminfo.mintick,   // activation offset in ticks
+         trail_offset = trail_dist / syminfo.mintick)   // trailing step in ticks
+    ny_trades   += in_ny   ? 1 : 0
+    asia_trades += in_asia ? 1 : 0
+
+// ── Visuals ───────────────────────────────────────────────
+plot(ema_fast,   "Fast EMA",   color.blue,  2)
+plot(ema_slow,   "Slow EMA",   color.orange,2)
+plot(ema_filter, "Filter EMA", color.red,   2)
+
+p1 = plot(bb_upper, "BB Upper", color.new(color.gray, 70), 1)
+p2 = plot(bb_lower, "BB Lower", color.new(color.gray, 70), 1)
+fill(p1, p2, color.new(color.gray, 92), title="BB Fill")
+
+bgcolor(in_news       ? color.new(color.red,   88) : na, title="News Blackout")
+bgcolor(daily_stop_hit ? color.new(color.purple,92) : na, title="Daily Stop Hit")
+
+View in Pine Editor・159 lines
+Use on chart
+2
+2
+1 034
+Overview
+This is a long-only, session-based, multi-regime trading strategy designed specifically for Gold futures (GC / GC1!) on intraday timeframes (typically 5–15 minutes).
+The strategy aims to capture high-probability moves during the New York and Asian sessions while avoiding major economic news events and enforcing strict daily risk limits — making it suitable for prop firm challenges (e.g. FTMO, FundedNext, Apex, etc.) that require consistent profitability, limited drawdown, and disciplined risk management.
+Core Philosophy
+
+Trade longs only (shorts were removed after analysis showed they were consistently unprofitable)
+Different logic depending on session and market regime (trending vs ranging)
+Heavy filtering using trend strength (ADX), volume confirmation, EMA alignment, Bollinger Bands, and RSI
+Strict position sizing, daily loss cap, per-session trade limits, and news blackout periods
+Trailing stop mechanism to let winners run while protecting against reversals
+
+Trading Sessions & Time Windows (Eastern Time)
+
+NY Session: 08:30 – 15:00 ET
+NY AM (trend/breakout zone): 08:30 – 11:30 ET
+NY PM (mean-reversion zone): 11:30 – 15:00 ET
+Asia Session (mean-reversion zone): 18:00 – 02:00 ET
+News blackouts: short windows around high-impact releases (CPI/NFP, ISM/Fed, FOMC)
+
+Entry Logic (Long Only)
+
+NY AM – Trend Following & Breakouts (strongest trend filter)
+ADX > 30 (strong trend)
+Price above 200 EMA (bull regime)
+Fast EMA (21) crosses above Slow EMA (55) or breakout above 20-bar high
+Volume spike (> 1.4 × 20-period SMA)
+Max 2 trades per NY session per day
+
+NY PM & Asia – Mean Reversion
+ADX ≤ 30 (ranging market)
+Price below lower Bollinger Band (20, 2.0)
+RSI < 25 (deep oversold)
+No volume filter required here
+Max 2 trades per Asia session per day
+
+
+Risk Management Rules
+
+Position size: Fixed 1–2 contracts (user selectable)
+Initial stop: 1.7 × ATR(14) below entry (tightened from original)
+Trailing stop:
+Activates after price moves +1.0 × ATR in profit
+Trails by 1.0 × ATR (locked-in profits aggressively)
+
+Daily loss limit: -$600 (stops all trading for the day once hit)
+No trading during defined news windows
+Pyramiding disabled (only one position at a time)
+No short entries (removed after backtest analysis)
+
+Indicators Used
+
+EMA 21 / 55 / 200 (trend direction & filter)
+ATR(14) × 0.85 (volatility base)
+ADX(14) threshold 30 (strong trend confirmation)
+Bollinger Bands (20, 2.0) for mean-reversion entries
+RSI(14) with oversold < 25
+Volume spike filter (1.4× SMA) for trend/breakout entries
+20-bar highest high / lowest low for breakout detection
+
+Visual Elements on Chart
+
+Fast (blue), Slow (orange), and Filter (red) EMAs
+Bollinger Bands (gray, semi-transparent fill)
+Background coloring:
+Red tint during news blackout periods
+Purple tint when daily loss limit is hit
+
+
+Intended Use Case
+
+Prop trading firm evaluation accounts
+Conservative intraday gold trading
+Focus on high-quality long setups in trending (NY AM) and mean-reverting (Asia/PM) environments
+Goal: positive expectancy with controlled drawdown, suitable for passing drawdown and profit targets

@@ -1,0 +1,213 @@
+//@version=6
+strategy("LANZ Strategy 2.0 [Backtest]", overlay=true, default_qty_type=strategy.cash, default_qty_value=100)
+
+// === INPUTS ===
+accountSizeUSD   = input.int(100000000, title="Account Size (USD)", minval=1)
+riskPercent      = input.float(1.0, title="Risk (%)", minval=0.1, maxval=100)
+slProtectionMode = input.string(title="SL Protection Mode", defval="Full Coverage", options=["First Swing", "Second Swing", "Full Coverage"])
+fullCoveragePips = input.int(12, title="Full Coverage Pips", minval=1)
+minBosBreakPips  = input.float(0.5, title="Minimum Break of Structure (Pips)", minval=0.1, step=0.1)
+rrMultiplier     = input.float(5.5, title="TP Risk Reward (RR)", minval=0.5, step=0.1)
+
+// === GLOBAL ===
+pipSize = syminfo.mintick * 10
+minBosBreakDist = minBosBreakPips * pipSize
+
+// === STRUCTURE & TREND ===
+var float prevHigh = na
+var float prevLow = na
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var float olderSwingHigh = na
+var float olderSwingLow = na
+var int trendDir = na
+
+hh = high[2] > high[3] and high[3] > high[4]
+ll = low[2] < low[3] and low[3] < low[4]
+
+if hh
+    olderSwingHigh := prevHigh
+    prevHigh := lastSwingHigh
+    lastSwingHigh := high[2]
+if ll
+    olderSwingLow := prevLow
+    prevLow := lastSwingLow
+    lastSwingLow := low[2]
+
+if not na(prevHigh) and not na(lastSwingHigh) and not na(prevLow) and not na(lastSwingLow)
+    isBullish = lastSwingHigh > prevHigh and lastSwingLow > prevLow
+    isBearish = lastSwingHigh < prevHigh and lastSwingLow < prevLow
+    trendDir := isBullish ? 1 : isBearish ? -1 : trendDir
+
+// === BREAK OF STRUCTURE ===
+var float bosLevel = na
+var int bosDir = na
+
+newBosUp   = not na(lastSwingHigh) and close > (lastSwingHigh + minBosBreakDist)
+newBosDown = not na(lastSwingLow)  and close < (lastSwingLow - minBosBreakDist)
+
+if newBosUp
+    bosLevel := lastSwingHigh
+    bosDir := 1
+else if newBosDown
+    bosLevel := lastSwingLow
+    bosDir := -1
+
+// === BOS AND TREND RECORD ===
+var int lastBosDir = na
+var int lastTrendDir = na
+
+if not na(bosDir)
+    lastBosDir := bosDir
+if not na(trendDir)
+    lastTrendDir := trendDir
+
+// === NY TIME FILTER ===
+isAnalysisBar = (hour(time, "America/New_York") == 2 and minute(time, "America/New_York") == 0)
+
+// === ENTRY LOGIC ===
+enterLong   = isAnalysisBar and lastBosDir == 1 and lastTrendDir == 1
+enterShort  = isAnalysisBar and lastBosDir == -1 and lastTrendDir == -1
+enterFallbackLong  = isAnalysisBar and lastBosDir == 1 and lastTrendDir != 1
+enterFallbackShort = isAnalysisBar and lastBosDir == -1 and lastTrendDir != -1
+
+// === PRICE & SL/TP ===
+entryPrice = close
+fallbackSL_Long  = entryPrice - (5 * pipSize)
+fallbackSL_Short = entryPrice + (5 * pipSize)
+
+slBase_Long = switch slProtectionMode
+    "First Swing"    => na(lastSwingLow)  ? fallbackSL_Long  : lastSwingLow
+    "Second Swing"   => na(prevLow)       ? fallbackSL_Long  : prevLow
+    "Full Coverage"  => (na(olderSwingLow) or na(prevLow) or na(lastSwingLow)) ? fallbackSL_Long : math.min(olderSwingLow, prevLow, lastSwingLow) - (fullCoveragePips * pipSize)
+
+slBase_Short = switch slProtectionMode
+    "First Swing"    => na(lastSwingHigh) ? fallbackSL_Short : lastSwingHigh
+    "Second Swing"   => na(prevHigh)      ? fallbackSL_Short : prevHigh
+    "Full Coverage"  => (na(olderSwingHigh) or na(prevHigh) or na(lastSwingHigh)) ? fallbackSL_Short : math.max(olderSwingHigh, prevHigh, lastSwingHigh) + (fullCoveragePips * pipSize)
+
+slPrice_Long  = (entryPrice - slBase_Long)  < (10 * pipSize) ? entryPrice - (10 * pipSize) : slBase_Long
+slPrice_Short = (slBase_Short - entryPrice) < (10 * pipSize) ? entryPrice + (10 * pipSize) : slBase_Short
+
+// === TP BASED ON RR MULTIPLIER ===
+tpPrice_Long  = entryPrice + rrMultiplier * (entryPrice - slPrice_Long)
+tpPrice_Short = entryPrice - rrMultiplier * (slPrice_Short - entryPrice)
+
+// === RISK MANAGEMENT ===
+slPips_Long  = math.abs(entryPrice - slPrice_Long) / pipSize
+slPips_Short = math.abs(entryPrice - slPrice_Short) / pipSize
+
+riskUSD      = accountSizeUSD * (riskPercent / 100)
+lotSize_Long = (riskUSD / (slPips_Long * 10))
+lotSize_Short= (riskUSD / (slPips_Short * 10))
+
+// === ACTIVE TRADE CONTROL ===
+alreadyInTrade = strategy.opentrades > 0
+enterLong   := enterLong and not alreadyInTrade
+enterShort  := enterShort and not alreadyInTrade
+enterFallbackLong  := enterFallbackLong and not alreadyInTrade
+enterFallbackShort := enterFallbackShort and not alreadyInTrade
+
+// === ORDER EXECUTION ===
+if enterLong
+    strategy.entry("BUY", strategy.long, qty=lotSize_Long, limit=entryPrice)
+    strategy.exit("TP/SL BUY", from_entry="BUY", stop=slPrice_Long, limit=tpPrice_Long)
+
+if enterShort
+    strategy.entry("SELL", strategy.short, qty=lotSize_Short, limit=entryPrice)
+    strategy.exit("TP/SL SELL", from_entry="SELL", stop=slPrice_Short, limit=tpPrice_Short)
+
+if enterFallbackLong
+    strategy.entry("BUY_FB", strategy.long, qty=lotSize_Long, limit=entryPrice)
+    strategy.exit("TP/SL BUY_FB", from_entry="BUY_FB", stop=slPrice_Long, limit=tpPrice_Long)
+
+if enterFallbackShort
+    strategy.entry("SELL_FB", strategy.short, qty=lotSize_Short, limit=entryPrice)
+    strategy.exit("TP/SL SELL_FB", from_entry="SELL_FB", stop=slPrice_Short, limit=tpPrice_Short)
+
+// === MANUAL CLOSE AT 11:45 NY ===
+manualClose = (hour(time, "America/New_York") == 11 and minute(time, "America/New_York") == 45)
+if strategy.opentrades > 0 and manualClose
+    strategy.close_all(comment="Manual Close 11:45 NY")
+
+View in Pine Editor・131 lines
+Use on chart
+6
+9
+8
+8 653
+🔷 LANZ Strategy 2.0 [Backtest]— Structural Breakout Logic with Dynamic Swing Protection
+
+LANZ Strategy 2.0 [Backtest] is a precision-focused backtesting system built for intraday traders who rely on structural confirmations before the London session to guide directional bias. This tool uses smart swing detection, risk-defined position sizing, and strict time-based execution to simulate real trading conditions with clarity and control.
+
+🧠 Core Components:
+
+Structural Confirmation (Trend & BoS): Detects trend direction and break of structure (BoS) using a three-swing logic, aligning trade entries with valid structural movement.
+
+Time-Based Execution: Trades are triggered exclusively at 02:00 a.m. New York time, ensuring disciplined and repeatable intraday testing.
+
+Swing-Based SL Models: Traders can select between three stop-loss protection types:
+
+First Swing: Most recent structural level
+
+Second Swing: Prior level
+
+Full Coverage: All recent swing levels + configurable pip buffer
+
+Dynamic TP Calculation: Take-Profit is projected as a risk-based multiple (RR), fully adjustable via input.
+
+Capital-Based Risk Management: Risk is defined as a percentage of a fixed account size (e.g., $100 per trade from $10,000), and lot size is automatically calculated based on SL distance.
+
+Fallback Entry Logic: If structural breakout is present but trend is not confirmed, a secondary entry is triggered.
+
+End-of-Session Management: Any open trades are automatically closed at 11:45 a.m. NY time, with optional manual labeling or review.
+
+
+
+📊 Visual Features (Optional in Indicator Version):
+(Note: Visuals apply to the indicator version of LANZ 2.0, not this backtest script)
+
+Swing level labels (1st, 2nd) and dynamic SL/TP lines.
+
+Real-time session coloring for clarity: Pre-London, Entry Window, and NY Close.
+
+Outcome labels: +RR, -RR, or net % at close.
+
+Auto-cleanup of previous drawings for a clean chart per session.
+
+
+
+⚙️ How It Works:
+
+Detects last trend and BoS using swing logic before 02:00 a.m. NY.
+
+At 02:00 a.m., evaluates directional bias and executes BUY or SELL if confirmed.
+
+Applies selected SL logic (1st, 2nd, or full swing protection).
+
+Sets TP based on the RR multiplier.
+
+Closes the trade either on SL, TP, or at 11:45 a.m. NY manually.
+
+
+
+🔔 Alerts:
+
+Time-of-day alert at 02:00 a.m. NY to monitor execution.
+
+Can be extended to cover SL/TP triggers or new BoS events.
+
+
+
+📝 Notes:
+
+Designed for backtesting precision and discretionary decision-making.
+
+Ideal for Forex pairs, indices, or assets active during the London session.
+
+Fully customizable: session timing, swing logic, SL buffer, and RR.
+
+
+
+👤 Credits:
+Strategy built by rau_u_lanz using Pine Script v6, combining structural logic, capital-based risk control, and London-session timing in a backtest-ready framework for traders who demand accuracy and structure.

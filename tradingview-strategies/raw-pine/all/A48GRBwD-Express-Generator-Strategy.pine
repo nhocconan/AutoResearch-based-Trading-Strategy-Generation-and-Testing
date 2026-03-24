@@ -1,0 +1,140 @@
+//@version=6
+strategy("Express Generator Strategy", overlay=true, currency="USD", default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Backtest Period Configuration
+testStartYear = input(2020, title="Backtest Start Year")
+testStartMonth = input(1, title="Backtest Start Month")
+testStartDay = input(1, title="Backtest Start Day")
+testStart = timestamp(testStartYear, testStartMonth, testStartDay, 0, 0)
+
+testStopYear = input(2025, title="Backtest Stop Year")
+testStopMonth = input(12, title="Backtest Stop Month")
+testStopDay = input(31, title="Backtest Stop Day")
+testStop = timestamp(testStopYear, testStopMonth, testStopDay, 0, 0)
+
+testPeriod = time >= testStart and time <= testStop
+
+// Indicator Inputs
+fastMA = input(9, title="Fast MA Length")
+slowMA = input(21, title="Slow MA Length")
+rsiLength = input(14, title="RSI Length")
+overbought = input(70, title="Overbought Level")
+oversold = input(30, title="Oversold Level")
+macdFast = input(12, title="MACD Fast")
+macdSlow = input(26, title="MACD Slow")
+macdSignal = input(9, title="MACD Signal")
+atrLength = input(14, title="ATR Length")
+
+// Risk Management Inputs
+riskPercent    = input.float(1.0, title="Risk % per Trade", minval=0.5, maxval=3.0)
+stopLossPips   = input.int(100, title="Stop Loss (Pips)", minval=50, maxval=200)
+useTrailingStop = input(true, title="Use Trailing Stop")
+trailingPips   = input.int(50, title="Trailing Stop (Pips)", minval=20)
+
+// Calculate Indicators
+fastMAPlot = ta.sma(close, fastMA)
+slowMAPlot = ta.sma(close, slowMA)
+rsiValue   = ta.rsi(close, rsiLength)
+[macdLine, macdSignalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+atr = ta.atr(atrLength)
+
+// Precompute Crossover/Crossunder Conditions
+longMA_Cross  = ta.crossover(fastMAPlot, slowMAPlot)
+longMACD_Cross = ta.crossover(macdLine, macdSignalLine)
+shortMA_Cross = ta.crossunder(fastMAPlot, slowMAPlot)
+shortMACD_Cross = ta.crossunder(macdLine, macdSignalLine)
+
+// Entry Conditions
+longCondition  = longMA_Cross  and rsiValue < overbought and longMACD_Cross
+shortCondition = shortMA_Cross and rsiValue > oversold  and shortMACD_Cross
+
+// Position Sizing Calculation using Partial Total Equity Risk
+entryPrice = close
+
+// Define stop-loss prices (using pips converted to price units)
+stopLossPriceLong  = entryPrice - (stopLossPips * syminfo.mintick)
+stopLossPriceShort = entryPrice + (stopLossPips * syminfo.mintick)
+
+// Determine risk per unit for each side
+tradeRiskLong  = entryPrice - stopLossPriceLong   // For longs
+tradeRiskShort = stopLossPriceShort - entryPrice   // For shorts
+
+// Volatility-Adjustment: Normalize ATR (dividing by a scaling factor)
+volatilityFactor = atr / (syminfo.mintick * 100)
+
+// Calculate the dollar risk amount (partial equity risk)
+riskAmount = strategy.equity * (riskPercent / 100)
+
+// Compute position sizes (before rounding):
+// For longs: riskAmount divided by the per-unit risk and adjusted for volatility
+// For shorts: riskAmount divided by the per-unit risk and adjusted likewise
+positionSizeLong = riskAmount / tradeRiskLong / volatilityFactor
+positionSizeShort = riskAmount / tradeRiskShort / volatilityFactor
+
+// Final position size with rounding to 8 decimals (ensuring a minimum value)
+positionSizeLong  := math.round(positionSizeLong)
+positionSizeShort := math.round(positionSizeShort)
+
+// Strategy Execution
+if testPeriod and longCondition
+    strategy.entry("Long", strategy.long, qty=positionSizeLong)
+
+if testPeriod and shortCondition
+    strategy.entry("Short", strategy.short, qty=positionSizeShort)
+
+// Exit Logic with Trailing Stop
+if strategy.position_size > 0 and testPeriod
+    strategy.exit("Exit Long", from_entry="Long", stop=close - (trailingPips * syminfo.mintick), 
+                  trail_points=trailingPips * syminfo.mintick, trail_offset=0)
+
+if strategy.position_size < 0 and testPeriod
+    strategy.exit("Exit Short", from_entry="Short", stop=close + (trailingPips * syminfo.mintick), 
+                  trail_points=trailingPips * syminfo.mintick, trail_offset=0)
+
+// Close all positions outside Backtest Period
+if not testPeriod and strategy.opentrades > 0
+    strategy.close_all(comment="Test Period Ended")
+
+// Plotting MAs
+plot(fastMAPlot, color=color.blue, title="Fast MA")
+plot(slowMAPlot, color=color.red, title="Slow MA")
+
+View in Pine Editor・103 lines
+Use on chart
+4
+2
+1 497
+Express Generator Strategy
+Pine Script™ v6
+
+The Express Generator Strategy is an algorithmic trading system that harnesses confluence from multiple technical indicators to optimize trade entries and dynamic risk management. Developed in Pine Script v6, it is designed to operate within a user-defined backtesting period—ensuring that trades are executed only during chosen historical windows for targeted analysis.
+
+How It Works:
+
+- Entry Conditions:
+
+The strategy relies on a dual confirmation approach:- A moving average crossover system where a fast (default 9-period SMA) crossing above or below a slower (default 21-period SMA) average signals a potential trend reversal.
+
+- MACD confirmation; trades are only initiated when the MACD line crosses its signal line in the direction of the moving average signal.
+
+- An RSI filter refines these signals by preventing entries when the market might be overextended—ensuring that long entries only occur when the RSI is below an overbought level (default 70) and short entries when above an oversold level (default 30).
+
+- Risk Management & Dynamic Position Sizing:
+
+The strategy takes a calculated approach to risk by enabling the adjustment of position sizes using:- A pre-defined percentage of equity risk per trade (default 1%, adjustable between 0.5% to 3%).
+
+- A stop-loss set in pips (default 100 pips, with customizable ranges), which is then adjusted by market volatility measured through the ATR.
+
+- Trailing stops (default 50 pips) to help protect profits as the market moves favorably.
+This combination of volatility-adjusted risk and equity-based position sizing aims to harmonize trade exposure with prevailing market conditions.
+
+- Backtest Period Flexibility:
+
+Users can define the start and end dates for backtesting (e.g., January 1, 2020 to December 31, 2025). This ensures that the strategy only opens trades within the intended analysis window. Moreover, if the strategy is still holding a position outside this period, it automatically closes all trades to prevent unwanted exposure.
+
+- Visual Insights:
+
+For clarity, the strategy plots the fast (blue) and slow (red) moving averages directly on the chart, allowing for visual confirmation of crossovers and trend shifts.
+
+By integrating multiple technical indicators with robust risk management and adaptable position sizing, the Express Generator Strategy provides a comprehensive framework for capturing trending moves while prudently managing downside risk. It’s ideally suited for traders looking to combine systematic entries with a disciplined and dynamic risk approach.
+

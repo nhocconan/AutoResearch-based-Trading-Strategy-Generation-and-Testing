@@ -1,0 +1,266 @@
+//@version=6
+strategy("HKEX:1810 | Regime Guard + Turtle Breakout + MFE 2-Stage Trail | Long-only | v6 (offline-optimized)",
+     overlay=true,
+     pyramiding=2,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.15,
+     slippage=1,
+     process_orders_on_close=true)
+
+boardLotShares = input.int(200, "Board Lot Shares (每手股数)", minval=1)
+minOrderShares = boardLotShares
+roundToLot(shares) =>
+    s = math.floor(shares)
+    math.floor(s / boardLotShares) * boardLotShares
+
+atr = ta.atr(14)
+atrPct = atr / close * 100.0
+ema200 = ta.ema(close, 200)
+
+slopeBars = input.int(60, "EMA slope lookback", minval=5, maxval=120)
+requireSlope = input.bool(true, "Require EMA slope up")
+emaUp = ema200 > ema200[slopeBars]
+bullRegime = close > ema200 and (not requireSlope or emaUp)
+
+useAtrGuard = input.bool(true, "ATR% guard")
+atrPctGuard = input.float(9.54, "Block entry if ATR% > x", minval=3.0, step=0.1)
+atrOk = (not useAtrGuard) or (atrPct <= atrPctGuard)
+
+var float peakEq = na
+peakEq := na(peakEq) ? strategy.equity : math.max(peakEq, strategy.equity)
+ddPct = peakEq > 0 ? (peakEq - strategy.equity) / peakEq * 100.0 : 0.0
+
+ddStart = input.float(5.89, "DD scale start %", minval=0.5, step=0.5)
+ddEnd   = input.float(16.41,   "DD scale end %",   minval=1.0, step=0.5)
+ddMinScale = input.float(0.49, "Min scale", minval=0.1, maxval=1.0, step=0.01)
+scaleDD = ddPct <= ddStart ? 1.0 : ddPct >= ddEnd ? ddMinScale : (1.0 - (ddPct - ddStart)/(ddEnd - ddStart) * (1.0 - ddMinScale))
+
+useVolTarget = input.bool(true, "Volatility targeting")
+volTargetPct = input.float(3.66, "Target ATR%", minval=0.5, step=0.1)
+volMinLev = input.float(0.61, "Min lev", minval=0.1, maxval=3.0, step=0.01)
+volMaxLev = input.float(1.54, "Max lev", minval=0.5, maxval=5.0, step=0.01)
+lev = (useVolTarget and atrPct > 0) ? math.min(volMaxLev, math.max(volMinLev, volTargetPct/atrPct)) : 1.0
+scale = scaleDD * lev
+
+maxExposurePct = input.float(257.4, "Max exposure cap (% equity)", minval=10, maxval=600, step=5)
+entryPct = input.float(100.7, "Entry exposure (% equity)", minval=1, maxval=400, step=1)
+addPct   = input.float(77.5,   "Add exposure (% equity)",   minval=0, maxval=400, step=1)
+
+useRiskCap = input.bool(true, "Risk cap sizing")
+riskCapPct = input.float(3.69, "Max loss at stop (% equity)", minval=0.1, step=0.1)
+
+qtyFromPct(pct) =>
+    desiredValue  = strategy.equity * (pct / 100.0)
+    desiredShares = desiredValue / close
+    capValue  = strategy.equity * (maxExposurePct / 100.0)
+    capShares = capValue / close
+    curShares    = math.max(strategy.position_size, 0)
+    remainShares = math.max(0.0, capShares - curShares)
+    raw = math.min(desiredShares, remainShares)
+    roundToLot(raw)
+
+riskCapShares(stopDist) =>
+    raw = (useRiskCap and stopDist > 0) ? (strategy.equity * (riskCapPct/100.0) / stopDist) : 1e18
+    roundToLot(raw)
+
+entryLen = input.int(31, "Entry breakout len", minval=10, maxval=200)
+exitLen  = input.int(10,  "Exit breakout len",  minval=5,  maxval=100)
+addLen   = input.int(6,   "Add breakout len",   minval=5,  maxval=100)
+
+hiEntry = ta.highest(high, entryLen)[1]
+loExit  = ta.lowest(low,  exitLen)[1]
+hiAdd   = ta.highest(high, addLen)[1]
+entrySignal = not na(hiEntry) and ta.crossover(close, hiEntry)
+exitSignal  = not na(loExit)  and ta.crossunder(close, loExit)
+addSignal   = not na(hiAdd)   and ta.crossover(close, hiAdd)
+
+initStopATR = input.float(2.38, "Init stop ATR mult", minval=0.5, step=0.1)
+trailBase   = input.float(4.66, "Trail ATR mult (base)", minval=1.0, step=0.1)
+trailTight  = input.float(2.30, "Trail ATR mult (tight)", minval=1.0, step=0.1)
+tightenAtR  = input.float(2.68, "Tighten after MFE >= R", minval=0.5, step=0.1)
+useBE = input.bool(true, "Breakeven after +R")
+beR   = input.float(1.32, "BE trigger (R)", minval=0.2, step=0.1)
+
+useRegimeExit = input.bool(true, "Regime exit (close < EMA200)")
+
+maxAdds = input.int(2, "Max adds", minval=0, maxval=5)
+addCooldown = input.int(3, "Add cooldown (bars)", minval=0, maxval=50)
+addAfterR = input.float(1.03, "Add after profit >= R", minval=0.0, step=0.05)
+
+inPos = strategy.position_size > 0
+avg   = strategy.position_avg_price
+var float entryStopDist = na
+var float hhSince = na
+var float trailMono = na
+var int addCount = 0
+var int lastAddBar = na
+
+newPos  = (strategy.position_size > 0) and (strategy.position_size[1] <= 0)
+exitPos = (strategy.position_size == 0) and (strategy.position_size[1] > 0)
+
+if newPos
+    hhSince := high
+    trailMono := na
+    addCount := 0
+    lastAddBar := na
+
+if not inPos
+    entryStopDist := na
+    hhSince := na
+    trailMono := na
+    addCount := 0
+    lastAddBar := na
+
+if (not inPos) and atrOk and bullRegime and entrySignal
+    stopDistNow = initStopATR * atr
+    entryStopDist := stopDistNow
+    qPct = qtyFromPct(entryPct * scale)
+    q = math.min(qPct, riskCapShares(stopDistNow))
+    if q >= minOrderShares
+        strategy.entry("L", strategy.long, qty=q)
+
+profitR_now = (inPos and not na(entryStopDist) and entryStopDist > 0) ? ((close - avg) / entryStopDist) : 0.0
+addCoolOk = addCooldown == 0 ? true : (na(lastAddBar) or (bar_index - lastAddBar >= addCooldown))
+canAdd = inPos and atrOk and bullRegime and addSignal and addCoolOk and (addCount < maxAdds) and (close > avg) and (profitR_now >= addAfterR)
+
+if canAdd
+    stopDistNow = initStopATR * atr
+    qPctA = qtyFromPct(addPct * scale)
+    qA = math.min(qPctA, riskCapShares(stopDistNow))
+    if qA >= minOrderShares
+        strategy.entry("L", strategy.long, qty=qA)
+        addCount += 1
+        lastAddBar := bar_index
+
+if inPos and not na(entryStopDist)
+    hhSince := na(hhSince) ? high : math.max(hhSince, high)
+    profitR_mfe = (hhSince - avg) / entryStopDist
+    tMult = (profitR_mfe >= tightenAtR) ? trailTight : trailBase
+    trailRaw = hhSince - tMult * atr
+    trailMono := na(trailMono[1]) ? trailRaw : math.max(trailMono[1], trailRaw)
+
+    initStop = avg - entryStopDist
+    effStop = math.max(initStop, trailMono)
+
+    if useBE and (close - avg >= beR * entryStopDist)
+        effStop := math.max(effStop, avg)
+
+    strategy.exit("X", from_entry="L", stop=effStop)
+
+    if exitSignal
+        strategy.close("L", comment="DonchianExit")
+    if useRegimeExit and close < ema200
+        strategy.close("L", comment="RegimeExit")
+
+showMarks = input.bool(true, "Show BUY/SELL")
+plotshape(showMarks and newPos, title="BUY", text="BUY", style=shape.triangleup, location=location.belowbar, size=size.tiny)
+plotshape(showMarks and exitPos, title="SELL", text="SELL", style=shape.triangledown, location=location.abovebar, size=size.tiny)
+plot(ema200, "EMA200", linewidth=2)
+
+View in Pine Editor・159 lines
+Use on chart
+1
+4
+545
+**脚本名称**：HKEX 长线趋势突破（Regime Guard + Turtle Breakout + MFE 两段式 ATR 追踪止损）| Long-only | v6
+
+这是一个面向港股（含港股通整手规则）的**日线趋势跟随策略**，核心目标是在趋势行情中尽量吃到大波段，同时通过“制度过滤 + 两段式追踪止损”控制回撤与利润回吐。
+
+### 核心逻辑
+
+* **Regime Guard（趋势制度过滤）**
+仅在价格位于 **EMA200 上方**时允许开仓；可选开启 **EMA200 斜率向上**过滤，降低震荡市的假突破。
+* **Turtle / Donchian Breakout（海龟突破）**
+使用 Donchian 通道：突破 `Entry Len` 的上轨触发入场；跌破 `Exit Len` 的下轨触发离场（趋势反转退出）。
+* **MFE 2-Stage Trail（基于最高浮盈的两段式 ATR 追踪止损）**
+使用持仓期间最高价（MFE）计算“盈利达到多少 R”，达到阈值后把追踪止损从“宽”切换为“紧”，以减少利润回吐。
+* **Breakeven（保本机制）**
+盈利达到 `BE R` 后，将止损抬到成本附近，减少“盈利单回撤成亏损”的概率。
+* **风险与仓位控制（可选）**
+
+* `ATR% Guard`：过滤极端波动区间，减少脉冲行情误入
+* `Volatility Targeting`：基于 ATR% 自动缩放仓位（高波动降仓、低波动放大）
+* `DD Scaling`：在权益回撤扩大时自动降仓，尽量压缩尾部风险
+* `Risk Cap`：单次订单按“止损距离”限制最大风险（% equity）
+
+### 适用标的与周期
+
+* 适合：**有明显趋势阶段**、流动性较好、跳空不极端的标的
+* 默认：**日线（1D）**
+* Long-only：只做多，适用于趋势向上阶段的捕捉，不适合长期单边下跌票。
+
+### 港股通整手（Board Lot）
+
+* 下单数量按 `Board Lot Shares` 自动对齐整手（例如 100/200/500 股一手）。
+* 请根据券商显示的该股每手股数修改此参数。
+
+### 使用方法
+
+1. 将脚本添加到图表（建议 1D）。
+2. 在输入项中设置 `Board Lot Shares`、佣金/滑点等。
+3. 先用默认参数观察信号与止损线，再根据标的波动特性微调：
+
+* 更少回撤：降低 `trailTight` 或降低 `tightenAtR`（更早收紧）
+* 更能持有趋势：提高 `trailBase` 或提高 `tightenAtR`（更晚收紧）
+* 更少交易：开启 `Require EMA slope up` 或提高 `Entry Len`
+
+### 重要说明（必读）
+
+* 该策略为**教育与研究用途**，并非投资建议。
+* 回测结果高度依赖样本期、佣金、滑点、撮合规则与标的特性；实盘可能与回测显著不同。
+* 本策略属于趋势类系统，震荡期可能出现连续小亏，需配合风险控制与组合管理。
+
+---
+
+## English description (for TradingView)
+
+**Title**: HKEX Trend Breakout (Regime Guard + Turtle Breakout + MFE 2-Stage ATR Trail) | Long-only | v6
+
+This is a **daily trend-following strategy** designed for HKEX stocks (with **Stock Connect board-lot compliance**). The goal is to capture major trend legs while controlling drawdowns and profit giveback using a **regime filter** and an **MFE-based 2-stage trailing stop**.
+
+### Core components
+
+* **Regime Guard (Trend regime filter)**
+Entries are allowed only when price is **above EMA200**. Optionally require **positive EMA200 slope** to reduce chop/whipsaws.
+* **Turtle / Donchian Breakout**
+Classic Donchian channel breakout: cross above `Entry Len` high triggers entry; cross below `Exit Len` low triggers exit.
+* **MFE 2-Stage ATR Trailing Stop**
+Uses **MFE (highest high since entry)** to compute profit in “R”. Once MFE exceeds a threshold, the trailing stop switches from a **wider** ATR multiple to a **tighter** one, aiming to reduce trend profit giveback.
+* **Breakeven logic**
+After profit reaches `BE R`, the stop is raised to (at least) breakeven to reduce the chance of winners turning into losers.
+* **Risk & position scaling (optional)**
+
+* `ATR% Guard` to block entries during extreme volatility
+* `Volatility Targeting` to scale exposure by ATR%
+* `DD Scaling` to reduce exposure under larger equity drawdowns
+* `Risk Cap` to limit per-order risk based on stop distance
+
+### Best use cases
+
+* Works best on instruments with **clear trending phases**, decent liquidity, and relatively controlled gaps.
+* Default timeframe: **1D**
+* **Long-only** by design (trend capture on the upside; not intended for persistent bear markets).
+
+### HKEX Board Lot compliance
+
+Order quantity is rounded to the configured **Board Lot Shares** (e.g., 100/200/500 shares per lot). Please set it according to your broker/exchange spec for the symbol.
+
+### How to use
+
+1. Add to chart (recommended 1D).
+2. Set `Board Lot Shares`, commission/slippage, and other inputs.
+3. Tune based on your instrument:
+
+* Lower drawdown: reduce `trailTight` and/or lower `tightenAtR` (tighten earlier)
+* Hold trends longer: increase `trailBase` and/or increase `tightenAtR` (tighten later)
+* Fewer trades: enable `Require EMA slope up` and/or increase `Entry Len`
+
+### Disclaimer
+
+This script is for **educational/research purposes only** and does not constitute investment advice. Backtest performance depends heavily on sample period, fees, slippage, execution assumptions, and instrument characteristics. Real-world results may differ materially.
+
+
+
+
+

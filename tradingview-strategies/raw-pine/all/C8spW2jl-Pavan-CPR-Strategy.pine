@@ -1,0 +1,108 @@
+//@version=5
+strategy("Pavan CPR Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// User input for custom take-profit target (in points)
+takeProfitTarget = input.float(50, title="Take Profit Target (Points)", minval=1)
+
+// Calculate daily CPR levels
+f_cpr(high, low, close) =>
+    pivot = (high + low + close) / 3
+    tc = (high + low) / 2      // Top Central Pivot (was incorrectly calculated as BC)
+    bc = (pivot - tc) + pivot  // Bottom Central Pivot (was incorrectly calculated as TC)
+    [pivot, tc, bc]
+
+// Fetch today's CPR levels based on daily timeframe
+[todayPivot, todayTC, todayBC] = request.security(syminfo.tickerid, "D", f_cpr(high, low, close))
+
+// Determine if the previous close was below the Top CPR level
+wasBelowCPR = close[1] < todayTC
+
+// Determine if price crosses above the Top CPR level today
+priceCrossedAboveTC = ta.crossover(close, todayTC)
+
+// Define Buy Condition: Price crosses above Top CPR and was below CPR on previous close
+if (priceCrossedAboveTC and wasBelowCPR)
+    // Enter long position with a stop loss at today's pivot level and a take profit at the user-defined target
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss", from_entry="Long", limit=close + takeProfitTarget, stop=todayPivot)
+
+// Plot CPR levels on chart for visual reference
+plot(todayPivot, title="Pivot", color=color.blue, linewidth=2, style=plot.style_line)
+plot(todayTC, title="Top CPR", color=color.green, linewidth=2, style=plot.style_line)
+plot(todayBC, title="Bottom CPR", color=color.red, linewidth=2, style=plot.style_line)
+
+View in Pine Editor・32 lines
+Use on chart
+1
+4
+3
+3 047
+Nov 11, 2024
+Pavan CPR Strategy (Pine Script)
+
+The Pavan CPR Strategy is a trading system based on the Central Pivot Range (CPR), designed to identify price breakouts and generate long trade signals. This strategy uses key CPR levels (Pivot, Top CPR, and Bottom CPR) calculated from the daily high, low, and close to inform trade decisions. Here's an overview of how the strategy works:
+
+Key Components:
+CPR Calculation:
+
+The strategy calculates three critical CPR levels for each trading day:
+Pivot (P): The central value, calculated as the average of the high, low, and close prices.
+Top Central Pivot (TC): The midpoint of the daily high and low, acting as the resistance level.
+Bottom Central Pivot (BC): Derived from the pivot and the top CPR, providing a support level.
+The script uses request.security to fetch these CPR values from the daily timeframe, even when applied on intraday charts.
+Trade Entry Condition:
+
+A long position is initiated when:
+The current price crosses above the Top CPR level (TC).
+The previous close was below the Top CPR level, signaling a breakout above a key resistance level.
+This condition aims to capture upward momentum as the price breaks above a significant level.
+Exit Strategy:
+
+Take Profit: The position is closed with a profit target set 50 points above the entry price.
+Stop Loss: A stop loss is placed at the Pivot level to protect against unfavorable price movements.
+Visual Reference:
+
+The script plots the three CPR levels on the chart:
+Pivot: Blue line.
+Top CPR (TC): Green line.
+Bottom CPR (BC): Red line.
+These plotted levels provide visual guidance for identifying potential support and resistance zones.
+Use Case:
+The Pavan CPR Strategy is ideal for intraday traders who want to capitalize on price movements and breakouts above critical CPR levels. It provides clear entry and exit signals based on price action and is best used in conjunction with proper risk management.
+
+Note: The strategy is written in Pine Script v5 for use on TradingView, and it is recommended to backtest and optimize it for the asset or market you are trading.
+Nov 11, 2024
+Release Notes
+Pavan CPR Strategy (Pine Script)
+
+The Pavan CPR Strategy is a trading system based on the Central Pivot Range (CPR), designed to identify price breakouts and generate long trade signals. This strategy uses key CPR levels (Pivot, Top CPR, and Bottom CPR) calculated from the daily high, low, and close to inform trade decisions. Here's an overview of how the strategy works:
+
+Key Components:
+CPR Calculation:
+
+The strategy calculates three critical CPR levels for each trading day:
+Pivot (P): The central value, calculated as the average of the high, low, and close prices.
+Top Central Pivot (TC): The midpoint of the daily high and low, acting as the resistance level.
+Bottom Central Pivot (BC): Derived from the pivot and the top CPR, providing a support level.
+The script uses request.security to fetch these CPR values from the daily timeframe, even when applied on intraday charts.
+Trade Entry Condition:
+
+A long position is initiated when:
+The current price crosses above the Top CPR level (TC).
+The previous close was below the Top CPR level, signaling a breakout above a key resistance level.
+This condition aims to capture upward momentum as the price breaks above a significant level.
+Exit Strategy:
+
+Take Profit: The position is closed with a profit target set 50 points above the entry price.
+Stop Loss: A stop loss is placed at the Pivot level to protect against unfavorable price movements.
+Visual Reference:
+
+The script plots the three CPR levels on the chart:
+Pivot: Blue line.
+Top CPR (TC): Green line.
+Bottom CPR (BC): Red line.
+These plotted levels provide visual guidance for identifying potential support and resistance zones.
+Use Case:
+The Pavan CPR Strategy is ideal for intraday traders who want to capitalize on price movements and breakouts above critical CPR levels. It provides clear entry and exit signals based on price action and is best used in conjunction with proper risk management.
+
+Note: The strategy is written in Pine Script v5 for use on TradingView, and it is recommended to backtest and optimize it for the asset or market you are trading.

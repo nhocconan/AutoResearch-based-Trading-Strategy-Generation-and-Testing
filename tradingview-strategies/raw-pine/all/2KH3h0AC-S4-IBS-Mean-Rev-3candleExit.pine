@@ -1,0 +1,171 @@
+//@version=6
+strategy("S4_IBS_Mean_Rev_3candleExit", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === Backtest Date Range Inputs ===
+StartTime = input.time(defval=timestamp('01 Jan 2024 05:00 +0000'), title='Start Time')
+EndTime = input.time(defval=timestamp('31 Dec 2024 00:00 +0000'), title='End Time')
+InDateRange = time >= StartTime and time <= EndTime
+
+// === Internal Bar Strength (IBS) ===
+highPrev = high[1]
+lowPrev = low[1]
+closePrev = close[1]
+ibs = (closePrev - lowPrev) / (highPrev - lowPrev)
+
+// === Entry Condition ===
+longCondition = ibs <= 0.25
+
+// === Track entry price and bar count ===
+var float entryPrice = na
+var int barsSinceEntry = 0
+inTrade = strategy.position_size > 0
+
+// === Trigger flags for plotting ===
+var bool showEntry = false
+var bool showExit = false
+
+// === Entry Logic (only during 2024) ===
+if (InDateRange and longCondition and not inTrade)
+    strategy.entry("Long", strategy.long)
+    entryPrice := na
+    barsSinceEntry := 0
+    showEntry := true
+else
+    showEntry := false
+
+// === Count bars since entry ===
+if (inTrade)
+    if (na(entryPrice))
+        entryPrice := strategy.opentrades.entry_price(0)
+        barsSinceEntry := 1
+    else
+        barsSinceEntry += 1
+
+// === Exit Logic (force close after year end) ===
+profit = close > entryPrice
+lossTooLong = barsSinceEntry >= 3 and close < entryPrice
+normalExit = InDateRange and inTrade and (profit or lossTooLong)
+
+// Force exit if time has passed EndTime and trade is still open
+forceExit = not InDateRange and inTrade and time > EndTime
+
+exitCondition = normalExit or forceExit
+
+if (exitCondition)
+    strategy.close("Long")
+    entryPrice := na
+    barsSinceEntry := 0
+    showExit := true
+else
+    showExit := false
+
+
+// === Plot IBS ===
+plot(ibs, title="IBS", color=color.purple, linewidth=2)
+hline(0.25, "Entry Threshold", color=color.gray)
+
+// === Entry/Exit Markers ===
+plotshape(showEntry, title="Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(showExit, title="Exit", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// === Performance Metrics === //
+var float grossProfit = 0.0
+var float grossLoss = 0.0
+var float lastNetProfit = 0.0
+var float bestTrade = na
+var float worstTrade = na
+
+if (strategy.closedtrades > 0 and strategy.netprofit != lastNetProfit)
+    tradeProfit = strategy.netprofit - lastNetProfit
+    lastNetProfit := strategy.netprofit
+
+    if tradeProfit > 0
+        grossProfit += tradeProfit
+    else
+        grossLoss += tradeProfit
+
+    bestTrade := na(bestTrade) or tradeProfit > bestTrade ? tradeProfit : bestTrade
+    worstTrade := na(worstTrade) or tradeProfit < worstTrade ? tradeProfit : worstTrade
+
+profitFactor = grossLoss != 0 ? math.abs(grossProfit / grossLoss) : na
+
+totalTrades = strategy.closedtrades
+totalPnL = strategy.netprofit
+maxDrawdown = strategy.max_drawdown
+profitableTrades = strategy.wintrades
+profitablePercent = totalTrades > 0 ? (profitableTrades / totalTrades) * 100 : na
+
+// === Table Display === //
+var table perfTable = table.new(position.top_right, 2, 8, border_width=1)
+
+if barstate.islastconfirmedhistory
+    table.cell(perfTable, 0, 0, "📊 Total Trades", text_color=color.white)
+    table.cell(perfTable, 1, 0, str.tostring(totalTrades), text_color=color.white)
+
+    table.cell(perfTable, 0, 1, "✅ % Profitable", text_color=color.white)
+    table.cell(perfTable, 1, 1, str.tostring(profitablePercent, "#.##") + "%", text_color=profitablePercent >= 50 ? color.lime : color.red)
+
+    table.cell(perfTable, 0, 2, "💰 Total P&L", text_color=color.white)
+    table.cell(perfTable, 1, 2, "$" + str.tostring(totalPnL, "#.##"), text_color=totalPnL > 0 ? color.lime : color.red)
+
+    table.cell(perfTable, 0, 3, "⚖️ Profit Factor", text_color=color.white)
+    table.cell(perfTable, 1, 3, str.tostring(profitFactor, "#.##"), text_color=profitFactor > 1 ? color.lime : color.red)
+
+    table.cell(perfTable, 0, 4, "🏁 Max Drawdown", text_color=color.white)
+    table.cell(perfTable, 1, 4, "$" + str.tostring(maxDrawdown, "#.##"), text_color=color.white)
+
+    table.cell(perfTable, 0, 5, "🌟 Best Trade", text_color=color.white)
+    table.cell(perfTable, 1, 5, "$" + str.tostring(bestTrade, "#.##"), text_color=color.lime)
+
+    table.cell(perfTable, 0, 6, "⚠️ Worst Trade", text_color=color.white)
+    table.cell(perfTable, 1, 6, "$" + str.tostring(worstTrade, "#.##"), text_color=color.red)
+
+View in Pine Editor・122 lines
+Use on chart
+2
+1
+679
+Overview:
+This is a rules-based, mean reversion strategy designed to trade pullbacks using the Internal Bar Strength (IBS) indicator. The system looks for oversold conditions based on IBS, then enters long trades, holding for a maximum of 3 bars or until the trade becomes profitable.
+
+The strategy includes:
+✅ Strict entry rules based on IBS
+✅ Hardcoded exit conditions for risk management
+✅ A clean visual table summarizing key performance metrics
+
+How It Works:
+1. Internal Bar Strength (IBS) Setup:
+The IBS is calculated using the previous bar’s price range:
+IBS = (Previous Close - Previous Low) / (Previous High - Previous Low)
+IBS values closer to 0 indicate price is near the bottom of the previous range, suggesting oversold conditions.
+
+2. Entry Conditions:
+IBS must be ≤ 0.25, signaling an oversold setup.
+Trade entries are only allowed within a user-defined backtest window (default: 2024).
+Only one trade at a time is permitted (long-only strategy).
+
+3. Exit Conditions:
+If the price closes higher than the entry price, the trade exits with a profit.
+If the trade has been open for 3 bars without showing profit, the trade is forcefully exited.
+All trades are closed automatically at the end of the backtest window if still open.
+
+Additional Features:
+📊 A real-time performance metrics table is displayed on the chart, showing:
+
+- Total trades
+- % of profitable trades
+- Total P&L
+- Profit Factor
+- Max Drawdown
+- Best/Worst trade performance
+
+📈 Visual markers indicate trade entries (green triangle) and exits (red triangle) for easy chart interpretation.
+
+Who Is This For?
+This strategy is designed for:
+✅ Traders exploring systematic mean reversion approaches
+✅ Those who prefer strict, rules-based setups with no subjective decision-making
+✅ Traders who want built-in performance tracking directly on the chart
+
+Note: This strategy is provided for educational and research purposes. It is a backtested model and past performance does not guarantee future results. Users should paper trade and validate performance before considering real capital.
+

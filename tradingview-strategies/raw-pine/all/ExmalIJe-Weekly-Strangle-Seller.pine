@@ -1,0 +1,471 @@
+//@version=6
+strategy(
+  "Weekly Strangle Seller",
+  shorttitle="WeekSell",
+  overlay=true,
+  default_qty_type=strategy.fixed,
+  default_qty_value=1,
+  initial_capital=200000,
+  margin_long=100,
+  margin_short=100,
+  commission_type=strategy.commission.cash_per_order,
+  commission_value=50,
+  slippage=2,
+  process_orders_on_close=true,
+  calc_on_every_tick=false,
+  max_bars_back=5000
+  )
+
+// ═══════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════
+
+string g1 = "Strike Selection"
+int atrLen = input.int(14, "ATR Length",
+  minval=5, maxval=50, group=g1)
+float atrMult = input.float(1.8, "ATR Mult (Nifty:1.8 BN:2.2)",
+  minval=0.5, maxval=5.0, step=0.1, group=g1)
+int sRound = input.int(100, "Round Strike To",
+  options=[50, 100, 200, 500], group=g1)
+bool useVWAP = input.bool(true, "VWAP as Center",
+  group=g1)
+
+string g2 = "Weekly Entry Rules"
+bool monEntry = input.bool(true, "Enter on Monday",
+  group=g2)
+bool tueEntry = input.bool(true, "Enter on Tuesday",
+  group=g2)
+bool wedEntry = input.bool(false, "Enter on Wednesday",
+  group=g2)
+string entryTime = input.string("1000-1400",
+  "Entry Window (IST)",
+  options=["0945-1400", "1000-1400", "1000-1300", "1030-1330"],
+  group=g2)
+
+string g3 = "Filters"
+bool useST = input.bool(true, "SuperTrend Filter",
+  group=g3)
+int stLen = input.int(10, "ST Length",
+  minval=5, maxval=30, group=g3)
+float stMul = input.float(2.0, "ST Mult",
+  minval=1.0, maxval=5.0, step=0.5, group=g3)
+bool useRSI = input.bool(true, "RSI Filter",
+  group=g3)
+int rsiLen = input.int(14, "RSI Length",
+  group=g3)
+int rsiOB = input.int(70, "RSI OB",
+  group=g3)
+int rsiOS = input.int(30, "RSI OS",
+  group=g3)
+float minWidth = input.float(3.0, "Min Width % (skip if narrow)",
+  minval=1.0, maxval=10.0, step=0.5, group=g3)
+
+string g4 = "Risk (200% Rule)"
+float slMult = input.float(2.0, "SL Multiplier (2.0 = 200% rule)",
+  minval=1.5, maxval=4.0, step=0.5, group=g4)
+string exitDay = input.string("Thursday",
+  "Expiry Day",
+  options=["Thursday", "Wednesday", "Friday"],
+  group=g4)
+string exitTime = input.string("1515",
+  "Expiry Exit Time",
+  options=["1500", "1510", "1515", "1520", "1525"],
+  group=g4)
+
+string g5 = "Display"
+bool showFill = input.bool(true, "Profit Zone",
+  group=g5)
+bool showLbl = input.bool(true, "Signals",
+  group=g5)
+bool showTbl = input.bool(true, "Dashboard",
+  group=g5)
+bool showSL = input.bool(true, "SL Lines",
+  group=g5)
+
+// ═══════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════
+
+float atrVal = ta.atr(atrLen)
+float vwapVal = ta.vwap(hlc3)
+float ema20 = ta.ema(close, 20)
+float center = useVWAP ? vwapVal : ema20
+
+float rawCE = center + (atrVal * atrMult)
+float rawPE = center - (atrVal * atrMult)
+
+float ceLevel = math.ceil(rawCE / sRound) * sRound
+float peLevel = math.floor(rawPE / sRound) * sRound
+
+float widthPct = (ceLevel - peLevel) / close * 100
+
+// ═══════════════════════════════════════
+// SUPERTREND
+// ═══════════════════════════════════════
+
+[stLine, stDir] = ta.supertrend(stMul, stLen)
+bool isBull = stDir < 0
+bool isBear = stDir > 0
+
+// ═══════════════════════════════════════
+// RSI
+// ═══════════════════════════════════════
+
+float rsiVal = ta.rsi(close, rsiLen)
+bool rsiBad = useRSI and (rsiVal > rsiOB or rsiVal < rsiOS)
+
+// ═══════════════════════════════════════
+// DAY OF WEEK DETECTION
+// ═══════════════════════════════════════
+
+int dow = dayofweek
+bool isMon = dow == dayofweek.monday
+bool isTue = dow == dayofweek.tuesday
+bool isWed = dow == dayofweek.wednesday
+bool isThu = dow == dayofweek.thursday
+bool isFri = dow == dayofweek.friday
+
+// Entry day check
+bool isEntryDay = false
+if monEntry and isMon
+    isEntryDay := true
+if tueEntry and isTue
+    isEntryDay := true
+if wedEntry and isWed
+    isEntryDay := true
+
+// Expiry day check
+bool isExpDay = false
+if exitDay == "Thursday" and isThu
+    isExpDay := true
+if exitDay == "Wednesday" and isWed
+    isExpDay := true
+if exitDay == "Friday" and isFri
+    isExpDay := true
+
+// Entry time window
+bool inEntryWindow = not na(time(
+  timeframe.period, entryTime, "Asia/Kolkata"
+  ))
+
+// Expiry exit time
+string expWindow = exitTime + "-1530"
+bool atExpiry = isExpDay and not na(time(
+  timeframe.period, expWindow, "Asia/Kolkata"
+  ))
+
+// ═══════════════════════════════════════
+// WEEKLY TRADE TRACKER
+// ═══════════════════════════════════════
+
+var bool weekTaken = false
+var float entryCE = 0.0
+var float entryPE = 0.0
+var float premCE = 0.0
+var float premPE = 0.0
+var int entryBar = 0
+
+// Reset on Monday open
+bool newWeek = isMon and not isMon[1]
+if newWeek
+    weekTaken := false
+
+// ═══════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════
+
+bool widthOK = widthPct >= minWidth
+bool trendOK = useST == false or (isBull == false and isBear == false) or widthPct >= 4.0
+bool rsiOK = rsiBad == false
+bool filterPass = widthOK and trendOK and rsiOK
+
+bool canEnter = isEntryDay and inEntryWindow and weekTaken == false and filterPass
+
+// ═══════════════════════════════════════
+// STRATEGY: ENTER STRANGLE
+// ═══════════════════════════════════════
+
+var bool inTrade = false
+var float slCE = 0.0
+var float slPE = 0.0
+
+if canEnter and inTrade == false
+    // Sell CE (short above)
+    strategy.entry("SellCE", strategy.short,
+      comment="SELL CE " + str.tostring(math.round(ceLevel)))
+    // Sell PE (long below as proxy)
+    strategy.entry("SellPE", strategy.long,
+      comment="SELL PE " + str.tostring(math.round(peLevel)))
+
+    entryCE := ceLevel
+    entryPE := peLevel
+    // Estimate premium as distance × delta approx
+    premCE := (ceLevel - close) * 0.15
+    premPE := (close - peLevel) * 0.15
+    // 200% SL: exit if price goes slMult × distance beyond
+    slCE := ceLevel + (ceLevel - center) * (slMult - 1)
+    slPE := peLevel - (center - peLevel) * (slMult - 1)
+    entryBar := bar_index
+    inTrade := true
+    weekTaken := true
+
+// ═══════════════════════════════════════
+// STRATEGY: EXIT LOGIC
+// ═══════════════════════════════════════
+
+// 200% SL on CE side (price shoots up)
+bool ceSLhit = inTrade and high >= slCE
+// 200% SL on PE side (price crashes down)
+bool peSLhit = inTrade and low <= slPE
+// Expiry exit
+bool expExit = inTrade and atExpiry
+// Friday safety (if somehow still in trade)
+bool friSafe = inTrade and isFri and not na(time(
+  timeframe.period, "1520-1530", "Asia/Kolkata"
+  ))
+
+if ceSLhit
+    strategy.close("SellCE", comment="CE SL 200%")
+    strategy.close("SellPE", comment="PE exit (CE SL)")
+    inTrade := false
+
+if peSLhit and inTrade
+    strategy.close("SellPE", comment="PE SL 200%")
+    strategy.close("SellCE", comment="CE exit (PE SL)")
+    inTrade := false
+
+if expExit and inTrade
+    strategy.close("SellCE", comment="EXPIRY")
+    strategy.close("SellPE", comment="EXPIRY")
+    inTrade := false
+
+if friSafe and inTrade
+    strategy.close("SellCE", comment="FRI SAFE")
+    strategy.close("SellPE", comment="FRI SAFE")
+    inTrade := false
+
+// ═══════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════
+
+pCE = plot(ceLevel, "CE Strike",
+  color=color.new(color.red, 0),
+  linewidth=2, style=plot.style_stepline)
+pPE = plot(peLevel, "PE Strike",
+  color=color.new(color.green, 0),
+  linewidth=2, style=plot.style_stepline)
+pMid = plot(center, "VWAP/Center",
+  color=color.new(color.yellow, 50),
+  linewidth=1)
+
+fill(pCE, pPE,
+  color=showFill ? color.new(color.yellow, 92) : na,
+  title="Profit Zone")
+
+// SL lines when in trade
+plot(inTrade and showSL ? slCE : na, "CE SL",
+  color=color.new(color.red, 40),
+  linewidth=1, style=plot.style_cross)
+plot(inTrade and showSL ? slPE : na, "PE SL",
+  color=color.new(color.green, 40),
+  linewidth=1, style=plot.style_cross)
+
+// SuperTrend
+plot(useST ? stLine : na, "ST",
+  color=stDir < 0 ? color.green : color.red,
+  linewidth=1)
+
+// Entry signals
+plotshape(canEnter and inTrade == false and showLbl,
+  title="ENTER",
+  style=shape.diamond,
+  location=location.abovebar,
+  color=color.yellow, size=size.small,
+  text="STRANGLE")
+
+// SL hit markers
+plotshape(ceSLhit and showLbl,
+  title="CE SL",
+  style=shape.xcross,
+  location=location.abovebar,
+  color=color.red, size=size.tiny,
+  text="SL")
+plotshape(peSLhit and showLbl,
+  title="PE SL",
+  style=shape.xcross,
+  location=location.belowbar,
+  color=color.red, size=size.tiny,
+  text="SL")
+
+// Expiry exit markers
+plotshape(expExit and showLbl,
+  title="EXP",
+  style=shape.flag,
+  location=location.belowbar,
+  color=color.blue, size=size.tiny,
+  text="EXP")
+
+// Background: in trade = subtle blue, danger = red/green
+color bgCol = na
+if inTrade and close > ceLevel
+    bgCol := color.new(color.red, 88)
+else if inTrade and close < peLevel
+    bgCol := color.new(color.green, 88)
+else if inTrade
+    bgCol := color.new(color.blue, 95)
+bgcolor(bgCol, title="Status BG")
+
+// ═══════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════
+
+alertcondition(
+  canEnter and inTrade == false,
+  title="ENTER STRANGLE",
+  message="SELL STRANGLE: CE={{plot_0}} PE={{plot_1}}")
+alertcondition(ceSLhit,
+  title="CE STOP LOSS",
+  message="CE SL HIT at {{close}}")
+alertcondition(peSLhit,
+  title="PE STOP LOSS",
+  message="PE SL HIT at {{close}}")
+alertcondition(expExit,
+  title="EXPIRY EXIT",
+  message="Weekly expiry — close all")
+
+// ═══════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════
+
+if showTbl and barstate.islast
+    var table d = table.new(
+      position.top_right, 2, 14,
+      bgcolor=color.new(color.black, 15),
+      border_width=1,
+      border_color=color.gray
+      )
+
+    table.cell(d, 0, 0,
+      "WEEKLY STRANGLE v6",
+      text_color=color.yellow,
+      text_size=size.normal,
+      bgcolor=color.new(color.black, 0))
+    table.merge_cells(d, 0, 0, 1, 0)
+
+    table.cell(d, 0, 1, "Spot",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 1,
+      str.tostring(math.round(close)),
+      text_color=color.yellow,
+      text_size=size.small)
+
+    table.cell(d, 0, 2, "SELL CE",
+      text_color=color.red,
+      text_size=size.small)
+    table.cell(d, 1, 2,
+      str.tostring(math.round(ceLevel)),
+      text_color=color.red,
+      text_size=size.small)
+
+    table.cell(d, 0, 3, "SELL PE",
+      text_color=color.green,
+      text_size=size.small)
+    table.cell(d, 1, 3,
+      str.tostring(math.round(peLevel)),
+      text_color=color.green,
+      text_size=size.small)
+
+    table.cell(d, 0, 4, "Width",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 4,
+      str.tostring(math.round(ceLevel - peLevel)) + "pt",
+      text_color=color.white,
+      text_size=size.small)
+
+    table.cell(d, 0, 5, "Width%",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 5,
+      str.tostring(math.round(widthPct, 1)) + "%",
+      text_color=color.aqua,
+      text_size=size.small)
+
+    table.cell(d, 0, 6, "CE SL",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 6,
+      inTrade ? str.tostring(math.round(slCE)) : "-",
+      text_color=color.orange,
+      text_size=size.small)
+
+    table.cell(d, 0, 7, "PE SL",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 7,
+      inTrade ? str.tostring(math.round(slPE)) : "-",
+      text_color=color.orange,
+      text_size=size.small)
+
+    table.cell(d, 0, 8, "ATR",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 8,
+      str.tostring(math.round(atrVal, 1)),
+      text_color=color.white,
+      text_size=size.small)
+
+    table.cell(d, 0, 9, "RSI",
+      text_color=color.white,
+      text_size=size.small)
+    color rc = rsiVal > rsiOB ? color.red :
+      rsiVal < rsiOS ? color.green : color.white
+    table.cell(d, 1, 9,
+      str.tostring(math.round(rsiVal, 1)),
+      text_color=rc,
+      text_size=size.small)
+
+    table.cell(d, 0, 10, "Trend",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 10,
+      isBull ? "BULL" : isBear ? "BEAR" : "NEUTRAL",
+      text_color=isBull ? color.green :
+        isBear ? color.red : color.white,
+      text_size=size.small)
+
+    table.cell(d, 0, 11, "Status",
+      text_color=color.white,
+      text_size=size.small)
+    string stat = inTrade ? "IN TRADE" :
+      weekTaken ? "DONE THIS WEEK" : "WAITING"
+    color stClr = inTrade ? color.lime :
+      weekTaken ? color.gray : color.yellow
+    table.cell(d, 1, 11, stat,
+      text_color=stClr,
+      text_size=size.small)
+
+    table.cell(d, 0, 12, "Day",
+      text_color=color.white,
+      text_size=size.small)
+    string dayStr = isMon ? "MON" :
+      isTue ? "TUE" : isWed ? "WED" :
+      isThu ? "THU" : isFri ? "FRI" : "?"
+    table.cell(d, 1, 12, dayStr,
+      text_color=isEntryDay ? color.lime :
+        isExpDay ? color.orange : color.white,
+      text_size=size.small)
+
+    table.cell(d, 0, 13, "Expiry",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 13, exitDay,
+      text_color=color.orange,
+      text_size=size.small)
+
+View in Pine Editor・465 lines
+Use on chart
+0
+248
+based in current market for opt sellers in. fifty easy to use. just see the levels and trade based oil

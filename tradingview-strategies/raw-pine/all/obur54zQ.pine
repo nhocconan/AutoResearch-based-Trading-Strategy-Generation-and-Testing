@@ -1,0 +1,118 @@
+//@version=5
+strategy("Stoch+RSI Trend Strategy (Webhook Ready)", overlay=true, margin_long=100, margin_short=100, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=20)
+
+// ================= INPUTS =================
+fastLen = input.int(8, "Fast MA", minval=1)
+slowLen = input.int(20, "Slow MA", minval=1)
+emaTrendLen = input.int(100, "Trend EMA Length")
+
+// ADX inputs
+adxLen = input.int(14, "ADX Length")
+adxThresh = input.float(20.0, "ADX Threshold", step=0.1)
+
+// Stochastic inputs
+kLen = input.int(12, "Stochastic K Length")
+dLen = input.int(3, "Stochastic D Length")
+smoothK = input.int(5, "Stoch Smooth")
+stochOB = input.int(80, "Overbought")
+stochOS = input.int(20, "Oversold")
+
+// RSI inputs
+rsiLen = input.int(10, "RSI Length")
+rsiSource = input.source(close, "RSI Source")
+
+// ATR inputs
+atrLen = input.int(14, "ATR Length")
+atrSmaLen = input.int(14, "ATR SMA Length")
+atrMult = input.float(1.0, "ATR Multiplier", step=0.1)
+
+// Risk Management
+TP = input.float(0.8, "TP %", step=0.1)
+SL = input.float(0.4, "SL %", step=0.1)
+
+// ================= INDICATORS =================
+emaTrend = ta.ema(close, emaTrendLen)
+emaFast  = ta.ema(close, fastLen)
+emaSlow  = ta.ema(close, slowLen)
+
+// ATR (volatility)
+atr = ta.atr(atrLen)
+atrSma = ta.sma(atr, atrSmaLen)
+
+// Manual ADX (v4/v5 safe)
+upMove  = high - high[1]
+downMove = low[1] - low
+plusDM  = (upMove > downMove and upMove > 0) ? upMove : 0.0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0.0
+tr1 = high - low
+tr2 = math.abs(high - close[1])
+tr3 = math.abs(low - close[1])
+trueRange = math.max(math.max(tr1, tr2), tr3)
+
+smTR = ta.rma(trueRange, adxLen)
+smPlusDM = ta.rma(plusDM, adxLen)
+smMinusDM = ta.rma(minusDM, adxLen)
+
+plusDI = 100 * (smPlusDM / smTR)
+minusDI = 100 * (smMinusDM / smTR)
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLen)
+
+// Stochastic
+stoch_k = ta.sma(ta.stoch(close, high, low, kLen), smoothK)
+stoch_d = ta.sma(stoch_k, dLen)
+
+// RSI
+rsi = ta.rsi(rsiSource, rsiLen)
+
+// ================= SIGNALS =================
+trendLong = close > emaTrend
+trendShort = close < emaTrend
+
+volatilityOk = atr > (atrMult * atrSma)
+adxOk = adx > adxThresh
+
+stochLong = ta.crossover(stoch_k, stoch_d) and stoch_k < stochOB
+stochShort = ta.crossunder(stoch_k, stoch_d) and stoch_k > stochOS
+
+rsiLong = rsi < 60
+rsiShort = rsi > 40
+
+canLong = trendLong and volatilityOk and adxOk and stochLong and rsiLong
+canShort = trendShort and volatilityOk and adxOk and stochShort and rsiShort
+
+// ================= ORDERS =================
+if (canLong)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", from_entry="Long", limit=close * (1 + TP/100), stop=close * (1 - SL/100))
+
+if (canShort)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", from_entry="Short", limit=close * (1 - TP/100), stop=close * (1 + SL/100))
+
+// ================= PLOTS =================
+plot(emaTrend, "EMA Trend", color=color.orange)
+plot(emaFast, "EMA Fast", color=color.green)
+plot(emaSlow, "EMA Slow", color=color.blue)
+plotshape(canLong, title="Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny)
+plotshape(canShort, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+
+// ================= ALERTS =================
+buyJson = '{"action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}'
+sellJson = '{"action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + '}'
+
+// UI alertconditions (no dynamic message here to avoid runtime errors)
+alertcondition(canLong, title="BUY Webhook")
+alertcondition(canShort, title="SELL Webhook")
+
+// Runtime alerts using alert() — this sends the JSON payload to webhook immediately when condition true
+if (canLong)
+    alert(buyJson, alert.freq_once_per_bar_close)
+if (canShort)
+    alert(sellJson, alert.freq_once_per_bar_close)
+
+View in Pine Editor・112 lines
+Use on chart
+6
+498
+En iyi ayarlar için lütfen geri dönüş yapmayı unutmayın.

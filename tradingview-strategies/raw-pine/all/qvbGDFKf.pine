@@ -1,0 +1,57 @@
+//@version=5
+strategy("I11L - Reversal Trading Ideas by Larry Connors", overlay=false, pyramiding=3, default_qty_value=10000, initial_capital=10000, default_qty_type=strategy.cash,process_orders_on_close=true, calc_on_every_tick=false)
+
+lowestPointBars = input.int(7)
+rsiLength = input.int(2)
+sellBarrier = input.int(70, step=55)
+onlyBuyWhenAbove55Average = input.bool(false)
+
+isLowest = ta.lowest(close,lowestPointBars*(strategy.opentrades+1)) == close
+isHighest = ta.rsi(close,rsiLength) > sellBarrier
+
+isBuy = isLowest and (strategy.position_avg_price * (1-0.01*strategy.opentrades) > close or strategy.opentrades == 0) and (close > ta.sma(close, 55) or not(onlyBuyWhenAbove55Average))
+isClose = isHighest
+
+plot(ta.rsi(close,rsiLength), color=isBuy ? color.green : isLowest ? color.yellow : color.white)
+plot(sellBarrier, color=color.red)
+
+if(isBuy)
+    strategy.entry("Buy"+str.tostring(strategy.opentrades+1),strategy.long, comment="#"+str.tostring(strategy.opentrades+1))
+
+if(isClose)
+    strategy.exit("Close",limit=close)
+
+View in Pine Editor・25 lines
+Use on chart
+1
+8
+7
+5
+6 982
+Dec 2, 2022
+This is my own Twist on Larry Connors Simple Tradingideas.
+It Combines the RSI, Averaging In and the Lowest Bars in a Single System.
+The current Configuration is designed for the Daily Timeframe.
+Feel free to play with the Parameters and keep in mind that Larry Intended to buy fear and sell the greed!
+
+The Rules are the following:
+
+---Buy---
+Buy, if the lowest Bar of your Configuration has been hit (default is set to 7).
+
+---Average Down--
+Buy, if the lowest Bar of your Configuration * Your open trades has been hit AND only if the buyin is atleast 1% cheaper.
+
+---Close---
+Close, if the RSI closes above a certain level (default is set to 70).
+
+---TP---
+There is no TP
+
+---SL---
+There is no SL, so be cautions of your tail Risk!
+Dec 2, 2022
+Release Notes
+Added a Medium Term Filter to Buy only if the Close is above the 55 Day average if onlyBuyWhenAbove55Average is true.
+Larry Connors sugested beeing above 200 Days, the Turtle Traders use 20 or 55 Days instead.
+

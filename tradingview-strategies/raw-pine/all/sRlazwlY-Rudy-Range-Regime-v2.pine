@@ -1,0 +1,78 @@
+//@version=6
+// Rudy v2 - Range Regime Premium Collector
+// Proprietary sideways market detector for credit spread timing
+// Apply to: SPY, QQQ, IWM, XLF, XLE, MSFT, AAPL, META
+strategy("Rudy Range Regime v2", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- Parameters ---
+int p_adx = input.int(14, "ADX Lookback")
+int p_adx_lim = input.int(25, "ADX Ceiling")
+int p_rsi = input.int(14, "RSI Lookback")
+int p_rsi_lo = input.int(35, "RSI Floor")
+int p_rsi_hi = input.int(65, "RSI Ceiling")
+int p_bb = input.int(20, "BB Lookback")
+float p_bb_lim = input.float(8.0, "BB Width Ceiling Pct")
+int p_hold = input.int(21, "Hold Duration Bars")
+
+// --- Calculations ---
+[dpI, dmI, adxV] = ta.dmi(p_adx, p_adx)
+float rsiV = ta.rsi(close, p_rsi)
+[bMid, bUp, bLo] = ta.bb(close, p_bb, 2)
+float bWidth = (bUp - bLo) / bMid * 100
+float hvProxy = ta.stdev(math.log(close / close[1]), 20) * math.sqrt(252) * 100
+
+// --- Regime Detection ---
+bool isFlat = adxV < p_adx_lim and rsiV > p_rsi_lo and rsiV < p_rsi_hi and bWidth < p_bb_lim
+
+// --- Position Tracking ---
+var int holdCount = 0
+var float basisPrice = 0.0
+
+if isFlat and strategy.position_size == 0
+    strategy.entry("RR_Sell", strategy.long)
+    holdCount := 0
+    basisPrice := close
+
+if strategy.position_size > 0
+    holdCount += 1
+    float drawdown = (close - basisPrice) / basisPrice * 100
+
+    if holdCount >= p_hold
+        strategy.close("RR_Sell", comment="Duration Exit")
+        holdCount := 0
+
+    if drawdown < -5.0
+        strategy.close("RR_Sell", comment="Protective Exit")
+        holdCount := 0
+
+// --- Visuals ---
+plot(bUp, "BB Upper", color.new(#9E9E9E, 50))
+plot(bLo, "BB Lower", color.new(#9E9E9E, 50))
+plot(bMid, "BB Mid", color.new(#9E9E9E, 70), style=plot.style_circles)
+bgcolor(isFlat ? color.new(#4CAF50, 88) : color.new(#F44336, 96))
+plot(adxV, "ADX", color.new(#9C27B0, 0))
+plotshape(isFlat and strategy.position_size == 0, "Collect", shape.diamond, location.abovebar, color.new(#4CAF50, 0), size=size.tiny)
+
+// --- Dashboard ---
+var table dash = table.new(position.top_right, 2, 5, bgcolor=color.new(#000000, 80))
+if barstate.islast
+    table.cell(dash, 0, 0, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, str.tostring(adxV, "#.#"), text_color=adxV < p_adx_lim ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 1, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(rsiV, "#.#"), text_color=(rsiV > p_rsi_lo and rsiV < p_rsi_hi) ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 2, "BB W", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(bWidth, "#.#") + "%", text_color=bWidth < p_bb_lim ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 3, "HV", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(hvProxy, "#.#") + "%", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 4, "Mode", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, isFlat ? "RANGE" : "TREND", text_color=isFlat ? color.lime : color.orange, text_size=size.small)
+
+View in Pine Editor・68 lines
+Use on chart
+3
+311
+Rudy Range Regime v2 — Range Regime Premium Collector for sideways markets. Detects low-volatility, range-bound
+conditions using ADX below 25, RSI between 35-65, and Bollinger Band width under 8%. Simulates credit spread entry
+during confirmed sideways regimes. Exits after 21-bar hold duration or on 5% protective stop. Includes real-time
+dashboard showing ADX, RSI, BB width, historical volatility, and regime mode. Designed for: SPY, QQQ, IWM, XLF, XLE,
+MSFT, AAPL, META.

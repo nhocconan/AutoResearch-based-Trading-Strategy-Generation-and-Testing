@@ -1,0 +1,241 @@
+//@version=6
+strategy("Small-Cap — Sell Every Spike (Rendon1) v6 — Strict (no look-ahead)",
+     overlay=true, pyramiding=10,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     commission_type=strategy.commission.percent, commission_value=0.005)
+
+// ── Balanced defaults ──
+minPrice     = input.float(2.0,  "Min Price ($)")
+maxPrice     = input.float(10.0, "Max Price ($)")
+floatShares  = input.float(20e6, "Float Shares (set per ticker)")
+
+rvolLen      = input.int(50,    "Intraday RVOL lookback (bars)", minval=1)
+rvolMin      = input.float(1.5, "Min RVOL (x)", step=0.1)
+warnRotation = input.float(5.0, "Warn if Rotation > x", step=0.5)
+maxRotation  = input.float(7.0, "HARD avoid if Rotation > x", step=0.5)
+
+rocBars     = input.int(5,     "ROC lookback bars", minval=1)
+rocPct      = input.float(1.0, "Min ROC over lookback (%)", step=0.1)
+atrLen      = input.int(14,    "ATR length", minval=1)
+atrExpMult  = input.float(1.6, "Bar Range vs ATR (x)", step=0.1)
+volLen      = input.int(80,    "Vol SMA length (bars)", minval=1)
+volMult     = input.float(1.8, "Vol spike vs SMA (x)", step=0.1)
+
+// confirmations (left OFF to truly sell spikes)
+useWick      = input.bool(false, "Require upper wick (stuff move)")
+wickMinPct   = input.int(35,     "Min upper wick % of bar", minval=0, maxval=100)
+useVWAPcross = input.bool(false, "Require cross back below VWAP")
+
+cooldownBars    = input.int(10, "Cooldown bars after entry", minval=0)
+maxTradesPerDay = input.int(6,  "Max trades per day", minval=1)
+
+// exits
+useATRStops = input.bool(true, "Stops/targets by ATR")
+stopATR     = input.float(1.2, "Stop = x ATR", step=0.1)
+tp1ATR      = input.float(1.0, "TP1 = x ATR", step=0.1)
+tp2ATR      = input.float(2.0, "TP2 = x ATR", step=0.1)
+
+usePctTP  = input.bool(true,  "Also place % targets")
+tp1Pct    = input.float(10.0, "TP1 %", step=0.5)
+tp2Pct    = input.float(20.0, "TP2 %", step=0.5)
+tp3Pct    = input.float(30.0, "TP3 %", step=0.5)
+
+// ── VWAP (reset daily) ──
+newDay = ta.change(time("D")) != 0
+var float cumVol = na
+var float cumTPV = na
+cumVol := newDay ? volume : nz(cumVol) + volume
+cumTPV := newDay ? (hlc3 * volume) : nz(cumTPV) + (hlc3 * volume)
+vwap   = cumTPV / cumVol
+plot(vwap, "VWAP", color=color.purple, linewidth=2)
+
+// ── measures ──
+atr  = ta.atr(atrLen)
+rng  = high - low
+rocX = (close / nz(close[rocBars]) - 1.0) * 100.0
+volS = ta.sma(volume, volLen)
+rvol = volS > 0 ? (volume / volS) : 0.0
+
+upperWick = high - math.max(open, close)
+wickPctUp = rng > 0 ? (upperWick / rng) * 100.0 : 0.0
+
+priceOk = close >= minPrice and close <= maxPrice
+rvolOk  = rvol >= rvolMin
+
+// ── float rotation ──
+var float dayCumVol = na
+dayCumVol := newDay ? volume : nz(dayCumVol) + volume
+rotation  = floatShares > 0 ? (dayCumVol / floatShares) : na
+warn      = rotation > warnRotation
+hardAvoid = rotation > maxRotation
+
+// ── daily spike-highs (confirmed only; no look-ahead) ──
+lastSpikeHighD = request.security(
+     syminfo.tickerid, "D",
+     ta.valuewhen((volume > ta.sma(volume, 60) * 3.0)[1], high[1], 0),
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+prevSpikeHighD = request.security(
+     syminfo.tickerid, "D",
+     ta.valuewhen((volume > ta.sma(volume, 60) * 3.0)[1], high[1], 1),
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+plot(lastSpikeHighD, "Last Spike High (D, confirmed)", color=color.new(color.red, 0),  style=plot.style_linebr)
+plot(prevSpikeHighD, "Prev Spike High (D, confirmed)", color=color.new(color.red, 60), style=plot.style_linebr)
+
+// ── spike + entry permission ──
+hh      = high == ta.highest(high, math.max(rocBars, 60))
+spikeUp = (rocX >= rocPct) and (rng >= atr * atrExpMult) and (volume > volS * volMult) and hh
+
+vwapCrossDn = useVWAPcross ? ta.crossunder(close, vwap) : true
+wickOk      = useWick ? (wickPctUp >= wickMinPct) : true
+
+var int  lastEntryBar = na
+var int  tradesToday  = 0
+if newDay
+    tradesToday := 0
+
+cooldownOk = na(lastEntryBar) or (bar_index - lastEntryBar >= cooldownBars)
+capOk      = tradesToday < maxTradesPerDay
+
+shortSignal = not hardAvoid and priceOk and rvolOk and spikeUp and vwapCrossDn and wickOk and cooldownOk and capOk
+
+// ── enter ONLY at bar close; arm exits next bar ──
+var int   entryBar = na
+var float entryATR = na
+var float stopPx   = na
+var float tp1ATRpx = na
+var float tp2ATRpx = na
+var float tp1Pctpx = na
+var float tp2Pctpx = na
+var float tp3Pctpx = na
+
+if barstate.isconfirmed and shortSignal
+    strategy.entry("SHORT", strategy.short)
+    lastEntryBar := bar_index
+    tradesToday  += 1
+
+// detect a NEW short opened on this bar close
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if barstate.isconfirmed and newShort
+    entryBar := bar_index
+    entryATR := atr
+    stopPx   := strategy.position_avg_price + (useATRStops ? stopATR * entryATR : 0.0)
+    tp1ATRpx := strategy.position_avg_price - tp1ATR * entryATR
+    tp2ATRpx := strategy.position_avg_price - tp2ATR * entryATR
+    tp1Pctpx := strategy.position_avg_price * (1 - tp1Pct/100.0)
+    tp2Pctpx := strategy.position_avg_price * (1 - tp2Pct/100.0)
+    tp3Pctpx := strategy.position_avg_price * (1 - tp3Pct/100.0)
+
+// place exits STARTING NEXT BAR (no same-bar fills)
+if strategy.position_size < 0 and not na(entryBar) and bar_index > entryBar
+    if useATRStops
+        strategy.exit("ATR-TP1", from_entry="SHORT", limit=tp1ATRpx, stop=stopPx)
+        strategy.exit("ATR-TP2", from_entry="SHORT", limit=tp2ATRpx, stop=stopPx)
+    if usePctTP
+        strategy.exit("PCT-TP1", from_entry="SHORT", limit=tp1Pctpx)
+        strategy.exit("PCT-TP2", from_entry="SHORT", limit=tp2Pctpx)
+        strategy.exit("PCT-TP3", from_entry="SHORT", limit=tp3Pctpx)
+
+// ── visuals & alerts ──
+bgcolor(shortSignal ? color.new(color.red, 85) : na)
+plotchar(warn,      title="Rotation > warn", char="⚠", location=location.top, color=color.orange, size=size.tiny)
+plotchar(hardAvoid, title="Rotation > HARD", char="✖", location=location.top, color=color.red,    size=size.tiny)
+plotshape(spikeUp, title="Spike", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, text="Spike")
+
+alertcondition(spikeUp,     title="Parabolic UP",    message="Parabolic UP (candidate SHORT).")
+alertcondition(shortSignal, title="SHORT Armed",     message="SHORT armed (will execute at bar close; exits from next bar).")
+
+View in Pine Editor・146 lines
+Use on chart
+9
+846
+Small-Cap — Sell Every Spike v6 — Strict, No Look-Ahead
+
+Educational use only. This is not financial advice or a signal service.
+This strategy targets low/ mid-float runners (≤ ~20M) that make parabolic spikes. It shorts qualified spikes and scales out into flushes. Logic is deliberately simple and transparent to avoid curve-fit.
+
+What the strategy does
+
+Detects a parabolic up move using:
+
+Fast ROC over N bars
+
+Big range vs ATR
+
+Volume spike vs SMA
+
+Fresh higher high (no stale spikes)
+
+Enters short at bar close when conditions are met (no same-bar fills).
+
+Manages exits with ATR targets and optional % covers.
+
+Tracks float rotation intraday (manual float input) and blocks trades above a hard limit.
+
+Draws daily spike-high resistance from confirmed daily bars (no repaint / no look-ahead).
+
+Timeframes & market
+
+Designed for 1–5 minute charts.
+
+Intended for US small-caps; turn Premarket on.
+
+Works intraday; avoid illiquid tickers or names with constant halts.
+
+Entry, Exit, Risk (short side)
+
+Entry: parabolic spike (ROC + Range≥ATR×K + Vol≥SMA×K, new HH).
+Optional confirmations (OFF by default to “sell every spike”): upper-wick and VWAP cross-down.
+
+Stop: ATR stop above entry (default 1.2× ATR).
+
+Targets: TP1 = 1.0× ATR, TP2 = 2.0× ATR + optional 10/20/30% covers.
+
+Safety: skip trades if RVOL is low or Float Rotation exceeds your limit (default warn 5×, hard 7×).
+
+Inputs (Balanced defaults)
+
+Price band: $2–$10
+
+Float Shares: set per ticker (from Finviz).
+
+RVOL(50) ≥ 1.5×
+
+ROC(5) ≥ 1.0%, Range ≥ 1.6× ATR, Vol ≥ 1.8× SMA
+
+Cooldown: 10 bars; Max trades/day: 6
+
+Optional: Require wick (≥35%) and/or Require VWAP cross-down.
+
+Presets suggestion:
+• Balanced (defaults above)
+• Safer: wick+VWAP ON, Range≥1.8×, trades/day 3–4
+• Micro-float (<5M): ROC 1.4–1.8%, Range≥1.9–2.2×, Vol≥2.2×, RVOL≥2.0, wick 40–50%
+
+No look-ahead / repaint notes
+
+Daily spike-highs use request.security(..., lookahead_off) and shifted [1] → only closed daily bars.
+
+Orders arm next bar after entry; entries execute at bar close.
+
+VWAP/ATR/ROC/Vol/RVOL are computed on the chart timeframe (no HTF peeking).
+
+How to use
+
+Build a watchlist: Float <20M, RelVol >2, Today +20% (Finviz).
+
+Open 1–5m chart, enter Float Shares for the ticker.
+
+Start with Balanced, flip to Safer on halty/SSR names or repeated VWAP reclaims.
+
+Scale out into flushes; respect the stop and rotation guard.
+
+Limitations & risk
+
+Backtests on small-caps can be optimistic due to slippage, spreads, halts, SSR, and limited premarket data. Always use conservative sizing. Low-float stocks can squeeze violently.
+
+Alerts
+
+Parabolic UP (candidate short)
+
+SHORT Armed (conditions met; entry at bar close)

@@ -1,0 +1,157 @@
+//@version=6
+strategy('Buy Sell Signal Strategy', overlay=true, pyramiding=0, 
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.075,
+     initial_capital=10000, currency=currency.USD)
+
+// ============================================
+// INPUTS
+// ============================================
+emaFastLen = input.int(5, 'Fast EMA', minval=1)
+emaSlowLen = input.int(13, 'Slow EMA', minval=1)
+atrLen = input.int(14, 'ATR Period', minval=1)
+atrMultSL = input.float(0.5, 'SL Multiplier (ATR)', minval=0.1, step=0.1)
+riskReward = input.float(3.0, 'Risk:Reward (R:R)', minval=1.0, step=0.5)
+confirmCandle = input.bool(true, 'Require candle confirmation')
+
+showEmaFast = input.bool(true, 'Show Fast EMA')
+showEmaSlow = input.bool(true, 'Show Slow EMA')
+emaFastColor = input.color(color.green, 'Fast EMA Color')
+emaSlowColor = input.color(color.orange, 'Slow EMA Color')
+
+// ============================================
+// CALCULATIONS
+// ============================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atr = ta.atr(atrLen)
+
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+trendChange = bullTrend != bullTrend[1]
+
+buyCondition1 = bullTrend and trendChange and close > open
+sellCondition1 = bearTrend and trendChange and close < open
+buySignal = confirmCandle ? buyCondition1 : (bullTrend and trendChange)
+sellSignal = confirmCandle ? sellCondition1 : (bearTrend and trendChange)
+
+// ============================================
+// STORAGE FOR VISUALS
+// ============================================
+var float currentSL = na
+var float currentFinalTP = na
+
+// ============================================
+// ENTRY + PARTIAL TP + SL LOGIC
+// ============================================
+if buySignal
+    slPrice = low - atr * atrMultSL
+    risk = close - slPrice
+    if risk > syminfo.mintick
+        tpFinal = close + risk * riskReward
+        
+        int numIntermediates = math.floor(riskReward) - 1
+        int numLevels = math.max(1, numIntermediates + 1)
+        float qtyPct = 100.0 / numLevels
+        
+        strategy.entry("Long", strategy.long)
+        
+        // Intermediate partial TPs
+        for i = 1 to numIntermediates
+            tpLevel = close + risk * i
+            strategy.exit("Long TP" + str.tostring(i), from_entry="Long", qty_percent=qtyPct, limit=tpLevel)
+        
+        // Final TP
+        strategy.exit("Long Final TP", from_entry="Long", qty_percent=qtyPct, limit=tpFinal)
+        
+        // SL for entire position
+        strategy.exit("Long SL", from_entry="Long", stop=slPrice, qty_percent=100)
+        
+        currentSL := slPrice
+        currentFinalTP := tpFinal
+
+if sellSignal
+    slPrice = high + atr * atrMultSL
+    risk = slPrice - close
+    if risk > syminfo.mintick
+        tpFinal = close - risk * riskReward
+        
+        int numIntermediates = math.floor(riskReward) - 1
+        int numLevels = math.max(1, numIntermediates + 1)
+        float qtyPct = 100.0 / numLevels
+        
+        strategy.entry("Short", strategy.short)
+        
+        // Intermediate partial TPs
+        for i = 1 to numIntermediates
+            tpLevel = close - risk * i
+            strategy.exit("Short TP" + str.tostring(i), from_entry="Short", qty_percent=qtyPct, limit=tpLevel)
+        
+        // Final TP
+        strategy.exit("Short Final TP", from_entry="Short", qty_percent=qtyPct, limit=tpFinal)
+        
+        // SL
+        strategy.exit("Short SL", from_entry="Short", stop=slPrice, qty_percent=100)
+        
+        currentSL := slPrice
+        currentFinalTP := tpFinal
+
+// Reset visuals when position closed
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    currentSL := na
+    currentFinalTP := na
+
+// ============================================
+// PLOTS
+// ============================================
+plot(emaFast, "Fast EMA", color=emaFastColor, linewidth=1, display=showEmaFast ? display.all : display.none)
+plot(emaSlow, "Slow EMA", color=emaSlowColor, linewidth=1, display=showEmaSlow ? display.all : display.none)
+
+// Signals
+plotshape(buySignal, "BUY", shape.labelup, location.belowbar, color.lime, text="BUY", textcolor=color.white, size=size.small)
+plotshape(sellSignal, "SELL", shape.labeldown, location.abovebar, color.red, text="SELL", textcolor=color.white, size=size.small)
+
+// Current SL & Final TP lines (when in position)
+plot(strategy.position_size != 0 ? currentSL : na, "Stop Loss", color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? currentFinalTP : na, "Final TP", color.green, linewidth=2, style=plot.style_linebr)
+
+// ============================================
+// INFO TABLE
+// ============================================
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 85), border_width=1)
+
+if barstate.islast
+    posSize = strategy.position_size
+    status = posSize > 0 ? "LONG" : posSize < 0 ? "SHORT" : "No Position"
+    table.cell(infoTable, 0, 0, "Status", text_color=color.white)
+    table.cell(infoTable, 1, 0, status, text_color=posSize != 0 ? color.yellow : color.gray)
+    
+    if posSize != 0
+        avgEntry = strategy.position_avg_price
+        table.cell(infoTable, 0, 1, "Avg Entry", text_color=color.white)
+        table.cell(infoTable, 1, 1, str.tostring(avgEntry, "#.####"))
+        
+        table.cell(infoTable, 0, 2, "Stop Loss", text_color=color.white)
+        table.cell(infoTable, 1, 2, str.tostring(currentSL, "#.####"), text_color=color.red)
+        
+        table.cell(infoTable, 0, 3, "Final TP", text_color=color.white)
+        table.cell(infoTable, 1, 3, str.tostring(currentFinalTP, "#.####"), text_color=color.green)
+        
+        risk = posSize > 0 ? avgEntry - currentSL : currentSL - avgEntry
+        reward = posSize > 0 ? currentFinalTP - avgEntry : avgEntry - currentFinalTP
+        rr = risk > 0 ? reward / risk : 0
+        table.cell(infoTable, 0, 4, "Current R:R", text_color=color.white)
+        table.cell(infoTable, 1, 4, str.tostring(rr, "#.##") + ":1", text_color=color.orange)
+
+// ============================================
+// ALERTS
+// ============================================
+alertcondition(buySignal, "🟢 BUY Signal", "BUY {{ticker}} @ {{close}}")
+alertcondition(sellSignal, "🔴 SELL Signal", "SELL {{ticker}} @ {{close}}")
+
+View in Pine Editor・150 lines
+Use on chart
+1
+4
+618
+buy sell signal stratergy it works great for autopilot

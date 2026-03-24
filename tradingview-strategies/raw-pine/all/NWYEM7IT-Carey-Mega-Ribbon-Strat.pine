@@ -1,0 +1,55 @@
+//@version=3
+strategy("CMR", overlay=true)
+
+
+exponential = input(true, title="Exponential MA")
+
+src = close
+
+
+ma03 = exponential ? ema(src, 03) : sma(src, 03)
+ma05 = exponential ? ema(src, 05) : sma(src, 05)
+ma10 = exponential ? ema(src, 10) : sma(src, 10)
+ma15 = exponential ? ema(src, 15) : sma(src, 15)
+ma20 = exponential ? ema(src, 20) : sma(src, 20)
+ma25 = exponential ? ema(src, 25) : sma(src, 25)
+ma30 = exponential ? ema(src, 30) : sma(src, 30)
+ma35 = exponential ? ema(src, 35) : sma(src, 35)
+ma40 = exponential ? ema(src, 40) : sma(src, 40)
+ma45 = exponential ? ema(src, 45) : sma(src, 45)
+ma50 = exponential ? ema(src, 50) : sma(src, 50)
+ma55 = exponential ? ema(src, 55) : sma(src, 55)
+ma60 = exponential ? ema(src, 60) : sma(src, 60)
+ma65 = exponential ? ema(src, 65) : sma(src, 65)
+ma70 = exponential ? ema(src, 70) : sma(src, 70)
+ma75 = exponential ? ema(src, 75) : sma(src, 75)
+ma80 = exponential ? ema(src, 80) : sma(src, 80)
+ma85 = exponential ? ema(src, 85) : sma(src, 85)
+ma90 = exponential ? ema(src, 90) : sma(src, 90)
+ma95 = exponential ? ema(src, 95) : sma(src, 95)
+ma100 = exponential ? ema(src, 100) : sma(src, 100)
+
+
+
+//Long Entry Condition
+longCondition = change(ma05)>=0 and ma05>ma100
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+plot(close[10], trackprice=true, offset=-9999)
+// trackprice=true plots horizontal line on close[10]
+// offset=-9999 hides the plot
+plot(close, color=#FFFFFFFF) // forces to show study
+
+    
+//Short Entry Condition    
+shortCondition = change(ma05)<=0 and ma05<ma100
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・48 lines
+Use on chart
+4
+9
+2 255
+Carey Mega Ribbon Strat

@@ -1,0 +1,112 @@
+//@version=5
+strategy(title=' Rsi Long-Term Strategy [15min]', overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.03)
+
+// Rsi
+rsi_lenght = input.int(10, title='RSI lenght', minval=0)
+rsi_up = ta.rma(math.max(ta.change(close), 0), rsi_lenght)
+rsi_down = ta.rma(-math.min(ta.change(close), 0), rsi_lenght)
+rsi_value = rsi_down == 0 ? 100 : rsi_up == 0 ? 0 : 100 - 100 / (1 + rsi_up / rsi_down)
+rsi_overs = rsi_value <= 30
+rsi_overb = rsi_value >= 70
+
+// Volume
+vol_sma_length = input.int(20, title='Volume lenght  ', minval=1)
+Volume_condt = volume > ta.sma(volume, vol_sma_length) * 2.5
+
+//SMA1
+lengthSMA1 = input(250, title="Lenght SMA 1")
+SMA1 = ta.sma(close, lengthSMA1)
+//plot(SMA1, color=color.rgb(245, 108, 3), linewidth=1, title="SMA250")
+
+//SMA2
+lengthSMA2 = input(500, title="Lenght SMA 2")
+SMA2 = ta.sma(close, lengthSMA2)
+//plot(SMA2, color=#9803f5, linewidth=1, title="SMA500")
+
+
+//Entry Logic
+Long_cond = (rsi_overs and SMA1 > SMA2 and Volume_condt )  
+
+if Long_cond
+    strategy.entry('Long', strategy.long)
+
+//Close Logic
+Long_close = ta.crossunder(SMA1,SMA2)
+
+if Long_close
+    strategy.close("Long")
+
+//Bar colors
+Bar_color = Volume_condt ? #fc9802 : SMA1 > SMA2 ? color.rgb(84, 252, 0) : SMA1 < SMA2 ? color.maroon : color.gray
+barcolor(color=Bar_color)
+
+// Rsi value Plotshapes
+plotshape(rsi_value < 30 and SMA1 > SMA2 and Volume_condt, title='Buy', color=color.new(color.green, 0), style=shape.circle, location=location.belowbar, size=size.tiny, textcolor=color.new(color.black, 0))
+plotshape(rsi_value > 70 and SMA1 < SMA2 and Volume_condt, title='Sell', color=color.new(color.red, 0), style=shape.circle, location=location.abovebar, size=size.tiny, textcolor=color.new(color.black, 0))
+plotshape(ta.crossunder(SMA1,SMA2) , title='DEATH CROSS', color=#000000, style=shape.xcross, location=location.abovebar, size=size.small, textcolor=color.new(color.black, 0))
+
+//Stop-Loss// this code is from author RafaelZioni, modified by wielkieef
+pera(pcnt) =>
+    strategy.position_size != 0 ? math.round(pcnt / 100 * strategy.position_avg_price / syminfo.mintick) : float(na)
+stoploss = input.float(title=' stop loss', defval=5.0, minval=0.5)
+los = pera(stoploss)
+strategy.exit('SL', loss=los)
+
+
+
+
+// by wielkieef
+
+View in Pine Editor・61 lines
+Use on chart
+4
+7
+0
+1
+9 367
+Aug 23, 2024
+Hello, I would like to present to you The "RSI Long-Term Strategy" for 15min tf
+
+The "RSI Long-Term Strategy [15min]" is designed for traders who prefer a combination of momentum and trend-following techniques. The strategy focuses on entering long positions during significant market corrections within an overall uptrend, confirmed by both RSI and volume. The use of long-term SMAs ensures that trades are made in line with the broader market trend. The stop-loss feature provides risk management by limiting losses on trades that do not perform as expected. This strategy is particularly well-suited for longer-term traders who monitor 15-minute charts but look for substantial trend reversals or continuations.
+
+Indicators and Parameters:
+
+Relative Strength Index (RSI):
+- The RSI is calculated using a 10-period length. It measures the magnitude of recent price changes to evaluate overbought or oversold conditions. The script defines oversold conditions when the RSI is at or below 30 and overbought conditions when the RSI is at or above 70.
+
+Volume Condition:
+-The strategy incorporates a volume condition where the current volume must be greater than 2.5 times the 20-period moving average of volume. This is used to confirm the strength of the price movement.
+
+Simple Moving Averages (SMA):
+- The strategy uses two SMAs: SMA1 with a length of 250 periods and SMA2 with a length of 500 periods. These SMAs help identify long-term trends and generate signals based on their crossover.
+
+Strategy Logic:
+
+Entry Logic:
+
+A long position is initiated when all the following conditions are met:
+The RSI indicates an oversold condition (RSI ≤ 30).
+SMA1 is above SMA2, indicating an uptrend.
+The volume condition is satisfied, confirming the strength of the signal.
+
+Exit Logic:
+
+The strategy closes the long position when SMA1 crosses under SMA2, signaling a potential end of the uptrend (a "Death Cross").
+
+Stop-Loss:
+
+A stop-loss is set at 5% below the entry price to manage risk and limit potential losses.
+
+Buy and sell signals are highlighted with circles below or above bars:
+Green Circle: Buy signal when RSI is oversold, SMA1 > SMA2, and the volume condition is met.
+Red Circle: Sell signal when RSI is overbought, SMA1 < SMA2, and the volume condition is met.
+Black Cross: "Death Cross" when SMA1 crosses under SMA2, indicating a potential bearish signal.
+
+to determine the level of stop loss and target point I used a piece of code by RafaelZioni, here is the script from which a piece of code was taken
+https://pl.tradingview.com/script/xGk5K4DE-BTC-15-min/
+
+I hope the strategy will be helpful, as always, best regards and safe trades
+;)
+Aug 23, 2024
+Release Notes
+update

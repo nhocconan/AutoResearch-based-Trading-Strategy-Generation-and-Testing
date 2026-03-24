@@ -1,0 +1,32 @@
+//@version=4
+//study(title="MA Crossover Strategy", overlay = true)
+strategy("MA Crossover Alerts", overlay=true)
+src = input(close, title="Source")
+
+price = security(syminfo.tickerid, timeframe.period, src)
+ma1 = input(25, title="1st MA Length")
+type1 = input("SMA", "1st MA Type", options=["SMA", "EMA"])
+
+ma2 = input(50, title="2nd MA Length")
+type2 = input("SMA", "2nd MA Type", options=["SMA", "EMA"])
+
+price1 = if type1 == "SMA"
+    sma(price, ma1)
+else
+    ema(price, ma1)
+
+price2 = if type2 == "SMA"
+    sma(price, ma2)
+else
+    ema(price, ma2)
+    
+alertcondition(crossover(price1, price2), title='Alert! Long Crossover', message='Go Long')
+
+alertcondition(crossunder(price1, price2), title='Alert! Short Crossover', message='Go Short')
+
+View in Pine Editor・25 lines
+Use on chart
+1
+8
+1 316
+Create option in Alert dialogue box when MAs cross over

@@ -1,0 +1,153 @@
+//@version=6
+strategy(
+     title = "Quality-Controlled Trend Strategy",
+     overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.05,
+     slippage = 1
+)
+
+// ==============================
+// Inputs
+// ==============================
+
+// Trend & Entry
+fastEmaLen = input.int(50, "Fast EMA Length")
+slowEmaLen = input.int(200, "Slow EMA Length")
+rsiLen     = input.int(14, "RSI Length")
+rsiMid     = input.float(50, "RSI Midline")
+
+// Risk (isolated block)
+atrLen     = input.int(14, "ATR Length")
+atrSLMult  = input.float(1.5, "Stop Loss ATR Multiplier")
+rrRatio    = input.float(2.0, "Risk-Reward Ratio")
+
+// ==============================
+// Indicator Calculations
+// ==============================
+
+emaFast = ta.ema(close, fastEmaLen)
+emaSlow = ta.ema(close, slowEmaLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+
+// ==============================
+// Trend Context
+// ==============================
+
+trendUp   = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+// ==============================
+// Entry Logic (Confirmed Bar)
+// ==============================
+
+longCondition =
+     trendUp and
+     close > emaFast and
+     rsiVal > rsiMid
+
+shortCondition =
+     trendDown and
+     close < emaFast and
+     rsiVal < rsiMid
+
+// ==============================
+// Entries
+// ==============================
+
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+// ==============================
+// Risk Management (Editable Without Touching Entries)
+// ==============================
+
+longStop  = strategy.position_avg_price - atrVal * atrSLMult
+longLimit = strategy.position_avg_price + atrVal * atrSLMult * rrRatio
+
+shortStop  = strategy.position_avg_price + atrVal * atrSLMult
+shortLimit = strategy.position_avg_price - atrVal * atrSLMult * rrRatio
+
+strategy.exit("Long Exit",  from_entry = "Long",  stop = longStop,  limit = longLimit)
+strategy.exit("Short Exit", from_entry = "Short", stop = shortStop, limit = shortLimit)
+
+// ==============================
+// Visuals
+// ==============================
+
+plot(emaFast, color=color.orange)
+plot(emaSlow, color=color.blue)
+
+View in Pine Editor・89 lines
+Use on chart
+2
+6
+1 165
+Overview
+This strategy demonstrates a clean, execution-aware trend framework with fully isolated risk management.
+Entry conditions and risk logic are intentionally separated so risk parameters can be adjusted without altering signal behavior.
+All calculations are evaluated on confirmed bars to ensure backtest behavior reflects real-time execution.
+
+Design intent
+Many scripts mix entries and exits in ways that make results fragile or misleading.
+This strategy focuses on structural clarity by enforcing:
+
+confirmed-bar logic only
+
+fixed and transparent risk handling
+
+consistent indicator calculations
+
+one position at a time
+
+
+It is intended as a baseline framework rather than an optimized system.
+
+Trading logic (high level)
+Trend context
+
+EMA 50 vs EMA 200 defines directional bias
+
+
+Entry
+
+Price alignment with EMA 50
+
+RSI used as a momentum confirmation, not as an overbought/oversold signal
+
+
+Risk management
+
+Stop-loss based on ATR
+
+Fixed risk–reward structure
+
+Risk logic is isolated from entry logic
+
+
+
+Editing risk without affecting signals
+All stop-loss and take-profit calculations are handled in a dedicated block.
+Users can adjust:
+
+ATR length
+
+stop-loss multiplier
+
+risk–reward ratio
+
+
+without modifying entry conditions.
+This allows controlled experimentation while preserving signal integrity.
+
+Usage notes
+Results vary by market, timeframe, and volatility conditions.
+This script is provided for testing and educational purposes and should be validated across multiple symbols and forward-tested before use in live environments.
+

@@ -1,0 +1,87 @@
+//@version=4
+strategy("SuperTrend Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=1000)
+
+LongOnly = input(title="Long Only ?", type=input.bool, defval=true)
+length = input(title="ATR Period", type=input.integer, defval=22)
+mult = input(title="ATR Multiplier", type=input.float, step=0.1, defval=3.0)
+showLabels = input(title="Show Buy/Sell Labels ?", type=input.bool, defval=true)
+
+////////////////////////////////////////////////////////////////////////////////
+// BACKTESTING RANGE
+
+// From Date Inputs
+fromDay = input(defval=1, title="From Day", minval=1, maxval=31)
+fromMonth = input(defval=1, title="From Month", minval=1, maxval=12)
+fromYear = input(defval=2019, title="From Year", minval=1970)
+
+// To Date Inputs
+toDay = input(defval=1, title="To Day", minval=1, maxval=31)
+toMonth = input(defval=1, title="To Month", minval=1, maxval=12)
+toYear = input(defval=2020, title="To Year", minval=1970)
+
+// Calculate start/end date and time condition
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+atr = mult * atr(length)
+
+longStop = hl2 - atr
+longStopPrev = nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? max(longStop, longStopPrev) : longStop
+
+shortStop = hl2 + atr
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? min(shortStop, shortStopPrev) : shortStop
+
+dir = 1
+dir := nz(dir[1], dir)
+dir := dir == -1 and close > shortStopPrev ? 1 : 
+   dir == 1 and close < longStopPrev ? -1 : dir
+
+longColor = color.green
+shortColor = color.red
+
+
+plot(dir == 1 ? longStop : na, title="Long Stop", style=plot.style_linebr, linewidth=2, color=longColor)
+buySignal = dir == 1 and dir[1] == -1
+plotshape(buySignal ? longStop : na, title="Long Stop Start", location=location.absolute, style=shape.circle, size=size.tiny, color=longColor, transp=0)
+plotshape(buySignal and showLabels ? longStop : na, title="Buy Label", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=longColor, textcolor=color.white, transp=0)
+
+plot(dir == 1 ? na : shortStop, title="Short Stop", style=plot.style_linebr, linewidth=2, color=shortColor)
+sellSignal = dir == -1 and dir[1] == 1
+plotshape(sellSignal ? shortStop : na, title="Short Stop Start", location=location.absolute, style=shape.circle, size=size.tiny, color=shortColor, transp=0)
+plotshape(sellSignal and showLabels ? shortStop : na, title="Sell Label", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=shortColor, textcolor=color.white, transp=0)
+
+if LongOnly
+    if buySignal and time_cond
+        strategy.entry("Long", strategy.long, comment="Long")
+    
+    if(sellSignal and time_cond)
+        strategy.close("Long")
+else
+    if buySignal and time_cond
+        strategy.entry("Long", strategy.long, comment="Long")
+    else
+        strategy.cancel("Long")
+    
+    
+    if sellSignal and time_cond
+        strategy.entry("Short", strategy.short, comment="Short")
+    else
+        strategy.cancel("Short")
+
+if not time_cond
+    strategy.close_all()
+
+View in Pine Editor・78 lines
+Use on chart
+2
+9
+0
+2
+5 450
+SuperTrend Strategy

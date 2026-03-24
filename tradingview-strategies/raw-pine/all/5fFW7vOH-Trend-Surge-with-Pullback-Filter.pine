@@ -1,0 +1,89 @@
+//@version=5
+strategy("Trend Surge with Pullback Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=25, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// === INPUTS ===
+rocLen      = input.int(10, title="ROC Length")
+rocThresh   = input.float(2.0, title="ROC Threshold (%)")
+pullbackBars = input.int(3, title="Pullback Lookback")
+pullbackDrop = input.float(1.0, title="Minimum Pullback %")
+atrLen      = input.int(14, title="ATR Length")
+volFactor   = input.float(1.2, title="Low Volatility Filter Multiplier")
+riskReward  = input.float(2.0, title="Risk-Reward Ratio")
+maxBars     = input.int(30, title="Max Holding Bars")
+
+// === CALCULATIONS ===
+roc = ta.roc(close, rocLen)
+atr = ta.atr(atrLen)
+atrMA = ta.sma(atr, 20)
+
+volLow = atr < atrMA * volFactor
+
+// === Pullback Logic ===
+pullbackCond = close < ta.highest(close, pullbackBars) * (1 - pullbackDrop / 100)
+
+// === LONG Condition ===
+longCond = roc > rocThresh and pullbackCond and volLow
+
+if (longCond)
+    strategy.entry("Long", strategy.long)
+
+// === SL/TP and Time Exit ===
+longSL = strategy.position_avg_price - atr
+longTP = strategy.position_avg_price + atr * riskReward
+
+strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP, when=bar_index - strategy.opentrades.entry_bar_index(0) >= maxBars)
+
+View in Pine Editor・34 lines
+Use on chart
+4
+0
+1 643
+Trend Surge with Pullback Filter
+
+Overview
+Trend Surge with Pullback Filter is a price action-based strategy designed to enter strong trends not at the breakout, but at the first controlled pullback after a surge. It filters out noise by requiring momentum confirmation and low volatility conditions, aiming for better entry prices and reduced risk exposure.
+
+How It Works
+
+A strong upward trend is identified when the Rate of Change (ROC) exceeds a defined percentage (e.g., 2%).
+
+Instead of jumping into the trend immediately, the strategy waits for a pullback: the price must drop at least 1% below its recent high (over the past 3 candles).
+
+A low volatility environment is also required for entry — measured using ATR being below its 20-period average multiplied by a safety factor.
+
+If all three conditions are met (trend + pullback + quiet volatility), the system enters a long position.
+
+The trade is managed using a dynamic ATR-based stop-loss and a take-profit at 2x ATR.
+
+An automatic exit occurs after 30 bars if neither SL nor TP is hit.
+
+Key Features
+- Momentum-triggered trend detection via ROC
+- Smart pullback filter avoids overbought entries
+- Volatility-based filter to eliminate noise and choppy conditions
+- Dynamic risk-reward ratio with ATR-driven exit logic
+- Time-limited exposure using bar-based exit
+
+Parameter Explanation
+
+ROC Length (10): Looks for short-term price surges
+
+ROC Threshold (2.0%): Trend is considered valid if price increased more than 2%
+
+Pullback Lookback (3): Checks last 3 candles for price retracement
+
+Minimum Pullback % (1.0%): Entry only if price pulled back at least 1%
+
+ATR Length (14): Measures current volatility
+
+Low Volatility Multiplier (1.2): ATR must be below this multiple of its 20-period average
+
+Risk-Reward (2.0): Target is set at 2x the stop-loss distance
+
+Max Bars (30): Trade is closed automatically after 30 bars
+
+Originality Statement
+This strategy doesn’t enter at the trend start, unlike many momentum bots. Instead, it waits for the first market hesitation — a minor pullback under low volatility — before entering. This logic mimics how real traders often wait for a better entry after a breakout, avoiding emotional overbought buys. The combined use of ROC, dynamic pullback detection, and ATR-based environment filters makes it both practical and original for real-world trading.
+
+Disclaimer
+This strategy is intended for educational and research purposes. Backtest thoroughly and understand the logic before using with real capital.

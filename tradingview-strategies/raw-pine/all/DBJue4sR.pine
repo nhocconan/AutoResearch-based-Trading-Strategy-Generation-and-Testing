@@ -1,0 +1,229 @@
+//@version=5
+strategy("Nirvana True Duel — EMA Ribbon + BB Squeeze + OBV (Backtest)",
+     overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true)
+
+// === Inputs ===
+emaFastLen   = input.int(20, "EMA Fast Length")
+emaSlowLen   = input.int(50, "EMA Slow Length")
+bbLength     = input.int(20, "BB Length")
+bbMult       = input.float(2.0, "BB StdDev Mult")
+squeezeLookback = input.int(20, "Squeeze Lookback")
+squeezeK        = input.float(1.2, "Squeeze Threshold (↑=느슨)")
+obvLen      = input.int(14, "OBV Smoothing")
+atrLen      = input.int(14, "ATR Length")
+atrMultSL   = input.float(1.5, "Stop ATR x")
+rr          = input.float(1.5, "Risk:Reward")
+usePctQty   = input.bool(true, "Use % of Equity")
+qtyPct      = input.float(10.0, "Position Size (%)")
+fixedQty    = input.float(1.0, "Fixed Qty")
+
+// 보유 최대 봉수(시간 제한 청산)
+maxBarsHold = input.int(96, "Max Bars to Hold (time stop)", minval=1,
+   tooltip="5분봉 기준 96=8시간, 15분봉 기준 96=24시간")
+
+// === Indicators ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+
+basis = ta.sma(close, bbLength)
+dev   = bbMult * ta.stdev(close, bbLength)
+upper = basis + dev
+lower = basis - dev
+bbWidth = (upper - lower) / basis
+
+obv = ta.cum(math.sign(ta.change(close)) * volume)
+obv_sma = ta.sma(obv, obvLen)
+obv_up  = obv > obv_sma
+obv_dn  = obv < obv_sma
+
+// === Logic ===
+inSqueeze     = bbWidth <= ta.lowest(bbWidth, squeezeLookback) * squeezeK
+squeezeExpand = (not inSqueeze) and inSqueeze[1]
+
+longTrig  = close > upper and bullTrend and obv_up and squeezeExpand
+shortTrig = close < lower and bearTrend and obv_dn and squeezeExpand
+
+// === Risk (ATR) ===
+atr = ta.atr(atrLen)
+longSL  = strategy.position_avg_price - atrMultSL * atr
+longTP  = strategy.position_avg_price + (atrMultSL * rr) * atr
+shortSL = strategy.position_avg_price + atrMultSL * atr
+shortTP = strategy.position_avg_price - (atrMultSL * rr) * atr
+
+// === Qty ===
+qty = usePctQty ? strategy.equity * qtyPct * 0.01 / close : fixedQty
+
+// === Entries ===
+canLong  = longTrig  and strategy.position_size <= 0
+canShort = shortTrig and strategy.position_size >= 0
+
+if canLong
+    strategy.entry("NTD_Long", strategy.long, qty=qty)
+if canShort
+    strategy.entry("NTD_Short", strategy.short, qty=qty)
+
+// === ATR exits ===
+if strategy.position_size > 0
+    strategy.exit("NTD_Long_Exit",  from_entry="NTD_Long",  stop=longSL,  limit=longTP)
+if strategy.position_size < 0
+    strategy.exit("NTD_Short_Exit", from_entry="NTD_Short", stop=shortSL, limit=shortTP)
+
+// === Time-based safety exit ===
+var int entryBar = na
+// 새 진입 시점 기록
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryBar := bar_index
+// 포지션 청산 시 초기화
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryBar := na
+barsHeld = strategy.position_size != 0 and entryBar != na ? (bar_index - entryBar) : 0
+
+if strategy.position_size > 0 and barsHeld >= maxBarsHold
+    strategy.close("NTD_Long",   comment="Time Stop")
+if strategy.position_size < 0 and barsHeld >= maxBarsHold
+    strategy.close("NTD_Short",  comment="Time Stop")
+
+// === Visuals & Alerts ===
+plot(emaFast, "EMA Fast", color=color.new(color.yellow, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0))
+plot(basis,   "BB Basis", color=color.new(color.blue, 0))
+plot(upper,   "BB Upper", color=color.new(color.green, 0))
+plot(lower,   "BB Lower", color=color.new(color.red, 0))
+
+plotshape(longTrig,  title="Nirvana True Duel BUY",  style=shape.labelup,   color=color.green, text="NTD BUY",  location=location.belowbar, size=size.tiny)
+plotshape(shortTrig, title="Nirvana True Duel SELL", style=shape.labeldown, color=color.red,   text="NTD SELL", location=location.abovebar, size=size.tiny)
+bgcolor(inSqueeze ? color.new(color.gray, 90) : na)
+
+alertcondition(longTrig,  "Nirvana True Duel — Buy",  "Nirvana True Duel BUY Trigger")
+alertcondition(shortTrig, "Nirvana True Duel — Sell", "Nirvana True Duel SELL Trigger")
+
+View in Pine Editor・106 lines
+Use on chart
+3
+4
+1 325
+전략 이름
+열반의 진검승부 (영문: Nirvana True Duel)
+
+컨셉과 철학
+“열반의 진검승부”는 시장 소음은 무시하고, 확실할 때만 진입하는 전략입니다.
+EMA 리본으로 추세 방향을 확인하고, 볼린저 밴드 수축/확장으로 변동성 돌파를 포착하며, OBV로 거래량 확인을 통해 가짜 돌파를 필터링합니다.
+
+전략 로직
+
+매수 조건 (롱)
+
+20EMA > 50EMA (상승 추세)
+
+밴드폭 수축 후 확장 시작
+
+종가가 상단 밴드 돌파
+
+OBV 상승 흐름 유지
+
+매도 조건 (숏)
+
+20EMA < 50EMA (하락 추세)
+
+밴드폭 수축 후 확장 시작
+
+종가가 하단 밴드 이탈
+
+OBV 하락 흐름 유지
+
+진입·청산
+
+손절: ATR × 1.5 배수
+
+익절: 손절폭의 1.5~2배에서 부분 청산
+
+시간 청산: 설정한 최대 보유 봉수 초과 시 강제 청산
+
+장점
+✅ 추세·변동성·거래량 3중 필터 → 노이즈 최소화
+✅ 백테스트·알람 지원 → 기계적 매매 가능
+✅ 5분/15분 차트에 적합 → 단타/스윙 트레이딩 활용 가능
+
+주의점
+⚠ 횡보장에서는 신호가 적거나 실패 가능
+⚠ 수수료·슬리피지 고려 필요
+
+
+
+
+📜 Nirvana True Duel — Strategy Description (English)
+
+Name:
+Nirvana True Duel (a.k.a. Nirvana Cross)
+
+Concept & Philosophy
+The “Nirvana True Duel” strategy focuses on trading only meaningful breakouts and avoiding unnecessary noise.
+
+Nirvana: A calm, patient state — waiting for the right opportunity without emotional trading.
+
+True Duel: When the signal appears, enter decisively and let the market reveal the outcome.
+
+In short: “Ignore market noise, trade only high-probability breakouts.”
+
+🧩 Strategy Components
+
+Trend Filter (EMA Ribbon): Stay aligned with the main market trend.
+
+Volatility Squeeze (Bollinger Band): Detect volatility contraction & expansion to catch explosive moves early.
+
+Volume Confirmation (OBV): Filter out false breakouts by confirming with volume flow.
+
+⚔️ Entry & Exit Conditions
+
+Long Setup:
+
+20 EMA > 50 EMA (uptrend)
+
+BB width breaks out from recent squeeze
+
+Close > Upper Bollinger Band
+
+OBV shows positive flow
+
+Short Setup:
+
+20 EMA < 50 EMA (downtrend)
+
+BB width breaks out from recent squeeze
+
+Close < Lower Bollinger Band
+
+OBV shows negative flow
+
+Risk Management:
+
+Stop Loss: ATR × 1.5 below/above entry
+
+Take Profit: 1.5–2× stop distance, partial take-profit allowed
+
+Time Stop: Automatically closes after max bars held (e.g. 8h on 5m chart)
+
+✅ Strengths
+
+Triple Filtering: Trend + Volatility + Volume → fewer false signals
+
+Mechanical & Backtestable: Ideal for objective trading & performance validation
+
+Adaptable: Works well on Bitcoin, Nasdaq futures, and other high-volatility markets (5m/15m)
+
+⚠️ Things to Note
+
+Low signal frequency or higher failure rate in sideways/range markets
+
+Commission & slippage should be factored in, especially on lower timeframes
+
+ATR multiplier and R:R ratio should be optimized per asset
+

@@ -1,0 +1,69 @@
+//@version=5
+strategy("DI+/- Cross Strategy with ATR SL and 2% TP", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+length = input.int(14, title="DI Length")
+threshold = input.int(40, title="Threshold")
+tpPerc = input.float(2.0, title="Take Profit (%)")
+atrLength = input.int(14, title="ATR Length")
+atrMult = input.float(1.5, title="ATR Multiplier for SL")
+
+// === CALCULATIONS ===
+[plusDI, minusDI, _] = ta.dmi(length, length)
+atr = ta.atr(atrLength)
+
+// === CONDITIONS ===
+buySignal = ta.crossover(plusDI, threshold)
+sellSignal = ta.crossover(minusDI, threshold)
+
+// === STRATEGY LOGIC ===
+// Long trade parameters
+longTP = close * (1 + tpPerc / 100)
+longSL = close - atr * atrMult
+
+// Short trade parameters
+shortTP = close * (1 - tpPerc / 100)
+shortSL = close + atr * atrMult
+
+// Enter Long
+if (buySignal)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", stop=longSL, limit=longTP)
+
+// Enter Short
+if (sellSignal)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry="Short", stop=shortSL, limit=shortTP)
+
+View in Pine Editor・36 lines
+Use on chart
+3
+2
+1 429
+DI+/- Cross Strategy with ATR Stop Loss and 2% Take Profit
+
+📝 Script Description for Publishing:
+This strategy is based on the directional movement of the market using the Average Directional Index (ADX) components — DI+ and DI- — to generate entry signals, with clearly defined risk and reward targets using ATR-based Stop Loss and Fixed Percentage Take Profit.
+
+🔍 How it works:
+Buy Signal: When DI+ crosses above 40, signaling strong bullish momentum.
+
+Sell Signal: When DI- crosses above 40, indicating strong bearish momentum.
+
+Stop Loss: Dynamically calculated using ATR × 1.5, to account for market volatility.
+
+Take Profit: Fixed at 2% above/below the entry price, for consistent reward targeting.
+
+🧠 Why it’s useful:
+Combines momentum breakout logic with volatility-based risk management.
+
+Works well on trending assets, especially when combined with higher timeframe filters.
+
+Clean BUY and SELL visual labels make it easy to interpret and backtest.
+
+✅ Tips for Use:
+Use on assets with clear trends (e.g., major forex pairs, trending stocks, crypto).
+
+Best on 30m – 4H timeframes, but can be customized.
+
+Consider combining with other filters (e.g., EMA trend direction or Bollinger Bands) for even better accuracy.

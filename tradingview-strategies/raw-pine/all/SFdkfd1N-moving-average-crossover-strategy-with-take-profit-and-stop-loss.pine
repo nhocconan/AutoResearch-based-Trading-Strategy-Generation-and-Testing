@@ -1,0 +1,125 @@
+//@version=6
+strategy("Moving Average Crossover Strategy with Take Profit and Stop Loss", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+//risk_free_rate = float(request.security("IRUS", "D", close)/request.security("IRUS", "D", close[1]) - 1  ))
+
+
+
+
+// MA periods
+fastLength = input.int(5, title="Fast MA Length")
+slowLength = input.int(12, title="Slow MA Length")
+
+
+
+
+// Take Profit and Stop Loss
+takeProfitLevel = input(10, title="Take Profit (пункты)") // Take profit % from the last price
+stopLossLevel = input(5, title="Stop Loss (пункты)") // Stop loss  % from the last price
+takeProfitLevel_dyn = input(20, title="Dynamic Take Profit (пункты)") // Move TP if current_price higher buy_px
+stopLossLevel_dyn =  input(2.5, title="Dynamic Stop Loss (пункты)") // S Move SL if current_price higher buy_px
+
+
+// Вычисление скользящих средних
+fastMA = ta.sma(close, fastLength)
+slowMA= ta.sma(close, slowLength)
+
+
+// Conditions for Sell and Buy
+longCondition = ta.crossover (fastMA, slowMA) // покупаем, если короткая MA персекает длинную снизу-вверх
+shortCondition = ta.crossunder(fastMA, slowMA) // продаем, если короткая MA персекает длинную сверху-вниз
+
+
+
+
+// Buy position condition
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+
+
+
+
+
+// Dynamic TP SL leveles
+takeProfitPrice = strategy.position_avg_price * (1+ takeProfitLevel / 100)
+stopLossPrice = strategy.position_avg_price * (1-stopLossLevel / 100)
+
+
+entryPrice = strategy.position_avg_price
+
+
+
+
+if (strategy.position_size > 0) // если есть открытая позиция
+
+
+
+
+    // takeProfitPrice := entryPrice * (1+ takeProfitLevel / 100)
+    // stopLossPrice := entryPrice * (1-stopLossLevel / 100)
+
+
+    // // Перемещение Stop Loss и Take Profit
+    if (close > entryPrice)
+   
+        takeProfitPrice := close * (1+ takeProfitLevel_dyn / 100)
+        stopLossPrice := close * (1- stopLossLevel_dyn/ 100)
+
+
+
+
+
+
+if (shortCondition)
+    strategy.close("Buy")
+
+
+
+
+strategy.exit("Take Profit/Stop loss", "Buy", limit=takeProfitPrice, stop=stopLossPrice)
+
+
+// Drawing MA lines
+plot(fastMA, color=color.blue, title="Fast Moving Average")
+plot(slowMA, color=color.orange, title="Slow Moving Average")
+
+
+
+
+// Визуализация
+plot(longCondition ? na : takeProfitPrice, title="Take Profit Level", color=color.green, linewidth=1, style=plot.style_line)
+plot(longCondition ? na: stopLossPrice, title="Stop Loss Level", color=color.red, linewidth=1, style=plot.style_line)
+
+View in Pine Editor・91 lines
+Use on chart
+6
+9
+3 214
+The Moving Average Crossover Strategy is a popular trading technique that utilizes two moving averages (MAs) of different periods to identify potential buy and sell signals. By incorporating take profit and stop loss levels, traders can effectively manage their risk while maximizing potential returns. Here’s a detailed explanation of how this strategy works:
+Overview of the Moving Average Crossover Strategy
+Moving Averages:
+A short-term moving average (e.g., 50-day MA) reacts more quickly to price changes, while a long-term moving average (e.g., 200-day MA) smooths out price fluctuations over a longer period.
+The strategy generates trading signals based on the crossover of these two averages:
+Buy Signal: When the short-term MA crosses above the long-term MA (often referred to as a "Golden Cross").
+Sell Signal: When the short-term MA crosses below the long-term MA (known as a "Death Cross").
+Implementing Take Profit and Stop Loss
+1. Setting Take Profit Levels
+Definition: A take profit order automatically closes a trade when it reaches a specified profit level.
+Strategy:
+Determine a realistic profit target based on historical price action, support and resistance levels, or a fixed risk-reward ratio (e.g., 2:1).
+For instance, if you enter a buy position at $100, you might set a take profit at $110 if you anticipate that level will act as resistance.
+2. Setting Stop Loss Levels
+Definition: A stop loss order limits potential losses by closing a trade when the price reaches a specified level.
+Strategy:
+Place the stop loss just below the most recent swing low for buy orders or above the recent swing high for sell orders.
+Alternatively, you can use a percentage-based method (e.g., 2-3% below the entry point) to define your stop loss.
+For example, if you enter a buy position at $100 with a stop loss set at $95, your maximum loss would be limited to $5 per share.
+Example of Using Moving Average Crossover with Take Profit and Stop Loss
+Entry Signal:
+You observe that the 50-day MA crosses above the 200-day MA at $100. You enter a buy position.
+Setting Take Profit and Stop Loss:
+You analyze historical price levels and set your take profit at $110.
+You place your stop loss at $95 based on recent swing lows.
+Trade Management:
+If the price rises to $110, your take profit order is executed, securing your profit.
+If the price falls to $95, your stop loss is triggered, limiting your losses.

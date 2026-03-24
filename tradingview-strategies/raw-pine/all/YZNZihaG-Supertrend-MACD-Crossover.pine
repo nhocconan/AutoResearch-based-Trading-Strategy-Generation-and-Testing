@@ -1,0 +1,84 @@
+//@version=5
+strategy("Supertrend + MACD Crossover", overlay=true)
+
+// Define Supertrend
+factor = 3.0
+atrLength = 10
+[supertrend, supertrendDirection] = ta.supertrend(factor, atrLength)
+
+// Define MACD
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+macdBullish = ta.crossover(macdLine, signalLine)
+macdBearish = ta.crossunder(macdLine, signalLine)
+
+// Define Buy and Sell Conditions
+bullishCrossover = supertrendDirection == 1 and macdBullish
+bearishCrossover = supertrendDirection == -1 and macdBearish
+
+// Execute Buy Order
+if (bullishCrossover)
+    strategy.entry("Long", strategy.long)
+
+// Execute Sell Order
+if (bearishCrossover)
+    strategy.close("Long")
+
+// Plot Supertrend
+plot(supertrend, color=supertrendDirection == 1 ? color.green : color.red, title="Supertrend")
+
+// Plot MACD Signals
+plotshape(series=bullishCrossover, location=location.belowbar, color=color.green, style=shape.triangleup, title="Buy Signal", size=size.small)
+plotshape(series=bearishCrossover, location=location.abovebar, color=color.red, style=shape.triangledown, title="Sell Signal", size=size.small)
+
+View in Pine Editor・31 lines
+Use on chart
+4
+0
+2 088
+Key Elements of the Template:
+Supertrend Settings:
+
+supertrendFactor: Adjustable to control the sensitivity of the Supertrend.
+
+supertrendATRLength: ATR length used for Supertrend calculation.
+
+MACD Settings:
+
+macdFastLength, macdSlowLength, macdSignalSmoothing: These settings allow you to fine-tune the MACD for better results.
+
+Risk Management:
+
+Stop-Loss: The stop-loss is based on the ATR (Average True Range), a volatility-based indicator.
+
+Take-Profit: The take-profit is based on the risk-reward ratio (set to 3x by default).
+
+Both stop-loss and take-profit are dynamic, based on ATR, which adjusts according to market volatility.
+
+Buy and Sell Signals:
+
+Buy Signal: Supertrend is bullish, and MACD line crosses above the Signal line.
+
+Sell Signal: Supertrend is bearish, and MACD line crosses below the Signal line.
+
+Visual Elements:
+
+The Supertrend line is plotted in green (bullish) and red (bearish).
+
+Buy and Sell signals are shown with green and red triangles on the chart.
+
+
+
+Next Steps for Optimization:
+Backtesting:
+Run backtests on BTC in the 5-minute timeframe and adjust parameters (Supertrend factor, MACD settings, risk-reward ratio) to find the optimal configuration for the 60% win ratio.
+
+Fine-Tuning Parameters:
+
+Adjust supertrendFactor and macdFastLength to find more optimal values based on BTC's market behavior.
+
+Tweak the risk-reward ratio to maximize profitability while maintaining a good win ratio.
+
+Evaluate Market Conditions:
+The performance of the strategy can vary based on market volatility. It may be helpful to evaluate performance in different market conditions or pair it with a filter like RSI or volume.
+
+Let me know if you'd like further tweaks or explanations!

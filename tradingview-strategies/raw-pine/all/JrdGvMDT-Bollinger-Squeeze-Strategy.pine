@@ -1,0 +1,62 @@
+//@version=3
+strategy("Bollinger Squeeze", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// Bollinger Bands
+
+source = close
+lengthBB = input(20, minval=1)
+mult = input(2.0, minval=0.001, maxval=50)
+basis = sma(source, lengthBB)
+dev = mult * stdev(source, lengthBB)
+upper = basis + dev
+lower = basis - dev
+
+longBB = (close <= lower)
+shortBB = (close >= upper)
+
+// Bollinger width
+
+lengthBW= input(20, minval=1)
+src = input(close, title="Source")
+mult2 = input(2.0, minval=0.001, maxval=50)
+basis2 = sma(src, lengthBW)
+dev2 = mult2 * stdev(src, lengthBW)
+upper2 = basis2 + dev2
+lower2 = basis2 - dev2
+bbr = (src - lower)/(upper - lower)
+
+BBW = (bbr >= 0.02)
+
+// Stochastic
+
+periodK = input(9, title="K", minval=1)
+periodD = input(3, title="D", minval=1)
+smoothK = input(3, title="Smooth", minval=1)
+k = sma(stoch(close, high, low, periodK), smoothK)
+d = sma(k, periodD)
+
+longStoch = (d <= 20)
+shortStoch = (d >= 80)
+
+// Strategy
+
+TP = input(500)
+SL = input(450)
+
+longCond = longBB and longStoch
+shortCond = shortBB and shortStoch
+
+if longCond
+    strategy.entry('long', strategy.long)
+    strategy.exit('long', profit=TP, loss=SL)
+    
+if shortCond
+    strategy.entry('short', strategy.short)
+    strategy.exit('short', profit=TP, loss=SL)
+
+View in Pine Editor・55 lines
+Use on chart
+7
+6
+3 968
+A Bollinger Strategy where we try to squeeze out some profits.

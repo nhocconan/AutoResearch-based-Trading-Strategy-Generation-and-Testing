@@ -1,0 +1,6 @@
+//@version=4
+lineWidth=##input(defval=1,type='INPUT_INTEGER',##id='in_9')
+##root(root_metainfo,rm_0,lineWidth,input__integer)
+##root(root_metainfo,rm_1,lineWidth,input__integer)
+##root(root_metainfo,rm_2,lineWidth,input__integer)
+##root(root_metainfo,rm_3,lineWidth,input__integer)

@@ -1,0 +1,109 @@
+//@version=4
+strategy(shorttitle='Buy The Dips in Bull Market',title='Buy The Dips in Bull Market (by Coinrule)', overlay=true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+    
+//Backtest dates
+fromMonth = input(defval = 1,  title = "From Month")     
+fromDay   = input(defval = 10,    title = "From Day")       
+fromYear  = input(defval = 2020, title = "From Year")       
+thruMonth = input(defval = 1,    title = "Thru Month")     
+thruDay   = input(defval = 1,    title = "Thru Day")     
+thruYear  = input(defval = 2112, title = "Thru Year")       
+    
+showDate  = input(defval = true, title = "Show Date Range")
+    
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+    
+    
+// RSI inputs and calculations
+lengthRSI = input(14, title = 'RSI period', minval=1)
+RSI = rsi(close, lengthRSI)
+
+//MA inputs and calculations
+inSignal=input(9, title='MAfast')
+inlong1=input(50, title='MAslow')
+inlong2=input(200, title='MAlong')
+
+
+MAfast= sma(close, inSignal)
+MAslow= sma(close, inlong1)
+MAlong= sma(close, inlong2)
+
+
+RSI_buy_signal= input(35, title='RSI Buy Signal')
+
+    
+//Entry
+    
+    
+strategy.entry(id="long", long = true, when = RSI < RSI_buy_signal and MAlong < MAslow and window()) 
+    
+//Exit
+    
+    
+strategy.close("long", when = close > MAfast and MAfast > MAslow and window())
+
+
+plot(MAslow, color=color.orange, linewidth=1)
+plot(MAfast, color=color.purple, linewidth=1)
+plot(MAlong, color=color.blue, linewidth=2)
+
+View in Pine Editor・50 lines
+Use on chart
+3
+4
+9
+3
+12 700
+Dec 22, 2020
+During a Bull market, beating the market, it's challenging. Trading strategies that buy the dips represent one of the best approaches to surf the trend and optimize the returns.
+
+The main obstacle is to gauge the dip's magnitude properly and set up the take profit level accordingly. The RSI is an excellent tool to catch price drops as it adjusts the entry to the asset's current volatility. Nevertheless, using the RSI as an indicator for exit is not an optimal solution in trending markets as it may end up with two scenarios:
+
+
+The price reverts before reaching overbought conditions. That is the case when the trend is not that strong at that moment. Leaving the position open could result in missed profit opportunities.
+
+The price rebounds strongly, leading the RSI quickly in overbought conditions too soon so that the strategy sells too early.
+
+
+
+One interesting option is to combine a trigger based on the RSI to catch the dip and then use two moving averages to spot the right time to seel when the price is entirely back on-trend.
+
+The Setup
+
+The entry-signal comes when the RSI is lower than 35 and the MA9 is above the MA200, indicating that the asset is currently in an uptrend.
+
+The sell-signal comes when at the same time, the price is above the MA9, and the MA9 is above the MA50.
+
+This setup was optimized on the 15-min time frame after over 150 backtests.
+
+A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange.
+
+
+
+
+Dec 22, 2020
+Release Notes
+During a Bull market, beating the market, it's challenging. Trading strategies that buy the dips represent one of the best approaches to surf the trend and optimize the returns.
+
+The main obstacle is to gauge the dip's magnitude properly and set up the take profit level accordingly. The RSI is an excellent tool to catch price drops as it adjusts the entry to the asset's current volatility. Nevertheless, using the RSI as an indicator for exit is not an optimal solution in trending markets as it may end up with two scenarios:
+
+
+The price reverts before reaching overbought conditions. That is the case when the trend is not that strong at that moment. Leaving the position open could result in missed profit opportunities.
+
+The price rebounds strongly, leading the RSI quickly in overbought conditions too soon so that the strategy sells too early.
+
+
+
+One interesting option is to combine a trigger based on the RSI to catch the dip and then use two moving averages to spot the right time to seel when the price is entirely back on-trend.
+
+The Setup
+
+The entry-signal comes when the RSI is lower than 35 and the MA9 is above the MA200, indicating that the asset is currently in an uptrend.
+
+The sell-signal comes when at the same time, the price is above the MA9, and the MA9 is above the MA50.
+
+This setup was optimized on the 15-min time frame after over 150 backtests.
+
+A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange.

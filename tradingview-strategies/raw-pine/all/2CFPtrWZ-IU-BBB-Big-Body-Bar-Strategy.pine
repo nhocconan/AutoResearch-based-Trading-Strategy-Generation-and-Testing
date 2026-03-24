@@ -1,0 +1,114 @@
+//@version=6
+strategy("IU BBB(Big Body Bar) Strategy", overlay = true, initial_capital = 100000, slippage = 1, commission_value = 0.002)
+
+// _________________________________________________ User Inputs ______________________________________ \\
+tooltip             = "Size of Body of the candle should be how much times the Average body ? "
+big_body_threshold  = input.float(4, "Big Body Threshold = ", tooltip = tooltip)
+ATR_lenght          = input.int(14,"ATR Lenght = ", group = "<------ Trailing Stop Loss -------- >")
+ATR_factor          = input.float(2, "ATR factor = ",group = "<------ Trailing Stop Loss -------- >")
+
+// _________________________________________________ Average body calculations _________________________ \\
+body                = math.abs(close - open)
+avg_body            = 0.00 
+for i = 0 to 20 
+    avg_body += body[i]
+
+// ___________________________________________________ long and short Conditions _________________________ \\
+avg_body           := avg_body / 20 
+long_cond           = body > (avg_body  * big_body_threshold) and close > open 
+short_cond          = body > (avg_body * big_body_threshold) and close < open 
+
+
+//___________________________________________ Going Long and Short ________________________________________ //\\
+// -------- Long Entry ---------- \\
+if long_cond and strategy.position_size == 0 and barstate.isconfirmed 
+    strategy.entry("long", strategy.long, comment = "Long Entry")
+//-------- Short Entry --------- \\
+if short_cond and strategy.position_size == 0 and barstate.isconfirmed 
+    strategy.entry("short", strategy.short, comment = "Short Entry")
+
+
+// ____________________________________________ ATR Trailing Stop Loss ________________________________________ \\
+float atr           = ta.atr(ATR_lenght)
+var float ATR_TSL   = na 
+// -------- Long Side Trailing --------- \\
+if strategy.position_size > 0 
+    // ---- Asigning trailing SL if its na ----- \\
+    if na(ATR_TSL)
+        ATR_TSL     := strategy.position_avg_price - (atr * ATR_factor)
+    else 
+        ATR_TSL     := math.max(ATR_TSL, close - (atr * ATR_factor))
+    // ---------- Setting Trailing SL --------------- \\
+    strategy.exit("long", "long", stop = ATR_TSL, comment = "Trailing SL")
+
+// -------- Short Side Trailing --------- \\
+if strategy.position_size < 0 
+    // ---- Asigning trailing SL if its na ----- \\
+    if na(ATR_TSL)
+        ATR_TSL     := strategy.position_avg_price + (atr * ATR_factor)
+    else 
+        ATR_TSL     := math.min(ATR_TSL, close + (atr * ATR_factor))
+    // ---------- Setting Trailing SL --------------- \\
+    strategy.exit("short", "short", stop = ATR_TSL, comment = "Short Trailing SL")
+
+// ------ Resetting Trailing SL ------ \\
+if strategy.position_size == 0 
+    ATR_TSL         := na 
+
+
+// ______________________________________________ Plotting _________________________________________________ \\
+ATR_TSL_plot = plot(strategy.position_size != 0 ? ATR_TSL : na, color = color.purple, 
+                     style = plot.style_linebr, linewidth = 1)
+mid_level    = plot(hl2, "Mid Level", display = display.none)
+// ----------------- Filling Positions ---------------- \\
+fill(ATR_TSL_plot, mid_level, hl2 ,ATR_TSL, color(na), strategy.position_size != 0 ? color.new(color.purple, 70) : na)
+
+View in Pine Editor・67 lines
+Use on chart
+1
+1
+1
+2 543
+DESCRIPTION
+The IU BBB (Big Body Bar) Strategy is a price action-based trading strategy that identifies high-momentum candles with significantly larger body sizes compared to the average. It enters trades when a strong bullish or bearish move occurs and manages risk using an ATR-based trailing stop-loss system.
+
+USER INPUTS:
+- Big Body Threshold – Defines how many times larger the candle body should be compared to the average body ( default is 4 ).
+- ATR Length – The period for the Average True Range (ATR) used in the trailing stop-loss calculation ( default is 14 ).
+- ATR Factor – Multiplier for ATR to determine the trailing stop distance ( default is 2 ).
+
+
+
+LONG CONDITION:
+- The current candle’s body is greater than the average body size multiplied by the Big Body Threshold.
+- The closing price is higher than the opening price (bullish candle).
+
+
+
+SHORT CONDITION:
+- The current candle’s body is greater than the average body size multiplied by the Big Body Threshold.
+- The closing price is lower than the opening price (bearish candle).
+
+
+
+LONG EXIT:
+- ATR-based trailing stop-loss dynamically adjusts, locking in profits as the price moves higher.
+
+
+
+SHORT EXIT:
+- ATR-based trailing stop-loss dynamically adjusts, securing profits as the price moves lower.
+
+
+
+WHY IT IS UNIQUE:
+- Unlike traditional momentum strategies, this system adapts to volatility by filtering trades based on relative candle size.
+- It incorporates an ATR-based trailing stop-loss, ensuring risk management and profit protection.
+- The strategy avoids choppy market conditions by only trading when significant momentum is present.
+
+HOW USERS CAN BENEFIT FROM IT:
+- Catch Strong Price Moves – The strategy helps traders enter trades when the market shows decisive momentum.
+- Effective Risk Management – The ATR-based trailing stop ensures that winning trades remain profitable.
+- Works Across Markets – Can be applied to stocks, forex, crypto, and indices with proper optimization.
+- Fully Customizable – Users can adjust sensitivity settings to match their trading style and time frame.
+

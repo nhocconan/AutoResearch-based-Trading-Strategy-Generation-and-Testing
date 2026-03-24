@@ -1,0 +1,152 @@
+//@version=6
+strategy('SuperTrend AI Oscillator Strategy', overlay = true, max_labels_count = 500, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//------------------------------------------------------------------------------
+// 📌 SuperTrend 計算
+//------------------------------------------------------------------------------
+length = input(10, 'ATR Length')
+atr = ta.atr(length)
+
+minMult = input.int(1, 'Factor Range', minval = 0, inline = 'factor')
+maxMult = input.int(5, '', minval = 0, inline = 'factor')
+step = input.float(.5, 'Step', minval = 0, step = 0.1)
+
+var float target_factor = na
+target_factor := na(target_factor) ? minMult : target_factor
+
+var float upper = hl2
+var float lower = hl2
+var int os = 0
+
+up = hl2 + atr * target_factor
+dn = hl2 - atr * target_factor
+upper := close[1] < upper ? math.min(up, upper) : up
+lower := close[1] > lower ? math.max(dn, lower) : dn
+os := close > upper ? 1 : close < lower ? 0 : os
+ts = os == 1 ? lower : upper // トレーリングストップ
+
+//------------------------------------------------------------------------------
+// 📌 Super Oscillator 計算
+//------------------------------------------------------------------------------
+super_osc = 3 * ta.sma((close - ta.lowest(low, 13)) / (ta.highest(high, 13) - ta.lowest(low, 13)) * 100, 5) - 2 * ta.sma(ta.sma((close - ta.lowest(low, 13)) / (ta.highest(high, 13) - ta.lowest(low, 13)) * 100, 5), 3)
+
+// **Super Oscillator フィルタ**
+superOscFilterLong = super_osc > 50
+superOscFilterShort = super_osc < 50
+
+//------------------------------------------------------------------------------
+// 📌 ストラテジーロジック（確定バーを利用）
+//------------------------------------------------------------------------------
+// **エントリーを次の足の始値で実行**
+longCondition = not na(os[1]) and os[1] == 0 and os == 1 and superOscFilterLong
+shortCondition = not na(os[1]) and os[1] == 1 and os == 0 and superOscFilterShort
+
+// 🎯 **反転売買の実装 (次の足の始値でエントリー)**
+if longCondition
+    strategy.close('Short') // 既存のショートポジションをクローズ
+    if bar_index != last_bar_index // **次の足の始値でロング**
+        strategy.entry('Long', strategy.long, comment = 'BUY')
+
+if shortCondition
+    strategy.close('Long') // 既存のロングポジションをクローズ
+    if bar_index != last_bar_index // **次の足の始値でショート**
+        strategy.entry('Short', strategy.short, comment = 'SELL')
+
+// 🎯 **トレーリングストップの適用**
+strategy.exit('Long Exit', from_entry = 'Long', stop = ts)
+strategy.exit('Short Exit', from_entry = 'Short', stop = ts)
+
+// 🎯 **オプション: テイクプロフィットを追加 (リスクリワード 1:2)**
+riskRewardRatio = input.float(2.0, title = 'Risk-Reward Ratio', minval = 1.0)
+takeProfitLong = ts + (ts - strategy.position_avg_price) * riskRewardRatio
+takeProfitShort = ts - (strategy.position_avg_price - ts) * riskRewardRatio
+
+strategy.exit('Long TP', from_entry = 'Long', limit = takeProfitLong)
+strategy.exit('Short TP', from_entry = 'Short', limit = takeProfitShort)
+
+//------------------------------------------------------------------------------
+// 🎨 プロット (オリジナルの LuxAlgo スタイル)
+//------------------------------------------------------------------------------
+plot(ts, 'Trailing Stop', color = os == 1 ? color.green : color.red, linewidth = 2)
+
+// **シグナルの可視化 (シグナルが確定した足にラベルを表示)**
+if longCondition
+    label.new(bar_index, low, 'BUY', color = color.green, textcolor = color.white, size = size.tiny, style = label.style_label_up)
+
+if shortCondition
+    label.new(bar_index, high, 'SELL', color = color.red, textcolor = color.white, size = size.tiny, style = label.style_label_down)
+
+View in Pine Editor・78 lines
+Use on chart
+1
+4
+3
+6 510
+SuperTrend AI Oscillator Strategy
+Overview
+This strategy is a trend-following approach that combines the SuperTrend indicator with oscillator-based filtering.
+By identifying market trends while utilizing oscillator-based momentum analysis, it aims to improve entry precision.
+Additionally, it incorporates a trailing stop to strengthen risk management while maximizing profits.
+
+This strategy can be applied to various markets, including Forex, Crypto, and Stocks, as well as different timeframes. However, its effectiveness varies depending on market conditions, so thorough testing is required.
+
+Features
+1️⃣ Trend Identification Using SuperTrend
+The SuperTrend indicator (a volatility-adjusted trend indicator based on ATR) is used to determine trend direction.
+A long entry is considered when SuperTrend turns bullish.
+A short entry is considered when SuperTrend turns bearish.
+The goal is to capture clear trend reversals and avoid unnecessary trades in ranging markets.
+2️⃣ Entry Filtering with an Oscillator
+The Super Oscillator is used to filter entry signals.
+If the oscillator exceeds 50, it strengthens long entries (indicating strong bullish momentum).
+If the oscillator drops below 50, it strengthens short entries (indicating strong bearish momentum).
+This filter helps reduce trades in uncertain market conditions and improves entry accuracy.
+3️⃣ Risk Management with a Trailing Stop
+Instead of a fixed stop loss, a SuperTrend-based trailing stop is implemented.
+The stop level adjusts automatically based on market volatility.
+This allows profits to run while managing downside risk effectively.
+4️⃣ Adjustable Risk-Reward Ratio
+The default risk-reward ratio is set at 1:2.
+Example: A 1% stop loss corresponds to a 2% take profit target.
+The ratio can be customized according to the trader’s risk tolerance.
+5️⃣ Clear Trade Signals & Visual Support
+Green "BUY" labels indicate long entry signals.
+Red "SELL" labels indicate short entry signals.
+The Super Oscillator is plotted in a separate subwindow to visually assess trend strength.
+A real-time trailing stop is displayed to support exit strategies.
+These visual aids make it easier to identify entry and exit points.
+
+Trading Parameters & Considerations
+Initial Account Balance: Default is $7,000 (adjustable).
+Base Currency: USD
+Order Size: 10,000 USD
+Pyramiding: 1
+Trading Fees: $0.94 per trade
+Long Position Margin: 50%
+Short Position Margin: 50%
+Total Trades (M5 Timeframe): 1,032
+
+Visual Aids for Clarity
+This strategy includes clear visual trade signals to enhance decision-making:
+Green "BUY" labels for long entries
+Red "SELL" labels for short entries
+Super Oscillator plotted in a subwindow with a 50 midline
+Dynamic trailing stop displayed for real-time trend tracking
+
+These visual aids allow traders to quickly identify trade setups and manage positions with greater confidence.
+
+Summary
+The SuperTrend AI Oscillator Strategy is developed based on indicators from Black Cat and LuxAlgo.
+By integrating high-precision trend analysis with AI-based oscillator filtering, it provides a strong risk-managed trading approach.
+
+Important Notes
+This strategy does not guarantee profits—performance varies based on market conditions.
+Past performance does not guarantee future results. Markets are constantly changing.
+Always test extensively with backtesting and demo trading before using it in live markets.
+Risk management, position sizing, and market conditions should always be considered when trading.
+
+Conclusion
+This strategy combines trend analysis with momentum filtering, enhancing risk management in trading.
+By following market trends carefully, making precise entries, and using trailing stops, it seeks to reduce risk while maximizing potential profits.
+
+Before using this strategy, be sure to test it thoroughly via backtesting and demo trading, and adjust the settings to match your trading style.

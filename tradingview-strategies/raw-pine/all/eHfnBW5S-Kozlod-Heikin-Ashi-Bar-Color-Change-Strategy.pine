@@ -1,0 +1,44 @@
+//@version=3
+strategy("Kozlod - Heikin-Ashi Bar Color Change Strategy", overlay = true)
+
+// Calculation HA Values 
+haopen   = 0.0
+haclose  = ((open + high + low + close)/4)
+haopen  := na(haopen[1]) ? (open + close)/2 : (haopen[1] + haclose[1]) / 2
+hahigh   = max(high, max(haopen, haclose))
+halow    = min(low,  min(haopen, haclose))
+
+// HA colors
+hacolor =  haclose  > haopen ? green : red
+
+// Signals
+turnGreen = haclose  >  haopen and haclose[1] <= haopen[1]
+turnRed   = haclose  <= haopen and haclose[1]  > haopen[1]
+
+// Plotting
+bgcolor(hacolor)
+
+plotshape(turnGreen, style = shape.arrowup,   location = location.belowbar, color = green)
+plotshape(turnRed,   style = shape.arrowdown, location = location.abovebar, color = red) 
+
+// Alerts
+strategy.entry("long",  true,  when = turnGreen)
+strategy.entry("short", false, when = turnRed)
+
+View in Pine Editor・26 lines
+Use on chart
+9
+1
+9
+9
+25 594
+Sep 3, 2018
+You can use this script to backtest Heikin-Ashi bar color change strategy.
+You have to apply this script to usual candles and not Heikin-Ashi!!!
+
+Background color indicates HA bar color. On change you'll see green/red arrows and alert will be fired.
+
+Also you can find in the code calculations of all HA OHLC values.
+Oct 14, 2020
+Release Notes
+Cleaning the code

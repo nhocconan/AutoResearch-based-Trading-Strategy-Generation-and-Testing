@@ -1,0 +1,59 @@
+//@version=6
+strategy("AI - Customizable EMA Offset Entry Strategy", overlay=true, calc_on_every_tick=false,
+     initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.1, slippage=3, pyramiding=1,
+     margin_long=0, margin_short=0, fill_orders_on_standard_ohlc=true)
+
+// === Date Filter ===
+startYear  = input.int(2018, "Start Year", minval=1900, maxval=2100)
+startMonth = input.int(1, "Start Month", minval=1, maxval=12)
+startDay   = input.int(1, "Start Day", minval=1, maxval=31)
+endYear    = input.int(2069, "End Year", minval=1900, maxval=2100)
+endMonth   = input.int(12, "End Month", minval=1, maxval=12)
+endDay     = input.int(31, "End Day", minval=1, maxval=31)
+
+inDateRange = (time >= timestamp(startYear, startMonth, startDay, 0, 0)) and 
+              (time <= timestamp(endYear, endMonth, endDay, 23, 59))
+
+// === Inputs for EMA + Offsets ===
+emaLength        = input.int(200, "EMA Length", minval=1)
+offsetPlusPct    = input.float(4.0, "Entry Offset +%", step=0.1)
+offsetMinusPct   = input.float(-50.0, "Entry Offset -%", step=0.1)
+offsetExitPct    = input.float(-6.5, "Exit Offset -%", step=0.1)
+stopLossPct      = input.float(-10.0, "Stop Loss %", step=0.1)
+
+// === EMA & Levels ===
+ema      = ta.ema(close, emaLength)
+ema_plus = ema * (1 + offsetPlusPct/100)
+ema_minus= ema * (1 + offsetMinusPct/100)
+ema_exit = ema * (1 + offsetExitPct/100)
+
+// === Plots ===
+plot(ema, color=color.yellow, title="EMA")
+plot(ema_plus, color=color.green, title="EMA + Offset")
+plot(ema_minus, color=color.purple, title="EMA - Offset")
+plot(ema_exit, color=color.blue, title="EMA Exit Offset")
+
+// === Strategy Logic ===
+// Long Entries
+buySignal_plus  = ta.crossover(close, ema_plus)
+buySignal_minus = ta.crossover(close, ema_minus)
+
+// Long Exit
+sellSignal = ta.crossunder(close, ema_exit)
+
+// === Orders ===
+if inDateRange and (buySignal_plus or buySignal_minus)
+    strategy.entry("Long", strategy.long)
+
+// Stop Loss at % below entry
+strategy.exit("Stop Loss", from_entry="Long", stop=strategy.position_avg_price * (1 + stopLossPct/100))
+
+// Exit on EMA Exit Offs
+
+View in Pine Editor・52 lines
+Use on chart
+2
+1
+1 387
+Moving average with offsets, such that buy indicators are above the MA and sell indicators are below the MA

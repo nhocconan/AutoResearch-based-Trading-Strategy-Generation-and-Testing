@@ -1,0 +1,140 @@
+//@version=5
+strategy("CBC Strategy with Trend Confirmation & Separate Stop Loss", overlay=true, initial_capital=2500, default_qty_value=5)
+
+// Input Settings
+atrLength = input.int(14, title="ATR Length")
+profitTargetMultiplier = input.float(1.0, title="Profit Target Multiplier", step=0.1)
+strongFlipsOnly = input.bool(true, title="Enable Strong Flips Only")  // Filter for Strong Flips
+entryStartHour = input.int(title="Entry Start Hour (24-Hour Format)", defval=10, minval=0, maxval=23)
+entryEndHour = input.int(title="No Entries After (24-Hour Format)", defval=15, minval=0, maxval=23)
+bullsColor = input.color(#008000, title="Strong Bulls Color")
+bearsColor = input.color(#ff0000, title="Strong Bears Color")
+
+color CLEAR = color.rgb(0, 0, 0, 100)
+
+// EMA and VWAP Calculation
+fastEma = ta.ema(close, 10)
+slowEma = ta.ema(close, 20)
+vwapValue = ta.vwap(close)
+
+// CBC Logic
+cbc = false
+cbc := cbc[1]
+if cbc and close < low[1]
+    cbc := false
+if not cbc and close > high[1]
+    cbc := true
+
+// ATR Calculation for Profit Target
+atrValue = ta.atr(atrLength)
+
+// Time Filter
+inTimeRange = (hour >= entryStartHour and hour < entryEndHour)
+
+// Long Entry Conditions
+longCondition = inTimeRange and (strongFlipsOnly ? (cbc and not cbc[1] and low < low[1] and slowEma >= vwapValue) : (cbc and not cbc[1] and slowEma >= vwapValue))
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="Long Entry")
+    strategy.exit("TP_Long", "Long", limit=close + (atrValue * profitTargetMultiplier), comment="Long TP")
+
+// Custom Stop Loss for Long
+if strategy.position_size > 0 and close <= low[1]
+    strategy.close("Long", comment="Long Stop Loss Hit")
+
+// Short Entry Conditions
+shortCondition = inTimeRange and (strongFlipsOnly ? (not cbc and cbc[1] and high > high[1] and slowEma < vwapValue) : (not cbc and cbc[1] and slowEma < vwapValue))
+if (shortCondition)
+    strategy.entry("Short", strategy.short, comment="Short Entry")
+    strategy.exit("TP_Short", "Short", limit=close - (atrValue * profitTargetMultiplier), comment="Short TP")
+
+// Custom Stop Loss for Short
+if strategy.position_size < 0 and close >= high[1]
+    strategy.close("Short", comment="Short Stop Loss Hit")
+
+// Plot Labels for Visual Confirmation
+if longCondition
+    label.new(bar_index, low, "▵", color=CLEAR, style=label.style_label_up, textcolor=bullsColor, size=size.small)
+
+if shortCondition
+    label.new(bar_index, high, "▿", color=CLEAR, style=label.style_label_down, textcolor=bearsColor, size=size.small)
+
+// Plot EMAs and VWAP
+plot(fastEma, color=color.black, title="Fast EMA (10)", linewidth=1)
+plot(slowEma, color=color.red, title="Slow EMA (20)", linewidth=1)
+plot(vwapValue, color=color.orange, title="VWAP", linewidth=1, style=plot.style_line)
+
+View in Pine Editor・64 lines
+Use on chart
+1
+7
+1
+4 545
+CBC Flip Strategy with Trend Confirmation and ATR-Based Targets
+This strategy is based on the CBC Flip concept taught by MapleStax and inspired by the original CBC Flip indicator by AsiaRoo. It focuses on identifying potential reversals or trend continuation points using a combination of candlestick patterns (CBC Flips), trend filters, and a time-based entry window. This approach helps traders avoid false signals and increase trade accuracy.
+
+What is a CBC Flip?
+The CBC Flip is a candlestick-based pattern that identifies moments when the market is likely to change direction or strengthen its trend. It checks for a shift in price behavior between consecutive candles, signaling a bullish (upward) or bearish (downward) move.
+
+However, not all flips are created equal! This strategy differentiates between Strong Flips and All Flips, allowing traders to choose between a more conservative or aggressive approach.
+
+Strong Flips vs. All Flips
+Strong Flips
+
+A Strong Flip is a high-probability setup that occurs only after liquidity is swept from the previous candle’s high or low.
+
+What is a liquidity sweep? This happens when the price briefly moves beyond the high or low of the previous candle, triggering stop-losses and trapping traders in the wrong direction. These sweeps often create fuel for the next move, making them powerful reversal signals.
+Examples:
+
+Long Setup: The price dips below the previous candle’s low (sweeping liquidity) and then closes higher, signaling a potential bullish move.
+Short Setup: The price moves above the previous candle’s high and then closes lower, signaling a potential bearish move.
+
+Why Use Strong Flips?
+
+They provide fewer signals, but the accuracy is generally higher.
+Ideal for trending markets where liquidity sweeps often mark key turning points.
+All Flips
+
+All Flips are less selective, offering both Strong Flips and additional signals without requiring a liquidity sweep.
+
+This approach gives traders more frequent opportunities but comes with a higher risk of false signals, especially in sideways markets.
+Examples:
+
+Long Setup: A CBC flip occurs without sweeping the previous low, but the trend direction is confirmed (slow EMA is still above VWAP).
+
+Short Setup: A CBC flip occurs without sweeping the previous high, but the trend is still bearish (slow EMA below VWAP).
+
+Why Use All Flips?
+
+Provides more frequent entries for active or aggressive traders.
+Works well in trending markets but requires caution during consolidation periods.
+How This Strategy Works
+The strategy combines CBC Flips with multiple filters to ensure better trade quality:
+
+Trend Confirmation: The slow EMA (20-period) must be positioned relative to the VWAP to confirm the overall trend direction.
+Long Trades: Slow EMA must be above VWAP (upward trend).
+Short Trades: Slow EMA must be below VWAP (downward trend).
+Time-Based Filter: Traders can specify trading hours to limit entries to a particular time window, helping avoid low-volume or high-volatility periods.
+Profit Target and Stop-Loss:
+Profit Target: Defined as a multiple of the 14-period ATR (Average True Range). For example, if the ATR is 10 points and the profit target multiplier is set to 1.5, the strategy aims for a 15-point profit.
+Stop-Loss: Uses a dynamic, candle-based stop-loss:
+Long Trades: The trade closes if the market closes below the low of two candles ago.
+Short Trades: The trade closes if the market closes above the high of two candles ago.
+This approach adapts to recent price behavior and protects against unexpected reversals.
+
+Customizable Settings
+Strong Flips vs. All Flips: Choose between a more selective or aggressive entry style.
+Profit Target Multiplier: Adjust the ATR multiplier to control the distance for profit targets.
+Entry Time Range: Define specific trading hours for the strategy.
+Indicators and Visuals
+Fast EMA (10-Period) – Black Line
+Slow EMA (20-Period) – Red Line
+VWAP (Volume-Weighted Average Price) – Orange Line
+Visual Labels:
+▵ (Triangle Up) – Marks long entries (buy signals).
+▿ (Triangle Down) – Marks short entries (sell signals).
+Credits
+CBC Flip Concept: Inspired by MapleStax, who teaches this concept.
+Original Indicator: Developed by AsiaRoo, this strategy builds on the CBC Flip framework with additional features for improved trade management.
+Risks and Disclaimer
+This strategy is for educational purposes only and does not constitute financial advice.
+Trading involves significant risk and may result in the loss of capital. Past performance does not guarantee future results. Use this strategy in a simulated environment before applying it to live trading.

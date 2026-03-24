@@ -1,0 +1,120 @@
+//@version=6
+strategy(title="RSI-Gauss-WiP", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3)
+startDate  = input.time(timestamp("1 Jan 2018 00:00 +0000"), "Start Date")
+endDate    = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
+timeFilter = time >= startDate and time <= endDate
+smoothK      = input.int(3, "K", minval=1)
+smoothD      = input.int(3, "D", minval=1)
+lengthRSI    = input.int(14, "RSI Length", minval=1)
+lengthStoch  = input.int(14, "Stochastic Length", minval=1)
+src_rsi      = input(close, title="RSI Source")
+rsiValue     = ta.rsi(src_rsi, lengthRSI)
+kValue       = ta.sma(ta.stoch(rsiValue, rsiValue, rsiValue, lengthStoch), smoothK)
+dValue       = ta.sma(kValue, smoothD)
+f_filt9x(_a, _s, _i) =>
+    int _m2 = 0, int _m3 = 0, int _m4 = 0, int _m5 = 0, int _m6 = 0, int _m7 = 0, int _m8 = 0, int _m9 = 0
+    float _f = 0.0
+    float _x = 1 - _a
+    _m2 := _i == 9 ? 36  : _i == 8 ? 28 : _i == 7 ? 21 : _i == 6 ? 15 : _i == 5 ? 10 : _i == 4 ? 6 : _i == 3 ? 3 : _i == 2 ? 1 : 0
+    _m3 := _i == 9 ? 84  : _i == 8 ? 56 : _i == 7 ? 35 : _i == 6 ? 20 : _i == 5 ? 10 : _i == 4 ? 4 : _i == 3 ? 1 : 0
+    _m4 := _i == 9 ? 126 : _i == 8 ? 70 : _i == 7 ? 35 : _i == 6 ? 15 : _i == 5 ? 5 : _i == 4 ? 1 : 0
+    _m5 := _i == 9 ? 126 : _i == 8 ? 56 : _i == 7 ? 21 : _i == 6 ? 6 : _i == 5 ? 1 : 0
+    _m6 := _i == 9 ? 84  : _i == 8 ? 28 : _i == 7 ? 7 : _i == 6 ? 1 : 0
+    _m7 := _i == 9 ? 36  : _i == 8 ? 8 : _i == 7 ? 1 : 0
+    _m8 := _i == 9 ? 9   : _i == 8 ? 1 : 0
+    _m9 := _i == 9 ? 1   : 0
+    _f := math.pow(_a, _i) * nz(_s)
+       + _i * _x * nz(_f[1])
+       - (_i >= 2 ? _m2 * math.pow(_x, 2) * nz(_f[2]) : 0)
+       + (_i >= 3 ? _m3 * math.pow(_x, 3) * nz(_f[3]) : 0)
+       - (_i >= 4 ? _m4 * math.pow(_x, 4) * nz(_f[4]) : 0)
+       + (_i >= 5 ? _m5 * math.pow(_x, 5) * nz(_f[5]) : 0)
+       - (_i >= 6 ? _m6 * math.pow(_x, 6) * nz(_f[6]) : 0)
+       + (_i >= 7 ? _m7 * math.pow(_x, 7) * nz(_f[7]) : 0)
+       - (_i >= 8 ? _m8 * math.pow(_x, 8) * nz(_f[8]) : 0)
+       + (_i == 9 ? _m9 * math.pow(_x, 9) * nz(_f[9]) : 0)
+    _f
+f_pole(_a, _s, _i) =>
+    _f1 = f_filt9x(_a, _s, 1)
+    _f2 = _i >= 2 ? f_filt9x(_a, _s, 2) : 0
+    _f3 = _i >= 3 ? f_filt9x(_a, _s, 3) : 0
+    _f4 = _i >= 4 ? f_filt9x(_a, _s, 4) : 0
+    _f5 = _i >= 5 ? f_filt9x(_a, _s, 5) : 0
+    _f6 = _i >= 6 ? f_filt9x(_a, _s, 6) : 0
+    _f7 = _i >= 7 ? f_filt9x(_a, _s, 7) : 0
+    _f8 = _i >= 8 ? f_filt9x(_a, _s, 8) : 0
+    _f9 = _i == 9 ? f_filt9x(_a, _s, 9) : 0
+    _fn = switch _i
+        1 => _f1
+        2 => _f2
+        3 => _f3
+        4 => _f4
+        5 => _f5
+        6 => _f6
+        7 => _f7
+        8 => _f8
+        9 => _f9
+        => na
+    [_fn, _f1]
+src       = input(defval=hlc3, title="Source")
+int N     = input.int(defval=4,   title="Poles", minval=1, maxval=9)
+int per   = input.int(defval=144, title="Sampling Period", minval=2)
+float mult= input.float(defval=1.414, title="Filtered True Range Multiplier", minval=0)
+bool modeLag  = input.bool(defval=false, title="Reduced Lag Mode")
+bool modeFast = input.bool(defval=false, title="Fast Response Mode")
+beta  = (1 - math.cos(4*math.asin(1)/per)) / (math.pow(1.414, 2/N) - 1)
+alpha = - beta + math.sqrt(math.pow(beta, 2) + 2*beta)
+lag   = (per - 1)/(2*N)
+srcdata   = modeLag ? src + (src - src[lag]) : src
+trdata    = modeLag ? ta.tr(true) + (ta.tr(true) - ta.tr(true)[lag]) : ta.tr(true)
+[filtn,  filt1]     = f_pole(alpha, srcdata, N)
+[filtntr,filt1tr]   = f_pole(alpha, trdata,  N)
+filt    = modeFast ? (filtn + filt1)/2 : filtn
+filttr  = modeFast ? (filtntr + filt1tr)/2 : filtntr
+hband = filt + filttr*mult
+lband = filt - filttr*mult
+fcolor = filt > filt[1] ? #0aff68 : filt < filt[1] ? #ff0a5a : color.gray
+plotF  = plot(filt,    title="Filter",                          color=fcolor, linewidth=3)
+plotHB = plot(hband,   title="Filtered True Range High Band",   color=fcolor)
+plotLB = plot(lband,   title="Filtered True Range Low Band",    color=fcolor)
+fill(plotHB, plotLB, color=color.new(fcolor, 80), title="Channel Fill")
+barCol = (src > src[1]) and (src > filt) and (src < hband) ? #0aff68 :
+         (src > src[1]) and (src >= hband)                 ? #0aff1b :
+         (src <= src[1]) and (src >  filt)                 ? #00752d :
+         (src <  src[1]) and (src <  filt) and (src > lband)? #ff0a5a :
+         (src <  src[1]) and (src <= lband)                ? #ff0a11 :
+         (src >= src[1]) and (src <  filt)                 ? #990032 : color.gray
+barcolor(barCol)
+gaussianGreen      = filt > filt[1]
+stochSignal        = kValue > dValue
+longCondition      = gaussianGreen and (close > hband) and stochSignal and timeFilter
+closeLongCondition = ta.crossunder(close, hband) and timeFilter
+
+if longCondition
+    strategy.entry("long", strategy.long)
+
+if closeLongCondition
+    strategy.close("long")
+
+View in Pine Editor・97 lines
+Use on chart
+1
+1
+387
+RSI-Gauss Momentum Breakout
+The Logic
+This strategy combines John Ehlers' N-Pole Gaussian Filter with Stoch-RSI momentum to capture high-probability trend expansions. It replaces lagging moving averages with a responsive Gaussian volatility channel to identify true price breakouts.
+
+Entry & Exit
+Long Entry: Gaussian trend is bullish (sloping up), price breaks above the Upper Channel, and Stoch-RSI confirms strong cyclical momentum.
+
+Long Exit: Price crosses back under the Gaussian Midline, providing a trailing exit that preserves gains during trend reversals.
+
+Key Features
+Gaussian Smoothing: Advanced signal processing filters market noise.
+
+Volatility Channels: Uses Filtered True Range for adaptive entries.
+
+Clean Chart: Optimized for a minimal UI by hiding labels and status line values.
+
+Best used on 1H, 4H, and Daily timeframes for trending assets.

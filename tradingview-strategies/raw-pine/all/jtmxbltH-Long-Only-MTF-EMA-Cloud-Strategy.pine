@@ -1,0 +1,145 @@
+//@version=6
+strategy(title="Long-Only MTF EMA Cloud Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD)
+
+// Inputs for EMA Cloud
+ma_len1 = input.int(21, title="Short EMA Length", group="EMA Cloud Settings")
+ma_len2 = input.int(50, title="Long EMA Length", group="EMA Cloud Settings")
+res = input.timeframe("", title="EMA Cloud Resolution (Leave blank for chart timeframe)", group="EMA Cloud Settings")
+
+// Source and Offset
+src = input(close, title="Source", group="General Settings")
+ma_offset = input.int(0, title="Offset", group="General Settings")
+
+// Stop Loss and Take Profit Inputs
+sl_percent = input.float(1.0, title="Stop Loss (%)", minval=0.1, step=0.1, group="Risk Management") / 100
+tp_percent = input.float(2.0, title="Take Profit (%)", minval=0.1, step=0.1, group="Risk Management") / 100
+
+// Adjust resolution dynamically if left blank
+dynamic_res = (res == "") ? timeframe.period : res
+
+// --- Calculate EMA Cloud ---
+htf_ma1 = ta.ema(src, ma_len1)
+htf_ma2 = ta.ema(src, ma_len2)
+out1 = request.security(syminfo.tickerid, dynamic_res, htf_ma1, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+out2 = request.security(syminfo.tickerid, dynamic_res, htf_ma2, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+mashort = out1
+malong = out2
+cloudcolour = mashort >= malong ? color.new(color.green, 54) : color.new(color.yellow, 54)
+
+// Plot EMA Cloud
+plot(mashort, color=color.blue, linewidth=1, offset=ma_offset, title="Short EMA")
+plot(malong, color=color.red, linewidth=3, offset=ma_offset, title="Long EMA")
+fill(plot(mashort), plot(malong), color=cloudcolour, title="EMA Cloud")
+
+// --- Strategy Logic ---
+// Entry Condition: EMA cloud turns bullish
+long_entry = ta.crossover(mashort, malong)
+
+// Calculate stop loss and take profit levels
+long_stop_price = strategy.position_avg_price * (1 - sl_percent)
+long_take_profit = strategy.position_avg_price * (1 + tp_percent)
+
+// Strategy Execution
+if (long_entry)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss", from_entry="Long", stop=long_stop_price, limit=long_take_profit)
+
+// Plot Buy Signal
+plotshape(series=long_entry, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+
+// Alerts
+alertcondition(long_entry, title="Long Alert", message="Long Entry Signal")
+
+View in Pine Editor・51 lines
+Use on chart
+5
+9
+2 374
+Overview:
+
+The Long-Only EMA Cloud Strategy is a powerful trend-following strategy designed to help traders identify and capitalize on bullish market conditions. By utilizing an Exponential Moving Average (EMA) Cloud, this strategy provides clear and reliable signals for entering long positions when the market trend is favorable. The EMA cloud acts as a visual representation of the trend, making it easier for traders to make informed decisions. This strategy is ideal for traders who prefer to trade in the direction of the trend and focus exclusively on long positions.
+
+Key Features:
+
+EMA Cloud:
+
+The strategy uses two EMAs (short and long) to create a dynamic cloud.
+
+The cloud is bullish when the short EMA is above the long EMA, indicating a strong upward trend.
+
+The cloud is bearish when the short EMA is below the long EMA, indicating a downward trend or consolidation.
+
+Long Entry Signals:
+
+A long position is opened when the EMA cloud turns bullish, which occurs when the short EMA crosses above the long EMA.
+
+This crossover signals a potential shift in market sentiment from bearish to bullish, providing an opportunity to enter a long trade.
+
+Adjustable Timeframe:
+
+The EMA cloud can be calculated on the same timeframe as the chart or on a higher/lower timeframe for multi-timeframe analysis.
+
+This flexibility allows traders to adapt the strategy to their preferred trading style and time horizon.
+
+Risk Management:
+
+The strategy includes adjustable stop loss and take profit levels to help traders manage risk and lock in profits.
+
+Stop loss and take profit levels are calculated as a percentage of the entry price, ensuring consistency across different assets and market conditions.
+
+Alerts:
+
+Built-in alerts notify you when a long entry signal is generated, ensuring you never miss a trading opportunity.
+
+Alerts can be customized to suit your preferences, providing real-time notifications for potential trades.
+
+Visualization:
+
+The EMA cloud is plotted on the chart, providing a clear visual representation of the trend.
+
+Buy signals are marked with a green label below the price bar, making it easy to identify entry points.
+
+How to Use:
+
+Add the Script:
+
+Add the script to your chart in TradingView.
+
+Set EMA Lengths:
+
+Adjust the Short EMA Length and Long EMA Length in the settings to suit your trading style.
+
+For example, you might use a shorter EMA (e.g., 21) for more responsive signals or a longer EMA (e.g., 50) for smoother signals.
+
+Choose EMA Cloud Resolution:
+
+Select the EMA Cloud Resolution (timeframe) for the cloud calculation.
+
+You can choose the same timeframe as the chart or a different timeframe (higher or lower) for multi-timeframe analysis.
+
+Adjust Risk Management:
+
+Set the Stop Loss (%) and Take Profit (%) levels according to your risk tolerance and trading goals.
+
+For example, you might use a 1% stop loss and a 2% take profit for a 1:2 risk-reward ratio.
+
+Enable Alerts:
+
+Enable alerts to receive notifications for long entry signals.
+
+Alerts can be configured to send notifications via email, SMS, or other preferred methods.
+
+Monitor and Trade:
+
+Monitor the chart for buy signals and execute trades accordingly.
+
+Use the EMA cloud as a visual guide to confirm the trend direction before entering a trade.
+
+Ideal For:
+Trend-Following Traders: This strategy is perfect for traders who prefer to trade in the direction of the trend and capitalize on sustained price movements.
+
+Long-Only Traders: If you prefer to focus exclusively on long positions, this strategy provides a clear and systematic approach to identifying bullish opportunities.
+
+Multi-Timeframe Analysts: The adjustable EMA cloud resolution allows you to analyze trends across different timeframes, making it suitable for both short-term and long-term traders.
+
+Risk-Averse Traders: The inclusion of stop loss and take profit levels helps manage risk and protect your capital.

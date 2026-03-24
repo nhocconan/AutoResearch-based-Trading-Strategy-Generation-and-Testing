@@ -1,0 +1,133 @@
+//@version=6
+strategy("[SHORT ONLY] ATR Sell the Rip Mean Reversion Strategy", overlay=true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true, fill_orders_on_standard_ohlc = true)
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group = "Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group = "Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// Strategy Settings
+// ============================================
+atrPeriod = input.int(title="ATR Period", defval=20, minval=1, group="Strategy Settings")
+atrMultInput = input.float(title='ATR Multiplier', defval=1.0, step=0.25, group="Strategy Settings")
+smoothPeriodInput = input.int(title='Smoothing Period', defval=10, minval=1, group="Strategy Settings")
+//#endregion
+
+// ============================================
+// EMA Filter Settings
+// ============================================
+useEmaFilter = input.bool(true, "Use EMA Filter", group="Trend Filter")
+emaPeriodInput = input.int(200, "EMA Period", minval=1, group="Trend Filter")
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Calculate ATR Signal Trigger
+// ============================================
+atrValue = ta.atr(atrPeriod)
+atrThreshold = close + atrValue * atrMultInput
+signalTrigger = ta.sma(atrThreshold, smoothPeriodInput)
+
+plot(signalTrigger, title="Smoothed ATR Trigger", color=color.white)
+
+// ============================================
+// Trend Filter
+// ============================================
+ma200 = ta.ema(close, emaPeriodInput)
+plot(ma200, color=color.red, force_overlay=true)
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================
+shortCondition = close>signalTrigger and isWithinTradingWindow
+exitCondition = close<low[1]
+
+// Apply EMA Filter if enabled
+if useEmaFilter
+    shortCondition := shortCondition and close < ma200
+//#endregion
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+if exitCondition
+    strategy.close_all()
+
+View in Pine Editor・57 lines
+Use on chart
+5
+4
+1
+2 042
+█ STRATEGY DESCRIPTION
+The "ATR Sell the Rip Mean Reversion Strategy" is a contrarian system that targets overextended price moves on stocks and ETFs. It calculates an ATR‐based trigger level to identify shorting opportunities. When the current close exceeds this smoothed ATR trigger, and if the close is below a 200-period EMA (if enabled), the strategy initiates a short entry, aiming to profit from an anticipated corrective pullback.
+
+█ HOW IS THE ATR SIGNAL BAND CALCULATED?
+This strategy computes an ATR-based signal trigger as follows:
+
+Calculate the ATR
+The strategy computes the Average True Range (ATR) using a configurable period provided by the user:
+
+Pine Script®
+atrValue = ta.atr(atrPeriod)
+
+Determine the Threshold
+Multiply the ATR by a predefined multiplier and add it to the current close:
+
+Pine Script®
+atrThreshold = close + atrValue * atrMultInput
+
+Smooth the Threshold
+Apply a Simple Moving Average over a specified period to smooth out the threshold, reducing noise:
+
+Pine Script®
+signalTrigger = ta.sma(atrThreshold, smoothPeriodInput)
+
+
+
+█ SIGNAL GENERATION
+
+1. SHORT ENTRY
+A Short Signal is triggered when:
+
+The current close is above the smoothed ATR signal trigger.
+
+The trade occurs within the specified trading window (between Start Time and End Time).
+
+If the EMA filter is enabled, the close must also be below the 200-period EMA.
+
+
+
+2. EXIT CONDITION
+
+An exit Signal is generated when the current close falls below the previous bar’s low (close < low[1]), indicating a potential bearish reversal and prompting the strategy to close its short position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+ATR Period: The period used to calculate the ATR, allowing for adaptability to different volatility conditions (default is 20).
+
+ATR Multiplier: The multiplier applied to the ATR to determine the raw threshold (default is 1.0).
+
+Smoothing Period: The period over which the raw ATR threshold is smoothed using an SMA (default is 10).
+
+Start Time and End Time: Defines the time window during which trades are allowed.
+
+EMA Filter (Optional): When enabled, short entries are only executed if the current close is below the 200-period EMA, confirming a bearish trend.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for use on the Daily timeframe, targeting stocks and ETFs by capitalizing on overextended price moves.
+
+It utilizes a dynamic, ATR-based trigger to identify when prices have potentially peaked, setting the stage for a mean reversion short entry.
+
+The optional EMA filter helps align trades with broader market trends, potentially reducing false signals.
+
+Backtesting is recommended to fine-tune the ATR multiplier, smoothing period, and EMA settings to match the volatility and behavior of specific markets.
+

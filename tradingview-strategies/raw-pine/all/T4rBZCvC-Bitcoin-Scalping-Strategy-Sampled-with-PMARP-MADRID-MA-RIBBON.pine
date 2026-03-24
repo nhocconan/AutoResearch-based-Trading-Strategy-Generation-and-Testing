@@ -1,0 +1,11 @@
+//@version=5
+i_p_width_line=##input(defval=1,type='INPUT_INTEGER',##id='in_7')
+i_p_width_sig=##input(defval=1,type='INPUT_INTEGER',##id='in_15')
+##root(root_metainfo,rm_0,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_3,i_p_width_line,input__integer)
+##root(root_metainfo,rm_4,i_p_width_line,input__integer)
+##root(root_metainfo,rm_5,i_p_width_sig,input__integer)
+##root(root_metainfo,rm_6,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_7,plot.style_line,cb__plot_style__integer,plot,style)

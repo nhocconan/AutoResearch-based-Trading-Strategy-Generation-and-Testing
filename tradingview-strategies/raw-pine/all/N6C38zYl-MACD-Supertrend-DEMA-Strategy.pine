@@ -1,0 +1,127 @@
+//@version=6
+strategy("MACD + Supertrend + DEMA Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// ===== INPUT PARAMETERS =====
+// MACD Settings
+fastLength = input(12, "Fast Length")
+slowlength = input(26, "Slow Length") 
+MACDLength = input(9, "MACD Length")
+
+// Supertrend Settings
+atrPeriod = input(10, "ATR Period")
+multiplier = input(3.0, "Multiplier")
+
+// DEMA Settings
+demaShort = input(20, "Short DEMA Length")
+demaLong = input(50, "Long DEMA Length")
+
+// Risk Management
+stopLossPerc = input(2.0, "Stop Loss %") / 100
+takeProfitPerc = input(4.0, "Take Profit %") / 100
+
+// ===== INDICATOR CALCULATIONS =====
+// MACD Calculation (similar to your example)
+MACD = ta.ema(close, fastLength) - ta.ema(close, slowlength)
+aMACD = ta.ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+// Supertrend Calculation
+atr = ta.atr(atrPeriod)
+up = hl2 + (multiplier * atr)
+dn = hl2 - (multiplier * atr)
+
+up1 = 0.0
+dn1 = 0.0
+trend = 0
+up1 := close[1] > up1[1] ? math.max(up, up1[1]) : up
+dn1 := close[1] < dn1[1] ? math.min(dn, dn1[1]) : dn
+trend := close > dn1[1] ? 1 : close < up1[1] ? -1 : nz(trend[1], 1)
+
+// DEMA Calculation
+demaShortVal = 2 * ta.ema(close, demaShort) - ta.ema(ta.ema(close, demaShort), demaShort)
+demaLongVal = 2 * ta.ema(close, demaLong) - ta.ema(ta.ema(close, demaLong), demaLong)
+
+// ===== STRATEGY CONDITIONS =====
+// Alignment Conditions - ALL must be true
+macdBullish = ta.crossover(delta, 0)
+macdBearish = ta.crossunder(delta, 0)
+supertrendBullish = trend == 1
+supertrendBearish = trend == -1
+demaBullish = demaShortVal > demaLongVal
+demaBearish = demaShortVal < demaLongVal
+
+// Final Entry Conditions with ALIGNMENT
+longCondition = macdBullish and supertrendBullish and demaBullish
+shortCondition = macdBearish and supertrendBearish and demaBearish
+
+// ===== POSITION MANAGEMENT =====
+var float longEntryPrice = 0.0
+var float shortEntryPrice = 0.0
+
+// Calculate TP/SL levels when entry occurs
+if longCondition and strategy.position_size == 0
+    longEntryPrice := close
+    strategy.entry("Long", strategy.long, comment="L_Entry")
+    
+if shortCondition and strategy.position_size == 0  
+    shortEntryPrice := close
+    strategy.entry("Short", strategy.short, comment="S_Entry")
+
+// Long Position TP/SL
+longStopLoss = longEntryPrice * (1 - stopLossPerc)
+longTakeProfit = longEntryPrice * (1 + takeProfitPerc)
+
+// Short Position TP/SL  
+shortStopLoss = shortEntryPrice * (1 + stopLossPerc)
+shortTakeProfit = shortEntryPrice * (1 - takeProfitPerc)
+
+// Exit conditions
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=longStopLoss, limit=longTakeProfit, comment="L_Exit")
+    
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=shortStopLoss, limit=shortTakeProfit, comment="S_Exit")
+
+// ===== PLOTTING =====
+// Plot DEMAs
+plot(demaShortVal, color=color.blue, linewidth=2, title="Short DEMA")
+plot(demaLongVal, color=color.red, linewidth=2, title="Long DEMA")
+
+// Plot Supertrend
+supertrendLine = trend == 1 ? up1 : dn1
+plot(supertrendLine, color=trend == 1 ? color.green : color.red, linewidth=2, title="Supertrend")
+
+// Plot entry signals
+plotshape(longCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Long Signal")
+plotshape(shortCondition, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Short Signal")
+
+// Background for alignment
+bgcolor(longCondition ? color.new(color.green, 90) : shortCondition ? color.new(color.red, 90) : na)
+
+View in Pine Editor・99 lines
+Use on chart
+3
+0
+1 189
+STRATEGY 📊 STRATEGY LOGIC:
+Long Entry: When ALL of these occur simultaneously:
+
+MACD histogram crosses above 0
+
+Supertrend is bullish (green)
+
+Short DEMA > Long DEMA
+
+Short Entry: When ALL of these occur simultaneously:
+
+MACD histogram crosses below 0
+
+Supertrend is bearish (red)
+
+Short DEMA < Long DEMA
+
+Exits: Based on your TP/SL percentages from entry price
+
+This follows the same clean structure as your MACD strategy but adds the alignment concept and proper risk management!
+
+

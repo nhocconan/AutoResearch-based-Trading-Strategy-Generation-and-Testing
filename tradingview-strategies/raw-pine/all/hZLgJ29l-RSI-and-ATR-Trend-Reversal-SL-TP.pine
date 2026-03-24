@@ -1,0 +1,136 @@
+//@version=5
+strategy("RSI Trend Reversal", overlay=true, max_bars_back = 4999, calc_on_every_tick = false)
+
+
+//INPUTS
+rsi_length = input.int(title = "Lenght", defval = 8)
+rsi_mult = input.float(title = "Multiplier", defval = 1.5, step = .05)
+lookback = input.int(title = "Delay to prevent idealization", defval = 1)
+sltp = input.float(title = "Minimum Difference", defval = 10)
+src = input.source(title = "Source Input", defval = close)
+
+//PARAMETERS INITILIZATION
+hclose = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, src)
+//FUNCTION INITILIZATION
+highest_custom(src, length) =>
+    x = src
+    for i = 0 to length
+        if src[i] > x
+            x := src[i]
+    x
+lowest_custom(src, length) => 
+    x = src
+    for i = 0 to length
+        if src[i] < x
+            x := src[i]
+    x
+rsilev(src, length, mult, sltp) =>
+    sl = (100 - sltp) / 100
+    tp = (100 + sltp) / 100
+    var bool crossup = na
+    var bool crossdown = na
+    var float dir = na
+    var float BearGuy = 0
+    BullGuy = ta.barssince(crossup or crossdown)
+    if na(BullGuy)
+        BearGuy += 1
+    else
+        BearGuy := BullGuy
+    var float upper = na
+    var float lower = na
+    rsilower = ta.rsi(src, length)
+    rsiupper = math.abs(ta.rsi(src, length) - 100)
+    atr = ta.atr(length) / src
+    lower := highest_custom(math.max(highest_custom(highest_custom(src, BearGuy) * (1 - (atr + ((1 / (rsilower) * mult)))), BearGuy), src * sl), BearGuy)
+    upper := lowest_custom(math.min(lowest_custom(lowest_custom(src, BearGuy) * (1 + (atr + ((1 / (rsiupper) * mult)))), BearGuy), src * tp), BearGuy)
+    var float thresh = na
+    if na(thresh)
+        thresh := lower
+    if na(dir)
+        dir := 1
+    if crossdown
+        dir := -1
+    if crossup
+        dir := 1
+    if dir == 1
+        thresh := lower
+    if dir == -1
+        thresh := upper
+    crossup := ta.crossover(src, thresh)
+    crossdown := ta.crossunder(src, thresh)
+    thresh
+
+rsiclose = rsilev(hclose, rsi_length, rsi_mult, sltp)
+
+//PLOTTING
+var color col = color.lime
+col := hclose > rsiclose ? color.lime : color.red
+plot(rsiclose, linewidth = 2, color = col)
+
+//STRATEGY
+buy = ta.crossover(hclose, rsiclose) and barstate.isconfirmed
+sell = ta.crossunder(hclose, rsiclose) and barstate.isconfirmed
+
+if buy[lookback]
+    strategy.entry("long", strategy.long)
+if sell[lookback]
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・77 lines
+Use on chart
+2 K
+15
+52 849
+Apr 19, 2024
+Quick History:
+I was frustrated with a standard fixed percent TP/SL as they often were not receptive to quick market rallies/reversals. I developed this TP/SL and eventually made it into a full fledge strategy and found it did well enough to publish. This strategy can be used as a standalone or tacked onto another strategy as a TP/SL. It does function as both with a single line. This strategy has been tested with TSLA , AAPL, NVDA, on the 15 minutes timeframe.
+
+HOW IT WORKS:
+Inputs:
+Length: Simple enough, it determines the length of the RSI and ATR used.
+
+Multiplier: This multiplies the RSI and ATR calculation, more on this later.
+
+Delay to prevent Idealization: TradingView will use the open of the bar the strategy triggers on when calculating the backtest. This can produce unrealistic results depending on the source. If your source is open, set to 0, if anything else, set to 1.
+
+Minimum Difference: This is essentially a traditional SL/TP, it is borderline unnecessary, but if the other parameters are wacky this can be used to ensure the SL/TP. It multiplies the source by the percent, so if it is set to 10, the SL/TP is initialized at src +- 10%.
+
+Source input: Self Explanatory, be sure to update the Delay if you use open.
+
+CALCULATION:
+Parameters Initialization:
+The strategy uses Heikinashi values for calculations, this is not toggleable in parameters, but can be easily changed by changing hclose to equal src.
+
+FUNCTION INITIALIZATION:
+highest_custom and lowest_custom do the same thing as ta.highest and ta.lowest, however the built in ta library does not allow for var int input, so I had to create my own functions to be used here. I actually developed these years ago and have used them in almost every strategy since. Feel especially free to use these in your own scripts.
+
+The rsilev is where the magic happens.
+
+SL/TP min/max are initially calculated to be used later.
+Then we begin by establishing variables.
+
+BullGuy is used to determine the length since the last crossup or crossdown, until one happens, it returns na, breaking the function. BearGuy is used in all the calculations, and is the same as BullGuy, unless BullGuy is na, where BearGuy counts up from 1 on each bar from 0.
+
+We create our rsi and have to modify the second one to suit the function. In the case of the upper band, we mirror the lower one. So if the RSI is 80, we want it to be 20 on the upper band.
+
+the upper band and lower band are calculated the exact same way, but mirrored. For the purpose of writing, I'm going to talk about the lower band. Assume everything is mirrored for the upper one. It finds the highest source since the last crossup or crossdown. It then multiplies from 1 / the RSI, this means that a rapid RSI increase will increase the band dramatically, so it is able to capture quick rally/reversals. We add this to the atr to source ratio, as the general volatility is a massive factor to be included. We then multiply this number by our chosen amount, and subtract it from the highest source, creating the band.
+
+We do this same process but mirrored with both bands and compared it to the source. If the source is above the lower band, it suggests an uptrend, so the lower band is outputted, and vice versa for the upper one.
+PLOTTING:
+We also determine the line color in the same manner as we do the trend direction.
+
+STRATEGY:
+We then use the source again, and if it crosses up or down relative to the selected band, we enter a long or short respectively.
+
+This may not be the most superb independent strategy, but it can be very useful as a TP/SL for your chosen entry conditions, especially in volatile markets or tickers.
+
+Thank you for taking the time to read, and please enjoy.
+Apr 21, 2024
+Release Notes
+Updated Chart
+Apr 21, 2024
+Release Notes
+Updated Slippage.
+May 30, 2024
+Release Notes
+Fixed slight repainting issue by forcing the bar to wait until bar close before updating the crossup/crossdown.

@@ -1,0 +1,281 @@
+//@version=5
+strategy("10-Factor Super Indicator Strategy (Fixed)", overlay=true, initial_capital=10000, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// =========================
+// Inputs
+// =========================
+emaFastLen      = input.int(20, "EMA Fast")
+emaSlowLen      = input.int(50, "EMA Slow")
+
+macdFastLen     = input.int(12, "MACD Fast")
+macdSlowLen     = input.int(26, "MACD Slow")
+macdSignalLen   = input.int(9, "MACD Signal")
+
+rsiLen          = input.int(14, "RSI Length")
+
+adxLen          = input.int(14, "ADX Length")
+adxSmoothing    = input.int(14, "ADX Smoothing")
+adxMin          = input.float(20.0, "ADX Minimum")
+
+bbLen           = input.int(20, "BB Length")
+bbMult          = input.float(2.0, "BB Mult")
+
+stochRsiLen     = input.int(14, "Stoch RSI Length")
+stochKLen       = input.int(3, "Stoch RSI K")
+stochDLen       = input.int(3, "Stoch RSI D")
+
+supertrendAtr   = input.int(10, "Supertrend ATR Length")
+supertrendMult  = input.float(3.0, "Supertrend Factor")
+
+atrLen          = input.int(14, "ATR Length")
+atrMinPct       = input.float(0.4, "Min ATR % of Price", step=0.1)
+
+longThreshold   = input.float(45.0, "Long Score Threshold", minval=0, maxval=100)
+shortThreshold  = input.float(-45.0, "Short Score Threshold", minval=-100, maxval=0)
+exitThreshold   = input.float(10.0, "Exit Score Threshold")
+
+stopATRMult     = input.float(2.0, "Stop ATR Mult")
+takeATRMult     = input.float(3.5, "Take Profit ATR Mult")
+
+// =========================
+// Weights
+// =========================
+wEMA        = input.int(15, "Weight EMA Trend")
+wSupertrend = input.int(15, "Weight Supertrend")
+wMACD       = input.int(12, "Weight MACD")
+wRSI        = input.int(8, "Weight RSI")
+wADX        = input.int(10, "Weight ADX")
+wVWAP       = input.int(10, "Weight VWAP")
+wBB         = input.int(8, "Weight Bollinger")
+wStochRSI   = input.int(8, "Weight Stoch RSI")
+wOBV        = input.int(7, "Weight OBV")
+wATR        = input.int(7, "Weight ATR Regime")
+
+totalWeight = wEMA + wSupertrend + wMACD + wRSI + wADX + wVWAP + wBB + wStochRSI + wOBV + wATR
+
+// =========================
+// Core Calculations
+// =========================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+[macdLine, macdSignal, macdHist] = ta.macd(close, macdFastLen, macdSlowLen, macdSignalLen)
+
+rsi = ta.rsi(close, rsiLen)
+
+// Fixed ADX block
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxSmoothing)
+
+vwapVal = ta.vwap(hlc3)
+
+bbBasis = ta.sma(close, bbLen)
+bbDev   = ta.stdev(close, bbLen) * bbMult
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+// Stoch RSI
+rsiBase   = ta.rsi(close, stochRsiLen)
+rsiLowest = ta.lowest(rsiBase, stochRsiLen)
+rsiHighest = ta.highest(rsiBase, stochRsiLen)
+stochRsiRaw = rsiHighest != rsiLowest ? 100 * (rsiBase - rsiLowest) / (rsiHighest - rsiLowest) : 0
+stochK = ta.sma(stochRsiRaw, stochKLen)
+stochD = ta.sma(stochK, stochDLen)
+
+// Supertrend
+[stLine, stDir] = ta.supertrend(supertrendMult, supertrendAtr)
+
+obv = ta.obv
+obvEma = ta.ema(obv, 21)
+
+atr = ta.atr(atrLen)
+atrPct = close != 0 ? atr / close * 100.0 : 0.0
+
+// =========================
+// Bull/Bear Votes
+// =========================
+emaBull = emaFast > emaSlow and close > emaFast
+emaBear = emaFast < emaSlow and close < emaFast
+
+superBull = stDir < 0
+superBear = stDir > 0
+
+macdBull = macdLine > macdSignal and macdHist > 0
+macdBear = macdLine < macdSignal and macdHist < 0
+
+rsiBull = rsi > 55
+rsiBear = rsi < 45
+
+adxBull = adx > adxMin and plusDI > minusDI
+adxBear = adx > adxMin and minusDI > plusDI
+
+vwapBull = close > vwapVal
+vwapBear = close < vwapVal
+
+bbBull = close > bbBasis and close < bbUpper
+bbBear = close < bbBasis and close > bbLower
+
+stochBull = stochK > stochD and stochK > 20 and stochK < 80
+stochBear = stochK < stochD and stochK > 20 and stochK < 80
+
+obvBull = obv > obvEma
+obvBear = obv < obvEma
+
+atrActive = atrPct > atrMinPct
+
+// =========================
+// Weighted Score
+// =========================
+atrScore = atrActive ? wATR : 0
+
+scoreRaw =
+     (emaBull ? wEMA : emaBear ? -wEMA : 0) +
+     (superBull ? wSupertrend : superBear ? -wSupertrend : 0) +
+     (macdBull ? wMACD : macdBear ? -wMACD : 0) +
+     (rsiBull ? wRSI : rsiBear ? -wRSI : 0) +
+     (adxBull ? wADX : adxBear ? -wADX : 0) +
+     (vwapBull ? wVWAP : vwapBear ? -wVWAP : 0) +
+     (bbBull ? wBB : bbBear ? -wBB : 0) +
+     (stochBull ? wStochRSI : stochBear ? -wStochRSI : 0) +
+     (obvBull ? wOBV : obvBear ? -wOBV : 0) +
+     atrScore
+
+score = totalWeight > 0 ? (scoreRaw / totalWeight) * 100.0 : 0.0
+
+// =========================
+// Trade Logic
+// =========================
+longSignal  = score >= longThreshold and emaBull and superBull and adx > adxMin and atrActive
+shortSignal = score <= shortThreshold and emaBear and superBear and adx > adxMin and atrActive
+
+exitLong  = score < exitThreshold
+exitShort = score > -exitThreshold
+
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+longStop  = strategy.position_avg_price - atr * stopATRMult
+longTake  = strategy.position_avg_price + atr * takeATRMult
+shortStop = strategy.position_avg_price + atr * stopATRMult
+shortTake = strategy.position_avg_price - atr * takeATRMult
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTake)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTake)
+
+if strategy.position_size > 0 and exitLong
+    strategy.close("Long")
+
+if strategy.position_size < 0 and exitShort
+    strategy.close("Short")
+
+// =========================
+// Visuals
+// =========================
+plot(emaFast, "EMA Fast", color=color.new(color.green, 0), linewidth=2)
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+plot(stLine, "Supertrend Line", color=color.new(color.blue, 0), linewidth=2)
+plot(vwapVal, "VWAP", color=color.new(color.purple, 0), linewidth=2)
+
+plotshape(longSignal, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SELL")
+
+scoreColor = score > 30 ? color.new(color.green, 0) : score < -30 ? color.new(color.red, 0) : color.new(color.gray, 0)
+plot(score, "Composite Score", color=scoreColor, linewidth=3, display=display.pane)
+
+hline(0, "Neutral", color=color.gray)
+hline(longThreshold, "Long Threshold", color=color.green)
+hline(shortThreshold, "Short Threshold", color=color.red)
+
+bgcolor(score >= longThreshold ? color.new(color.green, 88) : score <= shortThreshold ? color.new(color.red, 88) : na)
+
+// =========================
+// Table
+// =========================
+var table t = table.new(position.top_right, 2, 12, border_width=1)
+
+showState(bull, bear) =>
+    bull ? "Bull" : bear ? "Bear" : "Neutral"
+
+if barstate.islast
+    table.cell(t, 0, 0, "Factor", text_color=color.white, bgcolor=color.black)
+    table.cell(t, 1, 0, "State", text_color=color.white, bgcolor=color.black)
+
+    table.cell(t, 0, 1, "EMA")
+    table.cell(t, 1, 1, showState(emaBull, emaBear))
+
+    table.cell(t, 0, 2, "Supertrend")
+    table.cell(t, 1, 2, showState(superBull, superBear))
+
+    table.cell(t, 0, 3, "MACD")
+    table.cell(t, 1, 3, showState(macdBull, macdBear))
+
+    table.cell(t, 0, 4, "RSI")
+    table.cell(t, 1, 4, showState(rsiBull, rsiBear))
+
+    table.cell(t, 0, 5, "ADX/DI")
+    table.cell(t, 1, 5, showState(adxBull, adxBear))
+
+    table.cell(t, 0, 6, "VWAP")
+    table.cell(t, 1, 6, showState(vwapBull, vwapBear))
+
+    table.cell(t, 0, 7, "Bollinger")
+    table.cell(t, 1, 7, showState(bbBull, bbBear))
+
+    table.cell(t, 0, 8, "Stoch RSI")
+    table.cell(t, 1, 8, showState(stochBull, stochBear))
+
+    table.cell(t, 0, 9, "OBV")
+    table.cell(t, 1, 9, showState(obvBull, obvBear))
+
+    table.cell(t, 0, 10, "ATR Regime")
+    table.cell(t, 1, 10, atrActive ? "Active" : "Quiet")
+
+    table.cell(t, 0, 11, "Score")
+    table.cell(t, 1, 11, str.tostring(score, "#.0"), text_color=score >= 0 ? color.green : color.red)
+
+View in Pine Editor・236 lines
+Use on chart
+2
+3
+543
+10-Factor Super Indicator Strategy (Fixed) is a multi-signal confluence strategy that combines trend, momentum, volatility, volume, and market regime analysis into one weighted composite score.
+
+Instead of relying on a single indicator, this script evaluates 10 different factors:
+EMA trend, Supertrend, MACD, RSI, ADX/DI, VWAP, Bollinger Bands, Stochastic RSI, OBV, and ATR regime activity.
+
+Each factor contributes a bullish or bearish vote based on current market conditions. These votes are weighted and merged into a normalized composite score from -100 to +100, helping identify when market conditions are strongly aligned in one direction.
+
+The strategy uses this score together with key trend filters to generate long and short entries:
+
+Long trades require bullish confluence, trend confirmation, ADX strength, and active ATR regime
+
+Short trades require bearish confluence, trend confirmation, ADX strength, and active ATR regime
+
+Built-in ATR-based stop-loss and take-profit levels are included for risk management, while score-based exit logic helps close trades when overall confluence weakens.
+
+Core features:
+
+10-indicator confluence model
+
+Weighted bullish/bearish scoring system
+
+Composite market conviction score
+
+Long and short trade signals
+
+ATR-based stop loss and take profit
+
+Score-based early exit logic
+
+On-chart signal markers
+
+Informational table showing live factor states
+
+This script is designed for traders who want a broader market view rather than depending on one lagging signal. It works best as a structured confluence framework that can be optimized for different assets, timeframes, and trading styles.
+
+
+A 10-factor confluence trading strategy that combines EMA, Supertrend, MACD, RSI, ADX, VWAP, Bollinger Bands, Stochastic RSI, OBV, and ATR into a single weighted score. The strategy uses this composite score to identify high-conviction long and short setups, with built-in ATR-based risk management and score-driven exits.
+
+This strategy combines ten widely used technical indicators into a single weighted confluence model to help identify high-probability market setups. By blending trend, momentum, volatility, volume, and regime filters into one normalized score, it aims to reduce noise and avoid over-reliance on any single indicator. Entries are triggered only when multiple conditions align, while ATR-based stops, take-profit levels, and score deterioration exits help manage risk. Ideal for traders looking for a more systematic, multi-factor approach to chart analysis.

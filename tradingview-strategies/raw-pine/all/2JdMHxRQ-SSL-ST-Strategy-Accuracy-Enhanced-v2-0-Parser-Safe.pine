@@ -1,0 +1,169 @@
+//@version=6
+strategy("SSL ST Strategy – Accuracy Enhanced v2.0 (Parser Safe)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// -----------------------------
+// INPUTS
+// -----------------------------
+maType        = input.string("HMA", "Baseline/SSL MA Type", options=["SMA","EMA","DEMA","TEMA","WMA","LSMA","HMA"])
+len           = input.int(60, "SSL / Baseline Length", minval=1)
+atrLen        = input.int(14, "ATR Length", minval=1)
+atrSLmult     = input.float(1.8, "ATR Stop-Loss Multiplier", minval=0.1)
+exitPoints    = input.float(25, "Fixed Target (Points)", minval=0.0)
+exitMode      = input.string("Both", "Exit Mode", options=["Crossover Only","Points Only","Both"])
+useHTFfilter  = input.bool(true, "Use Higher-Timeframe Trend Filter?")
+htf           = input.timeframe("240", "Higher Timeframe (Trend Filter)")
+invert        = input.bool(false, "Invert Buy/Sell Signals?")
+showBaseline  = input.bool(true, "Show Baseline?")
+showSSL       = input.bool(true, "Show SSL1?")
+
+// -----------------------------
+// MA ENGINE (function)
+// -----------------------------
+ma_func(src, length, type) =>
+    if type == "SMA"
+        ta.sma(src, length)
+    else if type == "EMA"
+        ta.ema(src, length)
+    else if type == "DEMA"
+        2 * ta.ema(src, length) - ta.ema(ta.ema(src, length), length)
+    else if type == "TEMA"
+        3 * (ta.ema(src, length) - ta.ema(ta.ema(src, length), length)) + ta.ema(ta.ema(ta.ema(src, length), length), length)
+    else if type == "WMA"
+        ta.wma(src, length)
+    else if type == "LSMA"
+        ta.linreg(src, length, 0)
+    else
+        // HMA: ensure integer args
+        intLenHalf = int(length / 2)
+        intSqrtLen = int(math.sqrt(math.max(length, 1)))
+        ta.wma(2 * ta.wma(src, intLenHalf) - ta.wma(src, length), intSqrtLen)
+
+// -----------------------------
+// SSL CALC
+// -----------------------------
+maHigh   = ma_func(high, len, maType)
+maLow    = ma_func(low, len, maType)
+baseline = ma_func(close, len, maType)
+
+var int hlv = 1
+hlv := close > maHigh ? 1 : close < maLow ? -1 : nz(hlv[1], 1)
+ssl1 = hlv < 0 ? maHigh : maLow
+sslSmooth = ta.ema(ssl1, 2)  // small smoothing to reduce tiny flips
+
+// -----------------------------
+// HIGHER-TF TREND FILTER
+// -----------------------------
+// Request HTF baseline from higher timeframe
+htfBaseline = request.security(syminfo.tickerid, htf, ma_func(close, len, maType))
+bullHTF = close > htfBaseline
+bearHTF = close < htfBaseline
+
+// -----------------------------
+// SIGNALS
+// -----------------------------
+buySignalBase  = ta.crossunder(sslSmooth, baseline)
+sellSignalBase = ta.crossover(sslSmooth, baseline)
+
+buySignal  = invert ? ta.crossover(sslSmooth, baseline) : buySignalBase
+sellSignal = invert ? ta.crossunder(sslSmooth, baseline) : sellSignalBase
+
+filteredBuy  = useHTFfilter ? (buySignal and bullHTF) : buySignal
+filteredSell = useHTFfilter ? (sellSignal and bearHTF) : sellSignal
+
+// -----------------------------
+// ATR SL & POINT TARGETS
+// -----------------------------
+atr = ta.atr(atrLen)
+
+// compute point-exit using symbol tick size
+longPointExit  = strategy.position_size > 0 and (close - strategy.position_avg_price) >= exitPoints * syminfo.mintick
+shortPointExit = strategy.position_size < 0 and (strategy.position_avg_price - close) >= exitPoints * syminfo.mintick
+
+// compute dynamic SL only when in position to avoid NaNs
+longSL_calc  = strategy.position_size > 0 ? (strategy.position_avg_price - atrSLmult * atr) : na
+shortSL_calc = strategy.position_size < 0 ? (strategy.position_avg_price + atrSLmult * atr) : na
+
+// -----------------------------
+// ENTRIES
+// -----------------------------
+if filteredBuy
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if filteredSell
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// -----------------------------
+// EXITS
+// -----------------------------
+// Determine crossover exits
+longExitCross  = ta.crossover(sslSmooth, baseline)
+shortExitCross = ta.crossunder(sslSmooth, baseline)
+
+// Build exit booleans in parser-safe way
+exitLong = false
+exitShort = false
+
+// Long exit logic
+if strategy.position_size > 0
+    // Crossover condition
+    cond1 = exitMode == "Crossover Only" and longExitCross
+    // Points condition
+    cond2 = exitMode == "Points Only" and longPointExit
+    // Both mode: either crossover or points
+    cond3 = exitMode == "Both" and (longExitCross or longPointExit)
+    // ATR SL condition
+    cond4 = not na(longSL_calc) and close <= longSL_calc
+    if cond1 or cond2 or cond3 or cond4
+        exitLong := true
+
+// Short exit logic
+if strategy.position_size < 0
+    cond1s = exitMode == "Crossover Only" and shortExitCross
+    cond2s = exitMode == "Points Only" and shortPointExit
+    cond3s = exitMode == "Both" and (shortExitCross or shortPointExit)
+    cond4s = not na(shortSL_calc) and close >= shortSL_calc
+    if cond1s or cond2s or cond3s or cond4s
+        exitShort := true
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+// -----------------------------
+// PLOTS
+// -----------------------------
+plot(showBaseline ? baseline : na, "Baseline", color=color.new(color.orange, 0), linewidth=2)
+plot(showSSL ? ssl1 : na, "SSL1", color=color.new(color.blue, 0), linewidth=2)
+plot(strategy.position_size > 0 ? longSL_calc : na, "Long SL", color=color.new(color.red, 0), style=plot.style_line)
+plot(strategy.position_size < 0 ? shortSL_calc : na, "Short SL", color=color.new(color.red, 0), style=plot.style_line)
+plotshape(filteredBuy, title="BUY", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="BUY")
+plotshape(filteredSell, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+
+View in Pine Editor・147 lines
+Use on chart
+1
+6
+1
+850
+This strategy is built to identify high-probability trend breakouts using a combination of SSL Channel, Baseline, Hull / EMA signals, and Candle-based confirmations.
+The goal is to filter noise, avoid false breakouts, and enter only when the trend is truly shifting.
+
+This strategy identifies high-probability trend breakouts using SSL Channel, Baseline, Hull/EMA, and candle
+confirmations.
+1. SSL shows trend shift when price breaks high/low levels.
+2. Baseline filters direction (price above = buy bias, below = sell bias).
+3. Hull/EMA gives early momentum confirmation.
+4. Candle breakout ensures real momentum (breaks previous high/low).
+5. Optional filters: ATR, reversal logic, continuation entries.
+6. Exits occur on SSL flip, baseline cross, or weakness
+
+Disclaimer
+
+This strategy is provided strictly for educational and informational purposes only. It does not guarantee any profit, nor does it protect against losses of any kind. Financial markets are inherently unpredictable, and any market movement can only be assumed or estimated with a probability that is never guaranteed and can often be no better than a 50/50 chance.
+
+By using this strategy, you acknowledge that all trading decisions are made solely at your own risk. I am not liable for any profits, losses, or financial consequences incurred by anyone using or relying on this strategy. Always perform your own research, manage your risk responsibly, and consult with a qualified financial advisor before trading.
+

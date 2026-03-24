@@ -1,0 +1,295 @@
+//@version=5
+strategy(title="TQQQ EMA Strategy", overlay=true, initial_capital=1000000, currency=currency.NONE, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0, slippage=0, pyramiding=1, margin_long=0, margin_short=0, calc_on_order_fills=false, calc_on_every_tick=false, use_bar_magnifier=false, process_orders_on_close=false, max_labels_count=500)
+
+//#region —————————————————————————————————————————————————— Common Dependence
+
+p_comm_time_range_to_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int start_unix_time = na
+    int end_unix_time = na
+    int start_time_hour = na
+    int start_time_minute = na
+    int end_time_hour = na
+    int end_time_minute = na
+    if str.length(time_range) == 11
+        // Format: hh:mm-hh:mm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 3, 5)))
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 6, 8)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 9, 11)))
+    else if str.length(time_range) == 9
+        // Format: hhmm-hhmm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 2, 4)))
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 5, 7)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 7, 9)))
+    start_unix_time := timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), start_time_hour, start_time_minute, 0)
+    end_unix_time := timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), end_time_hour, end_time_minute, 0)
+    [start_unix_time, end_unix_time]
+
+p_comm_time_range_to_start_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int start_time_hour = na
+    int start_time_minute = na
+    if str.length(time_range) == 11
+        // Format: hh:mm-hh:mm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 3, 5)))
+    else if str.length(time_range) == 9
+        // Format: hhmm-hhmm
+        start_time_hour := math.floor(str.tonumber(str.substring(time_range, 0, 2)))
+        start_time_minute := math.floor(str.tonumber(str.substring(time_range, 2, 4)))
+    timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), start_time_hour, start_time_minute, 0)
+
+p_comm_time_range_to_end_unix_time(string time_range, int date_time = time, string timezone = syminfo.timezone) =>
+    int end_time_hour = na
+    int end_time_minute = na
+    if str.length(time_range) == 11
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 6, 8)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 9, 11)))
+    else if str.length(time_range) == 9
+        end_time_hour := math.floor(str.tonumber(str.substring(time_range, 5, 7)))
+        end_time_minute := math.floor(str.tonumber(str.substring(time_range, 7, 9)))
+    timestamp(timezone, year(date_time, timezone), month(date_time, timezone), dayofmonth(date_time, timezone), end_time_hour, end_time_minute, 0)
+
+p_comm_timeframe_to_seconds(simple string tf) =>
+    float seconds = 0
+    tf_lower = str.lower(tf)
+    value = str.tonumber(str.substring(tf_lower, 0, str.length(tf_lower) - 1))
+    if str.endswith(tf_lower, 's')
+        seconds := value
+    else if str.endswith(tf_lower, 'd')
+        seconds := value * 86400
+    else if str.endswith(tf_lower, 'w')
+        seconds := value * 604800
+    else if str.endswith(tf_lower, 'm')
+        seconds := value * 2592000
+    else
+        seconds := str.tonumber(tf_lower) * 60
+    seconds
+
+p_custom_sources() =>
+    [open, high, low, close, volume]
+
+//#endregion —————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Ta Dependence
+
+
+//#endregion —————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Constants
+
+// Input Groups
+string P_GP_1      =      ""
+
+//#endregion —————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Inputs
+
+// Default
+int p_inp_1        =      input.int(defval=20, title="Fast EMA Length", group=P_GP_1)
+int p_inp_2        =      input.int(defval=50, title="Slow EMA Length", group=P_GP_1)
+float p_inp_3      =      input.float(defval=1.3, title="Take Profit Price Multiplier", group=P_GP_1, step=0.01)
+float p_inp_4      =      input.float(defval=0.95, title="Stop Loss Price Multiplier", group=P_GP_1, step=0.01)
+
+
+//#endregion ———————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Price Data
+
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Indicators
+
+p_ind_1      =      ta.ema(close, p_inp_1) // Fast EMA
+p_ind_2      =      ta.ema(close, p_inp_2) // Slow EMA
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Conditions
+
+p_cond_1      =      (ta.crossover(p_ind_1, p_ind_2))
+
+
+//#endregion ———————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Strategy
+
+// Strategy Order Variables
+string p_st_name_1                       =      "Entry"
+string p_st_name_2                       =      "Exit"
+var float p_st_name_2_tp                 =      na
+var bool p_st_name_2_tp_can_drawing      =      true
+var float p_st_name_2_sl                 =      na
+var bool p_st_name_2_sl_can_drawing      =      true
+
+// Strategy Global
+open_trades_number = strategy.opentrades
+pre_bar_open_trades_number = na(open_trades_number[1]) ? 0 : open_trades_number[1]
+var p_entry_order_id = 1
+p_can_place_entry_order() =>
+    strategy.equity > 0
+get_entry_id_name(int current_order_id, string name) =>
+    "[" + str.tostring(current_order_id) + "] " + name
+is_entry_order(string order_id, string name) =>
+    str.startswith(order_id, "[") and str.endswith(order_id, "] " + name)
+get_open_trades_entry_ids() =>
+    int p_open_trades_count = strategy.opentrades
+    string[] p_entry_ids = array.new_string(0, "")
+    if p_open_trades_count > 0
+        for i = 0 to p_open_trades_count - 1
+            array.push(p_entry_ids, strategy.opentrades.entry_id(i))
+    p_entry_ids
+
+// Entry (Entry)
+if p_cond_1 and p_can_place_entry_order()
+    p_st_name_1_id = get_entry_id_name(p_entry_order_id, p_st_name_1)
+    p_entry_order_id := p_entry_order_id + 1
+    string entry_message = ""
+    strategy.entry(id=p_st_name_1_id, direction=strategy.long, alert_message=entry_message, comment=p_st_name_1_id)
+    
+    // TP/SL Exit (Exit)
+    float p_st_name_2_limit = close * p_inp_3
+    if p_st_name_2_tp_can_drawing
+        p_st_name_2_tp_can_drawing := false
+        p_st_name_2_tp := p_st_name_2_limit
+    float p_st_name_2_stop = close * p_inp_4
+    if p_st_name_2_sl_can_drawing
+        p_st_name_2_sl_can_drawing := false
+        p_st_name_2_sl := p_st_name_2_stop
+    string p_st_name_2_alert_message = ""
+    strategy.exit(id=p_st_name_1_id + "_0", from_entry=p_st_name_1_id, qty_percent=100, limit=p_st_name_2_limit, stop=p_st_name_2_stop, comment_profit=p_st_name_2 + " - TP", comment_loss=p_st_name_2 + " - SL", alert_message=p_st_name_2_alert_message)
+    
+
+if high >= p_st_name_2_tp or (pre_bar_open_trades_number > 0 and open_trades_number == 0)
+    p_st_name_2_tp_can_drawing := true
+    p_st_name_2_sl_can_drawing := true
+    p_st_name_2_tp := na
+    p_st_name_2_sl := na
+plot(p_st_name_2_tp, title="Exit - TP", color=color.rgb(0, 150, 136, 0), linewidth=1, style = plot.style_circles)
+if low <= p_st_name_2_sl or (pre_bar_open_trades_number > 0 and open_trades_number == 0)
+    p_st_name_2_sl_can_drawing := true
+    p_st_name_2_tp_can_drawing := true
+    p_st_name_2_sl := na
+    p_st_name_2_tp := na
+plot(p_st_name_2_sl, title="Exit - SL", color=color.rgb(244, 67, 54, 0), linewidth=1, style = plot.style_circles)
+//#endregion —————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Indicator Plots
+
+// Fast EMA
+plot(p_ind_1, "Fast EMA", color.rgb(33, 150, 243, 0), 1)
+
+// Slow EMA
+plot(p_ind_2, "Slow EMA", color.rgb(255, 82, 82, 0), 1)
+
+//#endregion ————————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Custom Plots
+
+//#endregion —————————————————————————————————————————————————————————————
+
+
+//#region —————————————————————————————————————————————————— Alert
+
+//#endregion ——————————————————————————————————————————————————————
+
+View in Pine Editor・218 lines
+Use on chart
+4
+4
+7
+1
+11 670
+TQQQ EMA Crossover Strategy Indicator
+
+Meta Title: TQQQ EMA Crossover Strategy - Enhance Your Trading with Effective Signals
+
+Meta Description: Discover the TQQQ EMA Crossover Strategy, designed to optimize trading decisions with fast and slow EMA crossovers. Learn how to effectively use this powerful indicator for better trading results.
+
+Key Features
+
+The TQQQ EMA Crossover Strategy is a powerful trading tool that utilizes Exponential Moving Averages (EMAs) to identify potential entry and exit points in the market. Key features of this indicator include:
+
+
+**Fast and Slow EMAs:** The strategy incorporates two EMAs, allowing traders to capture short-term trends while filtering out market noise.
+
+**Entry and Exit Signals:** Automated signals for entering and exiting trades based on EMA crossovers, enhancing decision-making efficiency.
+
+**Customizable Parameters:** Users can adjust the lengths of the EMAs, as well as take profit and stop loss multipliers, tailoring the strategy to their trading style.
+
+**Visual Indicators:** Clear visual plots of the EMAs and exit points on the chart for easy interpretation.
+
+
+
+How It Works
+
+The TQQQ EMA Crossover Strategy operates by calculating two EMAs: a fast EMA (default length of 20) and a slow EMA (default length of 50). The core concept is based on the crossover of these two moving averages:
+
+- When the fast EMA crosses above the slow EMA, it generates a *buy signal*, indicating a potential upward trend.
+- Conversely, when the fast EMA crosses below the slow EMA, it produces a *sell signal*, suggesting a potential downward trend.
+
+This method allows traders to capitalize on momentum shifts in the market, providing timely signals for trade execution.
+
+Trading Ideas and Insights
+
+Traders can leverage the TQQQ EMA Crossover Strategy in various market conditions. Here are some insights:
+
+
+**Scalping Opportunities:** The strategy is particularly effective for scalping in volatile markets, allowing traders to make quick profits on small price movements.
+
+**Swing Trading:** Longer-term traders can use this strategy to identify significant trend reversals and capitalize on larger price swings.
+
+**Risk Management:** By incorporating customizable stop loss and take profit levels, traders can manage their risk effectively while maximizing potential returns.
+
+
+
+How Multiple Indicators Work Together
+
+While this strategy primarily relies on EMAs, it can be enhanced by integrating additional indicators such as:
+
+- **Relative Strength Index (RSI):** To confirm overbought or oversold conditions before entering trades.
+- **Volume Indicators:** To validate breakout signals, ensuring that price movements are supported by sufficient trading volume.
+
+Combining these indicators provides a more comprehensive view of market dynamics, increasing the reliability of trade signals generated by the EMA crossover.
+
+Unique Aspects
+
+What sets this indicator apart is its simplicity combined with effectiveness. The reliance on EMAs allows for smoother signals compared to traditional moving averages, reducing false signals often associated with choppy price action. Additionally, the ability to customize parameters ensures that traders can adapt the strategy to fit their unique trading styles and risk tolerance.
+
+How to Use
+
+To effectively utilize the TQQQ EMA Crossover Strategy:
+
+1. **Add the Indicator:** Load the script onto your TradingView chart.
+2. **Set Parameters:** Adjust the fast and slow EMA lengths according to your trading preferences.
+3. **Monitor Signals:** Watch for crossover points; enter trades based on buy/sell signals generated by the indicator.
+4. **Implement Risk Management:** Set your stop loss and take profit levels using the provided multipliers.
+
+Regularly review your trading performance and adjust parameters as necessary to optimize results.
+
+Customization
+
+The TQQQ EMA Crossover Strategy allows for extensive customization:
+
+- **EMA Lengths:** Change the default lengths of both fast and slow EMAs to suit different time frames or market conditions.
+- **Take Profit/Stop Loss Multipliers:** Adjust these values to align with your risk management strategy. For instance, increasing the take profit multiplier may yield larger gains but could also increase exposure to market fluctuations.
+
+This flexibility makes it suitable for various trading styles, from aggressive scalpers to conservative swing traders.
+
+Conclusion
+
+The TQQQ EMA Crossover Strategy is an effective tool for traders seeking an edge in their trading endeavors. By utilizing fast and slow EMAs, this indicator provides clear entry and exit signals while allowing for customization to fit individual trading strategies. Whether you are a scalper looking for quick profits or a swing trader aiming for larger moves, this indicator offers valuable insights into market trends.
+
+Incorporate it into your TradingView toolkit today and elevate your trading performance!

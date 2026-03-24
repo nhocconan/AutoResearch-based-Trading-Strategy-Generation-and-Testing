@@ -1,0 +1,42 @@
+//@version=3
+//Author: HighProfit
+
+//Lead-In
+strategy("Parabolic SAR & Arnoud Legoux Moving Avarage Strategy", shorttitle="ST-PSAR+ALMA", overlay=true)
+
+//Arnoud Legoux Moving Avarage Inputs
+source = close
+windowsize = input(title="Window Size", type=integer, defval=50)
+offset = input(title="Offset", type=float, defval=0.85)
+sigma = input(title="Sigma", type=float, defval=6)
+
+//Parabolic SAR Inputs
+start = input(title="Start", type=float, defval=0.02)
+increase = input(title="Increase", type=float, defval=0.02)
+max = input(title="Max", type=float, defval=.2)
+
+//Conditions
+longCondition = close>open and sar(start, increase, max) < low and crossover(close, alma(source, windowsize, offset, sigma))
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = close<open and sar(start, increase, max) > high and crossunder(close, alma(source, windowsize, offset, sigma))
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+//Plots   
+plot(alma(source, windowsize, offset, sigma), linewidth=2, title="ALMA")
+plot(sar(start, increase, max), style=circles, linewidth=2, title="PSAR")
+
+View in Pine Editor・29 lines
+Use on chart
+3
+3
+6
+4
+14 999
+In the first short signal example, after price closes below the ALMA and the parabolic SAR plots above the price high, sell signal is opened with the stops trailed to the PSAR values until the trade is stopped out.
+
+Similarly, you can see a long position where price cuts above the ALMA and the Parabolic SAR plots below the price low. Using these values as the trailing stop levels, we can stay long into the trade until the trade is stopped out.
+
+Find out optimal values by trying. May not produce accurate results in horizontal markets. Thank you.

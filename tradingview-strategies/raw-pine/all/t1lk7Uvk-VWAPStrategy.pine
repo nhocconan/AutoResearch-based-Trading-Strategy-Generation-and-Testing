@@ -1,0 +1,29 @@
+//@version=2
+//Not suited for trading, signals show late
+//Use in 1 minutes chart
+strategy(title="VWAPStrategy", overlay=true)
+
+//Values for Simple Moving Average fast
+valfast=3
+//Value for VWAP
+valslow= vwap(hlc3)
+
+long = sma(close, valfast)
+short = valslow
+
+plot(short, color = red)
+plot(long, color = green)
+
+longCond=crossover(long,short)
+shortCond=crossover(short,long)
+strategy.entry("LONG", strategy.long, when=longCond)
+strategy.entry("SHORT", strategy.short, when=shortCond)
+strategy.exit("EXLONG", from_entry="LONG", when=shortCond)
+strategy.exit("EXSHORT", from_entry="SHORT", when=longCond)
+
+View in Pine Editor・22 lines
+Use on chart
+1.2 K
+22
+46 254
+Cross ema3 with VWAP. Just to give imression of how a day migth be divided in a long- and short bias zone. Not suited as trading signal.

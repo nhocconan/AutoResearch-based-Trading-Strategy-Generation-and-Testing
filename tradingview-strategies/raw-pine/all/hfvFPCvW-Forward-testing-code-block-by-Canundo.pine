@@ -1,0 +1,24 @@
+//@version=2
+//This is purely a demonstration with a short code block on how to set up a strategy to forwardtest only.
+//No backtest will happen.
+strategy("Forward testing code block by Canundo", overlay = true)
+
+starttime = starttime[1] != 0 ? starttime[1] : timenow
+
+future() => time >= starttime ? true : false
+
+if future()
+    strategy.entry("buy", strategy.long, 10, when=strategy.position_size <= 0)
+    strategy.entry("sell", strategy.short, 10, when=strategy.position_size > 0)
+
+View in Pine Editor・12 lines
+Use on chart
+6
+8
+5
+4 712
+This is purely a code block useable for strategies you want to forward test. No backtest will happen.
+
+It's especially important to figure out if a strategy will perform as well in live trading as it does in backtesting since the trades in backtests are calculated differently. It can be a great difference.
+
+It's best to test it on 1 minute timeframe or lower. It would take 1-2 minutes to see the first trade happen while no trade before exists.

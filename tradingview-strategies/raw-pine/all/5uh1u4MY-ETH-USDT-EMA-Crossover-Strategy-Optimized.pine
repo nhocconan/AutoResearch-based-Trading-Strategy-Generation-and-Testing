@@ -1,0 +1,153 @@
+//@version=6
+strategy("ETH/USDT EMA Crossover Strategy - Optimized", overlay=true)
+
+// Parámetros de las EMAs
+ema200_length = input.int(200, title="EMA 200 Length")
+ema50_length = input.int(50, title="EMA 50 Length")
+ema20_length = input.int(20, title="EMA 20 Length")
+ema50_length_short = input.int(50, title="EMA 50 Length")
+
+// Parámetros del RSI
+rsi_length = input.int(14, title="RSI Length")
+
+// Parámetros del ATR
+atr_length = input.int(14, title="ATR Length")
+
+// Cálculo de las EMAs
+ema200 = ta.ema(close, ema200_length)
+ema50 = ta.ema(close, ema50_length)
+ema20 = ta.ema(close, ema20_length)
+ema50_short = ta.ema(close, ema50_length_short)
+
+// Cálculo del RSI
+rsi = ta.rsi(close, rsi_length)
+
+// Cálculo del ATR
+atr = ta.atr(atr_length)
+
+// Filtros adicionales
+trend_filter = close > ema200  // Tendencia alcista (solo 1 vela)
+rsi_filter_long = rsi > 30  // Filtro de RSI más relajado para operaciones largas
+rsi_filter_short = rsi < 70  // Filtro de RSI más relajado para operaciones cortas
+volatility_filter = atr > ta.sma(atr, 10)  // Filtro de volatilidad
+volume_filter = volume > ta.sma(volume, 20)  // Filtro de volumen
+
+// Condiciones de la estrategia
+long_condition = ta.crossover(ema20, ema50_short) and trend_filter and rsi_filter_long and volatility_filter and volume_filter
+short_condition = ta.crossunder(ema20, ema50_short) and close < ema200 and rsi_filter_short and volatility_filter and volume_filter
+
+// Ejecución de las órdenes
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// Visualización de las EMAs en el gráfico (solo las esenciales)
+plot(ema200, color=color.red, linewidth=2, title="EMA 200", display=display.none)  // Ocultar EMA 200
+plot(ema50, color=color.blue, linewidth=2, title="EMA 50", display=display.none)  // Ocultar EMA 50
+plot(ema20, color=color.orange, linewidth=2, title="EMA 20")  // Mostrar EMA 20
+plot(ema50_short, color=color.green, linewidth=2, title="EMA 50 Short")  // Mostrar EMA 50 Short
+
+// Visualización del RSI (opcional)
+hline(50, "RSI Midline", color=color.gray, linestyle=hline.style_dotted, display=display.none)  // Ocultar línea de RSI
+plot(rsi, color=color.purple, linewidth=2, title="RSI", display=display.none)  // Ocultar RSI
+
+View in Pine Editor・54 lines
+Use on chart
+2
+0
+1 539
+Strategy Name: EMA Crossover Strategy for ETH/USDT
+
+Description:
+This trading strategy is designed for the ETH/USDT pair and is based on exponential moving average (EMA) crossovers combined with momentum and volatility indicators. The strategy uses multiple filters to identify high-probability signals in both bullish and bearish trends, making it suitable for traders looking to trade in trending markets.
+
+Strategy Components
+EMAs (Exponential Moving Averages):
+
+EMA 200: Used to identify the primary trend. If the price is above the EMA 200, it is considered a bullish trend; if below, a bearish trend.
+
+EMA 50: Acts as an additional filter to confirm the trend.
+
+EMA 20 and EMA 50 Short: These short-term EMAs generate entry signals through crossovers. A bullish crossover (EMA 20 crosses above EMA 50 Short) is a buy signal, while a bearish crossover (EMA 20 crosses below EMA 50 Short) is a sell signal.
+
+RSI (Relative Strength Index):
+
+The RSI is used to avoid overbought or oversold conditions. Long trades are only taken when the RSI is above 30, and short trades when the RSI is below 70.
+
+ATR (Average True Range):
+
+The ATR is used as a volatility filter. Trades are only taken when there is sufficient volatility, helping to avoid false signals in quiet markets.
+
+Volume:
+
+A volume filter is used to confirm sufficient market participation in the price movement. Trades are only taken when volume is above average.
+
+Strategy Logic
+Long Trades:
+
+The price must be above the EMA 200 (bullish trend).
+
+The EMA 20 must cross above the EMA 50 Short.
+
+The RSI must be above 30.
+
+The ATR must indicate sufficient volatility.
+
+Volume must be above average.
+
+Short Trades:
+
+The price must be below the EMA 200 (bearish trend).
+
+The EMA 20 must cross below the EMA 50 Short.
+
+The RSI must be below 70.
+
+The ATR must indicate sufficient volatility.
+
+Volume must be above average.
+
+How to Use the Strategy
+Setup:
+
+Add the script to your ETH/USDT chart on TradingView.
+
+Adjust the parameters according to your preferences (e.g., EMA periods, RSI, ATR, etc.).
+
+Signals:
+
+Buy and sell signals will be displayed directly on the chart.
+
+Long trades are indicated with an upward arrow, and short trades with a downward arrow.
+
+Risk Management:
+
+Use stop-loss and take-profit orders in all trades.
+
+Consider a risk-reward ratio of at least 1:2.
+
+Backtesting:
+
+Test the strategy on historical data to evaluate its performance before using it live.
+
+Advantages of the Strategy
+Trend-focused: The strategy is designed to trade in trending markets, increasing the probability of success.
+
+Multiple filters: The use of RSI, ATR, and volume reduces false signals.
+
+Adaptability: It can be adjusted for different timeframes, although it is recommended to test it on 5-minute and 15-minute charts for ETH/USDT.
+
+Warnings
+Sideways markets: The strategy may generate false signals in markets without a clear trend. It is recommended to avoid trading in such conditions.
+
+Optimization: Make sure to optimize the parameters according to the market and timeframe you are using.
+
+Risk management: Never trade without stop-loss and take-profit orders.
+
+Author
+Jose J. Sanchez Cuevas
+
+Version
+v1.0

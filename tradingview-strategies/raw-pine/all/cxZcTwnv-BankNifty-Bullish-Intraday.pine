@@ -1,0 +1,13 @@
+//@version=5
+showBand_1=##input(defval=true,type='INPUT_BOOL',##id='in_4')
+showBand_2=##input(defval=false,type='INPUT_BOOL',##id='in_6')
+showBand_3=##input(defval=false,type='INPUT_BOOL',##id='in_8')
+##root(root_metainfo,rm_0,(showBand_1?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_1,(showBand_1?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_2,(showBand_1?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_3,(showBand_2?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_4,(showBand_2?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_5,(showBand_2?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_6,(showBand_3?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_7,(showBand_3?display.all:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_8,(showBand_3?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)

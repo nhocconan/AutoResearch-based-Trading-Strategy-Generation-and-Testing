@@ -1,0 +1,78 @@
+//@version=5
+strategy(title="High Win Rate CCI + PSAR + MA Strategy (70%+ Target)", shorttitle="CCI PSAR MA Pro", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Inputs
+ma_short_len = input.int(50, title="Short MA Period (SMA)", minval=1)
+ma_long_len = input.int(200, title="Long MA Period (SMA)", minval=1)
+cci_len = input.int(20, title="CCI Length", minval=1)
+cci_buy_level = input.int(0, title="CCI Buy Cross Level")
+cci_sell_level = input.int(0, title="CCI Sell Cross Level")
+psar_start = input.float(0.02, title="PSAR Acceleration Factor Start", minval=0.001, step=0.001)
+psar_increment = input.float(0.02, title="PSAR Acceleration Factor Increment", minval=0.001, step=0.001)
+psar_max = input.float(0.2, title="PSAR Acceleration Factor Maximum", minval=0.01, step=0.01)
+
+// Higher Timeframe for MTF Filter
+htf = input.timeframe("240", title="Higher Timeframe (e.g., 240 for 4H)")
+use_htf_ma = input.bool(true, title="Use HTF MA Trend Filter")
+
+// Calculations
+short_ma = ta.sma(close, ma_short_len)
+long_ma = ta.sma(close, ma_long_len)
+cci_val = ta.cci(hl2, cci_len)
+psar_val = ta.sar(psar_start, psar_increment, psar_max)
+
+// PSAR Direction: Bullish when PSAR below price, Bearish when above
+psar_bullish = psar_val < close
+psar_bearish = psar_val > close
+
+// HTF Long MA
+htf_long_ma = request.security(syminfo.tickerid, htf, ta.sma(close, ma_long_len))
+
+// Entry Conditions
+in_uptrend = close > long_ma
+in_downtrend = close < long_ma
+
+long_condition = ta.crossover(cci_val, cci_buy_level) and psar_bullish and in_uptrend
+short_condition = ta.crossunder(cci_val, cci_sell_level) and psar_bearish and in_downtrend
+
+// Apply HTF Filter
+if use_htf_ma
+    long_condition := long_condition and (close > htf_long_ma)
+    short_condition := short_condition and (close < htf_long_ma)
+
+// Execute Trades
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// Exits: Opposite signal or PSAR trailing stop
+long_exit = short_condition or ta.crossunder(close, psar_val)
+short_exit = long_condition or ta.crossover(close, psar_val)
+
+strategy.close("Long", when = long_exit)
+strategy.close("Short", when = short_exit)
+
+// Plots
+plot(short_ma, title="Short MA", color=color.blue, linewidth=2)
+plot(long_ma, title="Long MA", color=color.orange, linewidth=2)
+plot(psar_val, title="PSAR", color=psar_bullish ? color.green : color.red, style=plot.style_circles, linewidth=2)
+
+// HTF MA Plot (optional)
+plot(htf_long_ma, title="HTF Long MA", color=color.gray, linewidth=1, style=plot.style_linebr)
+
+// Signals
+plotshape(long_condition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(short_condition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// Alerts
+alertcondition(long_condition, title="CCI PSAR Buy Alert", message="High Win Rate Buy Signal!")
+alertcondition(short_condition, title="CCI PSAR Sell Alert", message="High Win Rate Sell Signal!")
+
+View in Pine Editor・71 lines
+Use on chart
+2
+8
+1 216
+High Win Rate CCI + PSAR + MA Strategy (70%+ Target)

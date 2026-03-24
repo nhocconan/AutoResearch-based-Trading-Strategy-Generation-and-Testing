@@ -1,0 +1,160 @@
+//@version=6
+strategy(title="Stochastic RSI (K-D Candle Compressed) STRATEGY - signals on KD candle",
+     shorttitle="StochRSI KDc Strategy",
+     overlay=false,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     calc_on_order_fills=true,
+     process_orders_on_close=true)
+
+// ==== Inputs ====
+smoothK      = input.int(3,  "K", minval=1)
+smoothD      = input.int(3,  "D", minval=1)
+lengthRSI    = input.int(14, "RSI Length", minval=1)
+lengthStoch  = input.int(21, "Stochastic Length", minval=1)
+src          = input.source(close, "RSI Source")
+compress     = input.float(0.70, "K-D Compress (0~1)", minval=0.0, maxval=1.0, step=0.05)
+diffSmooth   = input.int(3, "K-D Extra Smooth (EMA)", minval=1)
+
+GRP = "Smoothing (from rsi-line)"
+TT_BB = "Only applies when 'SMA + Bollinger Bands' is selected."
+maTypeInput   = input.string("SMA", "Type", options = ["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group = GRP)
+maLengthInput = input.int(14, "Length", group = GRP, minval=1, inline="ma")
+bbMultInput   = input.float(2.0, "BB StdDev", minval = 0.001, maxval = 50, step = 0.5, tooltip = TT_BB, group = GRP, inline="ma")
+
+qtyLots = input.float(0.1, "Order size (lots/contracts)", minval=0.0, step=0.1)
+
+// 风控（以账户货币USD计的盈亏金额）
+slUsd = input.float(10.0, "Stop Loss (USD)", minval=0.01, step=0.1)
+tpUsd = input.float(20.0, "Take Profit (USD)", minval=0.01, step=0.1)
+
+// 回测开始时间
+fromTime = input.time(timestamp("2026-01-01T00:00:00"), "Backtest from")
+inRange = time >= fromTime
+
+// ==== K/D ====
+rsi1 = ta.rsi(src, lengthRSI)
+k0   = ta.stoch(rsi1, rsi1, rsi1, lengthStoch)
+k    = ta.sma(k0, smoothK)
+d    = ta.sma(k,  smoothD)
+
+// ==== RSI + smoothing MA ====
+change = ta.change(src)
+up     = ta.rma(math.max(change, 0), lengthRSI)
+down   = ta.rma(-math.min(change, 0), lengthRSI)
+rsi    = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+ma(source, length, MAtype) =>
+    switch MAtype
+        "SMA"                   => ta.sma(source, length)
+        "SMA + Bollinger Bands" => ta.sma(source, length)
+        "EMA"                   => ta.ema(source, length)
+        "SMMA (RMA)"            => ta.rma(source, length)
+        "WMA"                   => ta.wma(source, length)
+        "VWMA"                  => ta.vwma(source, length)
+        => na
+
+enableMA = maTypeInput != "None"
+isBB     = maTypeInput == "SMA + Bollinger Bands"
+smoothingMA = enableMA ? ma(rsi, maLengthInput, maTypeInput) : na
+
+mid = na(smoothingMA) ? rsi : (rsi + smoothingMA) / 2.0
+
+// ==== Plots ====
+plot(rsi, "RSI", color=#7E57C2)
+plot(smoothingMA, "RSI MA", color=color.yellow)
+
+bbBasis = ta.sma(mid, maLengthInput)
+bbDev   = bbMultInput * ta.stdev(mid, maLengthInput)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+pBasis = plot(isBB ? bbBasis : na, title="BB Basis (mid)", color=color.new(color.yellow, 0))
+pUpper = plot(isBB ? bbUpper : na, title="BB Upper (mid)", color=color.new(color.aqua, 0))
+pLower = plot(isBB ? bbLower : na, title="BB Lower (mid)", color=color.new(color.aqua, 0))
+fill(pUpper, pLower, title="BB Fill (mid)", color=color.new(color.aqua, 85))
+
+h0 = hline(80, "Upper Band", color=#787B86)
+hline(50, "Middle Band", color=color.new(#787B86, 50))
+h1 = hline(20, "Lower Band", color=#787B86)
+fill(h0, h1, title="Background", color=color.rgb(33, 150, 243, 90))
+hline(70, "Level 70", color=color.new(#787B86, 0), linestyle=hline.style_dotted)
+hline(30, "Level 30", color=color.new(#787B86, 0), linestyle=hline.style_dotted)
+
+// ==== KD candle ====
+diffRaw = (k - d) * compress
+diffSm  = ta.ema(diffRaw, diffSmooth)
+
+o  = mid - diffSm
+c  = mid + diffSm
+hi = math.max(o, c)
+lo = math.min(o, c)
+
+col = diffSm >= 0 ? color.red : color.white
+plotcandle(o, hi, lo, c, title="K-D Candle", color=col, wickcolor=col, bordercolor=col)
+
+// ==== Signal logic ====
+isRed   = diffSm >= 0
+isWhite = diffSm < 0
+
+var int whiteStreak = 0
+var int redStreak   = 0
+whiteStreak := isWhite ? nz(whiteStreak[1]) + 1 : 0
+redStreak   := isRed   ? nz(redStreak[1])   + 1 : 0
+
+buySignal  = inRange and (mid < 45) and isRed   and (nz(whiteStreak[1]) >= 2)
+sellSignal = inRange and (mid > 55) and isWhite and (nz(redStreak[1])   >= 2)
+
+plotshape(buySignal,  title="Buy",  style=shape.triangleup,   location=location.bottom, color=color.lime, text="Buy",  size=size.tiny)
+plotshape(sellSignal, title="Sell", style=shape.triangledown, location=location.top,    color=color.red,  text="Sell", size=size.tiny)
+
+// ==== Exits: SL/TP in USD (profit/loss are in account currency) ====
+strategy.exit("XL", from_entry="L", loss=slUsd, profit=tpUsd)
+strategy.exit("XS", from_entry="S", loss=slUsd, profit=tpUsd)
+
+// ==== Cooldown after SL/TP: wait next signal ====
+posNow  = strategy.position_size
+posPrev = nz(strategy.position_size[1])
+
+justClosed = (posPrev != 0) and (posNow == 0)
+
+// 用净利润变化 + 刚刚平仓 近似判定是否为止盈/止损触发（平仓原因在 Pine 里拿不到精确标签）
+netChg = strategy.netprofit - nz(strategy.netprofit[1])
+closedBySLTP = justClosed  // 这里按“任何平仓”都进入冷却；最符合你说的“止损或止盈后等下一个吸纳”
+
+var bool cooldown = false
+if closedBySLTP
+    cooldown := true
+
+// 下一次出现“吸纳信号”（buy 或 sell）时解除冷却（但在同一根上不立即二次下单）
+unlock = cooldown and (buySignal or sellSignal)
+if unlock
+    cooldown := false
+
+// ==== Entries: use signals as open/close; no immediate flip on same bar ====
+canTrade = inRange and not cooldown
+
+if canTrade and buySignal
+    // 多单开仓，同时确保空单已平
+    if strategy.position_size < 0
+        strategy.close("S", comment="Close Short by BuySignal")
+    if strategy.position_size == 0
+        strategy.entry("L", strategy.long, qty=qtyLots, comment="Open Long")
+
+if canTrade and sellSignal
+    if strategy.position_size > 0
+        strategy.close("L", comment="Close Long by SellSignal")
+    if strategy.position_size == 0
+        strategy.entry("S", strategy.short, qty=qtyLots, comment="Open Short")
+
+alertcondition(buySignal,  title="Buy alert",  message="Buy: below 30, >=2 white then 1 red")
+alertcondition(sellSignal, title="Sell alert", message="Sell: above 70, >=2 red then 1 white")
+
+View in Pine Editor・152 lines
+Use on chart
+1
+2
+547
+根据RSI 计算出当前的背离指数，用于辅助交易员对方向做出判断。
+Calculate the current divergence index based on RSI to assist traders in making directional judgments.

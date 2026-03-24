@@ -1,0 +1,76 @@
+//@version=6
+strategy("Dynamic Ticks Oscillator Model (DTOM)", overlay=false)
+
+// === Inputs ===
+downTicksSymbol = input.symbol("USI:DNTKS.NY", title="NYSE Down Ticks Symbol")  // NYSE Down Ticks Symbol
+rocLength = input.int(5, title="Down Ticks ROC Length", minval=1)  // Lookback period for ROC calculation
+volatilityLookback = input.int(24, title="Down Ticks Volatility Lookback", minval=1)  // Lookback period for standard deviation calculation
+entryStdDevMultiplier = input.float(1.6, title="Entry Standard Deviation Multiplier", minval=0.1, step=0.1)  // Multiplier for long entry threshold
+exitStdDevMultiplier = input.float(1.4, title="Exit Standard Deviation Multiplier", minval=0.1, step=0.1)  // Multiplier for exit threshold
+
+// === Data Loading ===
+downTicks = request.security(downTicksSymbol, "D", close, gaps=barmerge.gaps_on)  // NYSE Down Ticks daily data
+
+// === ROC Calculation ===
+downTicksROC = ta.roc(downTicks, rocLength)
+
+// === Dynamic Thresholds Based on Standard Deviation ===
+downTicksStdDev = ta.stdev(downTicksROC, volatilityLookback)  // Standard deviation of ROC
+entryThreshold = -downTicksStdDev * entryStdDevMultiplier  // Entry threshold based on standard deviation
+exitThreshold = downTicksStdDev * exitStdDevMultiplier  // Exit threshold based on standard deviation
+
+// === Conditions ===
+longCondition = downTicksROC < entryThreshold  // Enter long when ROC crosses below the entry threshold
+exitCondition = downTicksROC > exitThreshold  // Exit position when ROC crosses above the exit threshold
+
+// === Signals ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (exitCondition)
+    strategy.close("Long")
+
+// === Background Highlight ===
+bgColor = strategy.position_size > 0 ? color.new(color.rgb(0, 0, 255), 50) : na  // Blue background if a position is open
+bgcolor(bgColor)
+
+// === Plots ===
+plot(downTicksROC, title="ROC (Down Ticks)", color=color.rgb(255, 255, 255), linewidth=1)  // ROC line in white
+plot(entryThreshold, title="Entry Threshold (Dynamic)", color=color.rgb(0, 255, 0), linewidth=2)  // Entry threshold in green
+plot(exitThreshold, title="Exit Threshold (Dynamic)", color=color.rgb(255, 0, 0), linewidth=2)  // Exit threshold in red
+
+// === Horizontal Line for Reference ===
+hline(0, title="Zero Line", color=color.rgb(128, 128, 128), linewidth=1)  // Zero line in gray
+
+View in Pine Editor・43 lines
+Use on chart
+7
+0
+1 971
+The Dynamic Ticks Oscillator Model (DTOM) is a systematic trading approach grounded in momentum and volatility analysis, designed to exploit behavioral inefficiencies in the equity markets. It focuses on the NYSE Down Ticks, a metric reflecting the cumulative number of stocks trading at a lower price than their previous trade. As a proxy for market sentiment and selling pressure, this indicator is particularly useful in identifying shifts in investor behavior during periods of heightened uncertainty or volatility (Jegadeesh & Titman, 1993).
+
+Theoretical Basis
+
+The DTOM builds on established principles of momentum and mean reversion in financial markets. Momentum strategies, which seek to capitalize on the persistence of price trends, have been shown to deliver significant returns in various asset classes (Carhart, 1997). However, these strategies are also susceptible to periods of drawdown due to sudden reversals. By incorporating volatility as a dynamic component, DTOM adapts to changing market conditions, addressing one of the primary challenges of traditional momentum models (Barroso & Santa-Clara, 2015).
+
+Sentiment and Volatility as Core Drivers
+
+The NYSE Down Ticks serve as a proxy for short-term negative sentiment. Sudden increases in Down Ticks often signal panic-driven selling, creating potential opportunities for mean reversion. Behavioral finance studies suggest that investor overreaction to negative news can lead to temporary mispricings, which systematic strategies can exploit (De Bondt & Thaler, 1985). By incorporating a rate-of-change (ROC) oscillator into the model, DTOM tracks the momentum of Down Ticks over a specified lookback period, identifying periods of extreme sentiment.
+
+In addition, the strategy dynamically adjusts entry and exit thresholds based on recent volatility. Research indicates that incorporating volatility into momentum strategies can enhance risk-adjusted returns by improving adaptability to market conditions (Moskowitz, Ooi, & Pedersen, 2012). DTOM uses standard deviations of the ROC as a measure of volatility, allowing thresholds to contract during calm markets and expand during turbulent ones. This approach helps mitigate false signals and aligns with findings that volatility scaling can improve strategy robustness (Barroso & Santa-Clara, 2015).
+
+Practical Implications
+
+The DTOM framework is particularly well-suited for systematic traders seeking to exploit behavioral inefficiencies while maintaining adaptability to varying market environments. By leveraging sentiment metrics such as the NYSE Down Ticks and combining them with a volatility-adjusted momentum oscillator, the strategy addresses key limitations of traditional trend-following models, such as their lagging nature and susceptibility to reversals in volatile conditions.
+
+References
+
+• Barroso, P., & Santa-Clara, P. (2015). Momentum Has Its Moments. Journal of Financial Economics, 116(1), 111–120.
+
+• Carhart, M. M. (1997). On Persistence in Mutual Fund Performance. The Journal of Finance, 52(1), 57–82.
+
+• De Bondt, W. F., & Thaler, R. (1985). Does the Stock Market Overreact? The Journal of Finance, 40(3), 793–805.
+
+• Jegadeesh, N., & Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. The Journal of Finance, 48(1), 65–91.
+
+• Moskowitz, T. J., Ooi, Y. H., & Pedersen, L. H. (2012). Time Series Momentum. Journal of Financial Economics, 104(2), 228–250.

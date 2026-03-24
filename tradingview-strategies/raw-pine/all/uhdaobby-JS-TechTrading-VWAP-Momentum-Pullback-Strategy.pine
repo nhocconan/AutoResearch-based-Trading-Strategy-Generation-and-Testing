@@ -1,0 +1,194 @@
+//@version=5
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © JS-TechTrading 2023
+strategy(title='JS-TechTrading: VWAP Momentum_Pullback Strategy', initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=0, currency='USD', overlay=true)
+
+//// Stoploss and Take Profit Parameters
+// Enable Long Strategy
+enable_long_strategy = input.bool(true, title='Activate Long-Strategy', group='SL/TP for Long-Strategy', inline='1')
+long_stoploss_value = input.float(defval=3, title='Stop-Loss (SL) %', minval=0, group='SL/TP for Long-Strategy', inline='2')
+long_stoploss_percentage = close * (long_stoploss_value / 100) / syminfo.mintick
+long_takeprofit_value = input.float(defval=7, title='Take-Profit (TP) %', minval=0, group='SL/TP for Long-Strategy', inline='2')
+long_takeprofit_percentage = close * (long_takeprofit_value / 100) / syminfo.mintick
+
+// Enable Short Strategy
+enable_short_strategy = input.bool(false, title='Activate Short-Strategie', group='SL/TP for Short-Strategy', inline='3')
+short_stoploss_value = input.float(defval=50, title='Stop-Loss (SL) %', minval=0, group='SL/TP for Short-Strategy', inline='4')
+short_stoploss_percentage = close * (short_stoploss_value / 100) / syminfo.mintick
+short_takeprofit_value = input.float(defval=50, title='Take-Profit (TP) %', minval=0, group='SL/TP for Short-Strategy', inline='4')
+short_takeprofit_percentage = close * (short_takeprofit_value / 100) / syminfo.mintick
+
+// Plot Stoploss & Take Profit Levels
+long_stoploss_price = strategy.position_avg_price * (1 - long_stoploss_value / 100)
+long_takeprofit_price = strategy.position_avg_price * (1 + long_takeprofit_value / 100)
+short_stoploss_price = strategy.position_avg_price * (1 + short_stoploss_value / 100)
+short_takeprofit_price = strategy.position_avg_price * (1 - short_takeprofit_value / 100)
+plot(enable_long_strategy and not enable_short_strategy ? long_stoploss_price : na, color=color.new(#ff0000, 0), style=plot.style_linebr, linewidth=2, title='Long SL Level')
+plot(enable_long_strategy and not enable_short_strategy ? long_takeprofit_price : na, color=color.new(#008000, 0), style=plot.style_linebr, linewidth=2, title='Long TP Level')
+plot(enable_short_strategy and not enable_long_strategy ? short_stoploss_price : na, color=color.new(#ff0000, 0), style=plot.style_linebr, linewidth=2, title='Short SL Level')
+plot(enable_short_strategy and not enable_long_strategy ? short_takeprofit_price : na, color=color.new(#008000, 0), style=plot.style_linebr, linewidth=2, title='Short TP Level')
+
+// Date Range
+start_date = input.int(title='Start Day', defval=1, minval=1, maxval=31, group='Time-Period for Back-Testing', inline='1')
+end_date = input.int(title='until Day', defval=1, minval=1, maxval=31, group='Time-Period for Back-Testing', inline='1')
+start_month = input.int(title='Start Month', defval=10, minval=1, maxval=12, group='Time-Period for Back-Testing', inline='2')
+end_month = input.int(title='until Month', defval=1, minval=1, maxval=12, group='Time-Period for Back-Testing', inline='2')
+start_year = input.int(title='Start Year', defval=2022, minval=1800, maxval=3000, group='Time-Period for Back-Testing', inline='3')
+end_year = input.int(title='until Year', defval=2077, minval=1800, maxval=3000, group='Time-Period for Back-Testing', inline='3')
+in_date_range = time >= timestamp(syminfo.timezone, start_year, start_month, start_date, 0, 0) and time < timestamp(syminfo.timezone, end_year, end_month, end_date, 0, 0)
+
+//// Indicator Inputs
+// RSI
+rsi_over_sold = input.int(defval=40, minval=1, title='Oversold Level', group='RSI')
+rsi_over_bought = input.int(defval=70, minval=1, title='Overbought Level', group='RSI')
+rsi_length = input.int(defval=14, minval=1, title='RSI Length', group='RSI')
+rsi = ta.rsi(close, rsi_length)
+
+// VWAP
+maSource = input(title='SMA source', defval=close,group = "VWAP")
+maInterval = input.int(title='SMA interval', minval=0, maxval=999, step=1, defval=7,group = "VWAP")
+ma = ta.sma(maSource, maInterval)
+
+
+
+
+
+//// Strategy
+// Creating Long and Short Strategy
+was_over_sold = ta.barssince(rsi <= rsi_over_sold) <= 10
+was_over_bought = ta.barssince(rsi >= rsi_over_bought) <= 10
+crossover_bull = ta.crossover(ma, ta.vwap)
+crossover_bear = ta.crossunder(ma, ta.vwap)
+buy_signal = was_over_sold and crossover_bull
+sell_signal = was_over_bought and crossover_bear
+
+// Long Strategy
+if buy_signal and in_date_range and enable_long_strategy == true
+    strategy.entry('Long', strategy.long, when=buy_signal, alert_message='Open Long Position')
+    strategy.exit('Long SL/TP', from_entry='Long', loss=long_stoploss_percentage, profit=long_takeprofit_percentage, alert_message='Your SL/TP-Limit for the Long-Strategy has been activated.')
+    strategy.close('Long', when=sell_signal, alert_message='Close Long Position')
+
+// Short Strategy
+if sell_signal and in_date_range and enable_short_strategy == true
+    strategy.entry('Short', strategy.short, when=sell_signal, alert_message='Open Short Position')
+    strategy.exit('Short SL/TP', from_entry='Short', loss=short_stoploss_percentage, profit=short_takeprofit_percentage, alert_message='Your SL/TP-Limit for the Short-Strategy has been activated.')
+    strategy.close('Short', when=buy_signal, alert_message='Close Short Position')
+View in Pine Editor・75 lines
+Use on chart
+1.4 K
+3
+29 170
+General Description and Unique Features of this Script
+
+Introducing the VWAP Momentum-Pullback Strategy (long-only) that offers several unique features:
+
+1. Our script/strategy utilizes Mark Minervini's Trend-Template as a qualifier for identifying stocks and other financial securities in confirmed uptrends.
+
+NOTE: In this basic version of the script, the Trend-Template has to be used as a separate indicator on TradingView (Public Trend-Template indicators are available on TradingView – community scripts). It is recommended to only execute buy signals in case the stock or financial security is in a stage 2 uptrend, which means that the criteria of the trend-template are fulfilled.
+
+2. Our strategy is based on the supply/demand balance in the market, making it timeless and effective across all timeframes. Whether you are day trading using 1- or 5-min charts or swing-trading using daily charts, this strategy can be applied and works very well.
+
+3. We have also integrated technical indicators such as the RSI and the MA / VWAP crossover into this strategy to identify low-risk pullback entries in the context of confirmed uptrends. By doing so, the risk profile of this strategy and drawdowns are being reduced to an absolute minimum.
+
+
+Minervini’s Trend-Template and the ‘Stage-Analysis’ of the Markets
+
+This strategy is a so-called 'long-only' strategy. This means that we only take long positions, short positions are not considered.
+The best market environment for such strategies are periods of stable upward trends in the so-called stage 2 - uptrend.
+In stable upward trends, we increase our market exposure and risk.
+In sideways markets and downward trends or bear markets, we reduce our exposure very quickly or go 100% to cash and wait for the markets to recover and improve. This allows us to avoid major losses and drawdowns.
+
+
+This simple rule gives us a significant advantage over most undisciplined traders and amateurs!
+
+ 
+'The Trend is your Friend'. This is a very old but true quote.
+What's behind it???
+
+• 98% of stocks made their biggest gains in a Phase 2 upward trend.
+• If a stock is in a stable uptrend, this is evidence that larger institutions are buying the stock sustainably.
+• By focusing on stocks that are in a stable uptrend, the chances of profit are significantly increased.
+• In a stable uptrend, investors know exactly what to expect from further price developments. This makes it possible to locate low-risk entry points.
+
+The goal is not to buy at the lowest price – the goal is to buy at the right price!
+
+Each stock goes through the same maturity cycle – it starts at stage 1 and ends at stage 4
+
+
+
+
+
+ 
+Stage 1 – Neglect Phase – Consolidation
+Stage 2 – Progressive Phase – Accumulation
+Stage 3 – Topping Phase – Distribution
+Stage 4 – Downtrend – Capitulation
+
+This strategy focuses on identifying stocks in confirmed stage 2 uptrends. This in itself gives us an advantage over long-term investors and less professional traders.
+
+By focusing on stocks in a stage 2 uptrend, we avoid losses in downtrends (stage 4) or less profitable consolidation phases (stages 1 and 3). We are fully invested and put our money to work for us, and we are fully invested when stocks are in their stage 2 uptrends.
+
+But how can we use technical chart analysis to find stocks that are in a stable stage 2 uptrend?
+
+Mark Minervini has developed the so-called 'trend template' for this purpose. This is an essential part of our JS-TechTrading pullback strategy. For our watchlists, only those individual values that meet the tough requirements of Minervini's trend template are eligible.
+
+The Trend Template
+
+• 200d MA increasing over a period of at least 1 month, better 4-5 months or longer
+• 150d MA above 200d MA
+• 50d MA above 150d MA and 200d MA
+• Course above 50d MA, 150d MA and 200d MA
+• Ideally, the 50d MA is increasing over at least 1 month
+• Price at least 25% above the 52w low
+• Price within 25% of 52w high
+• High relative strength according to IBD.
+
+NOTE: In this basic version of the script, the Trend-Template has to be used as a separate indicator on TradingView (Public Trend-Template indicators are available in TradingView – community scripts). It is recommended to only execute buy signals in case the stock or financial security is in a stage 2 uptrend, which means that the criteria of the trend-template are fulfilled.
+
+This strategy can be applied to all timeframes from 5 min to daily.
+
+
+The VWAP Momentum-Pullback Strategy
+
+For the JS-TechTrading VWAP Momentum-Pullback Strategy, only stocks and other financial instruments that meet the selected criteria of Mark Minervini's trend template are recommended for algorithmic trading with this startegy.
+A further prerequisite for generating a buy signals is that the individual value is in a short-term oversold state (RSI).
+When the selling pressure is over and the continuation of the uptrend can be confirmed by the MA / VWAP crossover after reaching a price low, a buy signal is issued by this strategy.
+Stop-loss limits and profit targets can be set variably.
+
+
+
+
+Relative Strength Index (RSI)
+
+The Relative Strength Index (RSI) is a technical indicator developed by Welles Wilder in 1978. The RSI is used to perform a market value analysis and identify the strength of a trend as well as overbought and oversold conditions. The indicator is calculated on a scale from 0 to 100 and shows how much an asset has risen or fallen relative to its own price in recent periods.
+
+The RSI is calculated as the ratio of average profits to average losses over a certain period of time. A high value of the RSI indicates an overbought situation, while a low value indicates an oversold situation. Typically, a value > 70 is considered an overbought threshold and a value < 30 is considered an oversold threshold. A value above 70 signals that a single value may be overvalued and a decrease in price is likely , while a value below 30 signals that a single value may be undervalued and an increase in price is likely.
+For example, let's say you're watching a stock XYZ. After a prolonged falling movement, the RSI value of this stock has fallen to 26. This means that the stock is oversold and that it is time for a potential recovery. Therefore, a trader might decide to buy this stock in the hope that it will rise again soon.
+
+The MA / VWAP Crossover Trading Strategy
+
+This strategy combines two popular technical indicators: the Moving Average (MA) and the Volume Weighted Average Price (VWAP). The MA VWAP crossover strategy is used to identify potential trend reversals and entry/exit points in the market.
+The VWAP is calculated by taking the average price of an asset for a given period, weighted by the volume traded at each price level. The MA, on the other hand, is calculated by taking the average price of an asset over a specified number of periods. When the MA crosses above the VWAP, it suggests that buying pressure is increasing, and it may be a good time to enter a long position. When the MA crosses below the VWAP, it suggests that selling pressure is increasing, and it may be a good time to exit a long position or enter a short position.
+Traders typically use the MA VWAP crossover strategy in conjunction with other technical indicators and fundamental analysis to make more informed trading decisions. As with any trading strategy, it is important to carefully consider the risks and potential rewards before making any trades.
+
+This strategy is applicable to all timeframes and the relevant parameters for the underlying indicators (RSI and MA/VWAP) can be adjusted and optimized as needed.
+
+
+Backtesting
+
+Backtesting gives outstanding results on all timeframes and drawdowns can be reduced to a minimum level. In this example, the hourly chart for MCFT has been used.
+
+Settings for backtesting are:
+- Period from April 2020 until April 2021 (1 yr)
+- Starting capital 100k USD
+- Position size = 25% of equity
+- 0.01% commission = USD 2.50.- per Trade
+- Slippage = 2 ticks
+
+
+Other comments
+
+• This strategy has been designed to identify the most promising, highest probability entries and trades for each stock or other financial security.
+• The RSI qualifier is highly selective and filters out the most promising swing-trading entries. As a result, you will normally only find a low number of trades for each stock or other financial security per year in case you apply this strategy for the daily charts. Shorter timeframes will result in a higher number of trades / year.
+• As a result, traders need to apply this strategy for a full watchlist rather than just one financial security.
+

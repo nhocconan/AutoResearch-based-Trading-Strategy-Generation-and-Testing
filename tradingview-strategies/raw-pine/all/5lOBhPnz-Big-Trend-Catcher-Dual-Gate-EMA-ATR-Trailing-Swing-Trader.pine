@@ -1,0 +1,123 @@
+//@version=5
+strategy("Big Trend Catcher: Dual-Gate EMA & ATR Trailing Swing Trader", 
+     overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=20,
+     pyramiding=6,         
+     process_orders_on_close=true)
+
+// =============================
+// INDICATORS
+// =============================
+ema20  = ta.ema(close, 20)
+ema100 = ta.ema(close, 100)
+atrVal = ta.atr(20)
+volGate = volume > ta.sma(volume, 20) * 1.3
+
+// =============================
+// SIGNAL LOGIC
+// =============================
+basicEntry = (ta.crossover(close, ema20) or open > high[1]) and volGate
+
+var bool signalPending = false
+if basicEntry
+    signalPending := true
+
+// Reset signal if it takes too long or if momentum significantly fails
+if ta.crossunder(close, ema20) or ta.barssince(basicEntry) > 10
+    signalPending := false
+
+// =============================
+// THE DUAL-GATE ENTRY (FIXED)
+// =============================
+// Price MUST close above 100 EMA AND above 20 EMA to trigger.
+// This excludes entries where price is "lagging" below short-term momentum.
+confirmedEntry = signalPending and close > ema100 and close > ema20 and strategy.position_size == 0
+
+if confirmedEntry
+    strategy.entry("Wizard", strategy.long, comment="Entry")
+    signalPending := false 
+
+// =============================
+// PROGRESSIVE PYRAMIDING
+// =============================
+avgPrice = strategy.position_avg_price
+distFromEntry = (close - avgPrice) / avgPrice * 100
+
+runawayScale  = strategy.position_size > 0 and distFromEntry > 10 and close > ema100 and close > ema20 and strategy.opentrades < 3
+pullbackScale = ta.crossunder(low, ema20) and close > ema20 and close > ema100 and strategy.position_size > 0
+
+if (runawayScale or pullbackScale)
+    strategy.entry("Wizard", strategy.long, comment=runawayScale ? "Velocity" : "Pullback")
+
+// =============================
+// EXIT: THE IRON FLOOR
+// =============================
+var float TS = na
+highestBase = ta.highest(high - 3.5 * atrVal, 20)
+TS := (close > nz(TS[1])) ? math.max(nz(TS[1]), highestBase) : low - (atrVal * 3.5)
+
+if (close < TS) or ta.crossunder(close, ema100)
+    strategy.close_all(comment="Trend Death")
+
+// =============================
+// VISUALS
+// =============================
+plot(ema20, "20 EMA", color=color.yellow)
+plot(ema100, "100 EMA", color=color.blue, linewidth=2)
+plot(TS, "ATR Stop", color=color.red, style=plot.style_stepline)
+
+
+
+// Visuals for Logic Tracking
+plotshape(signalPending and (close <= ema100 or close <= ema20), "Signal Pending", shape.xcross, location.abovebar, color=color.gray, size=size.tiny)
+plotshape(confirmedEntry, "Gate Entry", shape.triangleup, location.belowbar, color=color.lime, size=size.tiny)
+
+View in Pine Editor・78 lines
+Use on chart
+5
+8
+1 817
+The Big Trend Catcher: Long-Only Progressive Swing System
+
+OVERVIEW
+The Big Trend Catcher is a high-conviction, long-only swing trading strategy designed to identify and ride sustained market moves. Unlike traditional trend-following systems that often get "chopped out" during sideways consolidation, this strategy utilizes a Dual-Gate Filter to ensure you only enter when short-term momentum and the long-term trend are in total alignment.
+
+It is specifically tuned for high-growth stocks and ETFs where capturing the lion’s share of a multi-week or multi-month move is the primary objective.
+
+CORE LOGIC: THE DUAL-GATE SYSTEM
+To maintain a high quality of entries, the strategy requires a "confirmed launch" through two distinct filters:
+* The Momentum Gate (20 EMA): Identifies immediate price acceleration and volume-backed impulse.
+* The Long-Term Gate (100 EMA): Acts as the ultimate trend filter. The script utilizes a "Signal Memory" logic—if an impulse happens while price is still below the 100 EMA, the trade is held in a "Pending" state. The entry only triggers once the price closes firmly above the 100 EMA.
+
+Goal: This prevents "bottom fishing" in established downtrends and keeps you in cash during sideways "death loops" when the long-term direction is unclear.
+
+KEY FEATURES
+1. Progressive Pyramiding (Scale-In)
+The biggest profits in swing trading are often made by adding to winners. This system features two automated scale-in triggers:
+
+Velocity Adds (VOLC): Adds to the position if the stock is up >10% and moving with rising momentum, allowing you to build a larger position as the trend proves its strength.
+
+Pullback Adds: Adds to the position when the price tests the 20 EMA and holds, allowing you to buy the "dip" within a healthy uptrend.
+
+2. The Phoenix Re-Entry
+This logic is designed to catch "V-shaped" recoveries. If the strategy exits on a trend break but the price aggressively reclaims the 20 EMA on massive volume shortly after, it re-enters the trade. This ensures you aren't left behind during the second leg of a major run after a temporary shakeout.
+
+3. Iron-Floor ATR Exit
+We use a 3.5x ATR Trailing Stop combined with the 100 EMA. This wider-than-average "breathing room" is designed to keep you in for significant gains while ignoring the minor daily volatility that often shakes out traders with tighter stops.
+
+HOW TO USE
+Best Timeframes: Daily (D) is recommended for identifying major cycles, but it can be applied to the 4-Hour (4H) for more active swing trading.
+
+Settings:
+* 20 EMA: Your short-term momentum guide.
+* 100 EMA: Your long-term trend guide.
+* ATR Multiplier: Set to 3.5 for maximum "trend hugging."
+
+SUMMARY OF VISUALS
+Blue Line (100 EMA): The Long-Term Trend.
+Yellow Line (20 EMA): The Short-Term Momentum.
+Red Stepped Line: Your ATR Trailing Floor (The "Iron Floor").
+Lime Triangle: Initial Trade Entry.
+Blue/Orange Shapes: Progressive Scale-in points.

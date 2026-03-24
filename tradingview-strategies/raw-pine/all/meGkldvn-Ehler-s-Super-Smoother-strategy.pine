@@ -1,0 +1,29 @@
+//@version=2
+strategy("Ehler's Super Smoother strategy", shorttitle="ESS strat", overlay=true)
+sslen = input(8, minval=1, title='SuperSmoother Length:')
+
+supersmoother(len) =>
+    p = close
+    a1 = exp(-(1.414*3.14159 / len))
+    c2 = 2*a1*cos(1.414*180 / len)
+    c3 = -a1*a1
+    c1 = 1 - c2 - c3
+    filt = c1*(p + p[1])*0.5 + c2*nz(filt[1]) + c3*nz(filt[2])
+
+longCondition = crossover(close, supersmoother(sslen))
+if (longCondition)
+    strategy.entry("ESS_Long", strategy.long)
+
+shortCondition = crossunder(close, supersmoother(sslen))
+if (shortCondition)
+    strategy.entry("ESS_Short", strategy.short)
+
+View in Pine Editor・19 lines
+Use on chart
+1
+6
+0
+2
+5 306
+This strategy is a mean-reversal strategy based on John F. Ehlers's Super Smoother filter. I tried it on 15m timeframe with 'Recalculate After Order Filled' option checked.
+

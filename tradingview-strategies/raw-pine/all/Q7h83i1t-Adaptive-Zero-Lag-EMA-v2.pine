@@ -1,0 +1,198 @@
+//@version=3
+strategy(title="Adaptive Zero Lag EMA v2", shorttitle="AZLEMA", overlay = true, initial_capital=1000, currency="USD", commission_type=strategy.commission.cash_per_contract, commission_value=0.00006833, slippage = 5, pyramiding=1, calc_on_every_tick=true)
+
+src = input(title="Source", type=source, defval=close)
+secType = input(title="Security Type", options=["Forex", "Metal Spot", "Cryptocurrency","Custom"], defval="Forex")
+contracts = input(title="Custom # of Contracts", defval=1, step=1)
+limit = input(title="Max Lots", type=integer, defval=100)
+Period = input(title="Period", type=integer, defval = 20)
+adaptive = input(title="Adaptive Method", options=["Off", "Cos IFM", "I-Q IFM", "Average"], defval="Cos IFM")
+GainLimit = input(title="Gain Limit", type=integer, defval = 8)
+Threshold = input(title="Threshold", type = float, defval=0.05, step=0.01)
+fixedSL = input(title="SL Points", defval=70)
+fixedTP = input(title="TP Points", defval=10)
+risk = input(title='Risk', defval=0.01, step=0.01)
+
+
+range = 50 //input(title="Max Period", type=integer, defval=60, minval=8, maxval=100)
+
+PI = 3.14159265359
+lenIQ = 0.0
+lenC = 0.0
+
+//##############################################################################
+//I-Q IFM
+//##############################################################################
+if(adaptive=="I-Q IFM" or adaptive=="Average")
+    imult = 0.635
+    qmult = 0.338
+    inphase = 0.0
+    quadrature = 0.0
+    re = 0.0
+    im = 0.0
+    deltaIQ = 0.0
+    instIQ = 0.0
+    V = 0.0
+    
+    P = src - src[7]
+    inphase := 1.25*(P[4] - imult*P[2]) + imult*nz(inphase[3])
+    quadrature := P[2] - qmult*P + qmult*nz(quadrature[2])
+    re := 0.2*(inphase*inphase[1] + quadrature*quadrature[1]) + 0.8*nz(re[1])
+    im := 0.2*(inphase*quadrature[1] - inphase[1]*quadrature) + 0.8*nz(im[1])
+    if (re!= 0.0)
+        deltaIQ := atan(im/re)
+    for i=0 to range
+        V := V + deltaIQ[i]
+        if (V > 2*PI and instIQ == 0.0)
+            instIQ := i
+    if (instIQ == 0.0)
+        instIQ := nz(instIQ[1])
+    lenIQ := 0.25*instIQ + 0.75*nz(lenIQ[1])
+
+//##############################################################################
+//COSINE IFM
+//##############################################################################
+if(adaptive == "Cos IFM" or adaptive == "Average")
+    s2 = 0.0
+    s3 = 0.0
+    deltaC = 0.0
+    instC = 0.0
+    v1 = 0.0
+    v2 = 0.0
+    v4 = 0.0
+    
+    v1 := src - src[7]
+    s2 := 0.2*(v1[1] + v1)*(v1[1] + v1) + 0.8*nz(s2[1])
+    s3 := 0.2*(v1[1] - v1)*(v1[1] - v1) + 0.8*nz(s3[1])
+    if (s2 != 0)
+        v2 := sqrt(s3/s2)
+    if (s3 != 0)
+        deltaC := 2*atan(v2)
+    for i = 0 to range
+        v4 := v4 + deltaC[i]
+        if (v4 > 2*PI and instC == 0.0)
+            instC := i - 1
+    if (instC == 0.0)
+        instC := instC[1]
+    lenC := 0.25*instC + 0.75*nz(lenC[1])
+
+if (adaptive == "Cos IFM")
+    Period := round(lenC)
+if (adaptive == "I-Q IFM")
+    Period := round(lenIQ)
+if (adaptive == "Average")
+    Period := round((lenC + lenIQ)/2)
+
+//##############################################################################
+//ZERO LAG EXPONENTIAL MOVING AVERAGE
+//##############################################################################
+LeastError = 1000000.0
+EC = 0.0
+Gain = 0.0
+EMA = 0.0
+Error = 0.0
+BestGain = 0.0
+
+alpha =2/(Period + 1)
+EMA := alpha*src + (1-alpha)*nz(EMA[1])
+
+for i = -GainLimit to GainLimit
+    Gain := i/10
+    EC := alpha*(EMA + Gain*(src - nz(EC[1]))) + (1 - alpha)*nz(EC[1])
+    Error := src - EC
+    if(abs(Error)<LeastError)
+        LeastError := abs(Error)
+        BestGain := Gain
+
+EC := alpha*(EMA + BestGain*(src - nz(EC[1]))) + (1-alpha)*nz(EC[1])
+
+plot(EC, title="EC", color=orange, linewidth=2)
+plot(EMA, title="EMA", color=red, linewidth=2)
+
+//##############################################################################
+//Trade Logic & Risk Management
+//##############################################################################
+buy = crossover(EC,EMA) and 100*LeastError/src > Threshold
+sell = crossunder(EC,EMA) and 100*LeastError/src > Threshold
+
+secScaler = secType == "Forex" ? 100000 : secType == "Metal Spot" ? 100 : secType == "Cryptocurrency" ? 10000 : secType == "Custom" ? contracts : 0
+
+balance = strategy.initial_capital + strategy.netprofit
+if (time>timestamp(2016, 1, 1 , 0, 0) and balance > 0)
+    //LONG
+    lots = ((risk * balance)/fixedSL)*secScaler
+    lots := lots > limit * secScaler ? limit * secScaler : lots
+    strategy.entry("BUY", strategy.long, qty=lots, oca_name="BUY", oca_type=strategy.oca.cancel, when=buy)
+    strategy.exit("B.Exit", "BUY", qty_percent = 100, loss=fixedSL, trail_offset=15, trail_points=fixedTP)
+    //SHORT
+    strategy.entry("SELL", strategy.short, qty=lots, oca_name="SELL", oca_type=strategy.oca.cancel, when=sell)
+    strategy.exit("S.Exit", "SELL", qty_percent = 100, loss=fixedSL, trail_offset=15, trail_points=fixedTP)
+
+View in Pine Editor・129 lines
+Use on chart
+8
+8
+3
+33
+24 742
+Feb 6, 2019
+This is my most successful strategy to date! Please enjoy and join the Open Source movement by sharing your code and ideas online!
+
+OPERATING PRINCIPLE
+The strategy is based on Ehlers idea that any indicator can be turned into a signal-producing trade system through smoothing and other filtering processes.
+In fact, I'm using his Zero Lag EMA (ZLEMA) as a baseline indicator as well as some code snippets he has made public (1). God bless open source!
+Next, I've provided the option to use an Instantaneous Frequency Measurement (IFM) method, which will adaptively choose the best period for the ZLEMA (2)
+I've written other studies that use the differential calculus approximations for IFM, so it was only natural to include them in this strategy.
+The primary two are Cosine IFM (3) and In-phase Quadrature IFM (4). You can also find an indicator with both plotted and the ability to average them together, as one IFM prefers long periods and the other short. (5)
+
+BEFORE WE BEGIN
+1. This strategy only runs on "normal" FX pairs (EURUSD, GBPJPY, AUDUSD ...) and will fail on Metals or Commodities.
+Cryptos are largely untested.
+2. Please run it on these time frames: M15 to D.
+Anything outside this range will likely fail.
+
+HOW TO USE AND SUCCEED
+1. If the Default settings don't produce good results right off the bat, then lower gain limit to 1 or 2 and threshold to 0.01.
+2. Test each setting under adaptive method. If you want to leave it Off, then I'd recommend using some kind of IFM (see my links below) to
+discover the most efficient period to use.
+3. Once you have the best adaptive method chosen, begin incrementing gain limit until you find a nice balance between profit factor (PF) and drawdown.
+4. Now, begin incrementing threshold. The goal is to have PF above 2 and a drawdown as low as possible.
+5. Finally, change the source! Typically, close is the best option, but I have run into cases where high
+yielded the highest returns and win rate.
+6. Sit back, relax, and tweak the risk until you're happy with the return and drawdown amounts.
+
+ADVANCED
+You may need to adjust take profit (TP) points and stop loss (SL) points to create the best entry possible. Don't be greedy! You'll likely have poor
+results if the TP is set to 300 and SL is 50.
+If you are trading a pair that has a long Dominant Cycle Period, then you may increase Max Period to allow the IFM
+to accept longer periods. Any period above the Max Period will be rejected. This may increase lag time!
+
+Cheers and good luck trading!
+-DasanC
+
+
+PS - This code doesn't repaint or have future-leak, which was present in Pinescript v2.
+PPS - Believe me! These returns are typical! Sometimes you must push aside the "if it's too good to be true..." mindset that society has ingrained in you.
+Do you really believe the most successful pass up opportunities before investigating them? ;)
+
+(1)Ehlers & Ric Zero Lag EMA [PDF]
+
+(2)Measuring Cycles by Ehlers [DOC]
+
+(3)Cosine IFM
+(4)Inphase Quadrature IFM
+(5)Averaging IFM
+Feb 8, 2019
+Release Notes
+Now with Cryptocurrencies, Metal Spots, and Custom trade settings!
+-> You're able to set a custom # of contracts to trade if required.
+-> Simply set the Security Type to Custom!
+
+Better Default settings!
+
+Please note, if SL Points is less than your slippage, trades will exit immediately.
+I encourage you to make testing conditions realistic & make sure SL points is greater than slippage!
+Feb 9, 2019
+Release Notes
+Now able to set the max allowed lot size!
+Many brokers set a hard limit at 100 Standard lots per trade for currency pairs and 30 standard lots for cryptocurrency pairs.

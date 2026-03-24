@@ -1,0 +1,87 @@
+//@version=6
+strategy("LUX CLARA - EMA + VWAP (No ATR Filter) - v6", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === PARAMETERS === //
+emaFastLen = input.int(8,  "Fast EMA Length")
+emaSlowLen = input.int(50, "Slow EMA Length")
+
+// === CALCULATIONS === //
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+
+// Correct usage of ta.vwap():
+// By default, it uses the chart's volume, so no second parameter is needed.
+vwapLine = ta.vwap(close)
+
+// === TREND LOGIC (50 EMA vs. VWAP) === //
+isBullishTrend = emaSlow > vwapLine
+isBearishTrend = emaSlow < vwapLine
+
+// === SESSION FILTER: 7:30 AM - 11:30 AM (Exchange Time) === //
+// "time(timeframe.period, '0730-1130')" returns `na` when outside that window.
+isInSession = not na(time(timeframe.period, "0730-1430"))
+
+// === ENTRY CONDITIONS === //
+// Go long when 8 EMA crosses above 50 EMA during a Bullish Trend + in session
+longEntry  = ta.crossover(emaFast, emaSlow)  and isBullishTrend  and isInSession
+// Go short when 8 EMA crosses below 50 EMA during a Bearish Trend + in session
+shortEntry = ta.crossunder(emaFast, emaSlow) and isBearishTrend and isInSession
+
+// === STRATEGY EXECUTION === //
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+// === EXIT LOGIC === //
+longExit  = ta.crossunder(emaFast, emaSlow)
+if longExit
+    strategy.close("Long")
+
+shortExit = ta.crossover(emaFast, emaSlow)
+if shortExit
+    strategy.close("Short")
+
+// === PLOTS === //
+plot(emaFast,  color=color.orange,  title="8 EMA")
+plot(emaSlow,  color=color.blue,    title="50 EMA")
+plot(vwapLine, color=color.fuchsia, title="VWAP")
+
+View in Pine Editor・50 lines
+Use on chart
+7
+7
+2 711
+EMA STRAT SHOUT OUTOUTLIERSSSSS
+
+
+Overview:
+an intraday strategy built around two core principles:
+
+Trend Confirmation using the 50 EMA (Exponential Moving Average) in relation to the VWAP (Volume-Weighted Average Price).
+
+Entry Signals triggered by the 8 EMA crossing the 50 EMA in the direction of that confirmed trend.
+
+Key Logic:
+
+Bullish Trend if the 50 EMA is above VWAP. Only long entries are allowed when the 8 EMA crosses above the 50 EMA during that bullish phase.
+
+Bearish Trend if the 50 EMA is below VWAP. Only short entries are allowed when the 8 EMA crosses below the 50 EMA during that bearish phase.
+
+Intraday Focus: Trades are restricted to a user-defined session window (default 7:30 AM–11:30 AM), aligning entries/exits with peak intraday liquidity.
+
+Exit Rule: Positions close automatically when the 8 EMA crosses back in the opposite direction of the entry.
+
+Why It Works:
+
+EMA + VWAP helps detect both immediate momentum (EMAs) and overall institutional bias (VWAP).
+
+By confining trades to a set intraday window, the strategy aims to capture morning volatility while avoiding choppy afternoon or overnight sessions.
+
+Customization:
+
+Users can adjust EMA lengths, session times, or incorporate stops/targets for additional risk management.
+
+It can be tested on various symbols and intraday timeframes to gauge performance and robustness.

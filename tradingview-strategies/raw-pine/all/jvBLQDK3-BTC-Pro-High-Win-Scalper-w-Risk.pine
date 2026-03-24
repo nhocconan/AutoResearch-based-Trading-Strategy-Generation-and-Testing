@@ -1,0 +1,119 @@
+//@version=6
+strategy("BTC Pro High-Win Scalper w/ % Risk (v6)", overlay=true, calc_on_every_tick=true)
+
+// ====================== INPUTS ======================
+fastEMA      = input.int(9, "Fast EMA")
+slowEMA      = input.int(21, "Slow EMA")
+htfFastEMA   = input.int(21, "15m Trend EMA Fast")
+htfSlowEMA   = input.int(50, "15m Trend EMA Slow")
+rsiLen       = input.int(14, "RSI Length")
+adxLen       = input.int(14, "ADX/DI Len")
+volLen       = input.int(20, "Volume MA Length")
+atrLen       = input.int(14, "ATR Length")
+slATRmult    = input.float(0.6, "Stop Loss ATR Multiplier")
+tpATRmult    = input.float(1.2, "Take Profit ATR Multiplier")
+riskPerc     = input.float(0.25, "Risk % per Trade", step=0.05, minval=0.01)
+
+// Partial profit / runner settings
+partialPercent = input.float(50, "Partial Profit %", step=5, minval=5, maxval=100)
+runnerTPmult   = input.float(2.5, "Runner TP ATR Multiplier")
+
+// Optional session filter — (UTC)
+startHour = input.int(8, "Session Start Hour (UTC+8)")
+endHour   = input.int(22, "Session End Hour (UTC+8)")
+
+// ====================== INDICATORS ======================
+emaFast = ta.ema(close, fastEMA)
+emaSlow = ta.ema(close, slowEMA)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+volMA   = ta.sma(volume, volLen)
+vwapVal = ta.vwap(close)
+
+// ===== ADX via DMI (returns [DI+, DI-, ADX]) =====
+[diplus, diminus, adxVal] = ta.dmi(adxLen, adxLen)
+
+// 15m Trend
+htfFast = request.security(syminfo.tickerid, "15", ta.ema(close, htfFastEMA))
+htfSlow = request.security(syminfo.tickerid, "15", ta.ema(close, htfSlowEMA))
+bullTrend = htfFast > htfSlow
+bearTrend = htfFast < htfSlow
+
+// Price action candle filters
+bullCandle = close > open and close > high - (high - low) * 0.5
+bearCandle = close < open and close < low + (high - low) * 0.2
+
+// Pullback conditions
+pullbackLong  = close >= emaSlow and close <= emaFast
+pullbackShort = close <= emaSlow and close >= emaFast
+
+// ====================== SESSION FILTER ======================
+useSessionFilter = input.bool(false, "Use Session Filter?")
+sessHour = hour(time)
+inSession = useSessionFilter ? (sessHour >= startHour and sessHour <= endHour) : true 
+
+// ====================== ENTRY CONDITIONS (ALL ONE LINE) ======================
+longCond  = bullTrend and adxVal > 22 and close > vwapVal and pullbackLong and rsiVal >= 45 and rsiVal <= 65 and bullCandle and volume > volMA and inSession
+shortCond = bearTrend and adxVal > 22 and close < vwapVal and pullbackShort and rsiVal <= 55 and rsiVal >= 35 and bearCandle and volume > volMA and inSession
+
+// ====================== POSITION SIZING ======================
+accountEquity = strategy.equity
+riskAmount    = accountEquity * (riskPerc / 100)
+
+longStopDist  = atrVal * slATRmult
+shortStopDist = atrVal * slATRmult
+
+longQty  = riskAmount / longStopDist
+shortQty = riskAmount / shortStopDist
+
+// ====================== ENTRY ======================
+if longCond
+    strategy.entry("Long", strategy.long, qty = longQty)
+
+if shortCond
+    strategy.entry("Short", strategy.short, qty = shortQty)
+
+// ====================== ATR-BASED EXIT WITH PARTIAL PROFITS ======================
+// Long exits
+if strategy.position_size > 0
+    strategy.exit("Long TP Partial", "Long",qty_percent = partialPercent,stop  = strategy.position_avg_price - longStopDist,limit = strategy.position_avg_price + atrVal * tpATRmult)
+       
+    strategy.exit("Long TP Runner", "Long",qty_percent = 100 - partialPercent,stop  = strategy.position_avg_price - longStopDist,limit = strategy.position_avg_price + atrVal * runnerTPmult)
+
+// Short exits
+if strategy.position_size < 0
+    strategy.exit("Short TP Partial", "Short",qty_percent = partialPercent,stop  = strategy.position_avg_price + shortStopDist,limit = strategy.position_avg_price - atrVal * tpATRmult)
+       
+    strategy.exit("Short TP Runner", "Short",qty_percent = 100 - partialPercent,stop  = strategy.position_avg_price + shortStopDist,limit = strategy.position_avg_price - atrVal * runnerTPmult)
+
+// ====================== VISUALS ======================
+plot(emaFast, color = color.orange, title="EMA 9")
+plot(emaSlow, color = color.blue, title="EMA 21")
+plot(vwapVal, color = color.purple, title="VWAP")
+
+plotshape(longCond, title="Long Signal", location=location.belowbar,
+     style=shape.triangleup, color=color.green, size=size.small)
+
+plotshape(shortCond, title="Short Signal", location=location.abovebar,
+     style=shape.triangledown, color=color.red, size=size.small)
+
+// ====================== ALERTS ======================
+alertcondition(longCond,  title="BTC Long (High Win Rate)", message="BTC LONG pullback scalp")
+alertcondition(shortCond, title="BTC Short (High Win Rate)", message="BTC SHORT pullback scalp")
+
+View in Pine Editor・105 lines
+Use on chart
+5
+3
+1 356
+Jan 4
+Hello,
+
+I have been working on this 15min scalper for bitcoin. Its still in progress but is showing some promising results.
+
+Check it out and let me know your thoughts
+
+Thanks
+Jan 4
+Release Notes
+Updated 1.1

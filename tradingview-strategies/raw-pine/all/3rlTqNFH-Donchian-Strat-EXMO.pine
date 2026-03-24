@@ -1,0 +1,30 @@
+//@version=4
+strategy("Donchian Strat EXMO", overlay=true)
+
+long_per = input(defval = 20, title = "Long Period")
+h = highest(high, long_per)
+l = lowest(low, long_per)
+
+
+plot(l)
+plot(h)
+
+perc = close/100
+
+if h[1] < h[2]
+    strategy.order("BUY", true, stop = h)
+    //strategy.exit("BUY", profit = 400)
+
+if l[1] > l[2]
+    strategy.order("SELL", false, stop = l)
+    //strategy.exit("SELL", profit = 400)
+
+View in Pine Editor・23 lines
+Use on chart
+8
+3
+1
+3 506
+This is simple test of Turtle Trading strategy by Richard Dennis. The script meant to place orders on Donchian Channel borders. It's best to test and use on mid-term charts like 1H and more.
+
+I've chosen Kraken XBT/USDT chart because this market opened in december 2019. The main problem of crypto trading strategy testing is the bullish market of 2017 year. That enormous growth gives unrealisting expectations to all trend-following strategies tested.

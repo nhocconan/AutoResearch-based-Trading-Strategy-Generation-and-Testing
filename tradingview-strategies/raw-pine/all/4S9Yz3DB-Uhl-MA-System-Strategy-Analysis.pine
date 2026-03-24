@@ -1,0 +1,119 @@
+//@version=4
+strategy("Uhl MA System - Strategy Analysis")
+length = input(100),mult = input(1.),src = input(close)
+//----
+out = 0., cma = 0., cts = 0.
+Var = variance(src,length)           ,sma = sma(src,length)
+secma = pow(nz(sma - cma[1]),2)      ,sects = pow(nz(src - cts[1]),2) 
+ka = Var < secma ? 1 - Var/secma : 0 ,kb = Var < sects ? 1 - Var/sects : 0
+cma := ka*sma+(1-ka)*nz(cma[1],src)  ,cts := kb*src+(1-kb)*nz(cts[1],src)
+//----
+if crossover(cts,cma)
+    strategy.entry("Buy", strategy.long)
+if crossunder(cts,cma)
+    strategy.entry("Sell", strategy.short)
+//----
+cap = strategy.initial_capital
+eq = strategy.equity
+rmax = 0.
+rmax := max(eq,nz(rmax[1]))
+//----
+css = eq > cap ? #0cb51a : #e65100
+a = plot(eq,"Equity",#2196f3,2,transp=0)
+b = plot(rmax,"Maximum",css,2,transp=0)
+fill(a,b,css,80)
+View in Pine Editor・27 lines
+Use on chart
+1 K
+7
+20 678
+The Uhl MA crossover system was specifically designed to provide an adaptive MA crossover system that didn't committed the same errors of more classical MA systems. This crossover system is based on a fast and a slow moving average, with the slow moving average being the corrected moving average (CMA) originally proposed by Andreas Uhl, and the fast moving average being the corrected trend step (CTS) which is also based on the corrected moving average design.
+
+For more information see :
+
+
+
+
+In this post, the performances of this system are analyzed on various markets.
+
+Setup And Rules
+
+The analysis is solely based on the indicator signals, therefore no spread is applied. Constant position sizing is used. The strategy will be backtested on the 15 minute time-frame. The mult setting is discarded, the default setting used for length is 100.
+
+Here are the rules of our strategy :
+
+
+long: CTS crossover CMA
+
+short: CTS crossunder CMA
+
+
+
+Results And Data
+
+EURUSD:
+
+Net Profit: $ 0.08
+
+Total number of trades: 99
+
+Profitability: 35.35 %
+
+Profit Factor: 1.834
+
+Max Drawdown: $ 0.01
+
+EURUSD behaved pretty well, and was most of time showing long term trends without exhibiting particularly tricky structures, the moving averages still did cross during ranging phases, since march 9 we can see a downtrend with more pronounced cyclical variations (retracements) that could potentially lead to loosing trades.
+
+BTCUSD:
+
+Net Profit: $ 4371.57
+
+Total number of trades: 94
+
+Profitability: 32.98 %
+
+Profit Factor: 1.749
+
+Max Drawdown: $ 1409.96
+
+The strategy didn't started well, producing its largest drawdown after only a few trades, the strategy still managed to recover. BTCUSD exhibited a strong downtrend, the strategy profited from that to recover, signals still occurred on ranging phases, and where mostly caused by a short term volatile move, unfortunately the CMA can converge toward ranging/flat price zones where false signals might occur at higher frequency.
+
+AMD:
+
+Net Profit: $ 16.09
+
+Total number of trades: 95
+
+Profitability: 29.47 %
+
+Profit Factor: 1.288
+
+Max Drawdown: $ 20.11
+
+On AMD the strategy started relatively well with a raising balance, then the balance quickly fallen, this downtrend in the balance lasted quite some time (almost 48 trades), the strategy finally recovered in Nov 2019 and the balance made a new highest high at the end of February. AMD had numerous trends during the backtesting period, yet results are poor.
+
+AAPL:
+
+Net Profit: $ -28.17
+
+Total number of trades: 89
+
+Profitability: 28.09 %
+
+Profit Factor: 0.894
+
+Max Drawdown: $ 63.21
+
+AAPL show the poorest results so far, with a stationary balance around the initial capital (in short the evolution of the balance is not showing any particular trend and oscillate around the initial capital value).
+
+
+
+
+AAPL had some significant retracements in its up-trend, which triggered some trades (of course), and the ranging period from Jan 24 to Feb 13 heavily damaged the strategy performance, generating 6 significant loosing trades. AAPL show the worst results so far, mostly due by ranging phases.
+
+Conclusions
+
+The Uhl MA crossover system strategy has been tested and based on the results don't show particularly interesting performances, and might even be outperformed by simpler MA systems that prove to be more robust against ranging markets. The total number of executed trades are on average 94, and the profitability is on average 31%. The strategy might prove more interesting if we can correct the behavior of the CMA, who sometimes converged toward ranging/flat markets.
+
+

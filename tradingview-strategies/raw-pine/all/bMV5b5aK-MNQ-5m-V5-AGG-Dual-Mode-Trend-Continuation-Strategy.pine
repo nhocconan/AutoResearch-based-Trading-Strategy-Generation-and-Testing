@@ -1,0 +1,326 @@
+//@version=5
+strategy("MNQ 5m V5 AGG — Clean Mode (Dual Exits + SL/TP Box + Breakdown Shorts + Cooldown)",
+     overlay=true,
+     pyramiding=0,
+     process_orders_on_close=true)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Session
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useRTH     = input.bool(true, "Trade RTH only", group="Session")
+sessionRTH = input.session("0930-1555", "RTH Window", group="Session")
+flatAtEnd  = input.bool(true, "Flat at end of RTH", group="Session")
+
+inRTH = useRTH ? not na(time(timeframe.period, sessionRTH)) : true
+sessionJustEnded = useRTH and inRTH[1] and not inRTH
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Trend + Filters
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+fastLen = input.int(21, "Fast EMA", minval=1, group="Trend")
+slowLen = input.int(50, "Slow EMA", minval=1, group="Trend")
+
+slopeLen   = input.int(5, "EMA slope lookback (bars)", minval=1, group="Trend Filters")
+minSlopePt = input.float(2.0, "Min fast EMA slope (points)", step=0.25, group="Trend Filters")
+
+atrLen     = input.int(14, "ATR length", minval=1, group="Volatility Filters")
+atrRiseLb  = input.int(6, "ATR rising lookback (bars)", minval=1, group="Volatility Filters")
+atrRiseMin = input.float(0.0, "Min ATR change (0=any rise)", step=0.01, group="Volatility Filters")
+
+relaxATRForShorts = input.bool(true, "Relax ATR filter for shorts", group="Short Enhancements")
+
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+atrVal  = ta.atr(atrLen)
+
+trendUp   = fastEMA > slowEMA
+trendDown = fastEMA < slowEMA
+
+fastSlope = fastEMA - fastEMA[slopeLen]
+slopeOKLong  = fastSlope >= minSlopePt
+slopeOKShort = fastSlope <= -minSlopePt
+
+atrDelta = atrVal - atrVal[atrRiseLb]
+atrRisingOK = atrDelta > atrRiseMin
+
+filtersOKLong  = slopeOKLong  and atrRisingOK
+filtersOKShort = slopeOKShort and (relaxATRForShorts ? true : atrRisingOK)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Entry logic (Pullback)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+rawLong  = trendUp   and (low  <= fastEMA) and (close > fastEMA)
+rawShort = trendDown and (high >= fastEMA) and (close < fastEMA)
+
+longPullbackSignal  = inRTH and rawLong  and filtersOKLong
+shortPullbackSignal = inRTH and rawShort and filtersOKShort
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Breakdown shorts for trend days
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useBreakdownShort  = input.bool(true, "Enable breakdown shorts", group="Short Enhancements")
+breakLookback      = input.int(10, "Breakdown lookback (bars)", minval=2, group="Short Enhancements")
+requireBearBody    = input.bool(true, "Require bearish candle (close<open)", group="Short Enhancements")
+useBreakOnlyIfNoPB = input.bool(false, "Only if pullback short NOT true", group="Short Enhancements")
+
+bearBodyOK = not requireBearBody or (close < open)
+breakdownShort = useBreakdownShort and trendDown and slopeOKShort and bearBodyOK and close < ta.lowest(low[1], breakLookback)
+
+shortSignalBase = inRTH and (shortPullbackSignal or (breakdownShort and (not useBreakOnlyIfNoPB or not shortPullbackSignal)))
+longSignalBase  = inRTH and longPullbackSignal
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Trade control: cooldown
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+cooldownBars = input.int(3, "Cooldown bars after exit", minval=0, group="Risk / Trade Control")
+var int lastExitBar = na
+cooldownOK = na(lastExitBar) or (bar_index - lastExitBar > cooldownBars)
+
+longSignal  = cooldownOK and longSignalBase
+shortSignal = cooldownOK and shortSignalBase
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Dual Exit Modes
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+mode = input.string("Scalp (aim ~80%)", "Exit mode",
+     options=["Scalp (aim ~80%)", "Runner (aim ~60%)"],
+     group="Exits")
+
+stopATR = input.float(2.0, "Stop ATR", step=0.1, group="Exits")
+
+scalpTP_ATR   = input.float(3.0, "Scalp TP (ATR)", step=0.1, group="Exits — Scalp")
+scalpTrailATR = input.float(1.6, "Scalp Trail (ATR)", step=0.1, group="Exits — Scalp")
+
+runnerTP_ATR     = input.float(5.0, "Runner TP (ATR)", step=0.1, group="Exits — Runner")
+runnerTrailATR   = input.float(2.4, "Runner Trail (ATR)", step=0.1, group="Exits — Runner")
+runnerTrailAfter = input.float(1.6, "Start trail after profit (ATR)", step=0.1, group="Exits — Runner")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Pending lock
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var float pendEntry = na
+var float pendATR   = na
+var string pendMode = ""
+var int   pendDir   = 0
+var string pendShortType = "-"
+
+if (longSignal and strategy.position_size <= 0)
+    pendEntry := close
+    pendATR   := atrVal
+    pendMode  := mode
+    pendDir   := +1
+    pendShortType := "-"
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal and strategy.position_size >= 0)
+    pendEntry := close
+    pendATR   := atrVal
+    pendMode  := mode
+    pendDir   := -1
+    pendShortType := breakdownShort ? "BRK" : (shortPullbackSignal ? "PB" : "S")
+    strategy.entry("Short", strategy.short)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Exits (engine)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+entry = strategy.position_avg_price
+tpMult = (mode == "Scalp (aim ~80%)" ? scalpTP_ATR : runnerTP_ATR)
+
+longStop   = entry - stopATR * atrVal
+shortStop  = entry + stopATR * atrVal
+
+longLimit  = entry + tpMult * atrVal
+shortLimit = entry - tpMult * atrVal
+
+trailPts = (mode == "Scalp (aim ~80%)") ? scalpTrailATR * atrVal : runnerTrailATR * atrVal
+
+longTrailOK  = (mode == "Scalp (aim ~80%)") or (strategy.position_size > 0 and (high - entry) >= runnerTrailAfter * atrVal)
+shortTrailOK = (mode == "Scalp (aim ~80%)") or (strategy.position_size < 0 and (entry - low)  >= runnerTrailAfter * atrVal)
+
+strategy.exit("Long Exit",  from_entry="Long",  stop=longStop,  limit=longLimit, trail_points = longTrailOK ? trailPts : na)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortLimit, trail_points = shortTrailOK ? trailPts : na)
+
+if flatAtEnd and sessionJustEnded
+    strategy.close_all(comment="End RTH")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CLEAN SL/TP visuals + minimalist labels
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+showSLTP       = input.bool(true, "Show SL/TP box + lines", group="Clean Visuals")
+showTrailLine  = input.bool(false, "Show trail line (visual)", group="Clean Visuals")
+keepAfterExit  = input.bool(false, "Keep box after exit", group="Clean Visuals")
+showOnlyLast   = input.bool(true, "Only show last trade labels", group="Clean Visuals")
+
+var line slLine = na
+var line tpLine = na
+var line enLine = na
+var line trLine = na
+var box  tradeBox = na
+
+var float lockEntry = na
+var float lockATR   = na
+var float lockSL    = na
+var float lockTP    = na
+
+posNow        = strategy.position_size != 0
+posJustOpened = (strategy.position_size != 0 and strategy.position_size[1] == 0)
+posJustClosed = (strategy.position_size == 0 and strategy.position_size[1] != 0)
+
+// Labels
+var label entryLbl = na
+var label exitLbl  = na
+var int tradeId = 0
+var string lastShortType = "-"
+
+// Trail approximation
+var float visTrail = na
+var float hh = na
+var float ll = na
+
+if strategy.position_size == 0
+    visTrail := na
+    hh := na
+    ll := na
+else
+    bool isLongNow = strategy.position_size > 0
+    float dist = (mode == "Scalp (aim ~80%)" ? scalpTrailATR : runnerTrailATR) * atrVal
+    bool trailActive = (mode == "Scalp (aim ~80%)") or (isLongNow ? (high - entry) >= runnerTrailAfter * atrVal : (entry - low) >= runnerTrailAfter * atrVal)
+
+    if posJustOpened
+        hh := high
+        ll := low
+    else
+        hh := math.max(nz(hh, high), high)
+        ll := math.min(nz(ll, low), low)
+
+    visTrail := trailActive ? (isLongNow ? (hh - dist) : (ll + dist)) : na
+
+if showSLTP and posJustOpened
+    bool isLong = strategy.position_size > 0
+    bool usePending = not na(pendEntry) and not na(pendATR) and (pendDir == (isLong ? +1 : -1))
+
+    lockEntry := usePending ? pendEntry : strategy.position_avg_price
+    lockATR   := usePending ? pendATR   : atrVal
+
+    float tpMultLock = usePending ? (pendMode == "Scalp (aim ~80%)" ? scalpTP_ATR : runnerTP_ATR) : (mode == "Scalp (aim ~80%)" ? scalpTP_ATR : runnerTP_ATR)
+
+    lockSL := isLong ? (lockEntry - stopATR * lockATR) : (lockEntry + stopATR * lockATR)
+    lockTP := isLong ? (lockEntry + tpMultLock * lockATR) : (lockEntry - tpMultLock * lockATR)
+
+    // clean redraw (SAFE - no comma chaining)
+    line.delete(slLine)
+    line.delete(tpLine)
+    line.delete(enLine)
+    line.delete(trLine)
+    box.delete(tradeBox)
+
+    enLine := line.new(bar_index, lockEntry, bar_index + 1, lockEntry, extend=extend.right, width=2, color=color.new(color.black, 0))
+    slLine := line.new(bar_index, lockSL,    bar_index + 1, lockSL,    extend=extend.right, width=2, color=color.new(color.red, 0))
+    tpLine := line.new(bar_index, lockTP,    bar_index + 1, lockTP,    extend=extend.right, width=2, color=color.new(color.green, 0))
+
+    float topY = math.max(lockEntry, lockTP)
+    float botY = math.min(lockEntry, lockSL)
+    tradeBox := box.new(bar_index, topY, bar_index + 1, botY, bgcolor=color.new(color.white, 100), border_color=color.new(color.red, 0))
+
+    lastShortType := usePending ? pendShortType : "-"
+
+    // Minimal ENTRY label
+    tradeId := tradeId + 1
+
+    if showOnlyLast
+        label.delete(entryLbl)
+    if showOnlyLast
+        label.delete(exitLbl)
+
+    entryLbl := label.new(bar_index, isLong ? (high + atrVal * 0.15) : (low - atrVal * 0.15),"#" + str.tostring(tradeId) + " " + (isLong ? "LONG" : "SHORT") + " @ " + str.tostring(lockEntry, format.mintick) + (isLong ? "" : " (" + lastShortType + ")"),style=isLong ? label.style_label_down : label.style_label_up,textcolor=color.black,color=color.new(color.white, 0),size=size.tiny)
+
+    // reset pending
+    pendEntry := na
+    pendATR := na
+    pendMode := ""
+    pendDir := 0
+    pendShortType := ""
+
+if showSLTP and posNow
+    line.set_xy2(enLine, bar_index + 1, lockEntry)
+    line.set_xy2(slLine, bar_index + 1, lockSL)
+    line.set_xy2(tpLine, bar_index + 1, lockTP)
+    box.set_right(tradeBox, bar_index + 1)
+
+    if showTrailLine
+        if na(visTrail)
+            line.delete(trLine)
+            trLine := na
+        else
+            if na(trLine)
+                trLine := line.new(bar_index, visTrail, bar_index + 1, visTrail, extend=extend.right, width=1, color=color.new(color.orange, 0))
+            else
+                line.set_xy1(trLine, bar_index, visTrail)
+                line.set_xy2(trLine, bar_index + 1, visTrail)
+
+if showSLTP and posJustClosed
+    lastExitBar := bar_index
+
+    float exitPx = close
+    bool wasLong = strategy.position_size[1] > 0
+
+    exitLbl := label.new(bar_index, wasLong ? (high + atrVal * 0.15) : (low - atrVal * 0.15),"EXIT #" + str.tostring(tradeId) + " @ " + str.tostring(exitPx, format.mintick),style=wasLong ? label.style_label_down : label.style_label_up,textcolor=color.black,color=color.new(color.white, 0),size=size.tiny)
+
+    if not keepAfterExit
+        line.delete(slLine)
+        line.delete(tpLine)
+        line.delete(enLine)
+        line.delete(trLine)
+        box.delete(tradeBox)
+        slLine := na
+        tpLine := na
+        enLine := na
+        trLine := na
+        tradeBox := na
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Visuals
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+plot(fastEMA, "Fast EMA", color=color.new(color.teal, 0))
+plot(slowEMA, "Slow EMA", color=color.new(color.orange, 0))
+plotshape(longSignal,  title="Long",  location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, size=size.tiny)
+plotshape(shortSignal, title="Short", location=location.abovebar, color=color.new(color.red, 0),  style=shape.triangledown, size=size.tiny)
+
+View in Pine Editor・287 lines
+Use on chart
+2
+1
+672
+This strategy is designed for MNQ and NQ on the 5 minute timeframe. It focuses on trend continuation using structured EMA alignment, slope confirmation, and ATR based volatility expansion. The goal is to capture high probability pullbacks and breakdown moves during strong intraday trends while maintaining disciplined risk control.
+
+Core Concept
+
+The strategy trades only in the direction of the prevailing trend. Trend direction is defined by the relationship between a fast EMA and a slow EMA. A slope filter is applied to ensure momentum is present and to avoid flat consolidation environments. An ATR expansion filter confirms volatility participation before allowing entries.
+
+Entry Logic
+
+Long entries occur when price pulls back to the fast EMA within an uptrend and closes back above it, provided slope and volatility conditions are satisfied.
+
+Short entries occur either on pullbacks to the fast EMA within a downtrend or on breakdown continuation moves when price makes a new low in an established bearish structure. Breakdown logic helps capture strong trend days where price does not offer clean pullbacks.
+
+Dual Exit Modes
+
+Scalp Mode is optimized for consistency. It uses a moderate ATR based stop and a controlled ATR target with earlier trailing activation. This mode aims for a higher win rate and smoother equity curve behavior.
+
+Runner Mode is optimized for larger directional moves. It uses a wider ATR target and delayed trailing activation, allowing trades more room to expand. This mode typically produces a lower win rate but higher average winner size and improved expectancy during strong trend sessions.
+
+Risk Management
+
+The strategy uses ATR based dynamic stop loss and take profit levels. Trailing stops are optional and adaptive to volatility. A cooldown period after each exit prevents immediate re entry and reduces overtrading. Trading can be restricted to regular trading hours and positions can automatically close at session end.
+
+Best Conditions
+
+This strategy performs best during trending sessions with expanding volatility, especially during post open momentum or strong directional days. It is not designed for low volatility, range bound, or mean reversion environments.
+
+Recommended Use
+
+Optimized for MNQ and NQ on the 5 minute chart. Performance can improve when aligned with higher timeframe bias such as 15 minute or 1 hour structure.
+
+Disclaimer
+
+This script is for research and educational purposes only. Futures trading involves substantial risk. Always forward test and apply proper position sizing before trading live capital.

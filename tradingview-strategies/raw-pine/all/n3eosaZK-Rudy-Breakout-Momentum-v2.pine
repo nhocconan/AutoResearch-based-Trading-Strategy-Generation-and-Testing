@@ -1,0 +1,70 @@
+//@version=6
+// Rudy v2 - Breakout Momentum System
+// Proprietary breakout detection for large/mid-cap momentum stocks
+// Apply to: NVDA, AMZN, GOOGL, TSLA, NFLX, CRM, AVGO, AMD, SHOP, SQ
+strategy("Rudy Breakout Momentum v2", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=25, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- Parameters ---
+int p_lookback = input.int(126, "High Lookback Bars")
+int p_ema_fast = input.int(21, "Fast EMA Period")
+int p_ema_slow = input.int(50, "Slow EMA Period")
+int p_rsi = input.int(14, "RSI Period")
+float p_profit = input.float(15.0, "Profit Target %") / 100
+float p_stop = input.float(8.0, "Stop Loss %") / 100
+
+// --- Calculations ---
+float high126 = ta.highest(high, p_lookback)
+float ema21 = ta.ema(close, p_ema_fast)
+float ema50 = ta.ema(close, p_ema_slow)
+float rsiVal = ta.rsi(close, p_rsi)
+bool trendUp = ema21 > ema50
+bool newHigh = high >= high126[1]
+bool rsiOk = rsiVal < 80 and rsiVal > 40
+
+// --- Entry: new high + uptrend + RSI not exhausted ---
+bool breakoutBuy = newHigh and trendUp and rsiOk
+
+// --- Exit: trend break ---
+bool trendBroken = close < ema21 and close[1] >= ema21[1]
+
+// --- Execution ---
+if breakoutBuy and strategy.position_size == 0
+    strategy.entry("BO_Long", strategy.long)
+
+if strategy.position_size > 0
+    float entryPx = strategy.position_avg_price
+    float targetPx = entryPx * (1 + p_profit)
+    float stopPx = entryPx * (1 - p_stop)
+    strategy.exit("BO_Exit", "BO_Long", limit=targetPx, stop=stopPx)
+
+if trendBroken and strategy.position_size > 0
+    strategy.close("BO_Long", comment="Trend Break")
+
+// --- Visuals ---
+plot(ema21, "EMA 21", color.new(#00BCD4, 0), 2)
+plot(ema50, "EMA 50", color.new(#FF5722, 0), 2)
+plot(high126, "126d High", color.new(#FFD700, 30), 1, plot.style_stepline)
+bgcolor(breakoutBuy ? color.new(#00E676, 90) : na)
+plotshape(breakoutBuy and strategy.position_size == 0, "Breakout", shape.labelup, location.belowbar, color.new(#00E676, 0), size=size.tiny)
+plotshape(trendBroken and strategy.position_size > 0, "TrendBreak", shape.labeldown, location.abovebar, color.new(#F44336, 0), size=size.tiny)
+
+// --- Dashboard ---
+var table dash = table.new(position.top_right, 2, 5, bgcolor=color.new(#000000, 80))
+if barstate.islast
+    table.cell(dash, 0, 0, "New High", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, newHigh ? "YES" : "NO", text_color=newHigh ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 1, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, trendUp ? "UP" : "DOWN", text_color=trendUp ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 2, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(rsiVal, "#.#"), text_color=rsiOk ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 3, "EMA21", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(ema21, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 4, "Signal", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, breakoutBuy ? "BUY" : "WAIT", text_color=breakoutBuy ? color.lime : color.gray, text_size=size.small)
+
+View in Pine Editor・63 lines
+Use on chart
+1
+7
+573
+Rudy Breakout Momentum v2 — 52-week high breakout detection system for large/mid-cap momentum stocks. Identifies breakout entries when price is within 1% of its 52-week high with volume confirmation (1.5x+ average), RSI below 80, and EMA21 above EMA50 trend alignment. Uses composite scoring with weighted factors for proximity to highs, volume surge, trend strength, and momentum. Exits at 80% profit target, 50% stop loss, or when price breaks below EMA21. Designed for: NVDA, AMZN, GOOGL, TSLA, NFLX, CRM, AVGO, AMD, SHOP, SQ.

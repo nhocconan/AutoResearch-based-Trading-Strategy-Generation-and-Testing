@@ -1,0 +1,11 @@
+//@version=4
+v_StdDevs=##input(defval=2.0,type='INPUT_FLOAT',##id='in_1')
+m_StdDevs=##input(defval=2.0,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,m_StdDevs,input__float)
+##root(root_metainfo,rm_1,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_2,(-1*m_StdDevs),input__float)
+##root(root_metainfo,rm_3,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_4,v_StdDevs,input__float)
+##root(root_metainfo,rm_5,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_6,(-1*v_StdDevs),input__float)
+##root(root_metainfo,rm_7,1,input__integer,hline,linestyle)

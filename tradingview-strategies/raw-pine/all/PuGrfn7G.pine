@@ -1,0 +1,33 @@
+//@version=4
+strategy("枢轴点突破策略", overlay=true)
+//strategy.risk.allow_entry_in(strategy.direction.long)
+// btcusdt 最好参数为4
+period = input(3,'观察数')
+
+startday = 2*period + 1
+lasthigh = 0.0
+lastlow = 0.0
+
+if high[period + 1] >= highest(high,startday)
+    lasthigh := high[period+1]
+else
+    lasthigh := lasthigh[1]
+
+if low[period+1] <= lowest(low,startday)
+    lastlow := low[period+1]
+else
+    lastlow := lastlow[1]
+
+if high > lasthigh
+    strategy.entry("Long", strategy.long, when=strategy.position_size <= 0)
+else
+    if low < lastlow
+        strategy.entry("Short", strategy.short, when=strategy.position_size > 0)
+
+View in Pine Editor・28 lines
+Use on chart
+1
+0
+7
+3 702
+Pivot Point Breakout

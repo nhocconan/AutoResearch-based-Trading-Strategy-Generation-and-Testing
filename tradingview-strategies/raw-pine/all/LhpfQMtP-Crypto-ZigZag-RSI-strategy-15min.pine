@@ -1,0 +1,98 @@
+//@version=4
+strategy("Crypto ZigZag RSI strategy 15min",overlay=true)
+length =input(5, title="RSI Length")
+overSold = input(25)
+overBought= input(75)
+
+p =close
+
+vrsi = rsi(p, length)
+var bool long = na
+var bool short = na
+
+long :=crossover(vrsi,overSold) 
+short := crossunder(vrsi,overBought)
+
+var float last_open_long = na
+var float last_open_short = na
+
+last_open_long := long ? close : nz(last_open_long[1])
+last_open_short := short ? close : nz(last_open_short[1])
+
+
+entry_value =last_open_long
+entry_value1=last_open_short
+
+//
+ZZPercent = input(1, title="Minimum % Change", type=input.float)
+r1Level=entry_value
+s1Level=entry_value1
+trend = 0
+trend := na(trend[1]) ? 1 : trend[1]
+LL = 0.0
+LL := na(LL[1]) ? s1Level : LL[1]
+HH = 0.0
+HH := na(HH[1]) ?r1Level : HH[1]
+
+Pi = ZZPercent * 0.01
+zigzag = float(na)
+
+if trend > 0  
+    if r1Level >= HH  
+        HH := r1Level
+        HH
+    else
+        if s1Level < HH * (1 - Pi)
+            zigzag :=r1Level[1]
+            trend := -1
+            LL := s1Level
+            LL
+else
+   
+    if s1Level <= LL 
+        LL := s1Level
+        LL
+    else
+        if r1Level > LL * (1 + Pi)
+            zigzag := s1Level[1]
+            trend := 1
+            HH := s1Level
+            HH
+
+
+shortc=crossunder(trend,0)
+longc=crossover(trend,0)
+
+
+longa =input(true)
+shorta=input(false)
+
+if(longa)
+    strategy.entry("long",1,when=longc)
+    strategy.close("long",when=shortc)
+if(shorta)
+    strategy.entry("short",0,when=shortc)
+    strategy.close("long",when=longc)
+View in Pine Editor・77 lines
+Use on chart
+1.4 K
+4
+47 232
+This strategy is designed for crypto markets like ETHUSD/T, BTCUSD/T and so on.
+
+It works amazingly with 15 min time frames.
+
+Its idea consists in :
+
+
+We have the RSI indicator, and with it we check for the crossover with overbought and oversold levels. At the same time we have the zigzag which is made from the higher highs and the lower lows between a specific price movement in %.
+
+For entries, they are going to be based on the crossover of rsi with overbought or oversold levels , combined together with cross over 0 line from the the zigzag.
+
+At the same time the strategy has the posibility to go only long, only short or both.
+
+
+
+Let me know if you have any questions.
+
+

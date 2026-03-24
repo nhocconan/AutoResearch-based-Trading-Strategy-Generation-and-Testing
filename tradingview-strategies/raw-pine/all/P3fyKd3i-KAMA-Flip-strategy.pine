@@ -1,0 +1,159 @@
+//@version=6
+strategy("12/21 Bands – KAMA Flip TP (Single TP 100%) for BTC on 1D",
+     overlay=true,
+     initial_capital=100,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     pyramiding=0,
+     process_orders_on_close=true)
+
+// ===== Inputs =====
+side   = input.string("Short only", "Trade Side", options=["Short only","Long only","Both"])
+slPct  = input.float(3.0, "Stop Loss %", step=0.1, minval=0) * 0.01
+tpPct  = input.float(3.0, "Take Profit % (single TP)", step=0.1, minval=0) * 0.01
+
+// --- KAMA settings (live-safe version) ---
+er_period    = input.int(8,  "Efficiency Ratio Period",  minval=1, group="KAMA")
+fast_period  = input.int(7,  "Fast Period",              minval=1, group="KAMA")
+slow_period  = input.int(19, "Slow Period",              minval=1, group="KAMA")
+norm_period  = input.int(50, "Normalization Lookback",   minval=1, group="KAMA")
+confirmBar   = input.bool(true, "Confirm signals on bar close", group="KAMA")
+
+// --- Visual toggles ---
+showOsc      = input.bool(false, "Show oscillator in price pane (can compress scale)", group="Visuals")
+showLines    = input.bool(true,  "Show SL/TP line objects", group="Visuals")
+showPlots    = input.bool(true,  "Show SL/TP plots",        group="Visuals")
+
+// ===== Normalized KAMA Oscillator (live-safe, non-repainting) =====
+change     = math.abs(close - close[er_period])
+volatility = math.sum(math.abs(close - close[1]), er_period)
+safeVol    = math.max(volatility, 1e-10)
+er_raw     = change / safeVol
+er         = math.min(math.max(er_raw, 0.0), 1.0)   // clamp [0,1]
+
+sc = er * (2.0 / (fast_period + 1.0) - 2.0 / (slow_period + 1.0)) + 2.0 / (slow_period + 1.0)
+emaFast = ta.ema(close, fast_period)
+kama    = emaFast + sc * (close - emaFast)
+
+lowest  = ta.lowest(kama, norm_period)
+highest = ta.highest(kama, norm_period)
+rng     = math.max(highest - lowest, 1e-10)
+normalized_kama = (kama - lowest) / rng - 0.5
+
+// ===== Signals =====
+longTrigRaw  = ta.crossover(normalized_kama, 0)
+shortTrigRaw = ta.crossunder(normalized_kama, 0)
+longTrig     = confirmBar ? (longTrigRaw  and barstate.isconfirmed) : longTrigRaw
+shortTrig    = confirmBar ? (shortTrigRaw and barstate.isconfirmed) : shortTrigRaw
+
+wantLong  = side == "Long only"  or side == "Both"
+wantShort = side == "Short only" or side == "Both"
+
+// ===== Plot (oscillator) =====
+plot(showOsc ? normalized_kama : na, color=color.new(color.aqua, 0), title="Normalized KAMA")
+hline(0, "Zero", color=color.new(color.gray, 50))
+bgcolor(showOsc ? (normalized_kama > 0 ? color.new(color.green, 90) : color.new(color.red, 90)) : na)
+
+// ===== Persistent variables =====
+var float slLvl = na
+var float tpLvl = na
+var line  slLine = na
+var line  tpLine = na
+
+// ===== Entries =====
+if wantLong and strategy.position_size == 0 and longTrig
+    strategy.entry("Long", strategy.long)
+
+if wantShort and strategy.position_size == 0 and shortTrig
+    strategy.entry("Short", strategy.short)
+
+// Detect new position and compute SL/TP
+newLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if newLong
+    float avg = strategy.position_avg_price
+    slLvl := avg * (1 - slPct)
+    tpLvl := avg * (1 + tpPct)
+
+    if showLines
+        if not na(slLine)
+            line.delete(slLine)
+        if not na(tpLine)
+            line.delete(tpLine)
+        slLine := line.new(bar_index, slLvl, bar_index + 1, slLvl, color=color.new(color.red, 0), width=2, extend=extend.right)
+        tpLine := line.new(bar_index, tpLvl, bar_index + 1, tpLvl, color=color.new(color.green, 0), width=2, extend=extend.right)
+
+if newShort
+    float avg = strategy.position_avg_price
+    slLvl := avg * (1 + slPct)
+    tpLvl := avg * (1 - tpPct)
+
+    if showLines
+        if not na(slLine)
+            line.delete(slLine)
+        if not na(tpLine)
+            line.delete(tpLine)
+        slLine := line.new(bar_index, slLvl, bar_index + 1, slLvl, color=color.new(color.red, 0), width=2, extend=extend.right)
+        tpLine := line.new(bar_index, tpLvl, bar_index + 1, tpLvl, color=color.new(color.green, 0), width=2, extend=extend.right)
+
+// Maintain/clear visuals when flat
+if strategy.position_size == 0
+    slLvl := na
+    tpLvl := na
+    if showLines
+        if not na(slLine)
+            line.delete(slLine)
+            slLine := na
+        if not na(tpLine)
+            line.delete(tpLine)
+            tpLine := na
+else
+    if showLines
+        if not na(slLine)
+            line.set_x2(slLine, bar_index)
+        if not na(tpLine)
+            line.set_x2(tpLine, bar_index)
+
+// ===== ALSO PLOT SL/TP as series (easier to see)
+slPlot = strategy.position_size != 0 ? slLvl : na
+tpPlot = strategy.position_size != 0 ? tpLvl : na
+plot(showPlots ? slPlot : na, title="Stop Loss (plot)", style=plot.style_linebr, color=color.new(color.red, 0), linewidth=2)
+plot(showPlots ? tpPlot : na, title="Take Profit (plot)", style=plot.style_linebr, color=color.new(color.green, 0), linewidth=2)
+
+// ===== Single target exit (closes 100%) =====
+if strategy.position_size > 0 and not na(slLvl) and not na(tpLvl)
+    strategy.exit("TP/SL", from_entry="Long",  qty_percent=100, stop=slLvl, limit=tpLvl)
+
+if strategy.position_size < 0 and not na(slLvl) and not na(tpLvl)
+    strategy.exit("TP/SL", from_entry="Short", qty_percent=100, stop=slLvl, limit=tpLvl)
+
+View in Pine Editor・131 lines
+Use on chart
+3
+1
+1 062
+I built this strategy because I wanted something that doesn’t overcomplicate trading.
+No 20 indicators, no guessing, no “maybe I should close here.”
+Just a clear momentum flip, a defined stop, and a defined take profit. (for me on 1D BTC chart it works best with 6% stoploss and 3% takeprofit, lookback should be 40, everything else standard)
+
+The idea is simple: when momentum shifts, I want to be on the right side of it.
+KAMA is good for this because it speeds up when the market moves and slows down when it doesn’t.
+I normalize it so it becomes a clean zero-line oscillator.
+Above zero means momentum is turning up. Below zero means it’s turning down.
+
+That’s the entire entry logic. A flip is a flip.
+
+The exit logic is just as simple: one stop loss, one take profit, both fixed percentages from the entry.
+The position closes 100% at the target or the stop. No scaling in, no scaling out, no trailing.
+It’s straightforward and easy to analyze because every trade has the exact same structure.
+
+I originally made this for BTC on the daily chart, but nothing stops you from trying it on other charts.
+If you want it only to go long, only to go short, or take both sides, you can set that.
+All the KAMA parameters are open so you can play with how reactive the signal is.
+The visuals and SL/TP lines can be turned on or off depending on how clean you want your chart.
+
+This isn’t financial advice. It’s just a system I like because it’s simple, objective, and does exactly what it’s supposed to do.
+Test it, adjust it, break it, rebuild it — do whatever fits your own approach.

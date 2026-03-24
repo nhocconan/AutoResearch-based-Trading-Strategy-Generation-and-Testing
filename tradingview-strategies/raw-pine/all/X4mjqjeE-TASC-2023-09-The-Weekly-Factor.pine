@@ -1,0 +1,137 @@
+//@version=5
+string title = 'TASC 2023.09 The Weekly Factor'
+string stitle = 'TWF'
+strategy(title, stitle, true)
+
+if not (timeframe.isminutes and timeframe.period == '15')
+    runtime.error('This strategy is designed for a bar' +
+     'period of 15 minutes')
+
+//#region   Inputs:
+
+string rangeFilterTooltip = 'Limiting Ratio of session' +
+     'body versus session high and low range.'          +
+     'A lower range filter will reduce number of trades.'
+float rangeFilter = input.float(0.5, 'Range Filter:', 
+     0.0, 1.0, 0.1, tooltip=rangeFilterTooltip)
+
+//#endregion
+//#region Week and Session properties:
+
+
+// @type Holds the Session/Week OHLC value. 
+// A Session is defined as a single trading day.
+// A Week is defined as a period of 5 trading days.
+type OHLC
+    float o
+    float h
+    float l
+    float c
+
+method isNewSession (OHLC s) =>
+    s.c != s.c[1]
+
+method calcBody (OHLC s) =>
+    math.abs(s.o - s.c)
+
+method calcFactor (OHLC s, float rangeFilter=1.0) =>
+    s.calcBody() < rangeFilter*(s.h - s.l)
+
+getOHLCValues (int length = 5) =>
+    float _o = open[length-1]
+    float _h = ta.highest(length)
+    float _l = ta.lowest(length)
+    float _c = close
+    OHLC  _s = request.security(
+     symbol     = syminfo.tickerid              ,
+     timeframe  = 'D'                           , 
+     expression = OHLC.new(_o, _h, _l, _c)   )
+
+OHLC    W  = getOHLCValues(5)
+bool    WF = W.calcFactor(rangeFilter)
+
+LB__  = plot.style_linebr
+lineO = plot(W.o, 'Five-day Open' , color.aqua, 1, LB__)
+lineH = plot(W.h, 'Five-day High' , color.blue, 1, LB__)
+lineL = plot(W.l, 'Five-day Low'  , color.blue, 1, LB__)
+lineC = plot(W.c, 'Five-day Close', color.navy, 1, LB__)
+fill(lineO, lineC, color.new(color.aqua, 90))
+
+//#endregion
+//#region Strategy
+
+OHLC S            = getOHLCValues(1)
+bool isNewSession = S.isNewSession()
+
+plotshape(isNewSession and WF ? S.c : na, 'WF', 
+ shape.diamond, location.absolute, color.aqua, 
+ size=size.small)
+
+var int BarCounter = 0
+var int DayCounter = 0
+
+if isNewSession
+    // exit any previous trades
+    strategy.close_all()
+    BarCounter := 1
+else
+    BarCounter += 1
+
+if WF
+    if BarCounter > 1 and BarCounter < 91 
+        if close > S.h
+            strategy.entry('long', strategy.long)
+        if close < S.l
+            strategy.entry('short', strategy.short)
+
+float MP = strategy.position_size
+bool isNewPosition = ta.change(MP) != 0.0 and MP != 0.0
+
+if isNewPosition
+    DayCounter := 0
+if isNewSession
+    DayCounter += 1
+
+// 
+if DayCounter > 1 and strategy.openprofit > 0
+    strategy.close_all()
+
+//#endregion
+
+View in Pine Editor・106 lines
+Use on chart
+1
+9
+6
+4
+5 861
+█ OVERVIEW
+
+TASC's September 2023 edition of Traders' Tips
+ features an article written by Andrea Unger titled “The Weekly Factor", discussing the application of price patterns as filters for trade entries. This script implements a sample trading strategy presented in the article for demonstration purposes only. It explores how the strategy's equity curve might benefit from filtering trade entries using a specific price pattern.
+
+
+█ CONCEPTS
+
+Pattern filters represent valuable tools that assess current market conditions based on price movements and determine when those conditions become more favorable for trade entries.
+
+The filter used and tested in this article is a metric called the "weekly factor", which measures the price range over the last five trading days and compares it to the open of the session five days ago and the close of the session one day ago (i.e., the "body" of the five-day period). When the five-day body is small compared to the five-day range, this could indicate "indecision" or "compression", potentially followed by a price expansion. Thus, the weekly factor metric can help identify areas in the market where a period of compression might signal a potential breakout.
+
+This script demonstrates the use of the weekly factor for a sample intraday trading strategy (intended for educational and exploratory purposes only). In this strategy, the entry signal is triggered when a 15-minute bar breaks out of the previous day's high-low range, and the position is closed at the end of the day.
+
+
+█ CALCULATIONS
+
+The script uses two timeframes:
+
+• The strategy entries are processed on the 15-minute timeframe.
+
+• The weekly factor is obtained from the daily timeframe using the request.security function and the following formula:
+
+
+Pine Script®
+math.abs(open[5] - close[1]) < RangeFilter * (ta.highest(5)[1] - ta.lowest(5)[1])
+
+
+
+Here, RangeFilter is an input that can be optimized to find the favorable ratio between the five-day body and the five-day range. Smaller RangeFilter values will lead to fewer trade entries. A RangeFilter value of 1 is equivalent to turning off the filtering altogether.

@@ -1,0 +1,201 @@
+//@version=5
+strategy("Demand Index MTF Strategy", shorttitle="DI MTF", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- 1. Timeframe Inputs ---
+grp_tf     = "Timeframes"
+tf_setup   = input.timeframe("5", "Timeframe: Demand Index Levels (Setup)", group=grp_tf)
+tf_trigger = input.timeframe("1", "Timeframe: EMA Cross (Trigger)", group=grp_tf)
+
+// --- 2. Risk Management ---
+grp_risk    = "Risk Management"
+sl_type     = input.string("Fixed", "Stop Loss Typ", options=["Fixed", "Trailing"], group=grp_risk, tooltip="Fixed: Bleibt beim Einstiegspreis.\nTrailing: Zieht mit dem Preis nach oben nach.")
+sl_perc     = input.float(0.3, "Stop Loss %", minval=0.1, step=0.1, group=grp_risk)
+tp_perc     = input.float(1.0, "Take Profit %", minval=0.1, step=0.1, group=grp_risk)
+
+// --- 3. Indikator Inputs ---
+grp_ind   = "Indikator Einstellungen"
+len_bs    = input.int(10, "Buy/Sell Power Length", group=grp_ind)
+len_bs_ma = input.int(10, "Buy/Sell Power MA Length", group=grp_ind)
+len_di_ma = input.int(10, "Demand Index MA Length (Signal)", group=grp_ind)
+
+// --- 4. Strategie Parameter ---
+grp_strat     = "Strategie Logik"
+lookback_deep = input.int(20, "Lookback für -45 Zone", group=grp_strat)
+level_deep    = input.int(-45, "Level: Tief (Setup)", group=grp_strat)
+level_trigger = input.int(-30, "Level: Erholung (Setup)", group=grp_strat)
+
+// --- Funktion: Sierra Chart Demand Index Berechnung ---
+f_calc_demand_index(_len_bs, _len_bs_ma) =>
+    // 1. P(HL2C) & Range
+    p = high + low + 2 * close
+    range_val = math.max(high, high[1]) - math.min(low, low[1])
+    
+    // Glättung
+    range_avg = ta.ema(range_val, _len_bs)
+    v_avg     = ta.ema(volume, _len_bs)
+
+    // 2. H0 / L0 Logik
+    var float h0 = 0.0
+    var float l0 = 0.0
+    if bar_index == 0
+        h0 := high
+        l0 := low
+    h0_l0 = math.max(h0 - l0, syminfo.mintick)
+
+    // 3. Buy/Sell Power Berechnung
+    bp = 0.0
+    sp = 0.0
+    v_ratio = (v_avg != 0) ? volume / v_avg : 1.0
+    k_const = 0.375
+
+    if p < p[1]
+        exponent = (k_const * (p + p[1])) / h0_l0 * (p[1] - p) / p
+        bp := v_ratio / math.exp(exponent)
+        sp := v_ratio
+    else if p > p[1]
+        exponent = (k_const * (p + p[1])) / h0_l0 * (p - p[1]) / p[1]
+        bp := v_ratio
+        sp := v_ratio / math.exp(exponent)
+    else
+        bp := v_ratio
+        sp := v_ratio
+
+    // 4. Glättung BP/SP
+    bp_ma = ta.ema(bp, _len_bs_ma)
+    sp_ma = ta.ema(sp, _len_bs_ma)
+
+    // 5. Finaler Demand Index
+    di = 0.0
+    q = 0.0
+    if bp_ma > sp_ma
+        q := sp_ma / bp_ma
+        di := 100 * (1 - q)
+    else if bp_ma < sp_ma
+        q := bp_ma / sp_ma
+        di := 100 * (q - 1)
+    
+    di // Return
+
+// --- Datenabruf (MTF) ---
+di_setup_val = request.security(syminfo.tickerid, tf_setup, f_calc_demand_index(len_bs, len_bs_ma))
+di_trigger_val = request.security(syminfo.tickerid, tf_trigger, f_calc_demand_index(len_bs, len_bs_ma))
+
+// --- Strategie Signale ---
+// Setup (5min)
+was_deep_setup = di_setup_val <= level_deep 
+var bool setup_zone_active = false
+
+if di_setup_val <= level_deep
+    setup_zone_active := true 
+if di_setup_val > 0
+    setup_zone_active := false 
+
+setup_condition = setup_zone_active and di_setup_val > level_trigger
+
+// Trigger (1min)
+di_trigger_ema = ta.ema(di_trigger_val, len_di_ma)
+trigger_cross = ta.crossover(di_trigger_val, di_trigger_ema)
+
+// Long Entry
+long_entry = setup_condition and trigger_cross
+
+// --- Execution & Risk Management Logic ---
+
+// Variablen zum Speichern der Preis-Levels
+var float trade_sl = na
+var float trade_tp = na
+
+if (long_entry)
+    strategy.entry("Long MTF", strategy.long)
+    // Initiale Level setzen beim Einstieg
+    float entry_price = close 
+    
+    trade_tp := entry_price * (1 + tp_perc / 100)
+    trade_sl := entry_price * (1 - sl_perc / 100)
+
+// Wenn wir in einer Position sind: Management
+if (strategy.position_size > 0)
+    
+    // SL Logik Update
+    if (sl_type == "Trailing")
+        // Berechne neuen potenziellen SL basierend auf aktuellem Close
+        float potential_new_sl = close * (1 - sl_perc / 100)
+        // Trailing: SL darf nur steigen, nie fallen
+        trade_sl := math.max(trade_sl, potential_new_sl)
+    
+    // Update Exit Orders (NUR SL/TP, kein Indicator Close)
+    strategy.exit("Exit Long", "Long MTF", stop=trade_sl, limit=trade_tp)
+
+else
+    // Reset Variablen wenn keine Position
+    trade_sl := na
+    trade_tp := na
+
+// --- Plotting ---
+
+// 1. Indikator Fenster
+plot(di_trigger_val, color=color.blue, title="DI (Trigger)")
+plot(di_trigger_ema, color=color.orange, title="DI EMA")
+plot(di_setup_val, color=color.new(color.gray, 50), title="DI (Setup)", linewidth=2)
+hline(level_trigger, "Trigger Lvl", color=color.green, linestyle=hline.style_dashed)
+hline(level_deep, "Deep Lvl", color=color.red, linestyle=hline.style_dotted)
+bgcolor(setup_condition ? color.new(color.green, 90) : na, title="Zone Active")
+
+View in Pine Editor・142 lines
+Use on chart
+1
+8
+763
+Jan 28
+Description:
+
+This strategy is an automated trading system based on a faithful replica of the Sierra Chart "Demand Index" (Study ID 139). It utilizes the complex pressure/volume calculations developed by James Sibbet to identify high-probability reversal points from oversold territory.
+
+📈 Strategy Logic: "The Deep Recovery"
+
+The Demand Index combines price and volume to measure buying vs. selling pressure. This strategy specifically looks for a "Deep Recovery" scenario where selling pressure exhausts itself and momentum shifts back to the upside.
+
+The Entry Conditions (Long Only):
+
+Deep Oversold Zone: The Demand Index must have visited the deep negative zone (-45) within the recent lookback period. This ensures we are watching a heavily sold-off asset.
+
+Recovery Trigger: The Demand Index must cross up through the recovery level (-30).
+
+Momentum Confirmation: At the moment of the crossover, the Demand Index must be above its Signal Line (EMA 10) to confirm the immediate trend direction.
+
+⚙️ Default Settings
+
+Buy/Sell Power Length: 10 (Shorter term focus for reaction speed).
+
+Buy/Sell MA Length: 10.
+
+Signal EMA Length: 10.
+
+Deep Level: -45 (Configurable).
+
+Trigger Level: -30 (Configurable).
+
+🛡️ Risk Management
+
+The strategy includes built-in inputs for risk management:
+
+Stop Loss: Defaults to 2.0%
+
+Take Profit: Defaults to 4.0%
+
+Note: These can be toggled off or adjusted in the settings menu.
+
+🔍 About the Indicator Source
+
+This script replicates the specific math found in Sierra Chart's documentation for Study ID 139. This includes the unique H0/L0 volatility scaling, where the calculation utilizes the High and Low of the very first loaded bar to normalize the exponential decay of the buying/selling pressure.
+
+Disclaimer: Past performance is not indicative of future results. This strategy is provided for educational purposes and demonstrates how to automate James Sibbet's Demand Index based on specific Sierra Chart logic.
+Jan 28
+Release Notes
+added Timeframe settings.
+Jan 28
+Release Notes
+added TP and SL
+Jan 28
+Release Notes
+bug fix

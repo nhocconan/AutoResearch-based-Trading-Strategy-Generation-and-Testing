@@ -1,0 +1,752 @@
+//@version=5
+strategy(title="SPY 1 Minute Day Trader", initial_capital=1800000, default_qty_type=strategy.percent_of_equity, default_qty_value=7, pyramiding=0, commission_type=strategy.commission.cash_per_order, commission_value=2.6, overlay=true, calc_on_every_tick=false, process_orders_on_close=true, max_labels_count=500)
+
+//This script has been created to take into account how the following variables impact trend for SPY 1 Minute
+//The SPY stop losses/take profit have been set to 0.00075% which equates to 10%ish on SPY 1 DTE ATM contracts
+//5 ema vs 13 ema : A cross establishes start of trend
+//Stoicastic smoothed line: Establish over bought vs over sold
+//MACD (Line, Signal & Slope) : If you have momentum
+//ADX : if you are trending
+//RSI : If the trend has strength
+//MACD Difference between line and signal line to wait on buying
+//Root Mean Square of ATR to(Average True Range) Want to buy during lower values
+//When the bounce up or bounce down is detected it shows yellow tick marks above and below the orange triangle
+//marker so users have an idea where potential run ends or to better understand when the analytic is wrong.
+//White L's indicate that 7 of 8 conditions are met due to impending uptrend w/ missing one in green below it
+//Yellow L's indicate that 8 of 8 conditions still are met
+//White S's indicate that 7 of 8 conditions are met due to impending downtrend w/ missing condition in red above it
+//Yellow S's indicate that 8 of 8 conditions still are met
+//Logic is available for trades to repeat before re-opening but has been disabled, since noisy trades have been removed.
+//Won't close position until either it gets stopped based on 0.00075 * stock price or higher degree trend
+//changes (as long as trending) or loses trend as determined by ADX.
+//Won't open any trades on last two minutes of day and won't trade during first 5 minutes of day
+//Will close any open trades going into 10AM and 4PM
+//For 4 option contracts set account to $1,800,000 with 7% trade and option cost of $2.60 for each trade
+//Forgot to remove lines and indicators
+
+// Initialize variables
+var float long_entry_price = na
+var float short_entry_price = na
+var float stop_loss = na
+var float take_profit = na
+var float twoxtake_profit = na
+var float threextake_profit = na
+var float short_stop_loss = na
+var float short_take_profit = na
+var float twoxshort_take_profit = na
+var float threexshort_take_profit = na
+//var float option_SL_P = 0.00075//approx 10% on SPY 1 DTE
+//var float option_TP_P = 0.00075//approx 10% on SPY 1 DTE
+var long_entry_time = 0
+var long_entry_minute = 0
+var short_entry_time = 0
+var short_entry_minute = 0
+var allow_long_entry = true
+var allow_short_entry = true
+var allow_trades = true
+var hourlyclose = 0
+var notify = 0
+var shortnotify = 0
+var adxinput = 18
+var entry = 0
+var tooltipnote = "Emtpy"
+var signal = "Empty"
+var show = 0
+float upperBandValue = na
+float lowerBandValue = na
+
+
+// Trade pin bars reversals
+shortpinbars = input.bool(true, "Trade 3x tail to body short pin bar reversals")
+longpinbars = input.bool(true, "Trade 3x tail to body long pin bar reversals")
+
+// Show 1 missing parameter by default
+D1 = input.bool(false, "Show missing parameters for all time / Unchecked (default) will allow descriptive tooltip for last 500 entries")
+
+// Disable trading during tough times by default
+notrade = input.bool(true, "Trade from 10:30 until Noon EST")
+notradelunch = input.bool(true, "Trade during lunchtime from noon until 1 EST")
+notrade1to3 = input.bool(true, "Trade from 1 until 3 EST") 
+notradePH = input.bool(true, "Trade during Power Hour 3 until 4 EST")
+
+// Calculate VWAP and upper and lower bands
+vwapmid = request.security(syminfo.tickerid, "1", ta.vwap(hlc3))
+
+vwap_array = array.new_float()
+array.push(vwap_array, vwapmid)
+array.push(vwap_array, vwapmid + 1)
+array.push(vwap_array, vwapmid - 1)
+std_dev = array.stdev(vwap_array)
+
+upperBandValue := vwapmid + std_dev * 2
+lowerBandValue := vwapmid - std_dev * 2
+
+plot(vwapmid, title="VWAP", color=color.aqua, linewidth = 2)
+plot(upperBandValue, title="Upper VWAP", color=color.aqua, linewidth = 1)
+plot(lowerBandValue, title="Lower VWAP", color=color.aqua, linewidth = 1)
+
+// Calculate the EMAs & SMAs
+ema5 = ta.ema(close, 5)
+ema13 = ta.ema(close, 13)
+sma20 = ta.sma(close, 20)
+
+// Input Stop Losses and Take Profits
+option_SL_P = input.float(0.00075, title = "Stop Loss Percentage in Decimal Form") //approx 10% on SPY 1 DTE
+option_TP_P = input.float(0.00075, title = "Take Profit Percentage in Decimal Form") //approx 10% on SPY 1 DTE
+
+//From Date
+TSTAMP = input.time(title="From this date. To see entire backtest range set to a year ago.", defval=timestamp("2022-05-12T09:30:00"))
+
+// Input parameters
+fastLength = input.int(12, minval=1, title="MACD Fast Length")
+slowLength = input.int(26, minval=1, title="MACD Slow Length")
+signalLength = input.int(9, minval=1, title="MACD Signal Smoothing")
+
+// Inputs
+length = input.int(14, "Stochastic Length")
+smoothK = input.int(3, "Stoicastic Smooth K")
+src = input(close, "Stoicastic Source")
+
+//Stochastic Calculation
+highestHigh = ta.highest(src, length)
+lowestLow = ta.lowest(src, length)
+k = 100 * ((src - lowestLow) / (highestHigh - lowestLow))
+d = ta.sma(k, smoothK)
+
+// Calculate the RSI
+rsiValue = ta.rsi(close, 5)
+
+// Calculate the signal line as the SMA of the RSI for 5 minute over 9 periods
+rsiSignal = ta.sma(rsiValue, 9)
+
+// Calculate MACD
+[macdLine, signalLine, _] = ta.macd(close, fastLength, slowLength, signalLength)
+
+// Calculate slope of MACD line
+macdSlope = (macdLine - macdLine[3]) / (bar_index - bar_index[3])
+
+// Length of the ATR
+atr_length = input.int(14, title="ATR Length", minval=1)
+
+// Calculate the True Range
+tr = ta.tr(true)
+
+// Calculate the ATR
+atr = ta.atr(atr_length)
+
+// Square the ATR values
+atr_squared = math.pow(atr, 2)
+
+// Calculate the mean of the squared ATR values over a window of 20 bars
+mean_atr_squared = ta.sma(atr_squared, 20)
+
+// Take the square root of the mean to get the RMS
+rms_atr = math.sqrt(mean_atr_squared)
+
+// Length of the ADX
+len = input.int(14, title="ADX Length", minval=1)
+
+// Set minimum number of bars between trades
+min_bars_between_trades = 12
+
+// Calculate the Directional Movement
+up = ta.change(high)
+down = -ta.change(low)
+plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+
+// Calculate the Smoothed Directional Movement
+plusDI = 100 * ta.ema(plusDM, len) / ta.ema(tr, len)
+minusDI = 100 * ta.ema(minusDM, len) / ta.ema(tr, len)
+
+// Calculate the Directional Index (DX)
+DX = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+
+// Calculate the ADX
+adx = ta.ema(DX, len)
+
+// Calculate 5-minute close price on a 1-minute chart
+src_5m = request.security(syminfo.tickerid, "5", close)//, lookahead=barmerge.lookahead_on)
+
+ema_5m_20 = ta.ema(src_5m, 20)
+ema_5m = ta.ema(src_5m, 13)
+ema_5m_5 = ta.ema(src_5m, 5)
+
+plot(ema_5m, "5 Min 13 EMA", color=color.orange, linewidth = 2)
+plot(ema_5m_5, "5 Min 5 EMA", color=color.blue, linewidth = 2)
+
+// Get high, low, and close prices
+highPrice = high
+lowPrice = low
+closePrice = close
+
+// Get the Unix timestamp of the current bar
+unixTimestamp = time_close
+
+// Extract the minute value from the Unix timestamp
+minuteValue = minute(unixTimestamp)
+
+// Calculate the trading minute of the day
+tradingMinute = (minuteValue + (hour(unixTimestamp) - 9) * 60) - 30
+
+// Get the lowest low of the day
+lowOfDay = ta.lowest(low, tradingMinute)
+highOfDay = ta.highest(high, tradingMinute)
+
+// Check if the current bar is after 10:30 AM
+isAfter1030 = request.security(syminfo.tickerid, "60", tradingMinute >= 0)
+
+// Get the highest high and lowest low of the last hour
+highOfLastHour = ta.highest(high, 90)
+lowOfLastHour = ta.lowest(low, 90)
+
+// Plot the minute value and the low of the day on the chart 
+plot(lowOfDay, "Low of Day", color.fuchsia)
+plot(highOfDay, "High of Day", color.fuchsia) 
+ 
+// Determine buy and sell signals
+buy_signal = (ema5 > ema13 and ema_5m > ema_5m_5 and rsiSignal < 49 and tradingMinute <= 60 and barstate.isconfirmed) or
+             (notrade == 1 and ema5 > ema13 and ema_5m > ema_5m_5 and rsiSignal < 49 and tradingMinute > 60 and tradingMinute <= 150 and barstate.isconfirmed) or
+             (notradelunch == 1 and ema5 > ema13 and ema_5m > ema_5m_5 and rsiSignal < 49 and tradingMinute > 150 and tradingMinute <= 210 and barstate.isconfirmed) or
+             (notrade1to3 and ema5 > ema13 and ema_5m > ema_5m_5 and rsiSignal < 49 and tradingMinute > 210 and tradingMinute <= 330 and barstate.isconfirmed) or
+             (notradePH == 1 and ema5 > ema13 and ema_5m > ema_5m_5 and rsiSignal < 49 and tradingMinute > 330 and barstate.isconfirmed)
+short_buy_signal = (ema5 < ema13 and ema_5m < ema_5m_5 and rsiSignal > 0 and tradingMinute <= 60 and barstate.isconfirmed) or
+                   (notrade == 1 and ema5 < ema13 and ema_5m < ema_5m_5 and rsiSignal > 60 and tradingMinute > 60 and tradingMinute <= 150 and barstate.isconfirmed) or
+                   (notradelunch == 1 and ema5 < ema13 and ema_5m < ema_5m_5 and rsiSignal > 60 and tradingMinute > 150 and tradingMinute <= 210 and barstate.isconfirmed) or
+                   (notrade1to3 and ema5 < ema13 and ema_5m < ema_5m_5 and rsiSignal > 60 and tradingMinute > 210 and tradingMinute <= 330 and barstate.isconfirmed) or
+                   (notradePH == 1 and ema5 < ema13 and ema_5m < ema_5m_5 and rsiSignal > 65 and tradingMinute > 330 and barstate.isconfirmed)
+//short_buy_signal = false
+
+// Define long entry conditions
+C1 = ema5 > ema13 ? 1 : 0 //E below bar when only one missing
+C2 = d >= 0 ? 1 : 0 //d Smoothed Stoicastic below bar when when only one missing
+//C3 = macdLine < .5 ? 1 : 0 //M below bar when only one missing
+C4 = adx > 0 ? 1 : 0 //A below bar when only one missing
+C5 = macdSlope > 0 ? 1 : 0 //% below bar when only one missing
+//C6 = signalLine > -.2 ? 1 : 0 //S (MACD Signal) below bar when only one missing
+//C7 = rsiSignal > 30 ? 1 : 0 //R below bar when only one missing
+//C17 = math.abs(macdLine - signalLine) > 0.00 ? 1 : 0 //D MACD Difference below bar when only one missing
+C18 = rms_atr < 0.75 ? 1 : 0 //T Root Mean Square of ATR below bar when only one missing
+C19 = ((ema_5m-ema_5m_5)/close >0.0005 and tradingMinute <= 60) or ((ema_5m-ema_5m_5)/close >0.0005 and tradingMinute > 60 and tradingMinute <= 150) or (math.abs(ema_5m-ema_5m_5)/close >0.0002 and tradingMinute > 150 and tradingMinute <= 210) or ((ema_5m-ema_5m_5)/close >0.0001 and tradingMinute > 210 and tradingMinute <= 330) or (math.abs(ema_5m-ema_5m_5)/close >0.0002 and tradingMinute > 330) ? 1 : 0 //5 minute 5 EMA / 13 EMA difference below bar when only one missing
+C22 = close > open ? 1 : 0 //C difference below bar when only one missing
+C23 = (math.abs(close - highOfDay)/close > 0.0006 and tradingMinute <= 150) or (math.abs(close - highOfDay)/close > 0.0006 and tradingMinute > 150 and tradingMinute <= 210) or (math.abs(close - highOfDay)/close > 0.0002 and tradingMinute > 210 and tradingMinute <= 330) or (math.abs(close - highOfDay)/close > 0.0006 and tradingMinute > 330) ? 1 : 0 //H Too close to High of Day
+C25 = close >= lowerBandValue ? 1 : 0 //V close above lower band of VWAP below bar when only one missing
+
+// Define short entry conditions
+C8 = ema5 < ema13 ? 1 : 0 //E above bar when only one missing
+C9 = d >= 0 ? 1 : 0 //d Smoothed Stoicastic above bar when when only one missing
+//C10 = macdLine > -0.5 ? 1 : 0 //M above bar when only one missing
+C11 = adx > 20 ? 1 : 0 //A above bar when only one missing
+C12 = macdSlope < 0 ? 1 : 0 //% above bar when only one missing
+//C13 = signalLine < .2 ? 1 : 0 //S (MACD Signal) above bar when only one missing
+//C14 = rsiSignal < 70 ? 1 : 0 //R above bar when only one missing
+//C15 = math.abs(macdLine - signalLine) > 0.00 ? 1 : 0 //D MACD Difference above bar when only one mising
+C16 = rms_atr < 0.75 ? 1 : 0 //T Root Mean Square of ATR above bar when only one missing
+C20 = ((ema_5m-ema_5m_5)/close >0.0005 and tradingMinute <= 60) or (math.abs(ema_5m-ema_5m_5)/close >0.0002 and tradingMinute > 60 and tradingMinute <= 150) or (math.abs(ema_5m-ema_5m_5)/close >0.0003 and tradingMinute > 150 and tradingMinute <= 210) or ((ema_5m-ema_5m_5)/close >0.0003 and tradingMinute > 210 and tradingMinute <= 330) or ((ema_5m-ema_5m_5)/close >0.0003 and tradingMinute > 330) ? 1 : 0 //5 minute 5 EMA / 13 EMA difference above bar when only one missing
+C21 = open > close ? 1 : 0 //C difference above bar when only one missing
+C24 = (math.abs(close - lowOfDay)/close > 0.0006 and tradingMinute <= 150) or (math.abs(close - lowOfDay)/close > 0.0006 and tradingMinute > 150 and tradingMinute <= 210) or (math.abs(close - lowOfDay)/close > 0.0002 and tradingMinute > 210 and tradingMinute <= 330) or (math.abs(close - lowOfDay)/close > 0.0006 and tradingMinute > 330) ? 1 : 0 //L Too close to Low of Day
+C26 = close <= upperBandValue  ? 1 : 0 //V close above upper band of VWAP above bar when only one missing
+
+// labels for tooltips
+if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C1) == 0 and barstate.isconfirmed
+    tooltipnote := "1 min 13 EMA > 5 EMA (decreasing trend)"
+    signal := "↓"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C2) == 0 and barstate.isconfirmed
+    tooltipnote := "Stoichastic > 90 (overbought may dump)"
+    signal := "d"
+    show := 1
+//else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C3) == 0 and barstate.isconfirmed
+//    tooltipnote := "MACD > 0.5 (too much momentum already)"
+//    signal := "M\nA\nC\nD"
+//    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C4) == 0 and barstate.isconfirmed
+    tooltipnote := "ADX < 20 (not trending)"
+    signal := "A\nD\nX"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C5) == 0 and barstate.isconfirmed
+    tooltipnote := "MACD has downward slope (losing momentum)"
+    signal := "M\n/"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C18) == 0 and barstate.isconfirmed
+    tooltipnote := "ATR > 0.75 (increased volatility)"
+    signal := "A\nT\nR"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C19) == 0 and barstate.isconfirmed
+    tooltipnote := "5 Min 5/13 EMA difference too close (noisy trade)"
+    signal := "5"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C22) == 0 and barstate.isconfirmed
+    tooltipnote := "Candle closes below open (trend reversing?)"
+    signal := "C"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C23) == 0 and barstate.isconfirmed
+    tooltipnote := "Too close to high of day (out of runway?)"
+    signal := "H"
+    show := 1
+else if (C1 + C2 + C4 + C5 + C18 + C19 + C22 + C23 + C25) == 8 and (C25) == 0 and barstate.isconfirmed
+    tooltipnote := "Below VWAP 2 standard deviations (on a run!)"
+    signal := "V"
+    show := 1
+
+if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C8) == 0 and barstate.isconfirmed
+    tooltipnote := "1 min 5 EMA > 13 EMA (increasing trend)"
+    signal := "↑"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C9) == 0 and barstate.isconfirmed
+    tooltipnote := "Stoichastic > 0 (oversold may cause bounce)"
+    signal := "d"
+    show := 2
+//else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C10) == 0 and barstate.isconfirmed
+//    tooltipnote := "MACD < -0.5 (too little momentum already)"
+//    signal := "M\nA\nC\nD"
+//    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C11) == 0 and barstate.isconfirmed
+    tooltipnote := "ADX < 20 (not trending)"
+    signal := "A\nD\nX"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C12) == 0 and barstate.isconfirmed
+    tooltipnote := "MACD has upward slope (gaining momentum)"
+    signal := "M\n/"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C16) == 0 and barstate.isconfirmed
+    tooltipnote := "ATR > 0.75 (increased volatility)"
+    signal := "A\nT\nR"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C20) == 0 and barstate.isconfirmed
+    tooltipnote := "5 Min 5/13 EMA difference too close (noisy trade)"
+    signal := "5"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C21) == 0 and barstate.isconfirmed
+    tooltipnote := "Candle closes above open (trend reversing?)"
+    signal := "C"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C24) == 0 and barstate.isconfirmed
+    tooltipnote := "Too close to low of day (out of runway?)"
+    signal := "L"
+    show := 2
+else if (C8 + C9 + C11 + C12 + C16 + C20 + C21 + C24 + C26) == 8 and (C26) == 0 and barstate.isconfirmed
+    tooltipnote := "Above VWAP 2 standard deviations (on a run!)"
+    signal := "V"
+    show := 2
+
+if show == 1 or show == 2
+    show := 0
+
+if ((buy_signal and strategy.position_size == 0 and allow_trades and allow_long_entry and barstate.isconfirmed)) and time >= TSTAMP
+    long_entry_price := open
+    strategy.entry("Pivot Up", strategy.long, alert_message = "Pivoting Up")
+    stop_loss := long_entry_price - (option_SL_P * open)
+    take_profit := long_entry_price + (option_TP_P * open)
+    twoxtake_profit := long_entry_price + (2 * option_TP_P * open)
+    threextake_profit := long_entry_price + (3 * option_TP_P * open)
+    long_entry_time := time
+    long_entry_minute := tradingMinute
+    allow_long_entry := false
+    allow_trades := false
+    notify := 1
+    entry := 0
+
+if ((high == open) and ((close - low >= 3*(open - close)) and open >= close and (high - low)/high >= option_TP_P and strategy.position_size <= 0 and longpinbars == 1 and barstate.isconfirmed)) and time >= TSTAMP
+    long_entry_price := open
+    strategy.entry("Pivot Pin Bar Up", strategy.long, alert_message = "Pivoting Pin Bar Up")
+    stop_loss := long_entry_price - (option_SL_P * open)
+    take_profit := long_entry_price + (option_TP_P * open)
+    twoxtake_profit := long_entry_price + (2 * option_TP_P * open)
+    threextake_profit := long_entry_price + (3 * option_TP_P * open)
+    long_entry_time := time
+    long_entry_minute := tradingMinute
+    allow_long_entry := false
+    allow_trades := false
+    notify := 1
+    entry := 0
+
+plot(notify == 1 ? open - (option_SL_P * open) : na, "Stop Loss",  color.yellow, style=plot.style_linebr, offset = 1, linewidth = 3, display=display.pane)
+plot(notify == 1 ? open + (option_TP_P * open) : na, "Take Profit",  color.yellow, style=plot.style_linebr, offset = 1, linewidth = 3, display=display.pane)
+plot(notify == 1 ? open + 2 * (option_TP_P * open) : na, "2x Take Profit",  color.orange, style=plot.style_linebr, offset = 1, linewidth = 2, display=display.pane)
+
+if notify == 1
+    notify := notify - 1
+
+if ((short_buy_signal and strategy.position_size == 0 and allow_trades and allow_short_entry)) and time >= TSTAMP
+    short_entry_price := open
+    strategy.entry("Pivot Down", strategy.short, alert_message = "Pivoting Down")
+    short_stop_loss := short_entry_price + (option_SL_P * open)
+    short_take_profit := short_entry_price - (option_TP_P * open)
+    twoxshort_take_profit := short_entry_price - (2 * option_TP_P * open)
+    threexshort_take_profit := short_entry_price - (3 * option_TP_P * open)
+    short_entry_time := time
+    short_entry_minute := tradingMinute
+    allow_short_entry := false
+    allow_trades := false
+    shortnotify := 1
+    entry := 0
+
+if ((close == low) and (high - close >= 3*(close - open)) and open <= close and (high - low)/high >= option_TP_P and strategy.position_size >= 0 and shortpinbars == 1 and barstate.isconfirmed) and time >= TSTAMP
+    short_entry_price := open
+    strategy.entry("Pivot Pin Bar Down", strategy.short, alert_message = "Pivoting Pin Bar Down")
+    short_stop_loss := short_entry_price + (option_SL_P * open)
+    short_take_profit := short_entry_price - (option_TP_P * open)
+    twoxshort_take_profit := short_entry_price - (2 * option_TP_P * open)
+    threexshort_take_profit := short_entry_price - (3 * option_TP_P * open)
+    short_entry_time := time
+    short_entry_minute := tradingMinute
+    allow_short_entry := false
+    allow_trades := false
+    shortnotify := 1
+    entry := 0
+
+plot(shortnotify == 1 ? open + (option_SL_P * open) : na, "Stop Loss",  color.yellow, style=plot.style_linebr, offset = 1, linewidth = 3, display=display.pane)
+plot(shortnotify == 1 ? open - (option_TP_P * open) : na, "Take Profit",  color.yellow, style=plot.style_linebr, offset = 1, linewidth = 3, display=display.pane)
+plot(shortnotify == 1 ? open - 2 * (option_TP_P * open) : na, "2x Take Profit",  color.orange, style=plot.style_linebr, offset = 1, linewidth = 2, display=display.pane)
+if shortnotify == 1 and barstate.isconfirmed
+    shortnotify := shortnotify - 1
+
+if strategy.position_size > 0 and barstate.isconfirmed
+    if close < stop_loss and barstate.isconfirmed
+        strategy.close("Pivot Up", "Exit Longs Stopped", alert_message = "Exit Longs Stopped")
+        strategy.close("Pivot Pin Bar Up", "Exit Longs Stopped", alert_message = "Exit Longs Stopped")
+    else if close >= twoxtake_profit and (adx <=25 or close < close[3]) and barstate.isconfirmed
+        if entry == 1 and barstate.isconfirmed
+            take_profit := threextake_profit
+        if entry == 0 and barstate.isconfirmed
+            entry := 1
+            stop_loss := take_profit
+            strategy.exit("Exit Longs", "Pivot Up", stop=stop_loss, limit = take_profit, alert_message = "Exit Longs")
+            strategy.exit("Exit Longs", "Pivot Pin Bar Up", stop=stop_loss, limit = take_profit, alert_message = "Exit Longs")
+    else if src_5m < ema_5m and tradingMinute - long_entry_minute > 3 and (adx <=25 or close < close[3]) and barstate.isconfirmed
+        strategy.exit("Exit Longs 5 Min EMA Cross", "Pivot Up", stop=stop_loss, limit = take_profit, alert_message = "Exit Longs 5 Min EMA Cross")
+        strategy.exit("Exit Longs 5 Min EMA Cross", "Pivot Pin Bar Up", stop=stop_loss, limit = take_profit, alert_message = "Exit Longs 5 Min EMA Cross")
+
+else if strategy.position_size < 0 and barstate.isconfirmed
+    if close > short_stop_loss and barstate.isconfirmed
+        strategy.close("Pivot Down", "Exit Shorts Stopped", alert_message = "Exit Shorts Stopped")
+        strategy.close("Pivot Pin Bar Down", "Exit Shorts Stopped", alert_message = "Exit Shorts Stopped")
+    else if close <= twoxshort_take_profit and (adx <= 25 or close > close[3]) and barstate.isconfirmed
+        if entry == 1 and barstate.isconfirmed
+            take_profit := threexshort_take_profit
+        if entry == 0 and barstate.isconfirmed
+            entry := 1
+            stop_loss := short_take_profit
+            strategy.exit("Exit Shorts", "Pivot Down", stop=short_stop_loss, limit = short_take_profit, alert_message = "Exit Shorts")
+            strategy.exit("Exit Shorts", "Pivot Pin Bar Down", stop=short_stop_loss, limit = short_take_profit, alert_message = "Exit Shorts")
+    else if src_5m > ema_5m and tradingMinute - short_entry_minute > 3 and (adx <=25 or close > close[3]) and barstate.isconfirmed
+        strategy.exit("Exit Shorts 5 Min EMA Cross", "Pivot Down", stop=short_stop_loss, limit = short_take_profit, alert_message = "Exit Shorts 5 Min EMA Cross")
+        strategy.exit("Exit Shorts 5 Min EMA Cross", "Pivot Pin Bar Down", stop=short_stop_loss, limit = short_take_profit, alert_message = "Exit Shorts 5 Min EMA Cross")
+
+// Reset allow_trades after cool-down period of min_bars_between_trades bars set above
+if time > long_entry_time + (time - time[1]) * min_bars_between_trades and barstate.isconfirmed
+    allow_long_entry := true
+    allow_trades := true
+
+if time > short_entry_time + (time - time[1]) * min_bars_between_trades and barstate.isconfirmed
+    allow_short_entry := true
+    allow_trades := true
+
+if hour == 15 and minute >= 55 and barstate.isconfirmed// Last five minutes of trading day
+    allow_trades := false
+
+if hour == 9 and minute <= 35 and barstate.isconfirmed// First five minutes of trading day
+    allow_trades := false
+
+// Close all positions at the end of trading day
+if ((hour == 15 and minute == 57)) and strategy.position_size != 0  and barstate.isconfirmed
+    strategy.close("Pivot Up", alert_message = "Market Closing")
+    strategy.close("Pivot Down", alert_message = "Market Closing")
+    strategy.close("Pivot Pin Bar Up", alert_message = "Market Closing")
+    strategy.close("Pivot Pin Bar Down", alert_message = "Market Closing")
+    hourlyclose := 1
+//plotshape(hourlyclose == 1 ? 1 : na, "Suggested Volatile Hour Close", text="Close positions prior to close", offset = 1, style=shape.triangledown, location=location.abovebar, size=size.tiny, textcolor = color.orange, color=color.orange, display=display.pane)
+if hourlyclose == 1 and barstate.isconfirmed
+    hourlyclose := 0
+
+View in Pine Editor・461 lines
+Use on chart
+1.2 K
+52
+38 981
+Mar 8, 2023
+When scalping options, users are looking for where breakouts are going to occur instead of sitting thru areas choppy price action that drain delta and cause them to lose value even if price is up trending. This script tries to identify when a trend reversal is expected based on one minute price action on the SPY. It alerts users to prepare for potential breakout when 5 out of the 6 key optimized parameters are discovered by showing a white L or S. Once all six trigger, it informs the user at the close of that candle with a golden triangle with Pivot Up or Pivot Down. As scalping options is something that is expected to be short in duration, a take profit and stop loss of 30 cents of price actions is established. If five or more parameters occur after the pivot is initiated, then stop losses and take profits are adhered to; however, if there are less, then it waits to take profit or stop the trade, as likely it is just noise and it will finish trend with an additional breakout.
+
+This script has been created to take into account how the following variables impact trend for SPY 1 Minute:
+ema vs 13 ema : A cross establishes start of trend
+MACD (Line, Signal & Slope) : If you have momentum
+ADX : if you are trending
+RSI : If the trend has strength
+
+The above has been optimized to determine pivot points in the trend using key values for these 6 indicators
+bounce up = ema5 > ema13 and macdLine < .5 and adx > 20 and macdSlope > 0 and signalLine > -.1 and rsiSignal > 40
+bounce down = ema5 < ema13 and macdLine > -.5 and adx > 20 and signalLine < 0 and macdSlope < 0 and rsiSignal < 60
+
+White L's indicate that 5 of 6 conditions are met due to impending uptrend w/ missing one in green below it
+Yellow L's indicate that 6 of 6 conditions still are met
+White S's indicate that 5 of 6 conditions are met due to impending downtrend w/ missing condition in red above it
+Yellow S's indicate that 6 of 6 conditions still are met
+
+After a downtrend or uptrend is established, once it closes it can't repeat for 10 minutes
+Won't open any trades on last two minutes of any hours to avoid volatility
+Will close any open trades going into last minute of hour to avoid large overnight random swings.
+
+Mar 9, 2023
+Release Notes
+When the bounce up or bounce down is detected it shows yellow tick marks above and below the orange triangle marker so users have an idea where potential run ends or to better understand when the analytic is wrong.
+Mar 9, 2023
+Release Notes
+Updated chart so it has clean chart vs other indicators.
+Mar 9, 2023
+Release Notes
+Corrected strategy tester so it used 10% of equity.
+Mar 9, 2023
+Release Notes
+Updated script to change wait time to 12 minutes between trades.
+Since pivot logic runs based on candle close of prior candle. If prior candle had a large change of greater than expected move, then algo waits to initiate. This removes false signals that then closed immediately.
+Mar 10, 2023
+Release Notes
+Updated exit strategy of trade so if trending is detected via high ADX, Average Directional Index, the .30 take profit is ignored and trade will not close until either the ADX drops, which signals no trending, or if the 5 minute close for a given minute crosses the 5 minute 13 EMA. This avoids a series of closing positions and then waits when to re-enter when trending in a direction. Even though the win % drops slightly, as the winning position is held longer it profits a greater amount. Also, when exiting a position now ensure entering proper exit portion for Pivot Up vs Pivot down. Also, updated entering Pivot Up and Pivot Down logic to only enter if not in a position.
+Mar 10, 2023
+Release Notes
+If stop loss is breached it now closes trade instead of relying completely on higher degree trend closing trade.
+Mar 10, 2023
+Release Notes
+By mistake deleted script. Re-adding.
+Mar 11, 2023
+Release Notes
+Tweaked MACD signal to allow trades to be entered sooner for both Pivot Up and Pivot Down.
+Mar 11, 2023
+Release Notes
+Updated stop loss logic to percentage so now this will work on any trending stock!
+Mar 12, 2023
+Release Notes
+Main change further optimized Pivot Up and Pivot Down by including 3 new indicators: Stochastic signal, MACD difference and Root Mean Square of ATR. Also tweaked MACD signal and RSI. This slightly lessoned amounts of trades but improved their ability to enter sooner. Also by tweaking ADX from 25 to 18 was able to hold trades longer. These changes improved backtesting results by about 25%
+
+Also did some basic house cleaning on stale duplicate code and initial header explanation.
+Mar 12, 2023
+Release Notes
+Got rid of noisy trades by taking absolute difference between 5 & 13 ema on higher degree and ensuring it was > .11. This allowed the time between successful trades shrink to 7 minutes since not taking noisy trades. Now also only closing trades right before 10AM & 4PM (eliminated 1PM and 3PM). Backtest results indicated that trades shrunk by more than 50% but profits close to doubled and percent profitable jumped to over 70% due to noisy trades being removed.
+Mar 13, 2023
+Release Notes
+Now including 5 min 5 EMA (blue) and 13 EMA (orange). These are used on 1 min to exit trades which are trending and not take trades when the difference is less than 0.12. If less than 0.12 and only parameter not hitting, you will see a 5 below/above the L or S that is prepping you to get ready for pivot point.
+Mar 13, 2023
+Release Notes
+There are 10 parameters not 9 so needed to update for Pivot Signals and letters to show properly.
+Mar 13, 2023
+Release Notes
+Prior release was correct plus needed to remove unnecessary indicators.
+Mar 13, 2023
+Release Notes
+Discovered a couple inconsistencies with macdLine letter colors so updated.
+Mar 13, 2023
+Release Notes
+Removed candle spike logic as noisy trades have been removed.
+Mar 14, 2023
+Release Notes
+Updating description. Now that this works with any trending stock, stops and take profits are 0.00075%
+Tweaked bounce up and bounce down logic with a
+Updated description about wait period for trades as none is enabled due to removing noisy trades
+Mar 15, 2023
+Release Notes
+Only cleaned-up notes in code. Reload not necessary for this version.
+Mar 15, 2023
+Release Notes
+Only now entering long trades if close > open and short trades if close < open. This was added as a new condition for white and gold L's and S's as well.
+Also not entering trades during first five minutes. It can enter if still trending in 6th minute. Also, now only not taking trades in last two minutes of day instead of last two minutes of every hour.
+Mar 15, 2023
+Release Notes
+Released with extra unnecessary stuff. Re-releasing clean version.
+Mar 16, 2023
+Release Notes
+With fuchsia line now indicate high low price of day and will not Pivot Up when within 0.05% of high of day and will not Pivot Down when within 0.05% of low of day.
+Will now suggest protecting trades when longs achieve 2x take profit and shorts achieve 1.8x take profits. Stops are then set to break-even.
+These changes have boosted win percentage to over 80% as indicated by backtesting.
+Mar 16, 2023
+Release Notes
+Tweaked HOD / LOD logic so that won't take if within 0.1% instead of 0.05%
+Mar 17, 2023
+Release Notes
+Updated to give some leeway on entering trade only if Pivot Up and Pivot Down by comparing prior candle and 3 cent buffer.
+Mar 17, 2023
+Release Notes
+Changed Protect Longs to Exit Partial Longs and same with Shorts so it is more understandable
+Remove extra MACD indicator added by mistake in last release.
+Mar 17, 2023
+Release Notes
+Critical update as discovered issue with short stop loss that was causing it to sometimes close trade too early
+Prepping tool for VWAP inclusion
+Mar 17, 2023
+Release Notes
+Will now only take partial profit for Pivot Up once above 2x when a candle closes below the 5 minute 13 EMA and for Pivot Down once below 2x when a candle closes above the 5 minute 13 EMA
+Added 2x Take Profit Indicators as an orange tick mark
+Mar 20, 2023
+Release Notes
+Critical Update
+Please note that in order to use this script Extended Hours trading must be turned off
+Updated strategy and backtested/optimized 5 different trading periods throughout the day and color coordinated triangles based on best trading times of day for this script. Wasn't much of a surprise that first 90 minutes of day is best time to trade. Also lunchtime looks like good time as well for this script.
+First 90 minutes: 94% win rate (green triangles)
+Next hour: 80% win rate (orange triangles)
+Lunchtime: 90% (green triangles)
+After lunch until Power Hour: 80% (orange triangles)
+Power Hour: 70% (red triangles)
+
+Removed the following parameters from Pivot Up / Pivot Down signals: Stoichastic Signal, MACD Signal, MACD Difference between Line and Signal, RSI Signal
+Removed low ADX from closing trade
+Mar 20, 2023
+Release Notes
+Per other users feedback updated first line of code to stop repaint from occurring and improperly positively impacting backtest results. By add the following line backtest results were minimally impacted and first hour still rocks at 94% for last 38 days of trading.
+strategy(title="SPY 1 Minute Day Trader", overlay=true, calc_on_every_tick=false, process_orders_on_close=true)
+Mar 20, 2023
+Release Notes
+Removed lookahead=barmerge.lookahead_on from request.security in script to avoid repaint at end of day. Tweaked values to get backtest clean.
+Mar 20, 2023
+Release Notes
+Had to remove volume or I get in trouble!
+Mar 20, 2023
+Release Notes
+Updated colors based on new backtesting and determined that for this strategy
+First 90 minutes and After lunch until power hour are good (green)
+After first 90 minutes until lunch is bad (red)
+1PM until power hour is great! (lime)
+Mar 20, 2023
+Release Notes
+Added ADX to stay in trending trades that pop above 2x and tweaked 5 minute 5/13 ema difference.
+Mar 20, 2023
+Release Notes
+Stay out of more trades before lunch!
+Mar 20, 2023
+Release Notes
+Tweaked power hour to take less trades.
+Mar 21, 2023
+Release Notes
+Fixed when one parameter short, now shows which one missing with silver L or S and Gold L or S when everything is there and trade is ongoing.
+Also added barstate.isconfirmed so trades don't change at close of day. Didn't impact backtest.
+Mar 22, 2023
+Release Notes
+Added 3x pin bar reversals with the ability to toggle them in inputs (positive impact to backtest with limited additional trades). Also cleaned up other inputs.
+Mar 22, 2023
+Release Notes
+Updated to only take pin bar if not in that type of long/short position already and can take opposite position and close on trend reversal.
+Mar 22, 2023
+Release Notes
+Updated so that pin bar has meaningful size to remove small signals that aren't true reversals. Improved win rate and lessened trades.
+Mar 23, 2023
+Release Notes
+Optimized pin bar height for reversal signal
+Added VWAP to stop trying to short when above VWAP 2 standard deviations and long when below VWAP 2 standard deviations. Reversals are unlikely at that point!
+Show VWAP with basic 2 standard deviations
+Cleaned-up function bar to remove unnecessary string of zeros
+
+Mar 24, 2023
+Release Notes
+Disabled trading from 11 until 12 by default. Can enable in settings.
+Changed 5 min difference of 5 & 13 EMA to reference percentage instead of fixed values to work with more stocks. This is however optimized for SPY.
+Also optimized pin bar exit height strategy.
+Mar 24, 2023
+Release Notes
+Turned off pin bar exits as closing trades too early
+Mar 24, 2023
+Release Notes
+Fixed missing indicator to work on % instead of fixed value.
+Mar 24, 2023
+Release Notes
+Now can see Pin Bar pivot signals vs typical pivot signal
+Mar 25, 2023
+Release Notes
+Optimized Stochastic to minimize trades (Pivot Down > 0 and Pivot Up <90)
+Won't close trade in first 3 minutes if 5 min EMA < 13 EMA for Pivot Up or 5 min 5 EMA > 13 EMA for Pivot Down
+No trades in first 10 minutes of day and last 5 minutes of day
+Close all positions in last 3 minutes of day
+From 1PM until 3PM will now take HOD & LOD trades
+Now showing Exit Longs if stopped as Exit Longs Stopped and if Exist Shorts if stopped as Exit Shorts Stopped
+Mar 27, 2023
+Release Notes
+Now give flexibility to enable and disable trading times in Inputs. They are broken into 5 segments:
+9:30 until 11 (default on)
+11 until noon (default off)
+Lunchtime (default on)
+1 until 3 (default on)
+Power Hour (default off)
+This way if you don't want alerts you won't get bothered during these times.
+Improved logic exiting trades to take profit sooner but if trending to allow it to run
+Mar 27, 2023
+Release Notes
+Had to remove Stoichastic... ugh.
+Mar 28, 2023
+Release Notes
+Cleaned-up bug in 1 to 3 5 min 5/13 diff
+Mar 28, 2023
+Release Notes
+Had to remove volume.
+Mar 28, 2023
+Release Notes
+Enabled all timeframes for trading by default. Can disable in Inputs. 11-12 and Power Hour are typically bad times to trade.
+Made one parameters missing descriptive and on by default. Can disable in Inputs if clutters screen with ability to toggle if interested.
+Mar 28, 2023
+Release Notes
+Critical Update:
+Discovered that exiting partial positions weren't occurring properly unless users had proper strategy of percent of equity selected vs the default. Updated strategy in order to approx. tune for a pair of 1 DTE ATM option contracts being bought/sold on SPY. Exit Partial refers to selling one contract and holding runner until Exit flashes for remaining.
+initial_capital=1800000, default_qty_type=strategy.percent_of_equity, default_qty_value=15, pyramiding=0, commission_type=strategy.commission.cash_per_order, commission_value=1.3
+Mar 29, 2023
+Release Notes
+Default state of missing 1 parameter from Pivot Up and Pivot Down signals, silver Ls and Ss, will now only show recent reasons with ability to hover over and have tool tip explain why position wasn't initiated.
+To see reasons for all time, simply check option box in Input (default is unchecked to show as stated above).
+Mar 31, 2023
+Release Notes
+Critical Update:
+Discovered a few repaints occurring so added barstate.isconfirmed to eliminate.
+Also check out new SPY 4 Hour Swing Trader! It works great with SPXL!!!
+Apr 9, 2023
+Release Notes
+Switched First 90 minutes of trading following one set of conditions to first 60 minutes. This in turn has next 30 minutes follow new conditions which now make 10: 30 until lunch profitable time period. Suggest not trading during power hour as this is still loses money. Also, forcing trades once over 2x to take profits vs adhere to limit order which improves profitability as well. Updated first hour of trading to lime and next 90 minutes to green.
+Apr 9, 2023
+Release Notes
+Fixed partial profit logic.
+Apr 9, 2023
+Release Notes
+After re-evaluating, removed partial logic as now able to re-enter if continuing trend after counter-trend.
+Apr 15, 2023
+Release Notes
+Critical Update:
+Was not detecting long properly and was shorting on false signals. Fixed parameters.
+Apr 15, 2023
+Release Notes
+Tweaked exiting trade to improve profit
+Apr 15, 2023
+Release Notes
+Updated trading pivot triangle colors for pivot signals based on how successful:
+9:30 until 10:30 -> Green
+10:30 until Noon -> Red (In backtesting didn't benefit)
+1:00 until 3:00 -> Lime
+3:00 until 4:00 -> Lime
+
+Removed unnecessary notes
+Apr 15, 2023
+Release Notes
+Updated to take more high and low of day trades first thing in morning (until noon) and during 1PM until 3PM as well.
+Will start trading after first 5 minutes after open.
+Apr 22, 2023
+Release Notes
+Added Stop Loss & Take Profit to Inputs
+Added Configurable date that is now tuned for 4 SPY 1 DTE option contracts that are to see profit or loss for day
+Found missing barstate.isconfirmed's that should correct any repaints
+May 13, 2023
+Release Notes
+Tweaked 5 minute differences between 5 and 13 EMAs. Eventually may rethink this part of strategy as it seems to change. Maybe this will be the last time for the tweak?
+May 18, 2023
+Release Notes
+Simplified getting into long trades by only including 5 ema > than 13 ema with 5 min 5 ema > 5 min 13 ema and RSI Signal < 49
+and simplified getting into long trades by only including 5 ema < 13 ema with 5 min 5 ema < 5 min 13 ema and RSI Signal > 60
+
+No longer need to show prep signals!
+Jun 9, 2023
+Release Notes
+Added alert messages to strategies so when alerts appear they can be more descriptive and show message indicating what action to take.
+
+Add the following code to your alert:
+{{ticker}} @ {{time}}
+{{strategy.order.action}}
+{{strategy.order.alert_message}}
+Jun 9, 2023
+Release Notes
+Forgot to remove indicators and lines.
+Jun 30, 2023
+Release Notes
+Trying to see if removing plotshape fixes alerts. Also removed excess commenting.

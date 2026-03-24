@@ -1,0 +1,186 @@
+//@version=6
+strategy('MTF MACD + Accelerator Oscillator Strategy ', overlay = true, margin_long = 100, margin_short = 100)
+
+// === INPUTS ===
+higher_tf = input.timeframe('60', '上位足の時間足')
+macd_fast = input.int(12, 'MACD Fast EMA')
+macd_slow = input.int(26, 'MACD Slow EMA')
+macd_signal = input.int(9, 'MACD Signal SMA')
+atr_mult_tp = input.float(1.5, '利確倍率（ATR）')
+atr_mult_sl = input.float(1.0, '損切り倍率（ATR）')
+
+// === HIGHER TIMEFRAME MACD ===
+[macd_h, signal_h, _] = ta.macd(request.security(syminfo.tickerid, higher_tf, close), macd_fast, macd_slow, macd_signal)
+macd_up = macd_h > signal_h
+macd_down = macd_h < signal_h
+
+// === LOWER TIMEFRAME ACCELERATOR OSCILLATOR ===
+// AO = SMA(5) - SMA(34)
+ao = ta.sma(hl2, 5) - ta.sma(hl2, 34)
+// AC = AO - SMA(5, AO)
+ac = ao - ta.sma(ao, 5)
+
+// === ENTRY CONDITIONS ===
+long_cond = macd_up and ta.crossover(ac, 0)
+short_cond = macd_down and ta.crossunder(ac, 0)
+
+// === ATR BASED EXIT ===
+atr = ta.atr(14)
+long_tp = strategy.position_avg_price + atr * atr_mult_tp
+long_sl = strategy.position_avg_price - atr * atr_mult_sl
+short_tp = strategy.position_avg_price - atr * atr_mult_tp
+short_sl = strategy.position_avg_price + atr * atr_mult_sl
+
+// === STRATEGY EXECUTION ===
+if long_cond
+    strategy.entry('Long', strategy.long)
+if short_cond
+    strategy.entry('Short', strategy.short)
+
+// Exit when opposite signal appears or SL/TP is hit
+if strategy.position_size > 0
+    strategy.exit('Long Exit', 'Long', stop = long_sl, limit = long_tp)
+if strategy.position_size < 0
+    strategy.exit('Short Exit', 'Short', stop = short_sl, limit = short_tp)
+
+// === ALERT CONDITIONS ===
+alertcondition(long_cond, title = 'Buy Signal', message = '📈 Long Signal: MTF MACD + AC Strategy')
+alertcondition(short_cond, title = 'Sell Signal', message = '📉 Short Signal: MTF MACD + AC Strategy')
+
+// === PLOTTING ===
+plot(ac, title = 'Accelerator Oscillator', color = color.new(color.aqua, 0))
+hline(0, 'Zero Line', color = color.gray)
+plotshape(long_cond, title = 'Buy Signal', location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup, size = size.tiny)
+plotshape(short_cond, title = 'Sell Signal', location = location.abovebar, color = color.new(color.red, 0), style = shape.triangledown, size = size.tiny)
+// === REAL-TIME ALERT TRIGGERS ===
+if long_cond
+    alert('📈 Long Signal: MTF MACD + AC Strategy', alert.freq_once_per_bar_close)
+if short_cond
+    alert('📉 Short Signal: MTF MACD + AC Strategy', alert.freq_once_per_bar_close)
+
+View in Pine Editor・59 lines
+Use on chart
+3
+4
+1 265
+Oct 16, 2025
+※日本語説明は英文の下にあります。
+Concept:
+This is a multi-timeframe trend-following strategy that combines:
+Higher timeframe MACD → determines the major trend direction.
+Lower timeframe Accelerator Oscillator (AC) → identifies acceleration in momentum for optimal entry timing.
+The strategy enters trades in the direction of the higher timeframe trend when the AC shows a momentum acceleration.
+
+Entry Rules:
+Long (Buy):
+Higher timeframe MACD line > signal line (uptrend)
+AC crosses above zero line on the lower timeframe
+
+Short (Sell):
+Higher timeframe MACD line < signal line (downtrend)
+AC crosses below zero line on the lower timeframe
+
+Exit Rules:
+Take Profit: ATR(14) * 1.5 (configurable)
+Stop Loss: ATR(14) * 1.0 (configurable)
+Exit on opposite signal or if TP/SL is hit
+
+Plotting:
+AC is plotted on the chart (green for positive, red for negative)
+Buy/Sell signals are marked with small triangles below/above bars
+
+Customization:
+Timeframe, MACD parameters, ATR multipliers can be adjusted in the input settings.
+Works for scalping, day trading, or swing trading on various instruments.
+
+---------------------------------------------------------------------
+
+コンセプト:
+この戦略はマルチタイムフレームのトレンドフォロー型で、以下を組み合わせています：
+上位足MACD → 大きなトレンド方向を確認
+下位足Accelerator Oscillator（AC） → モメンタム加速のタイミングを捉え、最適なエントリーを判断
+上位足のトレンド方向に沿って、下位足でACが勢いの加速を示したタイミングでエントリーします。
+
+エントリールール:
+
+ロング（買い）:
+上位足MACDライン > シグナルライン（上昇トレンド）
+下位足ACが0ラインを上抜け
+
+ショート（売り）:
+上位足MACDライン < シグナルライン（下降トレンド）
+下位足ACが0ラインを下抜け
+
+エグジットルール:
+利確：ATR(14) * 1.5（設定可能）
+損切り：ATR(14) * 1.0（設定可能）
+逆シグナル発生時やTP/SL到達時にも決済
+
+チャート表示:
+ACはチャート上にプロット（正なら緑、負なら赤）
+買い／売りシグナルはバーの下／上に小さな三角で表示
+
+カスタマイズ:
+時間足、MACDパラメータ、ATR倍率は入力設定で変更可能
+スキャルピング、デイトレード、スイングトレードなど幅広く利用可能
+Oct 16, 2025
+Release Notes
+※日本語説明は英文の下にあります。
+Concept:
+This is a multi-timeframe trend-following strategy that combines:
+Higher timeframe MACD → determines the major trend direction.
+Lower timeframe Accelerator Oscillator (AC) → identifies acceleration in momentum for optimal entry timing.
+The strategy enters trades in the direction of the higher timeframe trend when the AC shows a momentum acceleration.
+
+Entry Rules:
+Long (Buy):
+Higher timeframe MACD line > signal line (uptrend)
+AC crosses above zero line on the lower timeframe
+
+Short (Sell):
+Higher timeframe MACD line < signal line (downtrend)
+AC crosses below zero line on the lower timeframe
+
+Exit Rules:
+Take Profit: ATR(14) * 1.5 (configurable)
+Stop Loss: ATR(14) * 1.0 (configurable)
+Exit on opposite signal or if TP/SL is hit
+
+Plotting:
+AC is plotted on the chart (green for positive, red for negative)
+Buy/Sell signals are marked with small triangles below/above bars
+
+Customization:
+Timeframe, MACD parameters, ATR multipliers can be adjusted in the input settings.
+Works for scalping, day trading, or swing trading on various instruments.
+
+---------------------------------------------------------------------
+
+コンセプト:
+この戦略はマルチタイムフレームのトレンドフォロー型で、以下を組み合わせています：
+上位足MACD → 大きなトレンド方向を確認
+下位足Accelerator Oscillator（AC） → モメンタム加速のタイミングを捉え、最適なエントリーを判断
+上位足のトレンド方向に沿って、下位足でACが勢いの加速を示したタイミングでエントリーします。
+
+エントリールール:
+
+ロング（買い）:
+上位足MACDライン > シグナルライン（上昇トレンド）
+下位足ACが0ラインを上抜け
+
+ショート（売り）:
+上位足MACDライン < シグナルライン（下降トレンド）
+下位足ACが0ラインを下抜け
+
+エグジットルール:
+利確：ATR(14) * 1.5（設定可能）
+損切り：ATR(14) * 1.0（設定可能）
+逆シグナル発生時やTP/SL到達時にも決済
+
+チャート表示:
+ACはチャート上にプロット（正なら緑、負なら赤）
+買い／売りシグナルはバーの下／上に小さな三角で表示
+
+カスタマイズ:
+時間足、MACDパラメータ、ATR倍率は入力設定で変更可能
+スキャルピング、デイトレード、スイングトレードなど幅広く利用可能

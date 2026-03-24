@@ -1,0 +1,160 @@
+//@version=5
+strategy("Doji / Hammer / Spinning Top Breakout Strategy v5",
+     overlay=true,
+     margin_long=100,
+     margin_short=100,
+     initial_capital=100000,
+     pyramiding=0)  // only one trade at a time
+
+// --------------------
+// Time Filters (Indian Market Hours)
+// --------------------
+inSession = time(timeframe.period, "0915-1530", "Asia/Kolkata")
+squareOffTime = time(timeframe.period, "1529-1530", "Asia/Kolkata")
+
+// --------------------
+// Candle Calculations
+// --------------------
+body = math.abs(open - close)
+highLow = high - low
+upperShadow = high - math.max(open, close)
+lowerShadow = math.min(open, close) - low
+
+validHeight = (highLow > 10) and (highLow < 21.5)
+shadowRatio = (upperShadow + lowerShadow) / body
+validShadow = shadowRatio >= 2
+isPattern = validShadow and validHeight
+
+// --------------------
+// Entry Conditions
+// --------------------
+longEntryCond  = inSession and isPattern[1] and close > high[1] and (strategy.position_size == 0)
+shortEntryCond = inSession and isPattern[1] and close < low[1]  and (strategy.position_size == 0)
+
+// --------------------
+// SL & TP Calculations
+// --------------------
+longSL = low[1] - 3
+longTP = high[1] + (high[1] - low[1]) * 5
+shortSL = high[1] + 3
+shortTP = low[1] - (high[1] - low[1]) * 5
+
+// --------------------
+// Strategy Entries & Exits
+// --------------------
+if (longEntryCond)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if (shortEntryCond)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// --------------------
+// Auto Square-Off at 3:29 PM
+// --------------------
+if (squareOffTime and strategy.position_size != 0)
+    strategy.close_all(comment="EOD Square Off")
+
+// --------------------
+// Plot Entry Signals
+// --------------------
+plotshape(longEntryCond, title="Long Entry", location=location.belowbar,
+     color=color.new(color.green, 0), style=shape.triangleup, size=size.small, text="BUY")
+
+plotshape(shortEntryCond, title="Short Entry", location=location.abovebar,
+     color=color.new(color.red, 0), style=shape.triangledown, size=size.small, text="SELL")
+
+// --------------------
+// Plot SL & TP Lines + Labels
+// --------------------
+var line longSLLine  = na
+var line longTPLine  = na
+var line shortSLLine = na
+var line shortTPLine = na
+
+var label longSLLabel  = na
+var label longTPLabel  = na
+var label shortSLLabel = na
+var label shortTPLabel = na
+
+if (longEntryCond)
+    // Delete previous lines and labels
+    line.delete(longSLLine)
+    line.delete(longTPLine)
+    label.delete(longSLLabel)
+    label.delete(longTPLabel)
+    // Create new lines
+    longSLLine := line.new(bar_index, longSL, bar_index + 1, longSL, color=color.red, style=line.style_dotted, width=1)
+    longTPLine := line.new(bar_index, longTP, bar_index + 1, longTP, color=color.green, style=line.style_dotted, width=1)
+    // Add labels
+    longSLLabel := label.new(bar_index + 1, longSL, "SL: " + str.tostring(longSL, format.mintick), style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+    longTPLabel := label.new(bar_index + 1, longTP, "TP: " + str.tostring(longTP, format.mintick), style=label.style_label_left, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+
+if (shortEntryCond)
+    line.delete(shortSLLine)
+    line.delete(shortTPLine)
+    label.delete(shortSLLabel)
+    label.delete(shortTPLabel)
+    shortSLLine := line.new(bar_index, shortSL, bar_index + 1, shortSL, color=color.red, style=line.style_dotted, width=1)
+    shortTPLine := line.new(bar_index, shortTP, bar_index + 1, shortTP, color=color.green, style=line.style_dotted, width=1)
+    shortSLLabel := label.new(bar_index + 1, shortSL, "SL: " + str.tostring(shortSL, format.mintick), style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+    shortTPLabel := label.new(bar_index + 1, shortTP, "TP: " + str.tostring(shortTP, format.mintick), style=label.style_label_left, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+
+// Extend lines to current bar
+line.set_x2(longSLLine, bar_index)
+line.set_x2(longTPLine, bar_index)
+line.set_x2(shortSLLine, bar_index)
+line.set_x2(shortTPLine, bar_index)
+
+// --------------------
+// Plot Pattern Candles in Deep Yellow
+// --------------------
+plotcandle(isPattern ? open : na, isPattern ? high : na, isPattern ? low : na, isPattern ? close : na, 
+     title="Doji/Hammer/Spinning Top", color=color.new(#FFCC00, 0), wickcolor=color.new(#FFCC00, 0), 
+     bordercolor=color.new(#FFCC00, 0))
+
+// --------------------
+// Background Highlights
+// --------------------
+bgcolor(not inSession ? color.new(color.gray, 90) : na)
+
+// --------------------
+// Alerts
+// --------------------
+alertcondition(longEntryCond, title="Long Entry Alert", message="BUY Signal: Price crossed above previous pattern candle high")
+alertcondition(shortEntryCond, title="Short Entry Alert", message="SELL Signal: Price crossed below previous pattern candle low")
+alertcondition(squareOffTime, title="EOD Square-Off Alert", message="End of day square-off triggered (3:29 PM IST)")
+
+View in Pine Editor・127 lines
+Use on chart
+1
+1
+1
+2 055
+How it works
+1. Pattern Detection (Previous Candle):
+• Checks if total shadow length ≥ 2 × body.
+• Checks if candle height (high − low) is between 10 and 21.5 points.
+• If true → marks that candle as a potential Doji, Hammer, or Spinning Top.
+2. Long Setup:
+• LTP (close) crosses above previous candle high.
+• Previous candle is a valid pattern candle.
+• Stop Loss = 3 points below previous candle low.
+• Take Profit = 5 × (high − low) of previous candle added to previous high.
+3. Short Setup:
+• LTP (close) crosses below previous candle low.
+• Previous candle is a valid pattern candle.
+• Stop Loss = 3 points above previous candle high.
+• Take Profit = 5 × (high − low) of previous candle subtracted from previous low.
+4. Visualization:
+• Yellow background highlights pattern candles.
+• Green ▲ and Red ▼ markers show entry points.
+
+Deep yellow candles → represent Doji / Hammer / Spinning Top patterns
+• Green triangle → Buy signal
+• Red triangle → Sell signal
+• Dotted green line + label → Target
+• Dotted red line + label → Stop loss
+• Gray background → Outside trading hours
+• Auto close → All trades square off at 3:29 PM IST

@@ -1,0 +1,370 @@
+//@version=6
+strategy("BTC EMA Trend Strategy V5 PRO Lukas", overlay=true)
+
+// =======================
+// EMA
+// =======================
+
+ema20 = ta.ema(close,20)
+ema50 = ta.ema(close,50)
+ema100 = ta.ema(close,100)
+ema200 = ta.ema(close,200)
+
+plot(ema20,color=color.rgb(97, 97, 94),title="EMA 20")
+plot(ema50,color=color.orange,title="EMA 50")
+plot(ema100,color=color.rgb(91, 89, 92),title="EMA 100")
+plot(ema200,color=color.blue,linewidth=2,title="EMA 200")
+
+// =======================
+// INDICATORS
+// =======================
+
+atr = ta.atr(14)
+rsi = ta.rsi(close,14)
+
+[diplus,diminus,adx] = ta.dmi(14,14)
+volatilityFilter = atr > ta.sma(atr,14)
+
+// =======================
+// CISD (STRUCTURE FILTER)
+// =======================
+
+body = math.abs(close - open)
+avgBody = ta.sma(body, 20)
+
+bullCISD =
+ close > high[1] and
+ body > avgBody * 3.5 and
+ close > ema20
+
+bearCISD =
+ close < low[1] and
+ body > avgBody * 3.5 and
+ close < ema20
+// =======================
+// TREND FILTERS
+// =======================
+
+trend = adx > 20
+longSlope = ema50 > ema50[5]
+shortSlope = ema50 < ema50[5]
+
+// =======================
+// ENTRY CONDITIONS
+// =======================
+
+longCond = (
+ ema20 > ema50 and
+ close > ema200 and
+ low <= ema20 and
+ close > ema20 and
+ adx > 20 and
+ atr > ta.sma(atr,20)
+)
+
+shortCond = (
+ ema20 < ema50 and
+ close < ema200 and
+ high >= ema20 and
+ close < ema20 and
+ adx > 20 and
+ atr > ta.sma(atr,20)
+)
+
+// =======================
+// MARKET STRUCTURE
+// =======================
+
+pivotHigh = ta.pivothigh(high, 7, 5)
+pivotLow  = ta.pivotlow(low, 7, 5)
+
+var float lastHigh = na
+var float lastLow = na
+var string marketState = ""
+var string labelText = ""
+
+// ---- HIGH STRUCTURE ----
+if not na(pivotHigh)
+
+    labelText := na(lastHigh) ? "HH" : (pivotHigh > lastHigh ? "HH" : "LH")
+    marketState := labelText
+
+    label.new(
+     bar_index[5],
+     pivotHigh,
+     labelText,
+     style=label.style_none,
+     textcolor=color.lime,
+     size=size.tiny)
+
+    lastHigh := pivotHigh
+
+
+// ---- LOW STRUCTURE ----
+if not na(pivotLow)
+
+    labelText := na(lastLow) ? "HL" : (pivotLow > lastLow ? "HL" : "LL")
+    marketState := labelText
+
+    label.new(
+     bar_index[5],
+     pivotLow,
+     labelText,
+     style=label.style_none,
+     textcolor=color.red,
+     size=size.tiny)
+
+    lastLow := pivotLow
+
+
+
+// =======================
+// CISD BOX
+// =======================
+
+var box bullCISDBox = na
+var box bearCISDBox = na
+
+if bullCISD
+    bullCISDBox := box.new(
+     bar_index-1,
+     high[1],
+     bar_index,
+     low,
+     bgcolor=color.new(color.lime,70),
+     border_color=color.rgb(132, 255, 0),
+     border_width=2,
+     text="CISD",
+     text_color=color.white,
+     text_size=size.small)
+
+if bearCISD
+    bearCISDBox := box.new(
+     bar_index-1,
+     high,
+     bar_index,
+     low[1],
+     bgcolor=color.new(color.red,70),
+     border_color=color.rgb(255, 5, 5),
+     border_width=2,
+     text="CISD",
+     text_color=color.white,
+     text_size=size.small)
+
+// =======================
+// VARIABLES
+// =======================
+
+var float entry = na
+var float sl = na
+var float tp = na
+
+var box profitBox = na
+var box riskBox = na
+
+// ======================
+// LONG
+// ======================
+
+if longCond and strategy.position_size == 0
+
+    entry := close
+    sl := low - atr * 1.5
+    risk = entry - sl
+    tp := entry + risk * 3
+
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("EXIT LONG","LONG", stop=sl, limit=tp)
+
+    // PROFIT BOX
+    profitBox := box.new(
+     bar_index,
+     entry,
+     bar_index,
+     tp,
+     bgcolor=color.new(color.lime,70),
+     border_color=color.rgb(52, 184, 12),
+     border_width=2)
+
+    // RISK BOX
+    riskBox := box.new(
+     bar_index,
+     sl,
+     bar_index,
+     entry,
+     bgcolor=color.new(color.red,70),
+     border_color=color.rgb(243, 6, 6),
+     border_width=2)
+// ======================
+// SHORT
+// ======================
+
+if shortCond and strategy.position_size == 0
+
+    entry := close
+    sl := high + atr * 1.5
+    risk = sl - entry
+    tp := entry - risk * 3
+
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("EXIT SHORT","SHORT", stop=sl, limit=tp)
+
+    // PROFIT BOX
+    profitBox := box.new(
+     bar_index,
+     tp,
+     bar_index,
+     entry,
+     bgcolor=color.new(color.lime,70),
+     border_color=color.rgb(0, 230, 119, 27),
+     border_width=2)
+
+    // RISK BOX
+    riskBox := box.new(
+     bar_index,
+     entry,
+     bar_index,
+     sl,
+     bgcolor=color.new(color.red,70),
+     border_color=color.rgb(255, 82, 82, 27),
+     border_width=2)
+
+    // ======================
+// UPDATE TRADE BOX
+// ======================
+
+if strategy.position_size != 0 and not na(profitBox) and not na(riskBox)
+    box.set_right(profitBox, bar_index)
+    box.set_right(riskBox, bar_index)
+// =======================
+// SIGNAL ARROWS
+// =======================
+
+plotshape(longCond,style=shape.triangleup,location=location.belowbar,color=color.green,size=size.small,title="LONG")
+
+plotshape(shortCond,style=shape.triangledown,location=location.abovebar,color=color.red,size=size.small,title="SHORT")
+
+// =======================
+// TREND HEATMAP
+// =======================
+
+bgcolor(close > ema200 ? color.new(color.green,90) : color.new(color.red,90))
+
+/// =======================
+// DASHBOARD
+// =======================
+
+var table dash = table.new(position.bottom_left,2,4,bgcolor=color.rgb(61, 35, 155))
+
+winrate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+
+profitColor = strategy.netprofit >= 0 ? color.green : color.red
+winColor = winrate < 50 ? color.yellow : color.green
+
+table.cell(dash,0,0,"Net Profit",text_color=color.rgb(235, 237, 242))
+table.cell(dash,1,0,str.tostring(strategy.netprofit),text_color=profitColor)
+
+table.cell(dash,0,1,"Trades",text_color=color.rgb(236, 238, 243))
+table.cell(dash,1,1,str.tostring(strategy.closedtrades),text_color=color.rgb(246, 247, 248))
+
+table.cell(dash,0,2,"Winrate",text_color=color.rgb(243, 244, 246))
+table.cell(dash,1,2,str.tostring(winrate,"#.##")+"%",text_color=winColor)
+
+table.cell(dash,0,3,"Max DD",text_color=color.rgb(254, 254, 255))
+table.cell(dash,1,3,str.tostring(strategy.max_drawdown),text_color=color.red)
+// =======================
+// UPDATE TRADE BOX
+// =======================
+
+if strategy.position_size != 0 and not na(profitBox) and not na(riskBox)
+    box.set_right(profitBox, bar_index)
+    box.set_right(riskBox, bar_index)
+
+View in Pine Editor・281 lines
+Use on chart
+1
+2
+631
+🚀 Professional Header
+
+BTC EMA Trend Strategy V5 PRO is a trend-following strategy designed to identify strong directional moves in the cryptocurrency market using a combination of EMAs, volatility filters, market structure, and momentum confirmation.
+
+The strategy automatically detects LONG and SHORT opportunities, visualizes risk and reward zones, and displays performance statistics directly on the chart.
+
+📊 Strategy Logic
+
+The system uses four exponential moving averages to identify market trend:
+
+• EMA 20 – short-term momentum
+• EMA 50 – short-term trend
+• EMA 100 – medium-term trend
+• EMA 200 – long-term trend filter
+
+Trades are taken only when price aligns with the dominant trend.
+
+⚡ Momentum Confirmation (CISD)
+
+The strategy includes a CISD (Candle Impulse Structure Detection) filter that detects strong momentum candles.
+
+When a large impulse candle breaks the previous high or low with a significantly larger body, the script highlights the area using CISD boxes, signaling potential institutional momentum.
+
+📈 Entry Conditions
+LONG
+
+A long trade is opened when:
+
+• EMA20 is above EMA50
+• Price is above EMA200
+• Price retests EMA20
+• ADX confirms strong trend
+• Market volatility is above average
+
+SHORT
+
+A short trade is opened when:
+
+• EMA20 is below EMA50
+• Price is below EMA200
+• Price retests EMA20 from below
+• ADX confirms strong trend
+• Market volatility is above average
+
+🎯 Risk Management
+
+The strategy uses ATR-based dynamic Stop Loss and a 3:1 Risk-to-Reward ratio.
+
+Each trade is displayed with visual trade boxes:
+
+🟩 Green zone → potential profit
+🟥 Red zone → risk area
+
+📊 Dashboard
+
+A built-in dashboard displays key strategy statistics:
+
+• Net Profit
+• Total Trades
+• Win Rate
+• Maximum Drawdown
+
+This allows traders to quickly evaluate performance during backtesting.
+
+🎨 Chart Features
+
+The script includes multiple visual tools:
+
+✔ EMA trend lines
+✔ CISD momentum boxes
+✔ Market structure labels (HH, HL, LH, LL)
+✔ LONG / SHORT signal arrows
+✔ Trade risk/reward boxes
+✔ Trend heatmap based on EMA200
+
+⚠️ Note
+
+The strategy performs best in strong trending markets and may produce weaker results during sideways consolidation.
+
+For optimal performance, test the strategy on 15m, 1H, or 4H timeframes.
+
+⚠️ Disclaimer:
+This AI is not a financial advisor; please consult your financial advisor for personalized advice.

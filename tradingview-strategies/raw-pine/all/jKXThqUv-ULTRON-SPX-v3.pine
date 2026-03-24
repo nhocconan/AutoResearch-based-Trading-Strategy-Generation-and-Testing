@@ -1,0 +1,85 @@
+//@version=5
+strategy("ULTRON SPX v3", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.0,
+     slippage=2)
+
+// === INPUTS ===
+fastLen  = input.int(8,  "Fast EMA")
+slowLen  = input.int(21, "Slow EMA")
+trendLen = input.int(50, "Trend EMA")
+rsiLen   = input.int(14, "RSI")
+rsiOB    = input.int(70, "RSI OB")
+rsiOS    = input.int(30, "RSI OS")
+stopMult = input.float(1.5, "Stop ATR")
+tpMult   = input.float(3.0, "TP ATR")
+
+// === INDICATORS ===
+fastEMA  = ta.ema(close, fastLen)
+slowEMA  = ta.ema(close, slowLen)
+trendEMA = ta.ema(close, trendLen)
+rsi      = ta.rsi(close, rsiLen)
+atr      = ta.atr(14)
+vwap     = ta.vwap
+[macd, signal, _] = ta.macd(close, 12, 26, 9)
+
+// === SIGNALS ===
+crossUp   = ta.crossover(fastEMA, slowEMA)
+crossDown = ta.crossunder(fastEMA, slowEMA)
+
+longOK  = crossUp   and close > trendEMA and rsi > 40 and rsi < rsiOB and macd > signal and close > vwap
+shortOK = crossDown and close < trendEMA and rsi < 60 and rsi > rsiOS and macd < signal and close < vwap
+
+// === ENTRIES ===
+if longOK and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=close-(stopMult*atr), limit=close+(tpMult*atr))
+
+if shortOK and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=close+(stopMult*atr), limit=close-(tpMult*atr))
+
+if strategy.position_size > 0 and crossDown
+    strategy.close("Long", comment="X")
+if strategy.position_size < 0 and crossUp
+    strategy.close("Short", comment="X")
+
+// === PLOTS ===
+p1 = plot(fastEMA,  "Fast EMA",  color.blue,   2)
+p2 = plot(slowEMA,  "Slow EMA",  color.red,    2)
+plot(trendEMA, "Trend EMA", color.orange, 1)
+plot(vwap,     "VWAP",      color.purple, 1)
+fill(p1, p2, fastEMA > slowEMA ? color.new(color.green,85) : color.new(color.red,85))
+plotshape(longOK,  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.small)
+plotshape(shortOK, location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.small)
+
+View in Pine Editor・57 lines
+Use on chart
+3
+295
+ULTRON SPX v3 — ES1! 1H — Jan 2022 to Mar 2026 (4 years)
+
+┌───────────────┬───────────────────────┐
+│ Metric │ Value │
+├───────────────┼───────────────────────┤
+│ Total P&L │ +$36,295.50 (+36.30%) │
+├───────────────┼───────────────────────┤
+│ Max Drawdown │ -$29,812.50 (21.14%) │
+├───────────────┼───────────────────────┤
+│ Total Trades │ 523 │
+├───────────────┼───────────────────────┤
+│ Win Rate │ 35.56% (186/523) │
+├───────────────┼───────────────────────┤
+│ Profit Factor │ 1.106 │
+└───────────────┴───────────────────────┘
+
+Equity chart shows steady growth from 0% to +36.30% (blue line) vs buy & hold
+(green line).
+
+What this means:
+- Strategy is profitable but win rate (35%) is low
+- Profit factor 1.1 = barely above breakeven
+- The 3:1 R:R ratio compensates for low win rate

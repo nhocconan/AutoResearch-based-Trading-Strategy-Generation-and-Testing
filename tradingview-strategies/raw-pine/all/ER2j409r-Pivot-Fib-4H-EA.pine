@@ -1,0 +1,167 @@
+//@version=5
+strategy("Pivot Fib 4H — S1/S3 R1/R3 (30-pip SL, High/Low entry, SL/TP labels)", overlay=true, pyramiding=4, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// -------------------- INPUTS --------------------
+near_threshold_pct     = input.float(0.2,   "Near threshold (%)", step=0.01)
+risk_pct               = input.float(0.5,   "Risk % per trade",    step=0.1)
+daily_max_loss_pct     = input.float(2.0,   "Daily max loss %",    step=0.1)
+contract_size          = input.float(1.0,   "Contract size multiplier", step=0.01)
+pip_size               = input.float(0.0001,"One pip in price units (e.g., 0.0001 for most FX, 0.01 for JPY)")
+same_bar_prefers_tp    = input.bool(false,  "If TP & SL in same bar, prefer TP?")
+max_positions_per_day  = input.int(4,       "Max positions per day", minval=1)
+
+// -------------------- DAILY PIVOTS (Fibonacci) --------------------
+// request daily values (uses today's daily high/low/close for pivots)
+res = "D"
+[d_high, d_low, d_close] = request.security(syminfo.tickerid, res, [high, low, close], lookahead = barmerge.lookahead_on)
+pp  = (d_high + d_low + d_close) / 3.0
+rng = d_high - d_low
+r1  = pp + 0.382 * rng
+r2  = pp + 0.618 * rng
+r3  = pp + rng
+s1  = pp - 0.382 * rng
+s2  = pp - 0.618 * rng
+s3  = pp - rng
+
+// Optional: draw pivots on chart
+plot(pp, title="PP", linewidth=1, color=color.gray)
+plot(r1, title="R1", linewidth=1, color=color.orange)
+plot(r2, title="R2", linewidth=1, color=color.orange)
+plot(r3, title="R3", linewidth=1, color=color.orange)
+plot(s1, title="S1", linewidth=1, color=color.blue)
+plot(s2, title="S2", linewidth=1, color=color.blue)
+plot(s3, title="S3", linewidth=1, color=color.blue)
+
+// -------------------- SIGNAL RULES --------------------
+isMonday = dayofweek == dayofweek.monday
+open_near_s1 = not na(s1) and math.abs(open - s1) <= (s1 * (near_threshold_pct / 100.0))
+open_near_r1 = not na(r1) and math.abs(open - r1) <= (r1 * (near_threshold_pct / 100.0))
+
+buy_s1 = isMonday and open_near_s1 and high > s1 and close > s1
+buy_s3 = not na(s3) and low < s3 and close > s3
+
+sell_r1 = isMonday and open_near_r1 and low < r1 and close < r1
+sell_r3 = not na(r3) and high > r3 and close < r3
+
+// Trigger only when the boolean becomes true on this bar (prevents multiple entries while condition persists)
+sig_long_boolean  = buy_s1 or buy_s3
+sig_short_boolean = sell_r1 or sell_r3
+sig_long_trigger  = sig_long_boolean and not nz(sig_long_boolean[1], false)
+sig_short_trigger = sig_short_boolean and not nz(sig_short_boolean[1], false)
+sig_trigger       = sig_long_trigger or sig_short_trigger
+
+// Determine signal text (use only for labeling)
+sig_text = sig_long_trigger ? (buy_s1 ? "BUY_S1" : "BUY_S3") : sig_short_trigger ? (sell_r1 ? "SELL_R1" : "SELL_R3") : ""
+
+// -------------------- SL/TP RULES (30 pips) --------------------
+pip_offset = 30.0 * pip_size
+float sl_price = na
+float tp_price = na
+
+if sig_long_trigger
+    // choose which long signal triggered
+    if buy_s1
+        sl_price := s1 - pip_offset
+        tp_price := pp
+    else
+        // BUY_S3
+        sl_price := s3 - pip_offset
+        tp_price := s1
+else if sig_short_trigger
+    if sell_r1
+        sl_price := r1 + pip_offset
+        tp_price := pp
+    else
+        // SELL_R3
+        sl_price := r3 + pip_offset
+        tp_price := r1
+
+// -------------------- ENTRY PRICE (High for BUY, Low for SELL) --------------------
+float entry_price = na
+if sig_long_trigger
+    entry_price := high    // buy at signal candle HIGH
+else if sig_short_trigger
+    entry_price := low     // sell at signal candle LOW
+
+// -------------------- POSITION SIZING --------------------
+float price_diff = na
+price_diff := nz(math.abs(entry_price - sl_price))
+float qty = na
+if sig_trigger and not na(price_diff) and price_diff > 0
+    float risk_amount = strategy.equity * (risk_pct / 100.0)
+    float qty_calc = (risk_amount / price_diff) * contract_size
+    qty := qty_calc > 0 ? qty_calc : na
+
+// -------------------- DAILY COUNTERS & LIMITS --------------------
+var int trades_today = 0
+var int last_day = 0
+int curr_day = year * 10000 + month * 100 + dayofmonth
+
+// When the day changes, reset counters and set start_of_day equity
+var float start_equity_daily = na
+if curr_day != last_day
+    trades_today := 0
+    last_day := curr_day
+    start_equity_daily := strategy.equity
+
+// daily drawdown percent since start of day
+float daily_drawdown_pct = na
+daily_drawdown_pct := start_equity_daily == 0 ? 0.0 : (start_equity_daily - strategy.equity) / start_equity_daily * 100.0
+bool daily_stop_hit = daily_drawdown_pct >= daily_max_loss_pct
+
+bool can_enter = trades_today < max_positions_per_day
+
+// Arrays to hold labels so they persist (optional)
+var label[] labels_sl = array.new<label>()
+var label[] labels_tp = array.new<label>()
+
+// typed label variables (declare before using)
+label label_sl = na
+label label_tp = na
+
+if sig_trigger and not daily_stop_hit and can_enter and not na(qty)
+    // place orders
+    if sig_long_trigger
+        strategy.entry("Long_"+sig_text, strategy.long, qty=qty)
+        strategy.exit("Exit_Long_"+sig_text, "Long_"+sig_text, stop=sl_price, limit=tp_price)
+    else
+        strategy.entry("Short_"+sig_text, strategy.short, qty=qty)
+        strategy.exit("Exit_Short_"+sig_text, "Short_"+sig_text, stop=sl_price, limit=tp_price)
+
+    trades_today += 1
+
+    // create SL and TP labels at this bar (use := to assign to previously-declared label variables)
+    string sl_txt = "SL: " + str.tostring(sl_price, format.mintick)
+    string tp_txt = "TP: " + str.tostring(tp_price, format.mintick)
+    if sig_long_trigger
+        label_sl := label.new(bar_index, sl_price, sl_txt, xloc=xloc.bar_index, yloc=yloc.price,
+                              style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+        label_tp := label.new(bar_index, tp_price, tp_txt, xloc=xloc.bar_index, yloc=yloc.price,
+                              style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+    else
+        label_sl := label.new(bar_index, sl_price, sl_txt, xloc=xloc.bar_index, yloc=yloc.price,
+                              style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white)
+        label_tp := label.new(bar_index, tp_price, tp_txt, xloc=xloc.bar_index, yloc=yloc.price,
+                              style=label.style_label_down, color=color.new(color.green, 0), textcolor=color.white)
+
+    array.push(labels_sl, label_sl)
+    array.push(labels_tp, label_tp)
+
+// -------------------- VISUAL SIGNALS --------------------
+plotshape(buy_s1, title="Buy S1", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY S1")
+plotshape(buy_s3, title="Buy S3", location=location.belowbar, color=color.lime,  style=shape.labelup, text="BUY S3")
+plotshape(sell_r1, title="Sell R1", location=location.abovebar, color=color.red,   style=shape.labeldown, text="SELL R1")
+plotshape(sell_r3, title="Sell R3", location=location.abovebar, color=color.maroon, style=shape.labeldown, text="SELL R3")
+
+// Optional info label (last bar)
+if barstate.islast
+    string info_text = "Near%: " + str.tostring(near_threshold_pct) + "  Pip size: " + str.tostring(pip_size) + "  Risk%: " + str.tostring(risk_pct) + "  Max/day: " + str.tostring(max_positions_per_day)
+    label.new(bar_index, high, info_text, xloc=xloc.bar_index, yloc=yloc.abovebar, style=label.style_label_left, color=color.new(color.black, 80), textcolor=color.white)
+
+View in Pine Editor・159 lines
+Use on chart
+4
+5
+2
+1 514
+Strategy uses the pivot standard to open position, it has well define entry and exit point with SL, it also has a proper money management plan, maximum 4 trades a day, each trade risk 0.5% of the account, I have it EA version of it also.

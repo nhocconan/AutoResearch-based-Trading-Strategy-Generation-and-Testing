@@ -1,0 +1,120 @@
+//@version=4
+strategy("EMA Slope Trend Follower", initial_capital=10000, default_qty_type=strategy.percent_of_equity, commission_type=strategy.commission.percent, commission_value=0.06, slippage = 2, default_qty_value=30, overlay=false)
+
+//definizione input
+
+average = input (title="Source MA Type", type=input.string, defval="EMA",options=["EMA","SMA"])
+len = input(130, minval=1, title="Source MA Length")
+slopeFlen = input (9,title="Fast Slope MA Length")
+slopeSlen= input (21,title="Slow Slope MA Length")
+
+trendfilter=input(true,title="Trend Filter")
+trendfilterperiod=input(200,title="Trend Filter MA Period")
+trendfiltertype=input (title="Trend Filter MA Type", type=input.string, defval="EMA",options=["EMA","SMA"])
+
+volatilityfilter=input(false,title="Volatility Filter")
+volatilitystdevlength=input(20,title="Vol Filter STDev Length")
+volatilitystdevmalength=input(30,title="Vol Filter STDev MA Length")
+
+//variabili
+
+out = if average == "EMA" 
+    ema(close,len)
+else
+    sma(close,len)
+    
+slp = change(out)/out
+
+emaslopeF = ema(slp,slopeFlen)
+emaslopeS = ema(slp,slopeSlen)
+
+//variabili accessorie e condizioni
+
+TrendConditionL=if trendfiltertype =="EMA"
+    close>ema(close,trendfilterperiod)
+else
+    close>sma(close,trendfilterperiod)
+    
+TrendConditionS=if trendfiltertype =="EMA"
+    close<ema(close,trendfilterperiod)
+else
+    close<sma(close,trendfilterperiod)
+
+VolatilityCondition=stdev(close,volatilitystdevlength)>sma(stdev(close,volatilitystdevlength),volatilitystdevmalength)
+
+ConditionEntryL= if trendfilter == true
+    if volatilityfilter == true
+        emaslopeF>emaslopeS and TrendConditionL and VolatilityCondition
+    else
+        emaslopeF>emaslopeS and TrendConditionL
+else
+    if volatilityfilter == true
+        emaslopeF>emaslopeS and VolatilityCondition
+    else 
+        emaslopeF>emaslopeS
+
+ConditionEntryS= if trendfilter == true
+    if volatilityfilter == true
+        emaslopeF<emaslopeS and TrendConditionS and VolatilityCondition
+    else 
+        emaslopeF<emaslopeS and TrendConditionS
+else
+    if volatilityfilter == true
+        emaslopeF<emaslopeS and VolatilityCondition
+    else
+        emaslopeF<emaslopeS
+
+ConditionExitL=crossunder(emaslopeF,emaslopeS)
+
+ConditionExitS=crossover(emaslopeF,emaslopeS)
+
+//plot
+
+plot (slp, color=color.white)
+plot (emaslopeF,color=color.yellow)
+plot (emaslopeS,color=color.red)
+
+//ingressi e uscite
+
+if ConditionExitS
+    if strategy.position_size < 0
+        strategy.close("SLPShort")
+
+if ConditionExitL
+    if strategy.position_size > 0
+        strategy.close("SLPLong")
+
+if ConditionEntryL
+    strategy.entry("SLPLong",long=true)
+    
+if ConditionEntryS
+    strategy.entry("SLPShort",long=false)
+
+View in Pine Editor・94 lines
+Use on chart
+2.5 K
+17
+82 204
+This strategy is based on the slope of the EMA130.
+Over that slope, the script calculates two EMAs (9,21) which are used to generate the main entry and exit signal.
+
+In particular, the strategy enters a LONG position when EMA9 > EMA21. On the contrary, it closes the LONG and opens a SHORT when EMA9 < EMA21.
+
+When the slope of the EMA130 is rising, it means that the price is accelerating upwards, fueling an uptrend. Conversely, when the slope is falling, it means that the price is slowing down, falling into a possible downtrend.
+
+Calculating and analyzing two EMAs (fast and slow) over the slope of a medium length EMA instead of the price anticipates a lot the signal. In this way, the strategy never miss a trend.
+
+In order to minimize false positives (entering useless positions), I included two filters, which can be optionally turned on:
+
+- Trend Filter: When the price is above EMA200, the strategy opens ONLY LONG positions. If price < EMA200, only shorts allowed. If the slope gives a long signal and price is below EMA200, for example, the eventual SHORT position is closed, but the LONG entry is postponed to the moment when both conditions (slope uptrending and price > ema200) are met.
+I recommend always turning on this filter, as it dramatically decreases drawdown.
+
+- Volatility Filter: When the standard deviation of the last 20 candles is below its 50 samples moving average, no positions are opened, as market is going sideways. The purpose of this filter is to prevent false positives (positions which open and close in a matter of candles due to false signals in sideways market).
+I recommend turning on this filter only on low time frames.
+
+This strategy works great on medium time frames (like 4h, 6h, daily), since it spends way less in fees, opening less positions.
+
+It works good on low TFs too (up to 1h, didn't test lower ones), provided Volatility filter is turned on and parameters are set according to the asset.
+
+Commission included in calculations: 0.06% (it's the taker commission on BitMEX with the 10% discount obtainable with any referral link)
+Slippage included in calculations: 2 ticks (BitMEX has very liquid order books, and slippage doesn't happen very often unless a huge position size is used).

@@ -1,0 +1,73 @@
+//@version=5
+strategy("Random Entry and Exit", overlay=true, shorttitle = "Random Strategy", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0, commission_value = 0.1, initial_capital = 10000)
+
+// Strategy setting
+enable_long = input(defval = true, title = "Enqble Long")
+enable_short = input(defval = false, title = "Enable Short")
+
+// Function to generate random numbers
+random_number(seed, min_val, max_val) =>
+    // Seed-based pseudo-random number generation
+    var float r = na
+    if na(r)
+        r := seed
+    r := (r * 16807) % 2147483647
+    min_val + (max_val - min_val) * (r / 2147483647)
+
+// Input for random seed
+seed = input.int(1, title="Random Seed")
+
+// Generate random numbers for entry and exit points
+entry_prob = random_number(seed, 0.0, 1.0)
+exit_prob = random_number(seed + 1, 0.0, 1.0)
+
+// Parameters for random entry and exit logic
+entry_threshold = 0.01 // Adjust to change the frequency of entries
+exit_threshold = 0.01 // Adjust to change the frequency of exits
+
+// Generate random entries and exits
+enter_long = entry_prob < entry_threshold
+exit_long = exit_prob < exit_threshold
+
+enter_short = entry_prob < entry_threshold
+exit_short = exit_prob < exit_threshold
+
+// Strategy logic
+if (enable_long)
+    if (enter_long)
+        strategy.entry("Random Long", strategy.long)
+    if (exit_long)
+        strategy.close("Random Long")
+
+if (enable_short)
+    if (enter_short)
+        strategy.entry("Random Short", strategy.short)
+    if (exit_short)
+        strategy.close("Random Short")
+
+View in Pine Editor・46 lines
+Use on chart
+2
+0
+6
+7
+6 360
+Strategy for Researching Whether It Is Possible to Earn Consistently by Opening Random Trades
+
+The essence of the strategy lies in generating random entries and exits based on pseudorandom numbers. The generation of pseudorandom numbers is performed by the function random_number based on the value of the seed variable. The variables entry_threshold and exit_threshold control the frequency of entries and exits. Lower values mean less frequent trades. To increase the number of trades, increase the values of these variables.
+
+The strategy was created as part of research into whether it is possible to earn randomly in financial markets by making chaotic actions of opening and closing trades. However, it adheres to a few rules: open only long positions (in the direction of the global trend) and do not use leverage. Positions are opened with the entire available capital.
+
+100 generations of the strategy on the daily chart of the S&P 500 (seed 1-101) give 100% positive mathematical expectations. Similar results are observed on higher timeframes of assets that are in a global uptrend.
+
+There is also the possibility of opening only short positions for the research. Note that the logic of the strategy is built in such a way that only one trading direction can operate simultaneously (either longs or shorts). On higher timeframes, random shorts show negative results. Positive mathematical expectations for short positions can be found on lower timeframes (1 min, etc.), where a large amount of noise is observed.
+---------------------------------------------------------------------------------------------------
+Стратегия для исследования, можно ли стабильно зарабатывать при открытии случайных сделок
+
+Суть стратегии заключается в генерации случайных входов и выходов на основе псевдослучайных чисел. Генерация псевдослучайных чисел происходит функцией random_number на основе значения переменной seed. Переменные entry_threshold и exit_threshold контролируют частоту входов и выходов. Более низкие значения означают менее частые сделки. Для увеличения количества сделок - увеличивайте значения переменных.
+
+Стратегия создавалась в рамках исследования вопроса, можно ли случайным образом зарабатывать на фин. рынках, совершая хаотичные открытия и закрытия сделок. НО, придерживаясь нескольких правил: открывать только длинные позиции (в сторону глобального тренда) и не использовать кредитные плечи. Открытие позиций происходит на весь доступный капитал.
+
+100 генераций стратегии на дневном графике S&P500 (seed 1-101) дают 100% положительных математических ожиданий. Похожие результаты наблюдаются на высоких таймфреймах активов, которые глобально находятся в восходящем тренде.
+
+Также для исследования предусмотрена возможность открытия только коротких позиций. Обратите внимание, что логика стратегии построена таким образом, что одновременно может работать только одно направление торговли (либо лонги, либо шорты). На старших таймфреймах случайные шорты показывают негативные результаты. Положительное математическое ожидание для коротких позиций можно обнаружить на младших таймфреймах (1 min, etc), где наблюдается большое количество шумов.

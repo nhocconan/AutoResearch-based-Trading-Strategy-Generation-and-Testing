@@ -1,0 +1,252 @@
+//@version=5
+strategy("Inside Candle Positional Strategy", overlay=true, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.05, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0)
+
+// ─────────────────────────────
+// INPUTS
+// ─────────────────────────────
+
+groupRisk = "Risk Management"
+rr = input.float(3.0, "Risk Reward Ratio", minval = 0.1, group = groupRisk)
+
+groupTSL = "Trailing Stop"
+useTSL = input.bool(true, "Use Trailing Stop", group = groupTSL)
+atrPeriod = input.int(10, "ATR Period", minval = 1, group = groupTSL)
+atrMultiplier = input.float(1.0, "ATR Multiplier", minval = 0.1, group = groupTSL)
+
+groupVisual = "Visual Settings"
+insideColor = input.color(color.yellow, "Inside Candle Color", group = groupVisual)
+
+// ─────────────────────────────
+// MOTHER & INSIDE CANDLE LOGIC
+// ─────────────────────────────
+
+var float motherHigh = na
+var float motherLow = na
+var bool motherActive = false
+var bool breakoutTaken = false
+
+insideBar = high < high[1] and low > low[1]
+
+// Highlight inside candle
+barcolor(insideBar ? insideColor : na)
+
+if insideBar and strategy.position_size == 0
+    motherHigh := high[1]
+    motherLow := low[1]
+    motherActive := true
+    breakoutTaken := false
+
+// ─────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────
+
+longCondition = motherActive and not breakoutTaken and close > motherHigh and strategy.position_size == 0
+shortCondition = motherActive and not breakoutTaken and close < motherLow and strategy.position_size == 0
+
+if longCondition
+    strategy.entry("Long Entry", strategy.long)
+    breakoutTaken := true
+
+if shortCondition
+    strategy.entry("Short Entry", strategy.short)
+    breakoutTaken := true
+
+// ─────────────────────────────
+// TRADE VARIABLES
+// ─────────────────────────────
+
+var float initialSL = na
+var float target = na
+var float trailingSL = na
+
+atrValue = ta.atr(atrPeriod) * atrMultiplier
+
+newLong = strategy.position_size > 0 and strategy.position_size[1] == 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] == 0
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// ─────────────────────────────
+// SET INITIAL SL & TARGET
+// ─────────────────────────────
+
+if newLong
+    entryPrice = strategy.position_avg_price
+    risk = entryPrice - motherLow
+    initialSL := motherLow
+    target := entryPrice + risk * rr
+    trailingSL := initialSL
+
+if newShort
+    entryPrice = strategy.position_avg_price
+    risk = motherHigh - entryPrice
+    initialSL := motherHigh
+    target := entryPrice - risk * rr
+    trailingSL := initialSL
+
+// ─────────────────────────────
+// TRAILING STOP UPDATE
+// ─────────────────────────────
+
+if strategy.position_size > 0 and useTSL
+    newTSL = close - atrValue
+    trailingSL := math.max(trailingSL, newTSL)
+    trailingSL := math.max(trailingSL, initialSL)
+
+if strategy.position_size < 0 and useTSL
+    newTSL = close + atrValue
+    trailingSL := math.min(trailingSL, newTSL)
+    trailingSL := math.min(trailingSL, initialSL)
+
+activeSL = useTSL ? trailingSL : initialSL
+
+// ─────────────────────────────
+// EXIT LOGIC
+// ─────────────────────────────
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry = "Long Entry", stop = activeSL, limit = target)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry = "Short Entry", stop = activeSL, limit = target)
+
+// Reset after close
+if positionClosed
+    motherActive := false
+    initialSL := na
+    target := na
+    trailingSL := na
+
+// ─────────────────────────────
+// VISUAL PLOTS
+// ─────────────────────────────
+
+plot(strategy.position_avg_price, title="Entry", style=plot.style_linebr, linewidth=2)
+plot(initialSL, title="Initial SL", style=plot.style_linebr, linewidth=2)
+plot(useTSL ? trailingSL : na, title="Trailing SL", style=plot.style_linebr, linewidth=2)
+plot(target, title="Target", style=plot.style_linebr, linewidth=2)
+
+// ─────────────────────────────
+// ALERTS
+// ─────────────────────────────
+
+alertcondition(longCondition, "Long Entry", "Long Entry")
+alertcondition(shortCondition, "Short Entry", "Short Entry")
+alertcondition(positionClosed and strategy.position_size[1] > 0, "Long Exit", "Long Exit")
+alertcondition(positionClosed and strategy.position_size[1] < 0, "Short Exit", "Short Exit")
+
+View in Pine Editor・135 lines
+Use on chart
+7
+5
+1 395
+Introduction
+
+This strategy implements a structured Inside Candle breakout model designed to capture expansion moves following short-term price compression.
+
+An inside candle represents a temporary contraction in volatility, where the entire range of the current bar is contained within the previous bar. The preceding bar becomes the Mother Candle, and its range defines the potential breakout boundaries.
+
+The model focuses purely on price structure and predefined risk parameters rather than trend-following overlays or momentum filters.
+
+Core Logic and Structure
+Inside Candle Detection
+
+An inside candle is defined as:
+
+Current High < Previous High
+
+Current Low > Previous Low
+
+When this condition occurs, the previous bar is marked as the Mother Candle. Only one breakout attempt is allowed per identified structure to prevent repeated entries within the same consolidation phase.
+
+Trade Entry Rules
+
+Entries are executed at market on confirmed bar close.
+
+Long Position
+
+Close > Mother Candle High
+
+No active position
+
+Short Position
+
+Close < Mother Candle Low
+
+No active position
+
+This ensures breakout confirmation rather than anticipatory positioning.
+
+Risk Management Framework
+
+Risk control is fully rule-based and determined at the moment of entry.
+
+For each trade:
+
+Initial Stop Loss = Opposite boundary of the Mother Candle
+
+Risk = Distance between entry price and initial stop
+
+Target = Entry ± (Risk × Risk-Reward Ratio)
+
+The Risk-Reward Ratio is user configurable.
+
+Only one position is active at any time (pyramiding disabled).
+
+Optional ATR-Based Trailing Stop
+
+An optional trailing mechanism may be enabled:
+
+Trailing Stop updates on every confirmed bar.
+
+Calculated using ATR × Multiplier.
+
+Moves only in the direction of profit.
+
+Never worsens beyond the initial stop level.
+
+If disabled, exits rely solely on the fixed stop and target.
+
+Execution Model
+
+All signals are calculated on confirmed bar closes.
+
+Entries are market orders.
+
+Stop and target levels are evaluated using bar OHLC values.
+
+No repainting logic is used.
+
+No intrabar order sequencing assumptions are applied.
+
+Backtest performance may differ from live execution due to slippage, spread, liquidity, and market conditions.
+
+Visual Components
+
+Inside candles are highlighted (default: yellow).
+
+Entry, Initial Stop, Trailing Stop (if enabled), and Target levels are displayed using line-break formatting for clarity.
+
+Designed to maintain structural visibility without excessive chart clutter.
+
+Strategy Defaults
+
+Initial Capital: $1000
+
+Commission: 0.05%
+
+Position Size: 1 (fixed quantity)
+
+Pyramiding: Disabled
+
+These defaults can be adjusted in the Strategy Properties panel.
+
+Intended Application
+
+This strategy is suited for studying breakout behavior after short-term consolidation phases.
+Performance characteristics will vary depending on instrument volatility, timeframe, and market regime.
+
+It is presented as a structural breakout framework and should be tested and adapted according to individual risk tolerance and trading objectives.
+
+Disclaimer
+
+Trading involves significant risk. This script is provided for educational and research purposes only and does not constitute financial advice. Users are responsible for evaluating its suitability for their own trading decisions.

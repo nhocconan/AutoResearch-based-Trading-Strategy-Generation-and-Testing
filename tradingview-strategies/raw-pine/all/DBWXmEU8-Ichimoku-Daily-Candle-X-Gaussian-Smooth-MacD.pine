@@ -1,0 +1,50 @@
+//@version=2
+// Any timeFrame ok but good on 15 minute & 60 minute , Ichimoku + Daily-Candle_cross(DT) + HULL-MA_cross + MacD combination 420 special blend
+strategy("Ichimoku + Daily-Candle_X + HULL-MA_X + MacD", shorttitle="٩(̾●̮̮̃̾•̃̾)۶", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=52, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0,precision=6)
+plot(close[1],color=red)
+//                         /L'-, 
+//                               ,'-.           /MM . .             /  L '-, 
+//     .                    _,--dMMMM\         /MMM  `..           /       '-, 
+//     :             _,--,  )MMMMMMMMM),.      `QMM   ,<>         /_      '-,' 
+//     ;     ___,--. \MM(    `-'   )M//MM\       `  ,',.;      .-'* ;     .' 
+//     |     \MMMMMM) \MM\       ,dM//MMM/     ___ < ,; `.      )`--'    / 
+//     |      \MM()M   MMM)__   /MM(/MP'  ___, \  \ `  `. `.   /__,    ,' 
+//     |       MMMM/   MMMMMM( /MMMMP'__, \     | /      `. `-,_\     / 
+//     |       MM     /MMM---' `--'_ \     |-'  |/         `./ .\----.___ 
+//     |      /MM'   `--' __,-  \""   |-'  |_,               `.__) . .F. )-. 
+//     |     `--'       \   \    |-'  |_,     _,-/            J . . . J-'-. `-., 
+//     |         __  \`. |   |   |         \    / _           |. . . . \   `-.  F 
+//     |   ___  /  \  | `|   '      __  \   |  /-'            F . . . . \     '` 
+//     |   \  \ \  /  |        __  /  \  |  |,-'        __,- J . . . . . \ 
+//     |    | /  |/     __,-  \  ) \  /  |_,-     __,--'     |. .__.----,' 
+//     |    |/    ___     \    |'.  |/      __,--'           `.-;;;;;;;;;\ 
+//     |     ___  \  \     |   |  `   __,--'                  /;;;;;;;;;;;;. 
+//     |     \  \  |-'\    '    __,--'                       /;;;;;;;;;;;;;;\ 
+// \   |      | /  |      __,--'                             `--;;/     \;-'\ 
+//  \  |      |/    __,--'                                   /  /         \  \ 
+//   \ |      __,--'                                        /  /           \  \ 
+//    \|__,--'                                          _,-;M-K,           ,;-;\ 
+//                                                     <;;;;;;;;           '-;;;; 
+//a1=plot(n1,color=c)
+//a2=plot(n2,color=c)
+//plot(cross(n1, n2) ? n1 : na, style = circles, color=b, linewidth = 4)
+//plot(cross(n1, n2) ? n1 : na, style = line, color=d, linewidth = 4)
+//plot(conversionLine, color=#0496ff, title="Conversion Line")
+//plot(baseLine, color=#991515, title="Base Line")
+//plot(close, offset = -displacement, color=#459915, title="Lagging Span")
+//p1=plot (leadLine1, offset = displacement, color=green,  title="Lead 1")
+//p2=plot (leadLine2, offset = displacement, color=red,  title="Lead 2")
+//fill(p1, p2, color = leadLine1 > leadLine2 ? green : red)
+// remove the "//" from before the plot script if want to see the indicators on chart
+
+View in Pine Editor・38 lines
+Use on chart
+7
+6
+5 582
+Mar 28, 2018
+I take no credit for this script. I swapped the Hull moving average used the original program made by SeaSide420 for a gaussian smooth function made by jjaskulowski. This script seems to consistently outperform the original strategy for the long condition. I'm mainly focused on crypto, so I removed the "short" option because most crypto exchanges don't have this function as of right now.
+
+Mar 28, 2018
+Release Notes
+j

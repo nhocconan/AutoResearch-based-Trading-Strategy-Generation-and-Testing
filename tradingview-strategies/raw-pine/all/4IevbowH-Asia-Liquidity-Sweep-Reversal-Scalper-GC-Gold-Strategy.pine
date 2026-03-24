@@ -1,0 +1,111 @@
+//@version=5
+strategy("Asia Liquidity Sweep Reversal Scalper (GC/Gold) [Strategy]",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     initial_capital=10000)
+
+// -------------------------
+// Inputs
+// -------------------------
+sessionStr   = input.session("1900-0000", "Asia Session (New York time)")
+useSession   = input.bool(true, "Restrict trades to Asia session")
+
+pivotLeft    = input.int(3, "Pivot Left Bars", minval=1, maxval=20)
+pivotRight   = input.int(3, "Pivot Right Bars", minval=1, maxval=20)
+
+rsiLen       = input.int(14, "RSI Length", minval=1)
+rsiMaxLong   = input.int(45, "Max RSI for Long (avoid chasing)", minval=1, maxval=99)
+rsiMinShort  = input.int(55, "Min RSI for Short (avoid chasing)", minval=1, maxval=99)
+
+atrLen       = input.int(14, "ATR Length", minval=1)
+slATR        = input.float(1.2, "Stop Loss (ATR multiple)", step=0.1)
+tpATR        = input.float(1.4, "Take Profit (ATR multiple)", step=0.1)
+
+useTimeExit  = input.bool(true, "Time-based exit (bars)")
+maxHoldBars  = input.int(25, "Max bars to hold", minval=1, maxval=500)
+
+// -------------------------
+// Session filter
+// -------------------------
+inSession = not na(time(timeframe.period, sessionStr, "America/New_York"))
+tradeOK   = useSession ? inSession : true
+
+// -------------------------
+// Pivots (liquidity reference)
+// -------------------------
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low, pivotLeft, pivotRight)
+
+var float lastPH = na
+var float lastPL = na
+
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+// -------------------------
+// Sweep + reversal conditions
+// Sweep: wick breaks pivot, but close returns back inside
+// -------------------------
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(atrLen)
+
+// Long: sweep below last pivot low, then close back above it
+sweepDown = tradeOK and not na(lastPL) and low < lastPL and close > lastPL
+longOK    = sweepDown and rsi <= rsiMaxLong and strategy.position_size == 0
+
+// Short: sweep above last pivot high, then close back below it
+sweepUp   = tradeOK and not na(lastPH) and high > lastPH and close < lastPH
+shortOK   = sweepUp and rsi >= rsiMinShort and strategy.position_size == 0
+
+if longOK
+    strategy.entry("L", strategy.long)
+
+if shortOK
+    strategy.entry("S", strategy.short)
+
+// -------------------------
+// Exits (ATR)
+// -------------------------
+longStop  = strategy.position_avg_price - slATR * atr
+longLimit = strategy.position_avg_price + tpATR * atr
+
+shortStop  = strategy.position_avg_price + slATR * atr
+shortLimit = strategy.position_avg_price - tpATR * atr
+
+strategy.exit("LX", from_entry="L", stop=longStop, limit=longLimit)
+strategy.exit("SX", from_entry="S", stop=shortStop, limit=shortLimit)
+
+// -------------------------
+// Optional: Time-based exit (scalping)
+// -------------------------
+var int entryBarIndex = na
+
+if strategy.position_size != 0 and na(entryBarIndex)
+    entryBarIndex := bar_index
+if strategy.position_size == 0
+    entryBarIndex := na
+
+heldBars = strategy.position_size != 0 ? (bar_index - entryBarIndex) : 0
+
+if useTimeExit and strategy.position_size != 0 and heldBars >= maxHoldBars
+    strategy.close_all(comment="Time Exit")
+
+// -------------------------
+// Visuals
+// -------------------------
+plot(lastPH, "Last Pivot High", style=plot.style_linebr)
+plot(lastPL, "Last Pivot Low", style=plot.style_linebr)
+bgcolor(inSession ? color.new(color.purple, 92) : na)
+
+View in Pine Editor・101 lines
+Use on chart
+7
+522
+Asia Liquidity Sweep Reversal Scalper (GC/Gold) is a session-based strategy designed to capture short-term reversal opportunities during the Asia trading session. The script identifies recent swing highs and lows using pivot logic and looks for liquidity sweeps — when price briefly breaks above or below these levels before closing back inside the range.
+
+Long entries occur after a sweep below a prior pivot low followed by a reclaim, while short entries trigger after a sweep above a prior pivot high with confirmation back inside the level. An RSI filter helps avoid chasing extended moves and improves entry quality.
+
+Risk management is handled using ATR-based stop loss and take profit levels, with optional time-based exits for scalping efficiency. The script is built as a full strategy, including trackable entries and exits for detailed performance analysis in the TradingView Strategy Tester.

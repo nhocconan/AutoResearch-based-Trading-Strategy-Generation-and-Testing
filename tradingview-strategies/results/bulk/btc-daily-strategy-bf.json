@@ -1,0 +1,28 @@
+{
+  "slug": "btc-daily-strategy-bf",
+  "chart_url": "https://www.tradingview.com/script/Gyy3Q3tl-BTC-Daily-Strategy-BF/",
+  "name": "BTC Daily Strategy BF",
+  "pine_file": "raw-pine/bulk/Gyy3Q3tl-BTC-Daily-Strategy-BF.pine",
+  "classification": "partial",
+  "strategy_name": "btc-daily-strategy-bf",
+  "timeframe": "1d",
+  "reason": "Stop loss logic uses strategy.exit which requires approximation to next-bar signals in Python OHLC backtesting",
+  "adaptations": [
+    "Replace strategy.entry/exit with Python order logic",
+    "Implement stop-loss price calculation manually",
+    "Replicate Pine indicator calculations (EMA, RSI, Stoch)",
+    "Apply backtest date range filtering"
+  ],
+  "queue_rank": 47,
+  "updated_at": "2026-03-22T08:27:09.575921+00:00",
+  "conversion_notes": [
+    "Converted Pine indicators (EMA, RSI, StochRSI, SMA) to pandas/numpy.",
+    "Approximated strategy.exit stop-loss using iterative state tracking.",
+    "Shifted signals by 1 bar to prevent lookahead bias on execution.",
+    "Implemented 2017-2019 date filter using open_time column.",
+    "Returns numpy array of positions (1, -1, 0) matching input length."
+  ],
+  "python_file": "python-strategies/bulk/btc-daily-strategy-bf.py",
+  "repair_attempts_used": 0,
+  "import_ok": true
+}

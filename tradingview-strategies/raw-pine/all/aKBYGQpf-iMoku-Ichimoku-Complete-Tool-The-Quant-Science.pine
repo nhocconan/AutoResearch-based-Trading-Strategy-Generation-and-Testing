@@ -1,0 +1,265 @@
+//@version=5
+strategy("iMoku - The Quant Science", 
+             overlay = true,
+             default_qty_type = strategy.percent_of_equity, 
+             default_qty_value = 10,
+             currency = currency.EUR, 
+             initial_capital = 10000, 
+             commission_type = strategy.commission.percent, 
+             commission_value = 0.10,
+             slippage = 3,
+             process_orders_on_close = true)
+
+conversionPeriods = input.int(9, minval=1, title="Tenkan Sen Length", group = "Settings configuration")
+basePeriods = input.int(26, minval=1, title="Kjun Sen Length", group = "Settings configuration")
+laggingSpan2Periods = input.int(52, minval=1, title="Leading Span B Length", group = "Settings configuration")
+displacement = input.int(26, minval=1, title="Lagging Span", group = "Settings configuration")
+
+strategy_1 = input.bool(true, title = "Tenkan Sen - Kijun Sen Strategy", group = "Tenkan Sen - Kijun Sen Strategy Configuration")
+strategy_2 = input.bool(false, title = "Price - Kijun Sen Strategy", group = "Price - Kijun Sen Strategy Configuration")
+strategy_3 = input.bool(false, title = "Kumo Breakout Strategy", group = "Kumo Breakout Strategy Configuration")
+strategy_4 = input.bool(false, title = "Kumo Twist Strategy", group = "Kumo Twist Strategy Configuration")
+stop_loss = input.float(defval = 1, minval = 0.01, step = 0.01, maxval = 500, title = "Stop Loss", group = "Kumo Breakout Strategy Configuration" )
+take_profit = input.float(defval = 1, minval = 0.01, step = 0.01, maxval = 500, title = "Take Profit", group = "Kumo Breakout Strategy Configuration")
+
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+adj_leadLine1 = leadLine1[displacement -1]
+adj_leadLine2 = leadLine2[displacement -1]
+
+// 1. Cross Tenkan Sen - Kijun Sen 
+price_over_kumo = close > adj_leadLine1
+price_under_kumo = close < adj_leadLine2
+price_in_kumo = close > adj_leadLine1 and close < adj_leadLine2
+
+strong_xover_tenkan_kijun = ta.crossover(conversionLine, baseLine) and price_over_kumo
+neutro_xover_tenkan_kijun = ta.crossover(conversionLine, baseLine) and price_in_kumo
+light_xover_tenkan_kijun = ta.crossover(conversionLine, baseLine) and price_under_kumo
+
+close_tenkan_kijun = ta.crossunder(conversionLine, baseLine)
+
+SelectTenkanKijun(type) =>
+
+    switch type 
+        "Strong Crossover Tenkan Sen - Kijun Sen" => strong_xover_tenkan_kijun
+        "Neutro Crossover Tenkan Sen - Kijun Sen" => neutro_xover_tenkan_kijun
+        "Light Crossover Tenkan Sen - Kijun Sen" => light_xover_tenkan_kijun        
+
+type_input = input.string(
+     "Strong Crossover Tenkan Sen - Kijun Sen",
+     title = "Select strategy: ",
+     options = ["Strong Crossover Tenkan Sen - Kijun Sen", "Neutro Crossover Tenkan Sen - Kijun Sen", "Light Crossover Tenkan Sen - Kijun Sen" ],
+     tooltip = "",
+     group = "Tenkan Sen - Kijun Sen Strategy Configuration"
+     )
+
+select_tenkan_kijun = SelectTenkanKijun(type_input)
+price_entry_tenkan_kijun = ta.valuewhen(select_tenkan_kijun, close, 0)
+
+// 2. Cross Price - Kijun Sen 
+strong_xover_price_kijun = ta.crossover(close, baseLine) and price_over_kumo
+neutro_xover_price_kijun  = ta.crossover(close, baseLine) and price_in_kumo
+light_xover_price_kijun = ta.crossover(close, baseLine) and price_under_kumo
+
+close_price_kijun = ta.crossunder(close,baseLine)
+
+SelectPriceKijun(type) =>
+
+    switch type 
+        "Strong Crossover Price - Kijun Sen" => strong_xover_price_kijun
+        "Neutro Crossover Price - Kijun Sen" => neutro_xover_price_kijun
+        "Light Crossover Price - Kijun Sen" => light_xover_price_kijun        
+
+type_input_2 = input.string(
+     "Strong Crossover Price - Kijun Sen",
+     title = "Select strategy: ",
+     options = ["Strong Crossover Price - Kijun Sen", "Neutro Crossover Price - Kijun Sen", "Light Crossover Price - Kijun Sen" ],
+     tooltip = "",
+     group = "Price - Kijun Sen Strategy Configuration"
+     )
+
+select_price_kijun = SelectPriceKijun(type_input_2)
+price_entry_price_kijun = ta.valuewhen(select_price_kijun, close, 0)
+
+// 3. Kumo breakout 
+kumo_breakout = ta.crossover(close, adj_leadLine1) 
+
+// 4. Kumo Twist 
+strong_kumo_twist = ta.crossover(adj_leadLine1, adj_leadLine2) and price_over_kumo
+light_kumo_twist = ta.crossover(adj_leadLine1, adj_leadLine2) and price_under_kumo
+close_kumo_twist = ta.crossunder(adj_leadLine1, adj_leadLine2)
+
+SelectKumoTwist(type) =>
+
+    switch type 
+        "Strong Crossover Kumo Twist" => strong_kumo_twist
+        "Light Crossover Kumo Twist" => light_kumo_twist        
+
+type_input_3 = input.string(
+     "Strong Crossover Kumo Twist",
+     title = "Select strategy: ",
+     options = ["Strong Crossover Kumo Twist", "Light Crossover Kumo Twist" ],
+     tooltip = "",
+     group = "Kumo Twist Strategy Configuration"
+     )
+
+select_kumo_twist = SelectKumoTwist(type_input_3)
+price_entry_kumo_twist = ta.valuewhen(select_kumo_twist, close, 0)
+
+capital_invested = strategy.initial_capital * 10 / 100 
+
+var float price_1 = 0
+
+if (select_tenkan_kijun and strategy_1 == true)
+
+    price_1 := close 
+    strategy.entry(
+         id = "Tenkan Kijun Open", 
+         direction = strategy.long, 
+         qty = capital_invested / price_1, 
+         limit = price_entry_tenkan_kijun)
+        
+if (close_tenkan_kijun and strategy_1 == true)
+    strategy.close_all("Tenkan Kijun Closing")
+
+var float price_2 = 0
+
+if (select_price_kijun and strategy_2 == true)
+
+    price_2 := close 
+    strategy.entry(
+         id = "Price Kijun Open", 
+         direction = strategy.long, 
+         qty = capital_invested / price_2, 
+         limit = price_entry_price_kijun)
+
+if (close_price_kijun and strategy_2 == true)
+    strategy.close_all("Price Kijun Closing")
+
+var float price_kumobrk = 0
+
+if (kumo_breakout and strategy_3 == true) 
+
+    price_kumobrk := close
+    strategy.entry(
+         id = "Kumo Breakout Open", 
+         direction = strategy.long, 
+         qty = capital_invested / price_kumobrk, 
+         limit = price_kumobrk)
+
+take_profit_kumobrk_price = (price_kumobrk * (100 + take_profit) / 100)
+stop_loss_kumobrk_price = (price_kumobrk * (100 - stop_loss) / 100)
+
+if (take_profit_kumobrk_price) 
+
+    strategy.exit(
+         id = "Kumo Breakout Closing", 
+         from_entry = "Kumo Breakout Open", 
+         limit = take_profit_kumobrk_price, 
+         stop = stop_loss_kumobrk_price)
+
+if (stop_loss_kumobrk_price) 
+
+    strategy.exit(
+         id = "Kumo Breakout Closing", 
+         from_entry = "Kumo Breakout Open", 
+         limit = take_profit_kumobrk_price, 
+         stop = stop_loss_kumobrk_price)
+
+var float price_4 = 0
+
+if (select_kumo_twist and strategy_4 == true)
+
+    price_4 := close 
+    strategy.entry(
+         id = "Kumo Twist Open", 
+         direction = strategy.long, 
+         qty = capital_invested / price_4, 
+         limit = price_entry_kumo_twist)
+
+if (close_kumo_twist and strategy_4 == true)
+    strategy.close_all("Kumo Twist Closing")
+
+plot( conversionLine,  color =color.new(    color.aqua,   65),   title = "Conversion Line or Tenkan Sen" )
+plot( baseLine, color=color.new( color.purple,  65), title="Base Line or Kijun Sen")
+plot(close, offset = -displacement + 1, color= color.new(color.gray, 85), title="Lagging Span Chokou")
+p1 = plot(leadLine1, offset = displacement - 1, color= color.aqua,title="Leading Span A")
+p2 = plot(leadLine2, offset = displacement - 1, color= color.aqua,title="Leading Span B")
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.rgb( 21, 149, 253, 90) : color.rgb(21, 149, 253, 90 ))
+
+counter_error = 0
+
+if strategy_1 == true 
+    counter_error := counter_error + 1
+if strategy_2 == true 
+    counter_error := counter_error + 1
+if strategy_3 == true 
+    counter_error := counter_error + 1
+if strategy_4 == true 
+    counter_error := counter_error + 1
+
+if (counter_error >= 2)
+    runtime.error("Too much activated strategies, please activate only one strategy at time.")
+
+View in Pine Editor・210 lines
+Use on chart
+5
+5
+6
+2
+12 475
+Nov 17, 2022
+iMoku™ is a professional all-in-one solution for the famous Ichimoku Kinko Hyo indicator.
+
+The algorithm includes:
+
+1. Backtesting spot
+2. Visual tool
+3. Auto-trading functions
+
+With iMoku you can test four different strategies.
+
+Strategy 1: Cross Tenkan Sen - Kijun Sen
+A long position is opened with 100% of the invested capital ($1000) when "Tenkan Sen" crossover "Kijun Sen".
+Closing the long position on the opposite condition.
+There are 3 different strength signals for this strategy: weak, normal, strong.
+Weak: the signal is weak when the condition is true and the price is above the 'Kumo'
+Normal: the signal is normal when the condition is true and the price is within the 'Kumo'
+Strong: the signal is strong when the condition is true and the price is below the 'Kumo'
+
+Strategy 2: Cross Price - Kijun Sen
+A long position is opened with 100% of the invested capital ($1000) when the price crossover the 'Kijun Sen'.
+Closing the long position on the opposite condition.
+There are 3 different strength signals for this strategy: weak, normal, strong.
+Weak: the signal is weak when the condition is true and the price is above the 'Kumo'
+Normal: the signal is normal when the condition is true and the price is inside the 'Kumo'
+Strong: the signal is strong when the condition is true and the price is below the 'Kumo'
+
+Strategy 3: Kumo Breakout
+A long position is opened with 100% of the invested capital ($1000) when the price breakup the 'Kumo'.
+Closing the long position with a percentage stop loss and take profit on the invested capital.
+
+Strategy 4: Kumo Twist
+A long position is opened with 100% of the invested capital ($1000) when the 'Kumo' goes from negative to positive (called "Twist").
+Closing the long position on the opposite condition.
+There are 2 different strength signals for this strategy: weak, and strong.
+Weak: the signal is weak when the condition is true and the price is above the 'Kumo'
+Strong: the signal is strong when the condition is true and the price is below the 'Kumo'
+
+This script is compliant with algorithmic trading.
+You can use this script with trading terminals such as 3Commas or CryptoHopper. Connecting this script is very easy.
+
+1. Enter the user interface
+2. Select and activate a strategy
+3. Copy your bot's links into the dedicated fields
+4. Create and activate alert
+
+Disclaimer: algorithmic trading involves risk, the user should consider aspects such as slippage, liquidity and costs when evaluating an asset. The Quant Science is not responsible for any kind of damage resulting from use of this script. By using this script you take all the responsibilities and risks.
+Jan 6, 2024
+Release Notes
+Optimization of the source code syntax.

@@ -1,0 +1,350 @@
+//@version=6
+strategy("BB SPY Mean Reversion Investment Strategy", overlay=true, margin_long = 0 , margin_short =0)
+
+maxIdLossPcnt = input.float(1, "Max intraday loss (%)")
+strategy.risk.max_intraday_loss(maxIdLossPcnt, strategy.percent_of_equity)
+// =========================
+// config
+// =========================
+src_close         = close
+bb_len_input      = input.int(14, "BB Length", minval=1)
+bb_mult_input     = input.float(1.1, "BB Mult", minval=0.001, maxval=50)
+dir_selector      = input.int(1, "Strategy Direction", minval=-1, maxval=1)
+ema_len_long_inp  = input.int(20, "EMA Length long")
+ema_len_short_inp = input.int(10, "EMA Length short")
+adx_min_inp       = input.int(25, "ADX Minimum for short")
+
+// Adaptive bands (optional)
+use_adaptive_mult = input.bool(false, "Use Adaptive Multiplier")
+vov_len           = input.int(20, "VOV Length", minval=5)
+vov_gain          = input.float(0.6, "VOV Gain", step=0.05)
+vov_scale_min     = input.float(0.5, "VOV Scale Min")
+vov_scale_max     = input.float(2.0, "VOV Scale Max")
+use_eff_for_sigs  = input.bool(false, "Use Adaptive Bands For Signals")
+
+// Regime (optional, does not control bias flips)
+regime_type       = input.string("none", "Regime Type", options=["none","trend","mean_reversion"])
+rank_len          = input.int(200, "Regime Rank Lookback", minval=50)
+trend_rank_min    = input.float(60, "Trend Min Width Percentile", minval=0, maxval=100)
+slope_len         = input.int(10, "Basis Slope Length", minval=1)
+slope_thr         = input.float(0.10, "Norm Slope Threshold", step=0.01)
+apply_filters_to  = input.string("both", "Apply Filters To", options=["both","longs","shorts"])
+
+// Risk management segmentation
+use_atr_exit      = input.bool(true, "Use ATR Exit")
+atr_len           = input.int(14, "ATR Length", minval=1)
+atr_stop_mult     = input.float(1.5, "ATR Stop Mult", step=0.1)
+atr_tp_mult       = input.float(3.0, "ATR Take Profit Mult", step=0.1)
+be_trigger_r      = input.float(1.0, "Breakeven Trigger R")
+
+use_time_exit         = input.bool(false, "Use Time Exit")
+bars_min_hold         = input.int(30, "Min Bars In Trade", minval=1)
+extend_bars_if_profit = input.int(15, "Extend Bars If Profit")
+time_profit_gate_r    = input.float(0.25, "Profit Gate ATR R")
+
+// Bias memory and re-arm
+bias_history_len      = input.int(16, "Bias flips kept", minval=1)
+keep_rearm_when_flat  = input.bool(true, "Keep pending order while flat")
+
+// Direction permission identical to base
+strategy.risk.allow_entry_in(
+     dir_selector == 0 ? strategy.direction.all
+   : dir_selector  < 0 ? strategy.direction.short
+   :                    strategy.direction.long)
+
+// =========================
+// calc
+// =========================
+bb_basis = ta.sma(src_close, bb_len_input)
+bb_dev   = bb_mult_input * ta.stdev(src_close, bb_len_input)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+[_, _, adx_series] = ta.dmi(14, 14)
+
+// Adaptive bands
+vov        = ta.stdev(ta.roc(src_close, 1), vov_len)
+vov_ma     = ta.sma(vov, vov_len)
+vov_ratio  = nz(vov_ma) == 0 ? 1.0 : vov / vov_ma
+vov_scale  = math.min(math.max(1 + vov_gain * (vov_ratio - 1), vov_scale_min), vov_scale_max)
+bb_mult_eff  = use_adaptive_mult ? bb_mult_input * vov_scale : bb_mult_input
+bb_dev_eff   = bb_mult_eff * ta.stdev(src_close, bb_len_input)
+bb_upper_eff = bb_basis + bb_dev_eff
+bb_lower_eff = bb_basis - bb_dev_eff
+
+band_upper_for_sig = use_adaptive_mult and use_eff_for_sigs ? bb_upper_eff : bb_upper
+band_lower_for_sig = use_adaptive_mult and use_eff_for_sigs ? bb_lower_eff : bb_lower
+
+// Regime gates
+bb_width   = bb_upper - bb_lower
+width_rank = ta.percentrank(bb_width, rank_len)
+norm_slope = (bb_basis - bb_basis[slope_len]) / math.max(bb_width, syminfo.mintick)
+trend_gate = width_rank > trend_rank_min and math.abs(norm_slope) > slope_thr
+mr_gate    = width_rank < (100 - trend_rank_min)
+regime_ok  = regime_type == "none" or (regime_type == "trend" and trend_gate) or (regime_type == "mean_reversion" and mr_gate)
+
+apply_long  = apply_filters_to == "both" or apply_filters_to == "longs"
+apply_short = apply_filters_to == "both" or apply_filters_to == "shorts"
+
+// Base signals (used for entries and for bias flips)
+long_cond_base  = ta.crossover(src_close, band_lower_for_sig) and close > open and close > ta.ema(close, ema_len_long_inp)
+short_cond_base = ta.crossunder(src_close, band_upper_for_sig) and close < open and close < ta.ema(close, ema_len_short_inp) and adx_series > adx_min_inp
+
+filters_ok = regime_ok
+long_cond  = long_cond_base  and (apply_long  ? filters_ok : true)
+short_cond = short_cond_base and (apply_short ? filters_ok : true)
+
+// =========================
+// bias memory using array
+// =========================
+DIR_NONE  = 0
+DIR_LONG  = 1
+DIR_SHORT = -1
+var dir_hist = array.new_int()
+
+f_bias_get() =>
+    sz = array.size(dir_hist)
+    sz > 0 ? array.get(dir_hist, sz - 1) : DIR_NONE
+
+f_bias_push(d) =>
+    if array.size(dir_hist) == 0 or array.get(dir_hist, array.size(dir_hist) - 1) != d
+        array.push(dir_hist, d)
+        if array.size(dir_hist) > bias_history_len
+            array.shift(dir_hist)
+
+bias_now = f_bias_get()
+
+// init or flip only on opposite base signal
+if bias_now == DIR_NONE
+    if long_cond_base
+        f_bias_push(DIR_LONG)
+    else if short_cond_base
+        f_bias_push(DIR_SHORT)
+else
+    if bias_now == DIR_LONG and short_cond_base
+        f_bias_push(DIR_SHORT)
+    else if bias_now == DIR_SHORT and long_cond_base
+        f_bias_push(DIR_LONG)
+
+bias_now := f_bias_get()
+
+// =========================
+// risk segmentation exits
+// =========================
+atr_val = request.security(syminfo.tickerid, "M", ta.atr(atr_len))
+
+in_long_prev  = strategy.position_size[1] > 0
+in_short_prev = strategy.position_size[1] < 0
+in_long_now   = strategy.position_size > 0
+in_short_now  = strategy.position_size < 0
+
+long_stop_raw  = strategy.position_avg_price - atr_stop_mult * atr_val
+short_stop_raw = strategy.position_avg_price + atr_stop_mult * atr_val
+long_be_on     = in_long_now  and (close - strategy.position_avg_price) >= be_trigger_r * atr_stop_mult * atr_val
+short_be_on    = in_short_now and (strategy.position_avg_price - close) >= be_trigger_r * atr_stop_mult * atr_val
+long_stop      = long_be_on  ? math.max(long_stop_raw,  strategy.position_avg_price) : long_stop_raw
+short_stop     = short_be_on ? math.min(short_stop_raw, strategy.position_avg_price) : short_stop_raw
+long_tp        = strategy.position_avg_price + atr_tp_mult * atr_val
+short_tp       = strategy.position_avg_price - atr_tp_mult * atr_val
+
+if use_atr_exit
+    strategy.exit("long_exit",  from_entry="long",  stop=long_stop,  limit=long_tp)
+    strategy.exit("short_exit", from_entry="short", stop=short_stop, limit=short_tp)
+
+// Time exit with profit extension
+var int long_entry_bar  = na
+var int short_entry_bar = na
+new_long_pos  =  in_long_now  and not in_long_prev
+new_short_pos =  in_short_now and not in_short_prev
+if new_long_pos
+    long_entry_bar := bar_index
+if not in_long_now and in_long_prev
+    long_entry_bar := na
+if new_short_pos
+    short_entry_bar := bar_index
+if not in_short_now and in_short_prev
+    short_entry_bar := na
+
+bars_in_long  = in_long_now  ? bar_index - nz(long_entry_bar, bar_index)  : 0
+bars_in_short = in_short_now ? bar_index - nz(short_entry_bar, bar_index) : 0
+
+long_profit_ok  = in_long_now  and (close - strategy.position_avg_price) >= time_profit_gate_r * atr_stop_mult * atr_val
+short_profit_ok = in_short_now and (strategy.position_avg_price - close) >= time_profit_gate_r * atr_stop_mult * atr_val
+
+if use_time_exit and in_long_now
+    cond_time_close_l = (bars_in_long >= bars_min_hold and not long_profit_ok) or (bars_in_long >= bars_min_hold + extend_bars_if_profit)
+    if cond_time_close_l
+        strategy.close("long", comment="time")
+
+if use_time_exit and in_short_now
+    cond_time_close_s = (bars_in_short >= bars_min_hold and not short_profit_ok) or (bars_in_short >= bars_min_hold + extend_bars_if_profit)
+    if cond_time_close_s
+        strategy.close("short", comment="time")
+
+// Refresh state after exits
+in_long_now  := strategy.position_size > 0
+in_short_now := strategy.position_size < 0
+just_exited_long  = not in_long_now  and in_long_prev
+just_exited_short = not in_short_now and in_short_prev
+
+// =========================
+// entry + re-arm engine
+// =========================
+want_long_rearm  = (bias_now == DIR_LONG)  and not in_long_now  and (keep_rearm_when_flat or just_exited_long)
+want_short_rearm = (bias_now == DIR_SHORT) and not in_short_now and (keep_rearm_when_flat or just_exited_short)
+
+long_entry_plan  = long_cond  or want_long_rearm
+short_entry_plan = short_cond or want_short_rearm
+
+if long_entry_plan
+    // Keep the original "close before entry" behavior
+    strategy.close("long")
+    strategy.entry("long", strategy.long, stop=band_lower_for_sig, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="long")
+else
+    // Cancel only if we are not supposed to keep a rearm order
+    if not want_long_rearm
+        strategy.cancel(id="long")
+
+if short_entry_plan
+    strategy.entry("short", strategy.short, stop=band_upper_for_sig, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="short")
+else
+    if not want_short_rearm
+        strategy.cancel(id="short")
+
+// =========================
+// visuals
+// =========================
+plot(bb_basis, "BB Basis", color=color.silver)
+plot(bb_upper, "BB Upper", color=color.new(color.teal, 40))
+plot(bb_lower, "BB Lower", color=color.new(color.teal, 40))
+plot(use_adaptive_mult ? bb_upper_eff : na, "BB Upper Adaptive", color=color.teal)
+plot(use_adaptive_mult ? bb_lower_eff : na, "BB Lower Adaptive", color=color.teal)
+
+View in Pine Editor・223 lines
+Use on chart
+4
+6
+1 384
+Summary
+
+Mean reversion first, continuation second. This strategy targets equities and ETFs on daily timeframes. It waits for price to revert from a Bollinger location with candle and EMA agreement, then manages risk with ATR based exits. Uniqueness comes from two elements working together. One, an adaptive band multiplier driven by volatility of volatility that expands or contracts the envelope as conditions change. Two, a bias memory that re arms the same direction after any stop, target, or time exit until a true opposite signal appears. Add it to a clean chart, use the markers and levels, and select on bar close for conservative alerts. Shapes can move while the bar is open and settle on close.
+
+
+Scope and intent
+• Markets. Currently adapted for SPY, needs to be optimized for other assets
+• Timeframes. Daily primary. Other frames are possible but not the default
+• Default demo. SPY on daily
+• Purpose. Trade mean reversion entries that can chain into a longer swing by splitting holds into ATR or time segments
+
+Originality and usefulness
+• Novelty. Adaptive band width from volatility of volatility plus a persistent bias array that keeps the original direction alive across sequential entries until an opposite setup is confirmed
+• Failure modes mitigated. False starts in chop are reduced by candle color and EMA location. Missed continuation after a take profit or stop is addressed by the re arm engine. Oversized envelopes during quiet regimes are avoided by the adaptive multiplier
+• Testability. Every module has Inputs and visible levels so users can see why a suggestion appears
+• Portable yardstick. All risk and targets are expressed in ATR units
+
+Method overview in plain language
+
+The engine measures where price sits relative to Bollinger bands, confirms with candle color and EMA location, requires ADX for shorts(in our case long close since we use it currently as long only), and optionally requires a trend or mean reversion regime using band width percent rank and basis slope. Risk uses ATR for stop, target, and optional breakeven. A small array stores the last confirmed direction. While flat, the engine keeps a pending order in that direction. The array flips only when a true opposite setup appears.
+
+Base measures
+
+• Range basis. True Range smoothed over a user defined ATR Length
+• Return basis. Not required
+
+Components
+
+• Bollinger envelope. SMA length and standard deviation multiplier. Entry is based on cross of close through the band with location bias
+• Candle and EMA filter. Close relative to open and close relative to EMA align direction
+• ADX gate for shorts. Requires minimum trend strength for short trades
+• Adaptive multiplier. Band width scales using volatility of volatility so envelopes breathe with conditions
+• Regime gate optional. Band width percent rank and basis slope identify trend or mean reversion regimes
+• Risk manager. ATR stop, ATR target, optional breakeven, optional time exit
+• Bias memory. Array stores last confirmed direction and re arms entries while flat
+
+Fusion rule
+
+Minimum satisfied gates count style. All required gates must be true. Optional gates are controlled in Inputs. Bias memory never overrides an opposite confirmed setup.
+
+Signal rule
+
+• Long setup when close crosses up through the lower band, the bar closes green, and close is above the long EMA
+• Short setup when close crosses down through the upper band, the bar closes red, close is below the short EMA, and ADX is above the minimum
+• While flat the model keeps a pending order in the stored direction until a true opposite setup appears
+• IN LONG or IN SHORT describes states between entry and exit
+
+What you will see on the chart
+
+• Markers for Long and Short setups
+• Exit markers from ATR or time rules
+• Reference levels for entry, stop, and target
+• Bollinger bands and optional adaptive bands
+
+Inputs with guidance
+
+Setup
+• Signal timeframe. Uses the chart timeframe
+• Invert direction optional. Flips long and short
+
+Logic
+• BB Length. Typical 10 to 50. Higher smooths more
+• BB Mult. Typical 1.0 to 2.5. Higher widens entries
+• EMA Length long. Typical 10 to 50
+• EMA Length short. Typical 5 to 30
+• ADX Minimum for short. Typical 15 to 35
+
+Filters
+• Regime Type. none or trend or mean reversion
+• Rank Lookback. Typical 100 to 300
+• Basis Slope Length and Threshold. Larger values reduce false trends
+
+Risk
+• ATR Length. Typical 10 to 21
+• ATR Stop Mult. Typical 1.0 to 3.0
+• ATR Take Profit Mult. Typical 2.0 to 5.0
+• Breakeven Trigger R. Move stop to entry after the chosen multiple
+• Time Exit. Minimum bars and extension when profit exceeds a fraction of ATR
+
+Bias and rearm
+• Bias flips kept. Array depth
+• Keep rearm when flat. Maintain a pending order while flat
+
+UI
+• Show markers and levels. Clean defaults
+
+Usage recipes
+
+Alerts update in real time and can change while the bar forms. Select on bar close for conservative workflows.
+
+
+Properties visible in this publication
+
+• Initial capital 25000
+• Base currency USD
+• If any higher timeframe calls are enabled, request.security uses lookahead off
+• Commission 0.03 percent
+• Slippage 3 ticks
+• Default order size method Percent of equity with value 5
+• Pyramiding 0
+• Process orders on close On
+• Bar magnifier Off
+• Recalculate after order is filled Off
+• Calc on every tick Off
+
+Realism and responsible publication
+
+No performance claims. Costs and fills vary by venue. Shapes can move intrabar and settle on close. Strategies use standard candles only.
+
+Honest limitations and failure modes
+
+High impact releases and thin liquidity can break assumptions. Gap heavy symbols may require larger ATR. Very quiet regimes can reduce contrast in the mean reversion signal. If stop and target can both be touched inside one bar, outcome follows the TradingView order model for that bar path.
+Regimes with extreme one sided trend and very low volatility can reduce mean reversion edges. Results vary by symbol and venue. Past results never guarantee future outcomes.
+
+
+Open source reuse and credits
+
+None.
+
+
+Backtest realism
+Costs are realistic for liquid equities. Sizing does not exceed five percent per trade by default. Any departure should be justified by the user.
+
+If you got any questions please le me know

@@ -1,0 +1,10 @@
+//@version=5
+bullLevel=##input(defval=63,type='INPUT_INTEGER',##id='in_6')
+bearLevel=##input(defval=29,type='INPUT_INTEGER',##id='in_7')
+##root(root_metainfo,rm_0,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_1,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_2,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_3,bullLevel,input__float)
+##root(root_metainfo,rm_4,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_5,bearLevel,input__float)
+##root(root_metainfo,rm_6,hline.style_dotted,cb__hline_style__integer,hline,linestyle)

@@ -1,0 +1,119 @@
+//@version=5
+strategy("Trailing Stop with RSI", overlay=true)
+
+length = input.int(12, "Momentum Length")
+price = close
+momentum(seria, length) =>
+    mom = seria - seria[length]
+    mom
+mom0 = momentum(price, length)
+mom1 = momentum(mom0, 1)
+
+rsiLength = input.int(14, "RSI Length")
+rsiOverbought = input(70, "RSI Overbought Level")
+rsiOversold = input(30, "RSI Oversold Level")
+
+rsiValue = ta.rsi(close, rsiLength)
+
+tsact = input.float(0.0, "Trailing Stop Activation (%)", group="strategy", tooltip="Activates the Trailing Stop once this PnL is reached.") / 100
+tsact := tsact ? tsact : na
+ts = input.float(0.0, "Position Trailing Stop (%)", group="strategy", tooltip="Trails your position with a stop loss at this distance from the highest PnL") / 100
+ts := ts ? ts : na
+
+in_long = strategy.position_size > 0
+in_short = strategy.position_size < 0
+
+var ts_ = array.new_float()
+ts_size = array.size(ts_)
+ts_get = ts_size > 0 ? array.get(ts_, ts_size - 1) : 0
+
+if in_long
+    if tsact and high > strategy.position_avg_price + strategy.position_avg_price * tsact
+        if ts_size > 0 and ts_get < high
+            array.push(ts_, high)
+        if ts_size < 1
+            array.push(ts_, high)
+    if not tsact
+        if ts_size > 0 and ts_get < high
+            array.push(ts_, high)
+        if ts_size < 1
+            array.push(ts_, high)
+if in_short
+    if tsact and low < strategy.position_avg_price - strategy.position_avg_price * tsact
+        if ts_size > 0 and ts_get > low
+            array.push(ts_, low)
+        if ts_size < 1
+            array.push(ts_, low)
+    if not tsact
+        if ts_size > 0 and ts_get > low
+            array.push(ts_, low)
+        if ts_size < 1
+            array.push(ts_, low)
+
+trail = in_long and ts_size > 0 ? low < ts_get - ts_get * ts : in_short and ts_size > 0 ? high > ts_get + ts_get * ts : na
+
+if (mom0 > 0 and mom1 > 0)
+    strategy.entry("MomLE", strategy.long, stop=high+syminfo.mintick, comment="MomLE")
+else
+    strategy.cancel("MomLE")
+if (mom0 < 0 and mom1 < 0)
+    strategy.entry("MomSE", strategy.short, stop=low-syminfo.mintick, comment="MomSE")
+else
+    strategy.cancel("MomSE")
+
+tsClose = in_long ? ts_get - ts_get * ts : in_short ? ts_get + ts_get * ts : na
+if trail
+    strategy.close_all()
+if not strategy.opentrades
+    array.clear(ts_)
+
+rsiOverboughtCondition = rsiValue >= rsiOverbought
+rsiOversoldCondition = rsiValue <= rsiOversold
+
+if rsiOverboughtCondition
+    strategy.close("SHORT", "SX")
+    strategy.entry("LONG", strategy.long)
+
+if rsiOversoldCondition
+    strategy.close("LONG", "LX")
+    strategy.entry("SHORT", strategy.short)
+
+plotchar(ts_get, "GET", "")
+plot(strategy.position_avg_price > 0 ? strategy.position_avg_price : na, "Average", color.rgb(251, 139, 64), 2, plot.style_cross)
+plot(tsClose > 0 ? tsClose : na, "Trailing", color.rgb(251, 64, 64), 2, plot.style_cross)
+plot(strategy.position_avg_price - strategy.position_avg_price * tsact > 0 ? strategy.position_avg_price - strategy.position_avg_price * tsact : na, "TS Activation", color.fuchsia, 2, plot.style_cross)
+
+View in Pine Editor・84 lines
+Use on chart
+2
+3
+6
+6 674
+Trailing Stop with RSI - Momentum-Based Strategy
+
+Description:
+The Trailing Stop with RSI strategy combines momentum analysis and trailing stop functionality to help traders identify potential entry and exit points in their trading decisions. This strategy is suitable for various markets and timeframes.
+
+Key Features:
+
+Momentum Analysis: The strategy incorporates momentum indicators to identify potential buying and selling opportunities based on momentum shifts in the price.
+Trailing Stop Functionality: The strategy utilizes a trailing stop to protect profits and dynamically adjust the stop loss level as the trade moves in the desired direction.
+RSI Confirmation: The Relative Strength Index (RSI) is included to provide additional confirmation for trade entries by considering overbought and oversold conditions.
+
+How to Use:
+
+Entry Conditions: Long positions are triggered when positive momentum is detected, and the RSI confirms an oversold condition. Short positions are triggered when negative momentum is detected, and the RSI confirms an overbought condition.
+Trailing Stop Activation: Once a position is opened, the trailing stop is activated when the specified profit level (as a percentage) is reached.
+Trailing Stop Level: The trailing stop maintains a stop loss level at a specified distance (as a percentage) from the highest profit achieved since opening the position.
+Exit Conditions: The trailing stop will trigger an exit and close all positions when the trailing stop level is breached.
+
+Markets and Conditions:
+This strategy can be applied to various markets, including stocks, forex, cryptocurrencies, and commodities. It can be used in trending and ranging market conditions, making it versatile for different market environments.
+
+Important Considerations:
+
+Adjust Parameters: Traders can modify the length of the momentum and RSI indicators to suit their preferred timeframe and trading style.
+Risk Management: It is recommended to consider appropriate position sizing, risk-to-reward ratios, and overall risk management practices when using this strategy.
+Backtesting and Optimization: Traders are encouraged to backtest the strategy on historical data and optimize the parameters to find the best settings for their chosen market and timeframe.
+
+By incorporating momentum analysis, trailing stop functionality, and RSI confirmation, this strategy aims to provide traders with a systematic approach to capturing profitable trades while managing risk effectively.

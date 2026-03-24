@@ -1,0 +1,113 @@
+//@version=4
+strategy(title="RSI + MA", shorttitle="RSI + MA")
+reverseTrade = input(false, title = "Use Reverse Trade?")
+lengthRSI = input(14, minval=1, title="RSI Length")
+sourceRSI = input(close, "RSI Source", type = input.source)
+
+showMA = input(true, title="Show MA")
+lengthMA = input(9, minval=1, title="MA Length")
+offsetMA = input(title="MA Offset", type=input.integer, defval=0, minval=-500, maxval=500)
+
+up = rma(max(change(sourceRSI), 0), lengthRSI)
+down = rma(-min(change(sourceRSI), 0), lengthRSI)
+
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+ma = sma(rsi, lengthMA)
+
+plot(showMA ? ma : na, "MA", color=color.blue, linewidth=2, style=0, offset=offsetMA)
+plot(rsi, "RSI", color=#9915FF, linewidth=1, style=0)
+
+band1 = hline(70, "Upper Band", color=#C0C0C0, linestyle=2, linewidth=1)
+band0 = hline(30, "Lower Band", color=#C0C0C0, linestyle=2, linewidth=1)
+fill(band1, band0, color=color.new(#9915FF,95), title="Background")
+
+buy = reverseTrade ? rsi[1] < ma[1] and rsi > ma : rsi[1] > ma[1] and rsi < ma
+sell = reverseTrade ? rsi[1] > ma[1] and rsi < ma : rsi[1] < ma[1] and rsi > ma
+
+strategy.entry("Buy", true, when = buy)
+strategy.entry("Sell", false, when = sell)
+
+View in Pine Editor・28 lines
+Use on chart
+3
+5
+0
+14
+9 295
+Hello, everyone!
+
+
+We have just released an innovative strategy for TradingView. It allows you to facilitate the trading process when you have to use both indicators.
+
+This strategy is:
+
+
+User-friendly
+
+Configurable
+
+Equipped with the combination of Relative Strength Index (RSI) and Moving Average (MA) indicators
+
+Designed with all required functions to manage positions
+
+
+
+
+Features
+
+The RSI+MA strategy can:
+
+Identify entry points for Long and Short positions.
+
+Depict RSI and MA values concerning each other.
+
+Reduce visual congestion and import usability thanks to using a combo of 2 indicators.
+
+Allow using pivot trading. The RSI+MA strategy will enter a Long position according to the Short position conditions. And vice versa.
+
+
+
+Note! If you want to open a Long position, the RSI line should cross MA from top to bottom. If you want to open a Short position, RSI has to cross MA from bottom to top.
+
+
+Parameters
+
+We have equipped our strategy with more than 14 additional parameters. So, you can configure the EA according to your needs!
+
+Inputs:
+
+Use Reverse Trade — allows swapping Long and Short positions opening conditions.
+
+Resolution — allows you to view an indicator with data on a higher or lower timeframe on the current chart.
+
+RSI Length
+
+RSI Source: Open, High, Low, Close, HL2, HLC3, OHLC4
+
+Show MA — allows you to enable or disable MA displaying.
+
+MA Length
+
+MA Offset
+
+
+
+Style:
+
+RSI — RSI indicator line color and style settings.
+
+MA — MA indicator line color and style configuration.
+
+Upper Band — allows customizing line style, color, and RSI upper bound value.
+
+Lower Band — allows you to customize line style, color, and RSI lower bound value.
+
+Background — background color setting within the RSI upper and lower borders.
+
+Precision — number of decimals for RSI values.
+
+
+
+
+Note! Try RSI+MA on your demo account first before going live.
+

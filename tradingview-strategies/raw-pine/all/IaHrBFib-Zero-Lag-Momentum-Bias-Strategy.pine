@@ -1,0 +1,109 @@
+//@version=6
+strategy("Zero Lag + Momentum Bias Strategy (MTF + Strong MBI + R:R + Partial TP + Alerts)", overlay=true, margin_long=100, margin_short=100)
+
+// === INPUTS ===
+length      = input.int(34, "ZLEMA Length")
+atrPeriod   = input.int(14, "ATR Period")
+atrMult     = input.float(1.5, "ATR Multiplier", step=0.1)
+
+mbiLength   = input.int(14, "MBI Length")
+riskReward  = input.float(2.0, "Risk Reward Ratio", step=0.1)
+partialRR   = input.float(1.0, "Partial Take-Profit (R Multiple)", step=0.1)
+stopATR     = input.float(1.0, "Stop ATR Multiplier", step=0.1)
+
+mtf1 = input.timeframe("15", "TF 1 (base)")
+mtf2 = input.timeframe("60", "TF 2")
+mtf3 = input.timeframe("240", "TF 3")
+mtf4 = input.timeframe("D", "TF 4")
+
+// === ZLEMA FUNCTION (compute per timeframe when requested) ===
+f_zlema(_src, _len) =>
+    _ema1 = ta.ema(_src, _len)
+    _ema2 = ta.ema(_ema1, _len)
+    2 * _ema1 - _ema2
+
+// Current timeframe ZLEMA, ATR and ribbon
+zlema = f_zlema(close, length)
+atr = ta.atr(atrPeriod)
+upperBand = zlema + atrMult * atr
+lowerBand = zlema - atrMult * atr
+
+// Ribbon state
+ribbonBull = close > zlema
+ribbonBear = close < zlema
+
+// Plot ribbon background and ZLEMA
+bgcolor(ribbonBull ? color.new(color.green, 90) : ribbonBear ? color.new(color.red, 90) : na)
+plot(zlema, color=color.yellow, title="ZLEMA")
+
+// === MBI (Momentum Bias Index) ===
+// EMA of (close - open) as per the video
+mbi = ta.ema(close - open, mbiLength)
+// dynamic threshold (series) using stdev of mbi
+threshold = ta.stdev(mbi, mbiLength)
+
+// strong/weak detection (bright vs dark)
+isStrongBull = mbi > threshold
+isStrongBear = mbi < -threshold
+
+plot(mbi, color = isStrongBull ? color.lime : isStrongBear ? color.red : color.gray, title="MBI")
+plot(threshold, color=color.green, title="MBI Upper Threshold")
+plot(-threshold, color=color.red, title="MBI Lower Threshold")
+
+// === Multi-timeframe confirmations ===
+// Compute ZLEMA on each TF explicitly inside request.security
+zlema_mtf1 = request.security(syminfo.tickerid, mtf1, f_zlema(close, length))
+zlema_mtf2 = request.security(syminfo.tickerid, mtf2, f_zlema(close, length))
+zlema_mtf3 = request.security(syminfo.tickerid, mtf3, f_zlema(close, length))
+zlema_mtf4 = request.security(syminfo.tickerid, mtf4, f_zlema(close, length))
+
+trend_mtf1 = request.security(syminfo.tickerid, mtf1, close > f_zlema(close, length))
+trend_mtf2 = request.security(syminfo.tickerid, mtf2, close > f_zlema(close, length))
+trend_mtf3 = request.security(syminfo.tickerid, mtf3, close > f_zlema(close, length))
+trend_mtf4 = request.security(syminfo.tickerid, mtf4, close > f_zlema(close, length))
+
+allBull = trend_mtf1 and trend_mtf2 and trend_mtf3 and trend_mtf4
+allBear = (not trend_mtf1) and (not trend_mtf2) and (not trend_mtf3) and (not trend_mtf4)
+
+// === SIGNAL CONDITIONS ===
+// Crossover relative to current timeframe ZLEMA (arrow/reversal)
+longSignal  = ta.crossover(close, zlema) and isStrongBull and allBull
+shortSignal = ta.crossunder(close, zlema) and isStrongBear and allBear
+
+// === ENTRY / EXIT with ATR-based stop and R:R-derived target (partial TP implemented) ===
+if (longSignal)
+    // Stop level based on ATR multiplier
+    stopLevel  = close - atr * stopATR
+    // full TP price
+    fullTP     = close + (close - stopLevel) * riskReward
+    // partial TP
+    partialTP  = close + (close - stopLevel) * partialRR
+    strategy.entry("Long", strategy.long)
+    // First exit 50% at partialTP, final exit remaining with stop at stopLevel and limit at fullTP
+    strategy.exit("Partial TP Long", from_entry="Long", qty_percent=50, limit=partialTP)
+    strategy.exit("Final TP Long",   from_entry="Long", qty_percent=50, stop=stopLevel, limit=fullTP)
+
+if (shortSignal)
+    stopLevel  = close + atr * stopATR
+    fullTP     = close - (stopLevel - close) * riskReward
+    partialTP  = close - (stopLevel - close) * partialRR
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Partial TP Short", from_entry="Short", qty_percent=50, limit=partialTP)
+    strategy.exit("Final TP Short",   from_entry="Short", qty_percent=50, stop=stopLevel, limit=fullTP)
+
+// === ALERTS ===
+alertcondition(longSignal,  title="Long Alert",  message="BUY Signal - Zero Lag + MBI Strategy")
+alertcondition(shortSignal, title="Short Alert", message="SELL Signal - Zero Lag + MBI Strategy")
+
+// === PLOT SIGNALS ===
+plotshape(longSignal,  title="Long Arrow",  location=location.belowbar, color=color.green, style=shape.labelup,   text="BUY")
+plotshape(shortSignal, title="Short Arrow", location=location.abovebar, color=color.red,   style=shape.labeldown, text="SELL")
+
+View in Pine Editor・100 lines
+Use on chart
+1
+2
+2
+1
+3 048
+Zero Lag + Momentum Bias Strategy (MTF + Strong MBI + R:R + Partial TP + Alerts)

@@ -1,0 +1,151 @@
+//@version=6
+strategy("Nifty Alpha Swing Bot", 
+     overlay = true, 
+     initial_capital = 1000000, 
+     default_qty_type = strategy.fixed, 
+     default_qty_value = 1, 
+     process_orders_on_close = true,
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.03, 
+     margin_long = 0,
+     margin_short = 0,
+     slippage = 2)
+
+// --- Constants ---
+color BULL_COLOR    = #089981
+color BEAR_COLOR    = #f23645
+color NEUTRAL_COLOR = #5b9cf6
+
+// --- Inputs ---
+lotSize      = input.int(25, "Lot Size", minval = 1, group = "Risk", tooltip = "Nifty Lot Size is 65.")
+numLots      = input.int(2, "Number of Lots", minval = 1, group = "Risk")
+atrMult      = input.float(4.0, "ATR SL Multiplier", step = 0.1, group = "Risk")
+rrRatio      = input.float(2.5, "Risk:Reward Ratio", step = 0.1, group = "Risk")
+
+emaFast      = input.int(50, "Fast EMA", group = "Trend")
+emaSlow      = input.int(200, "Slow EMA", group = "Trend")
+adxThreshold = input.int(20, "ADX Filter (Trend Strength)", minval = 1, group = "Trend")
+useDailyFilter = input.bool(true, "Use Daily Trend Filter with EMA50", group = "Trend")
+
+stochLen     = input.int(14, "Stoch RSI Length", group = "Momentum")
+stochLevel   = input.int(20, "Stoch RSI Extreme Level", group = "Momentum")
+
+// Session & Trailing Inputs
+sessionStr   = input.session("0930-1530", "Allowed Entry Session", group = "Filters")
+useTrailing  = input.bool(true, "Enable Trailing Stop", group = "Trailing")
+trailActivPc = input.float(2.0, "Trail Activation %", minval = 0.1, step = 0.1, group = "Trailing")
+trailOffsetPc = input.float(1.2, "Trail Offset %", minval = 0.1, step = 0.1, group = "Trailing")
+
+// --- Calculations ---
+inSession = not na(time(timeframe.period, sessionStr, "UTC+5:30"))
+
+
+// 1. Higher Timeframe Filter (Daily) - Using [1] to reference yesterday's locked candle to prevent repainting
+dailyEma = request.security(syminfo.tickerid, "D", ta.ema(close, 50)[1])
+dailyBull = close > dailyEma
+dailyBear = close < dailyEma
+
+// 2. Trend & Strength (Current Timeframe)
+fEma = ta.ema(close, emaFast)
+sEma = ta.ema(close, emaSlow)
+[diplus, diminus, adx] = ta.dmi(14, 14)
+
+trendBull = fEma > sEma and adx > adxThreshold and (not useDailyFilter or dailyBull)
+trendBear = fEma < sEma and adx > adxThreshold and (not useDailyFilter or dailyBear)
+
+// 3. Momentum
+rsiVal = ta.rsi(close, stochLen)
+stochK = ta.sma(ta.stoch(rsiVal, rsiVal, rsiVal, stochLen), 3)
+stochD = ta.sma(stochK, 3)
+atr    = ta.atr(14)
+
+// --- Strategy Logic ---
+stochCrossOver  = ta.crossover(stochK, stochD)
+stochCrossUnder = ta.crossunder(stochK, stochD)
+
+longSignal  = inSession and trendBull and stochCrossOver and stochK < stochLevel
+shortSignal = inSession and trendBear and stochCrossUnder and stochK > (100 - stochLevel)
+
+// Persistent State
+var float activeDist = na
+tradeQty = lotSize * numLots
+
+if (longSignal or shortSignal) and strategy.position_size == 0
+    activeDist := atr * atrMult
+
+if longSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty = tradeQty, comment = "Alpha Long")
+
+if shortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty = tradeQty, comment = "Alpha Short")
+
+// Exit Execution
+float slPrice = na
+float tpPrice = na
+float tPrice  = na
+float tOffset = na
+
+if strategy.position_size != 0
+    float entry = strategy.position_avg_price
+    slPrice := strategy.position_size > 0 ? entry - activeDist : entry + activeDist
+    tpPrice := strategy.position_size > 0 ? entry + (activeDist * rrRatio) : entry - (activeDist * rrRatio)
+    
+    if useTrailing
+        tPrice  := strategy.position_size > 0 ? entry * (1 + trailActivPc / 100) : entry * (1 - trailActivPc / 100)
+        tOffset := (entry * trailOffsetPc / 100) / syminfo.mintick
+
+    strategy.exit("Exit", qty = math.abs(strategy.position_size), stop = slPrice, limit = tpPrice, trail_price = tPrice, trail_offset = tOffset, comment = "Exit")
+
+// --- Visuals ---
+plot(fEma, "Fast EMA", color = color.new(NEUTRAL_COLOR, 50))
+plot(sEma, "Slow EMA", color = color.new(chart.fg_color, 80))
+plot(useDailyFilter ? dailyEma : na, "Daily 200 EMA", color = color.new(BULL_COLOR, 50), linewidth = 2, style = plot.style_circles)
+
+// Swapped to plotchar dots to prevent auto-scaling chart squish
+plotchar(slPrice, "Active SL", char="•", location=location.absolute, color=BEAR_COLOR, size=size.tiny)
+plotchar(tpPrice, "Active TP", char="•", location=location.absolute, color=BULL_COLOR, size=size.tiny)
+
+bgcolor(not inSession ? color.new(BEAR_COLOR, 95) : na)
+plotshape(longSignal and strategy.position_size == 0, "Long Label", shape.triangleup, location.belowbar, BULL_COLOR, size = size.small, text = "BUY")
+plotshape(shortSignal and strategy.position_size == 0, "Short Label", shape.triangledown, location.abovebar, BEAR_COLOR, size = size.small, text = "SELL")
+
+// --- Status Dashboard ---
+var table statusTab = table.new(position.top_right, 2, 4, frame_color = chart.fg_color, frame_width = 1, border_color = chart.fg_color, border_width = 1)
+if barstate.islast
+    table.cell(statusTab, 0, 0, "Bot Status", bgcolor = NEUTRAL_COLOR, text_color = color.white)
+    table.cell(statusTab, 1, 0, strategy.position_size != 0 ? "IN TRADE" : "WAITING", bgcolor = strategy.position_size != 0 ? BULL_COLOR : BEAR_COLOR, text_color = color.white)
+    
+    table.cell(statusTab, 0, 1, "Daily Trend", bgcolor = color.new(NEUTRAL_COLOR, 80))
+    table.cell(statusTab, 1, 1, dailyBull ? "BULLISH" : dailyBear ? "BEARISH" : "NEUTRAL", bgcolor = dailyBull ? BULL_COLOR : BEAR_COLOR, text_color = color.white)
+    
+    table.cell(statusTab, 0, 2, "3H Trend", bgcolor = color.new(NEUTRAL_COLOR, 80))
+    table.cell(statusTab, 1, 2, fEma > sEma ? "UP" : "DOWN", bgcolor = fEma > sEma ? BULL_COLOR : BEAR_COLOR, text_color = color.white)
+    
+    table.cell(statusTab, 0, 3, "Strength (ADX)", bgcolor = color.new(NEUTRAL_COLOR, 80))
+    table.cell(statusTab, 1, 3, str.tostring(math.round(adx, 1)), bgcolor = adx > adxThreshold ? BULL_COLOR : BEAR_COLOR, text_color = color.white)
+
+View in Pine Editor・125 lines
+Use on chart
+1
+2
+2
+538
+It is the trading bot designed to work with nifty with perameter set for Nifty for swing trading with ideal time frames as 1 Hr and/or 3 Hr.
+
+Startgy is defiend with Entry logic, Stop loss logic and traile logic once the trade becomes +ve.
+
+It considers fast ema-fEma (50) and slow ema-sEma (200) in a perticular time frame, Daily EMA 50, Stock RSI, ADX etc.
+
+Bull or Bear entry logic is defined as follows.
+
+trendBull = fEma > sEma and adx > adxThreshold and (not useDailyFilter or dailyBull)
+trendBear = fEma < sEma and adx > adxThreshold and (not useDailyFilter or dailyBear)
+
+Long or Short signals are defined as follows (It considers StockRSI crossover
+
+longSignal = inSession and trendBull and stochCrossOver and stochK < stochLevel
+shortSignal = inSession and trendBear and stochCrossUnder and stochK > (100 - stochLevel)
+
+Once the trade is placed, it then puts SL defined by multiplier x ATR and once the trade becomes +ve above offset level, it will start trailing the SL.
+
+NoReco-just sharing for learning and backtesting.

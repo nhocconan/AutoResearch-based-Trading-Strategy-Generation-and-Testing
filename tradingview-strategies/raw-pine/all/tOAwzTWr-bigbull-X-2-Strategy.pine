@@ -1,0 +1,205 @@
+//@version=5
+strategy("bigbull X 2 Strategy", overlay=true,pyramiding=0,  initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=120, commission_type=strategy.commission.percent, commission_value=0.01,  slippage=2 ,process_orders_on_close=true)
+
+//────────────────────────
+// DATE FILTER
+//────────────────────────
+startYear  = input.int(2012, "Start Year")
+startMonth = input.int(9, "Start Month")
+startDay   = input.int(22, "Start Day")
+startDate  = timestamp(startYear, startMonth, startDay, 0, 0)
+
+endYear   = input.int(2099, "End Year")
+endMonth  = input.int(12, "End Month")
+endDay    = input.int(31, "End Day")
+endDate   = timestamp(endYear, endMonth, endDay, 23, 59)
+
+isDateValid = time >= startDate and time <= endDate
+
+//────────────────────────
+// TRADE SESSION
+//────────────────────────
+sessionTime = input.session("0915-1630", "Trade Session")
+inSession   = not na(time(timeframe.period, sessionTime))
+
+//────────────────────────
+// MOVING AVERAGES
+//────────────────────────
+ema10 = ta.ema(close, 10)
+ema20 = ta.ema(close, 20)
+ema30 = ta.ema(close, 30)
+sma20 = ta.sma(close, 20)
+sma30 = ta.sma(close, 30)
+sma50 = ta.sma(close, 50)
+
+//────────────────────────
+// ROC
+//────────────────────────
+roc = ta.roc(close, 10)
+
+//────────────────────────
+// SCORE (same logic)
+//────────────────────────
+score = 0
+score += close > ema10 ? 1 : close < ema10 ? -1 : 0
+score += close > ema20 ? 1 : close < ema20 ? -1 : 0
+score += close > ema30 ? 1 : close < ema30 ? -1 : 0
+score += close > sma20 ? 1 : close < sma20 ? -1 : 0
+score += close > sma30 ? 1 : close < sma30 ? -1 : 0
+score += close > sma50 ? 1 : close < sma50 ? -1 : 0
+
+//────────────────────────
+// FINAL RATING
+//────────────────────────
+strongBuy  = score >= 9
+buy        = score >= 4 and score < 9
+neutral    = score > -4 and score < 4
+sell       = score <= -4 and score > -9
+strongSell = score <= -9
+
+longSignal  = strongBuy or buy
+shortSignal = strongSell or sell
+
+//────────────────────────
+// MA CONDITIONS
+//────────────────────────
+maBull = close > ema10 and close > ema20 and close > ema30 and close > sma20 and close > sma30 and close > sma50
+maBear = close < ema10 and close < ema20 and close < ema30 and close < sma20 and close < sma30 and close < sma50
+
+buyAllowed     = longSignal  and roc > 0 and maBull
+buyExitOnly    = longSignal  and (roc <= 0 or not maBull)
+sellAllowed    = shortSignal and roc < 0 and maBear
+sellExitOnly   = shortSignal and (roc >= 0 or not maBear)
+
+//────────────────────────
+// ENTRY (DATE + SESSION ONLY)
+//────────────────────────
+if isDateValid and inSession
+    if buyAllowed
+        strategy.entry("Buy", strategy.long)
+    if sellAllowed
+        strategy.entry("Sell", strategy.short)
+
+//────────────────────────
+// EXIT LOGIC
+//────────────────────────
+if buyExitOnly
+    strategy.close("Sell")
+
+if sellExitOnly
+    strategy.close("Buy")
+
+if neutral
+    strategy.close("Buy")
+    strategy.close("Sell")
+
+//────────────────────────
+// 🔥 DAY END FORCE CLOSE (RENKO SAFE)
+//────────────────────────
+isDayEnd = not inSession and inSession[1]
+if isDayEnd
+    strategy.close_all(comment="Day End Square Off")
+
+View in Pine Editor・101 lines
+Use on chart
+3
+4
+661
+**bigbull X 2 Strategy**
+
+This strategy is designed to identify high-probability trend-based trading opportunities using a multi-moving average scoring system combined with momentum confirmation. It evaluates market strength by analyzing the position of price relative to multiple EMA and SMA levels, and confirms entries using Rate of Change (ROC) momentum and strict trend alignment conditions.
+
+The strategy is optimized for trend-following environments and works best on index derivatives and liquid instruments.
+
+---
+
+**Recommended Settings:**
+
+• Symbol: NIFTY MID SELECT
+• Timeframe: 15 Minutes
+• Trading Session: 09:15 – 15:00
+• Commission: 0.01%
+• Slippage: 2 points
+• Order execution: Bar close confirmation
+• Strategy type: Intraday trend-following
+
+---
+
+**Core Logic:**
+
+The strategy calculates a score based on six moving averages:
+
+• EMA 10
+• EMA 20
+• EMA 30
+• SMA 20
+• SMA 30
+• SMA 50
+
+Each moving average contributes to a bullish or bearish score depending on price position.
+
+Trade entries occur when:
+
+• Multiple moving averages confirm trend alignment
+• Rate of Change confirms momentum direction
+• Strong trend bias is detected
+• Trade occurs within defined session and date range
+
+---
+
+**Entry Conditions:**
+
+Long Entry:
+
+• Price above all key moving averages
+• Positive momentum confirmation (ROC > 0)
+• Strong bullish score
+
+Short Entry:
+
+• Price below all key moving averages
+• Negative momentum confirmation (ROC < 0)
+• Strong bearish score
+
+---
+
+**Exit Conditions:**
+
+Positions are closed when:
+
+• Trend strength weakens
+• Momentum reverses
+• Neutral market condition detected
+• Session ends (automatic square-off)
+
+---
+
+**Risk Management Features:**
+
+• Built-in commission simulation
+• Slippage simulation
+• No pyramiding
+• Session-based execution control
+• Automatic end-of-day square off
+
+---
+
+**Important Notes:**
+
+• This strategy executes trades on confirmed bar close to avoid repainting behavior
+• Designed for backtesting, forward testing, and educational purposes
+• Performance may vary depending on market conditions and instrument selection
+
+---
+
+**Recommended Instruments:**
+
+• NIFTY MID SELECT
+• NIFTY 50
+• BANKNIFTY
+• Highly liquid index derivatives
+
+---
+
+This strategy helps traders identify structured trend opportunities while maintaining realistic execution and risk control conditions.
+

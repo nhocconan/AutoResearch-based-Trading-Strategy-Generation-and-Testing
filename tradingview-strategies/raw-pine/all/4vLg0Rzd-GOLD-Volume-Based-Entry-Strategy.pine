@@ -1,0 +1,58 @@
+//@version=5
+strategy("Volume-Based Entry Strategy", overlay=true)
+
+// Input parameters
+ma_length = input.int(20, title="Volume MA Period")
+target_move = input.float(5.0, title="Target Move (USD)")
+
+// Calculate volume MA
+vol_ma = ta.sma(volume, ma_length)
+
+// Identify conditions for entry based on two consecutive green volume bars above MA
+first_green_volume = volume[1] > vol_ma and close[1] > open[1] and volume[1] > vol_ma // First green volume bar must close above MA and be above MA
+second_green_volume = volume > vol_ma and close > open and volume > volume[1] and volume > vol_ma // Second green volume bar must also close above MA, be higher than the first, and be above MA
+
+// Entry signal: Two consecutive green volume bars above MA
+entry_signal = first_green_volume and second_green_volume
+
+// Execute trade on entry signal with adjustable profit target
+if entry_signal
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("Take Profit", from_entry="Buy", limit=close + target_move)
+
+// Plot signals on the chart
+plotshape(entry_signal, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal")
+
+// Highlight green volume bars that trigger an entry
+plot(entry_signal ? volume : na, title="Green Volume Above MA", style=plot.style_columns, color=color.green, transp=60)
+
+View in Pine Editor・27 lines
+Use on chart
+9
+6
+3
+3 561
+Short Description:
+This script identifies potential long entries by detecting two consecutive bars with above-average volume and bullish price action. When these conditions are met, a trade is entered, and an optional profit target is set based on user input. This strategy can help highlight momentum-driven breakouts or trend continuations triggered by a surge in buying volume.
+
+How It Works
+Volume Moving Average
+A simple moving average of volume (vol_ma) is calculated over a user-defined period (default: 20 bars). This helps us distinguish when volume is above or below recent averages.
+
+Consecutive Green Volume Bars
+
+First bar: Must be bullish (close > open) and have volume above the volume MA.
+Second bar: Must also be bullish, with volume above the volume MA and higher than the first bar’s volume.
+When these two bars appear in sequence, we interpret it as strong buying pressure that could drive price higher.
+
+Entry & Profit Target
+
+Upon detecting these two consecutive bullish bars, the script places a long entry.
+A profit target is set at current price plus a user-defined fixed amount (default: 5 USD).
+You can adjust this target, or you can add a stop-loss in the script to manage risk further.
+Visual Cues
+
+Buy Signal Marker appears on the chart when the second bar confirms the signal.
+Green Volume Columns highlight the bars that fulfill the criteria, providing a quick visual confirmation of high-volume bullish bars.
+
+Works fine on 1M-2M-5M-15M-30M. Do not use it on higher TF. Due the lack of historical data on lower TF, the backtest result is limited.

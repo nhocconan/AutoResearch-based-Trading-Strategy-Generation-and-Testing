@@ -1,0 +1,249 @@
+//@version=4
+strategy("Supertrend RG with TP", overlay = true,process_orders_on_close=true,commission_type=strategy.commission.percent,commission_value=InitCommission,
+ currency=currency.USD,initial_capital=InitCapital,default_qty_type=strategy.cash, default_qty_value=InitPosition, calc_on_order_fills=CalcOnorderFills, calc_on_every_tick=CalcOnTick,pyramiding=InitPyramidMax)
+
+//
+////////////////////////////////////////////////////////////////////////////////
+// BACKTESTING RANGE
+
+// From Date Inputs
+fromDay = input(defval=1, title="From Day", minval=1, maxval=31)
+fromMonth = input(defval=1, title="From Month", minval=1, maxval=12)
+fromYear = input(defval=2017, title="From Year", minval=1970)
+
+// To Date Inputs
+toDay = input(defval=1, title="To Day", minval=1, maxval=31)
+toMonth = input(defval=1, title="To Month", minval=1, maxval=12)
+toYear = input(defval=2100, title="To Year", minval=1970)
+
+// Calculate start/end date and time condition
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate
+
+
+//Stop loss for supertrend entries
+useSL_P1 = input(true, "Use stop Loss for buy/sell entries")
+StopTrailPerc_P1 = input(title="Stop Loss value for entries (%)", type=input.float, minval=0.0, step=0.1, defval=8) * 0.01
+
+use_TP = input(true, "Use take profit for buy/sell entries")
+use_SL_Trigger_c = true 
+//input(true, "Use stop Loss trail Trigger candle")
+StopTrailTrigger_c   = input(2.0, "SL Trigger candle (%)",minval=0,step=0.5,type=input.float) * 0.01
+StopTrailPerc_c = input(title="Stop Loss for trail candle entries (%)", type=input.float, minval=0.0, step=0.1, defval=2.5) * 0.01
+
+Periods = input(title="ATR Period", type=input.integer, defval=10)
+src = input(hl2, title="Source")
+Multiplier = input(title="ATR Multiplier", type=input.float, step=0.1, defval=3.0)
+changeATR= input(title="Change ATR Calculation Method ?", type=input.bool, defval=true)
+showsignals = input(title="Show Buy/Sell Signals ?", type=input.bool, defval=true)
+highlighting = input(title="Highlighter On/Off ?", type=input.bool, defval=true)
+atr2 = sma(tr, Periods)
+atr= changeATR ? atr(Periods) : atr2
+up=src-(Multiplier*atr)
+up1 = nz(up[1],up)
+up := close[1] > up1 ? max(up,up1) : up
+dn=src+(Multiplier*atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+upPlot = plot(trend == 1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=color.green)
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal ? up : na, title="UpTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.green, transp=0)
+plotshape(buySignal and showsignals ? up : na, title="Buy", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white, transp=0)
+dnPlot = plot(trend == 1 ? na : dn, title="Down Trend", style=plot.style_linebr, linewidth=2, color=color.red)
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal ? dn : na, title="DownTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.red, transp=0)
+plotshape(sellSignal and showsignals ? dn : na, title="Sell", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white, transp=0)
+mPlot = plot(ohlc4, title="", style=plot.style_circles, linewidth=0)
+longFillColor = highlighting ? (trend == 1 ? color.green : color.white) : color.white
+shortFillColor = highlighting ? (trend == -1 ? color.red : color.white) : color.white
+fill(mPlot, upPlot, title="UpTrend Highligter", color=longFillColor)
+fill(mPlot, dnPlot, title="DownTrend Highligter", color=shortFillColor)
+alertcondition(buySignal, title="SuperTrend Buy", message="SuperTrend Buy!")
+alertcondition(sellSignal, title="SuperTrend Sell", message="SuperTrend Sell!")
+changeCond = trend != trend[1]
+alertcondition(changeCond, title="SuperTrend Direction Change", message="SuperTrend has changed direction!")
+
+since_buy  = barssince(buySignal)
+since_sell = barssince(sellSignal)
+buy_trend  = since_sell > since_buy
+sell_trend = since_sell < since_buy 
+
+// Deternine if we are currently LONG
+islong = false
+islong := nz(islong[1], false)
+
+// Determine if we are currently SHORT
+isshort = false
+isshort := nz(isshort[1], false)
+
+// Buy only if the buy signal is triggered and we are not already long
+buySignal_c = not islong and buySignal 
+
+// Sell only if the sell signal is triggered and we are not already short
+sellSignal_c = not isshort and sellSignal 
+
+if buySignal_c
+    islong := true
+    isshort := false
+    isshort
+
+if sellSignal_c
+    islong := false
+    isshort := true
+    isshort
+
+///////////////////////////////
+//======[ Trailing STOP ]======//
+///////////////////////////////
+entry_price_c = valuewhen(buySignal or sellSignal, close, 0)
+
+StopLossPriceTrigger_c = 0.0
+StopLossPriceTrigger_c := if (use_SL_Trigger_c)
+    if islong
+        entry_price_c * (1 + StopTrailTrigger_c) 
+    else
+        entry_price_c * (1 - StopTrailTrigger_c)
+else
+    -1
+
+var SL_Trigger_Long_HIT_c = false
+SL_Trigger_Long_HIT_c :=  use_SL_Trigger_c and islong and close[1] >= StopLossPriceTrigger_c ? true : SL_Trigger_Long_HIT_c[1]
+
+var SL_Trigger_Short_HIT_c = false
+SL_Trigger_Short_HIT_c := use_SL_Trigger_c and isshort and close[1] <= StopLossPriceTrigger_c ? true : SL_Trigger_Short_HIT_c[1]
+
+display_long_SL_trigger_c     = use_TP and islong  and use_SL_Trigger_c and SL_Trigger_Long_HIT_c == false and StopLossPriceTrigger_c != -1
+display_short_SL_trigger_c    = use_TP and isshort and use_SL_Trigger_c and SL_Trigger_Short_HIT_c == false and StopLossPriceTrigger_c != -1
+display_SL_trigger_c          = use_TP and display_long_SL_trigger_c or display_short_SL_trigger_c
+
+plot(display_SL_trigger_c and use_TP? StopLossPriceTrigger_c : na, title='SLPriceTrigger', transp=0, color=color.maroon, style=plot.style_circles, linewidth=3)
+
+// Determine trail stop loss prices
+longStopPrice_c = 0.0, shortStopPrice_c = 0.0
+longStopPrice_c := if islong
+    stopValue = low * (1 - StopTrailPerc_c)
+    max(stopValue, longStopPrice_c[1])
+else
+    0
+
+shortStopPrice_c := if isshort
+    stopValue = high * (1 + StopTrailPerc_c)
+    min(stopValue, shortStopPrice_c[1])
+else
+    999999
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//*** STOP LOSS HIT CONDITIONS TO BE USED IN ALERTS  ***//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+cond_long_stop_loss_hit_above_c  =  islong and use_TP and crossunder(low, longStopPrice_c[1]) and (SL_Trigger_Long_HIT_c or use_SL_Trigger_c == false) and use_SL_Trigger_c
+cond_short_stop_loss_hit_below_c =  isshort and use_TP and crossover(high, shortStopPrice_c[1]) and (SL_Trigger_Short_HIT_c or use_SL_Trigger_c == false) and use_SL_Trigger_c
+
+// Plot stop loss values for confirmation
+plot(series=islong and use_TP and low >= longStopPrice_c and (SL_Trigger_Long_HIT_c or use_SL_Trigger_c == false) and use_SL_Trigger_c? longStopPrice_c : na,color=color.blue, style=plot.style_cross,linewidth=2, title="Long Trail Stop")
+
+plot(series=isshort and use_TP and high <= shortStopPrice_c and (SL_Trigger_Short_HIT_c or use_SL_Trigger_c == false) and use_SL_Trigger_c? shortStopPrice_c : na,color=color.blue, style=plot.style_cross,linewidth=2, title="Short Trail Stop")
+
+entry_price_long_P1 = valuewhen(buySignal, close, 0)
+entry_price_short_P1 = valuewhen(sellSignal, close, 0)
+
+// Determine trail stop loss prices
+longStopPrice_P1 = 0.0, shortStopPrice_P1 = 0.0
+longStopPrice_P1 := if useSL_P1 and buy_trend
+    stopValue = entry_price_long_P1 * (1 - StopTrailPerc_P1)
+    //max(stopValue, longStopPrice[1])
+else
+    0
+      
+shortStopPrice_P1 := if useSL_P1 and sell_trend
+    stopValue = entry_price_short_P1 * (1 + StopTrailPerc_P1)
+    //min(stopValue, shortStopPrice[1])
+else
+    99999
+    
+// Trigger levels for stop for the first entries 
+cond_long_stop_loss_hit_above_P1  = islong and crossunder(close, longStopPrice_P1) and useSL_P1  //estava close 
+cond_short_stop_loss_hit_below_P1 = isshort and crossover(close, shortStopPrice_P1) and useSL_P1 //estava close     
+    
+// Plot stop loss values for confirmation
+plot(series=useSL_P1 and islong and  barssince(buySignal) < 25 ? longStopPrice_P1 : na, color=color.black, style=plot.style_cross, linewidth=2, title="Long Stop")
+plot(series=useSL_P1 and isshort and barssince(sellSignal) < 25  ? shortStopPrice_P1 : na, color=color.black, style=plot.style_cross, linewidth=2, title="Short Stop")
+
+GreenCandleP = islong 
+RedCandleP =  isshort
+// conditons
+barGreenP = GreenCandleP
+barRedP = RedCandleP 
+var barsFromGreenP = 0
+barsFromGreenP := barGreenP ? barsFromGreenP + 1 : 0
+var barsFromRedP = 0
+barsFromRedP := barRedP ? barsFromRedP + 1 : 0
+
+aux_close_long_P1=0
+if cond_long_stop_loss_hit_above_P1
+    aux_close_long_P1:=1
+
+close_long = crossover(aux_close_long_P1,0) and barsFromGreenP > 1 and useSL_P1
+
+aux_close_short_P1=0
+if cond_short_stop_loss_hit_below_P1 
+    aux_close_short_P1:=1
+
+close_short = crossover(aux_close_short_P1,0) and barsFromRedP > 1 and useSL_P1
+
+    
+plotshape(series=close_long[1], title="Close long RG", color=color.black, text="CLOSE L", textcolor=color.white, size=size.normal, style=shape.labeldown)
+plotshape(series=close_short[1], title="Close short RG", color=color.black, text="CLOSE S", textcolor=color.white, size=size.normal, style=shape.labelup, location=location.belowbar)
+
+close_TP_long = cond_long_stop_loss_hit_above_c[1] and (SL_Trigger_Long_HIT_c or use_SL_Trigger_c == false)
+close_TP_short = cond_short_stop_loss_hit_below_c[1]  and (SL_Trigger_Short_HIT_c or use_SL_Trigger_c == false)
+
+plotshape(series=close_TP_long, title="Close long RG", color=color.lime, text="TP L", textcolor=color.white, size=size.normal, style=shape.labeldown)
+plotshape(series=close_TP_short, title="Close short RG", color=color.lime, text="TP S", textcolor=color.white, size=size.normal, style=shape.labelup, location=location.belowbar)
+
+if close_long or close_TP_long
+    islong := 0
+if close_short or close_TP_short
+    isshort := 0
+
+close_order = (close_long[1] or close_short[1] or close_TP_long or close_TP_short)
+
+if changeCond
+    SL_Trigger_Long_HIT_c := false
+    SL_Trigger_Short_HIT_c := false
+
+strategy.entry(TradeId + " Long", true, when=buySignal[1] and time_cond)
+strategy.entry(TradeId + " Short", false, when=sellSignal[1] and time_cond)   
+strategy.close_all(when=close_order and time_cond)
+
+View in Pine Editor・230 lines
+Use on chart
+4
+1
+7
+10
+9 340
+Apr 19, 2020
+
+Supertrend from KivancOzbilgic adapted to strategy so people can accurately maximise its profit regardless the asset and time-frame. Hope it helps
+
+
+Apr 27, 2020
+Release Notes
+Now with stop loss option included!
+May 16, 2020
+Release Notes
+As the user snbalar suggested, a take profit feature has been added to the strategy.
+
+As soon as the set trigger value is hit, a trailing of the price takes place. Also the % of this trailing stop can be adjusted.
+
+Hope you guys like it!
+
+Regards,
+May 18, 2020
+Release Notes
+New update

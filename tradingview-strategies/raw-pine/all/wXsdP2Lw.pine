@@ -1,0 +1,81 @@
+//@version=1
+strategy("EMA Strategy v_1 by.JanS.", overlay=true)
+
+// === EMA Strategy v_1 ===
+
+// Input options
+EMA_5  = input(title="EMA 5" , type=integer, defval=5)
+EMA_10 = input(title="EMA 10", type=integer, defval=10)
+
+// Calculate values
+Alert_EMA_5  = ema(close, EMA_5)
+Alert_EMA_10 = ema(close, EMA_10)
+
+// Create Buy/Sell Arrows
+// plotshape(Buy, color=green, style=shape.arrowup, text="Buy", location=location.bottom)
+// plotshape(Sell, color=red, style=shape.arrowdown, text="Sell", location=location.top)
+
+// Show on Chart
+plot(Alert_EMA_5,  color = white, linewidth=3)
+plot(Alert_EMA_10, color = lime, linewidth=3)
+
+
+// Create alert conditions
+alertcondition(condition=crossover(Alert_EMA_5, Alert_EMA_10), 
+     title="EMA 5 Cross Above",
+     message="EMA 5 crossed over EMA 10."
+     
+     )
+    
+
+alertcondition(condition=crossunder(Alert_EMA_5, Alert_EMA_10),
+     title="EMA 10 Cross Above",
+     message="EMA 10 crossed over EMA 5."
+    
+     )
+     
+
+
+// EMA trend bar color
+TrendingUp() => Alert_EMA_5 > Alert_EMA_10 
+TrendingDown() => Alert_EMA_5 < Alert_EMA_10 
+barcolor(TrendingUp() ? green : TrendingDown() ? red : blue)
+
+// EMA cross background color alert to chart (Tall Candle)
+Uptrend() => TrendingUp() and TrendingDown()[1]
+Downtrend() => TrendingDown() and TrendingUp()[1]
+bgcolor(Uptrend() ? green : Downtrend() ? red : na,transp=50)
+
+// Buy and sell alert (Arrow bottom of Chart, using variables from above)
+Buy = Uptrend() and close > close[1]
+Sell = Downtrend() and close < close[1]
+plotshape(Buy, color=white, style=shape.triangleup, text="Buy", location=location.bottom)
+plotshape(Sell, color=white, style=shape.triangledown, text="Sell", location=location.bottom)
+
+View in Pine Editor・56 lines
+Use on chart
+3
+8
+1
+1 687
+This Strategy use in 1 hour and daily graph.
+
+
+
+
+Long Strategy;
+
+The strategy is if the EMA_5 cross over EMA_10 in 1 hour chart, it is long opportunity. Now check the price on daily chart.
+
+
+If the EMA_5 cross over EMA_10 in daily chart, long more!!.
+
+Short Strategy;
+
+If the EMA_5 cross under EMA_10 in 1 hour chart, it is a short opportunity. Now check the price on daily chart.
+
+
+If the EMA_5 cross under EMA_10 in daily chart, short more!!
+
+This is my first pine editor code. I am new at coding.
+

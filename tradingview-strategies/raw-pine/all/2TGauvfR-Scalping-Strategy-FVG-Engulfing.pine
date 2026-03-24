@@ -1,0 +1,130 @@
+//@version=6
+strategy("Scalping Strategy: FVG + Engulfing", overlay=true, 
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 1, 
+     max_bars_back = 5000)
+
+// ==== INPUTS ====
+max_trades_per_day = input.int(2, "Max trades per day")
+rr_ratio = input.float(3.0, "Risk:Reward Ratio")
+fvg_min_size = input.float(0.0, "Min FVG size (in price)", step=0.01)
+
+// ==== TIME HANDLING ====
+var float range_high = na
+var float range_low = na
+var int trades_today = 0
+
+is_new_day = ta.change(time("D")) != 0
+if is_new_day
+    range_high := na
+    range_low := na
+    trades_today := 0
+
+// === Manual Time Window for 09:30–09:35 EST ===
+start_time = timestamp("America/New_York", year, month, dayofmonth, 9, 30)
+end_time   = timestamp("America/New_York", year, month, dayofmonth, 9, 35)
+in_first_range = (time >= start_time and time < end_time)
+
+if in_first_range and na(range_high)
+    range_high := high
+    range_low := low
+
+// ==== PLOT RANGE ====
+plot(range_high, title="Range High", color=color.red, linewidth=1)
+plot(range_low, title="Range Low", color=color.green, linewidth=1)
+
+// ==== FVG DETECTION ====
+bool is_fvg_bearish = false
+bool is_fvg_bullish = false
+float fvg_top = na
+float fvg_bottom = na
+
+if bar_index >= 3
+    float h2 = high[2]
+    float l2 = low[2]
+    float h1 = high[1]
+    float l1 = low[1]
+
+    if (l1 > h2)
+        is_fvg_bearish := true
+        fvg_top := h2
+        fvg_bottom := l1
+    else
+        is_fvg_bearish := false
+
+    if (h1 < l2)
+        is_fvg_bullish := true
+        fvg_top := h1
+        fvg_bottom := l2
+    else
+        is_fvg_bullish := false
+
+// ==== BREAKOUT ====
+bool fvg_closed_outside = false
+if not na(range_high) and not na(range_low)
+    fvg_closed_outside := (close[2] > range_high or close[2] < range_low) or
+                          (close[1] > range_high or close[1] < range_low) or
+                          (close > range_high or close < range_low)
+
+// ==== RETEST + ENGULFING ====
+bool is_engulfing = false
+bool retest = false
+
+if ( (is_fvg_bearish or is_fvg_bullish) and fvg_closed_outside )
+    if (is_fvg_bearish and (high >= fvg_bottom) )
+        retest := true
+    if (is_fvg_bullish and (low <= fvg_top) )
+        retest := true
+
+    if retest and bar_index >= 1
+        float prev_open = open[1]
+        float prev_close = close[1]
+        float cur_open = open
+        float cur_close = close
+
+        if is_fvg_bearish
+            if (cur_open < prev_close) and (cur_close < prev_open) and (cur_open > prev_open)
+                is_engulfing := true
+        if is_fvg_bullish
+            if (cur_open > prev_close) and (cur_close > prev_open) and (cur_open < prev_open)
+                is_engulfing := true
+
+// ==== ENTRY ====
+if (is_engulfing and trades_today < max_trades_per_day)
+    bool go_short = is_fvg_bearish
+    bool go_long = is_fvg_bullish
+
+    float sl_price = na
+    if go_short
+        sl_price := high[1] + syminfo.mintick
+    if go_long
+        sl_price := low[1] - syminfo.mintick
+
+    float entry_price = close
+    float risk_amount = math.abs(entry_price - sl_price)
+    float tp_price = na
+    if go_short
+        tp_price := entry_price - risk_amount * rr_ratio
+    if go_long
+        tp_price := entry_price + risk_amount * rr_ratio
+
+    if go_short
+        strategy.entry("Short_" + str.tostring(bar_index), strategy.short)
+        strategy.exit("ExitShort_" + str.tostring(bar_index), from_entry = "Short_" + str.tostring(bar_index), stop = sl_price, limit = tp_price)
+        trades_today += 1
+    if go_long
+        strategy.entry("Long_" + str.tostring(bar_index), strategy.long)
+        strategy.exit("ExitLong_" + str.tostring(bar_index), from_entry = "Long_" + str.tostring(bar_index), stop = sl_price, limit = tp_price)
+        trades_today += 1
+
+// ==== PLOTS ====
+plotshape(is_engulfing and is_fvg_bearish, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(is_engulfing and is_fvg_bullish, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+
+View in Pine Editor・121 lines
+Use on chart
+7
+5
+1
+2 276
+
+This is a scalping strategy based on the Fair Value Gap (FVG) and Engulfing pattern confirmation. It identifies the high and low of the first 5-minute candle after the 9:30 AM EST market open and waits for a breakout supported by a Fair Value Gap. A trade is only triggered after a retest of the FVG zone followed by an engulfing candle in the direction of the breakout. Trades are entered with a fixed 3:1 risk-to-reward ratio and limited to 2 entries per trading day to avoid overtrading. Ideal for NASDAQ scalping on a 1-minute chart.

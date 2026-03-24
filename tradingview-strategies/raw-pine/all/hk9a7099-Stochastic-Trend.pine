@@ -1,0 +1,52 @@
+//@version=4
+strategy(title="Stochastic Trend", overlay=false, pyramiding=1, commission_value=0.2, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Stochastic
+periodK = input(200, title="K", minval=1, step=10)
+periodD = input(3, title="D", minval=1)
+smoothK = input(100, title="Smooth", minval=1, step=10)
+k = sma(stoch(close, high, low, periodK), smoothK)
+d = sma(k, periodD)
+
+// Entry / Exit lines
+Enter = input(50)
+Exit = input(60)
+
+// Plots
+plot(k, title="%K", color=color.blue)
+plot(d, title="%D", color=color.blue)
+plot(Enter, "Upper Band", color=color.green)
+plot(Exit, "Lower Band", color=color.red)
+
+// Conditions
+long = crossover(k, Enter)
+longclose = crossunder(k, Exit)
+
+// Alert messages - feel free to edit
+LongAlert = 'LONG'
+CloseAlert = 'Close Position'
+
+// Strategy
+if long
+    strategy.entry("long", strategy.long, alert_message=LongAlert)
+
+if longclose
+    strategy.close("long", alert_message=CloseAlert)
+
+View in Pine Editor・34 lines
+Use on chart
+9
+0
+7
+8
+17 595
+Apr 18, 2021
+Dear community,
+
+I've made another simple trading bot for you to use. This bot is based on the Stochastic Oscillator. It only produces long trades currently.
+
+I changed the oscillation period to a much longer one, which in turn creates opportunities to trade long term trends.
+The bot goes long when the Entry lines is crossed from below and it will close its long position once the Exit line has been crossed from above.
+Apr 18, 2021
+Release Notes
+Added alerts

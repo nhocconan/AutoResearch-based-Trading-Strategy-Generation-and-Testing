@@ -1,0 +1,89 @@
+//@version=4
+strategy("Renko Intraday Strategy", overlay=true)
+//Default values for ticker MOEX:BR, 5 minutes
+
+// --- Renko Input ---
+renkoBox = input(defval = 0.11, title="Renko box size", step = 0.01 )
+
+//--- Risk Management Input ---
+confirmEnter = input(defval=true, title="Price movement confirmation")
+inpsl = input(defval = 15.0, title="Stop Loss", minval =0) 
+inptp = input(defval = 0, title="Take Profit", minval = 0) 
+inpbe = input(defval =7.0, title="Move stop loss to breakeven after ... pips", minval = 0) 
+inpClosePos = input(defval = 8.0, title="Close the trade if profit has decreased compared to the maximum by ...%", minval = 0)
+fixProfit = input(defval = 65.0, title="Profit in pips, after which the previous option is turned on (closing a position)", minval = 0)
+// If the zero value is set for stop loss or take profit, then the function is disabled
+sl = inpsl >0 ? inpsl : na 
+tp = inptp >0 ? inptp : na
+be = inpbe >0 ? inpbe : na
+ClosePos = inpClosePos >0 ? inpClosePos : na
+
+//--- Session Input ---
+sess = input(defval = "1005-2335", title="Trading Session")
+t = time(timeframe.period, sess)
+sessionOpen = na(t) ? false : true
+
+// --- Renko ---
+renkoTicker = renko(syminfo.tickerid, "Traditional", renkoBox) 
+source = security(renkoTicker, timeframe.period, close, barmerge.lookahead_off)
+isBullBrick(i) => source[i] > source[i+1]
+isBearBrick(i) => source[i] < source[i+1]
+
+// --- Opent trades ---
+long = strategy.opentrades>0 and strategy.position_size>0 ? true : false
+short = strategy.opentrades>0 and strategy.position_size<0 ? true : false
+
+// -- Breakeven --
+tick = syminfo.mintick*syminfo.pointvalue
+var b = 0.0
+con = strategy.position_size < 0 ? strategy.position_size*-1 : strategy.position_size
+b := strategy.openprofit/con/tick >= be ? 1.0 : strategy.opentrades == 0 ? 0 : b
+sl := b>0 ? -1 : sl
+
+//--Price movement confirmation--
+confirmBuy = confirmEnter ? close[0]>close[1]  and high[0]>high[1] and low[0]>low[1] : true
+confirmSell = confirmEnter ? close[0]<close[1] and high[0]<high[1] and low[0]<low[1] :true
+
+// --- Strategy ---
+var pick = 0.0
+cor = renkoBox/tick*2
+pick := strategy.openprofit > pick ? strategy.openprofit : strategy.openprofit == 0 ? 0 : pick
+ex = pick/con - strategy.openprofit/con >= pick/con/100*ClosePos and pick/con >= fixProfit*tick ? true : false
+longCondition = strategy.opentrades == 0 or short and strategy.openprofit < cor ? isBullBrick(0) and confirmBuy and sessionOpen : short ? isBullBrick(0) and isBullBrick(1) and confirmBuy and sessionOpen : false
+shortCondition = strategy.opentrades == 0 or long and strategy.openprofit < cor ? isBearBrick(0) and confirmSell and sessionOpen : long  ? isBearBrick(0) and isBearBrick(1) and confirmSell and sessionOpen : false
+strategy.entry("Long", true, when = longCondition)
+strategy.entry("Short", false, when = shortCondition)
+strategy.exit("exit", from_entry = "Long", profit = tp, loss = sl)
+strategy.exit("exit", from_entry = "Short", profit = tp, loss = sl)
+strategy.close_all(when = ex or not sessionOpen)
+
+// --- Color ---
+// for dark color theme
+red = #f35a54
+darkred = #a8413d
+green = #1faea2
+darkgreen = #136962
+blue = #7babcf
+
+// --- Plot ---
+plot(source, color = blue, linewidth = 2, transp = 10)
+plotshape(pick/con >= fixProfit*tick, style=shape.circle, color = blue, location = location.top)
+bgcolor(short and b==0 ? darkred : short and b>0 ? red : na, transp=65)
+bgcolor(long and b==0 ? darkgreen : long and b>0 ? green : na, transp=65)
+
+View in Pine Editor・72 lines
+Use on chart
+1.5 K
+21
+45 128
+Nov 15, 2019
+A simple intraday strategy based on Renko values.
+Nov 16, 2019
+Release Notes
+bugs fixed
+Nov 16, 2019
+Release Notes
+bugs fixed
+Nov 16, 2019
+Release Notes
+bugs fixed

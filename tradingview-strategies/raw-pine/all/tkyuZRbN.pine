@@ -1,0 +1,83 @@
+//@version=5
+strategy("Double Bottom and Top Hunter", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1000)
+
+// Parametreler
+length = input.int(100, title="Dönem Uzunluğu", defval=100)
+lookback = input.int(100, title="Geriye Dönük Kontrol Süresi", defval=100)
+
+// İkili Dip ve Tepe Bulma
+low1 = ta.lowest(low, length)
+high1 = ta.highest(high, length)
+
+low2 = ta.valuewhen(low == low1, low, 1)
+high2 = ta.valuewhen(high == high1, high, 1)
+
+doubleBottom = (low == low1 and ta.lowest(low, lookback) == low1 and low == low2)
+doubleTop = (high == high1 and ta.highest(high, lookback) == high1 and high == high2)
+
+// İşlem Açma Koşulları
+longCondition = doubleBottom
+shortCondition = doubleTop
+
+// İşlem Kapatma Koşulları
+closeLongCondition = ta.highest(high, length) > high1 and low < low1
+closeShortCondition = ta.lowest(low, length) < low1 and high > high1
+
+// İşlem Açma
+if (longCondition)
+    strategy.entry("Long", strategy.long, qty=100)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short, qty=100)
+
+// İşlem Kapatma
+if (closeLongCondition)
+    strategy.close("Long")
+
+if (closeShortCondition)
+    strategy.close("Short")
+
+// Grafik Üzerinde Göstergeler ve ZigZag Çizimi
+plotshape(series=longCondition, title="İkili Dip Bulundu", location=location.belowbar, color=color.green, style=shape.labelup, text="LONG")
+plotshape(series=shortCondition, title="İkili Tepe Bulundu", location=location.abovebar, color=color.red, style=shape.labeldown, text="SHORT")
+
+var line zigzagLine = na
+if (doubleBottom or doubleTop)
+    zigzagLine := line.new(x1=bar_index[1], y1=na, x2=bar_index, y2=doubleBottom ? low : high, color=doubleBottom ? color.green : color.red, width=2)
+
+// Zigzag çizgisini sürekli güncelleme
+line.set_xy1(zigzagLine, bar_index[1], na)
+line.set_xy2(zigzagLine, bar_index, doubleBottom ? low : high)
+
+View in Pine Editor・50 lines
+Use on chart
+9
+2
+5
+4
+16 519
+### Türkçe Açıklama:
+Bu strateji, grafikte ikili dip ve ikili tepe formasyonlarını tespit ederek otomatik alım ve satım işlemleri gerçekleştirir. İkili dip, fiyatın belirli bir dönem içinde iki kez en düşük seviyeye ulaşması ile oluşur ve bu durumda strateji long (alım) işlemi açar. İkili tepe ise fiyatın belirli bir dönem içinde iki kez en yüksek seviyeye ulaşması ile oluşur ve bu durumda strateji short (satış) işlemi açar.
+
+- **Dönem Uzunluğu ve Geriye Dönük Kontrol:** Strateji, varsayılan olarak 100 periyotluk bir zaman dilimini temel alır ve bu süre boyunca en düşük ve en yüksek fiyat seviyelerini belirler. Geriye dönük kontrol süresi de 100 periyot olarak ayarlanmıştır.
+
+- **İşlem Açma Koşulları:** İkili dip tespit edildiğinde long pozisyon, ikili tepe tespit edildiğinde short pozisyon açılır.
+
+- **İşlem Kapatma Koşulları:** İkili dipte, en yüksek seviyeye (HH) ulaşıldıktan sonra fiyatın daha düşük bir seviye (LL) yapması durumunda pozisyon kapanır. İkili tepede ise tam tersi bir durumda, pozisyon kapanır.
+
+- **Zigzag Çizimi:** İkili dip ve tepe formasyonları, grafik üzerinde yeşil (dipler) ve kırmızı (tepeler) zigzag çizgileri ile gösterilir.
+
+Bu strateji, özellikle 1, 3 ve 5 dakikalık kısa zaman dilimlerinde yüksek başarı oranına sahiptir ve piyasadaki kısa vadeli trend dönüşlerini yakalamada etkili bir araçtır.
+
+### English Explanation:
+This strategy automatically executes buy and sell orders by detecting double bottom and double top formations on the chart. A double bottom occurs when the price reaches a low level twice within a specific period, prompting the strategy to open a long (buy) position. Conversely, a double top forms when the price reaches a high level twice, leading the strategy to open a short (sell) position.
+
+- **Period Length and Lookback Control:** By default, the strategy is based on a 100-period length, during which it identifies the lowest and highest price levels. The lookback control period is also set to 100 periods.
+
+- **Entry Conditions:** A long position is opened when a double bottom is detected, while a short position is opened when a double top is identified.
+
+- **Exit Conditions:** In the case of a double bottom, the position is closed after the price reaches a higher high (HH) and then makes a lower low (LL). For a double top, the opposite occurs before closing the position.
+
+- **Zigzag Plotting:** The double bottom and top formations are visually represented on the chart with green (bottoms) and red (tops) zigzag lines.
+
+This strategy is particularly successful in short timeframes such as 1, 3, and 5 minutes and is an effective tool for capturing short-term trend reversals in the market.

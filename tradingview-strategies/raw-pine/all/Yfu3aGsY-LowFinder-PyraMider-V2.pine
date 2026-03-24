@@ -1,0 +1,7 @@
+//@version=5
+upper=##input(defval=80,type='INPUT_INTEGER',##id='in_3')
+lower=##input(defval=20,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_0,plot.style_areabr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,lower,input__float)
+##root(root_metainfo,rm_2,upper,input__float)
+##root(root_metainfo,rm_3,lower,input__float)

@@ -1,0 +1,356 @@
+//@version=6
+strategy("Gann Fan Strategy [KedarArc Quant]",
+     overlay=true, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.02,
+     calc_on_every_tick=true, process_orders_on_close=true, pyramiding=0, max_labels_count=200)
+
+//@author [KedarArc Quant]
+//@createdon 08-Sep-2025
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+src               = input.source(close, "Source")
+useAutoAnchor     = input.bool(true, "Auto Anchor (latest swing)", inline="a1")
+pivotLeft         = input.int(5, "Left", minval=1, inline="a1")
+pivotRight        = input.int(5, "Right", minval=1, inline="a1")
+
+// Manual anchor (0 = unset; inputs can't default to na)
+manualAnchorPrice_in = input.float(0.0, "Manual Anchor Price", inline="a2")
+manualAnchorBar_in   = input.int(0,    "Manual Anchor Bar Index", inline="a2",
+     tooltip="bar_index to anchor from. 0 = unset")
+
+reanchorOnNewPivot = input.bool(true, "Re-anchor when a fresher pivot appears")
+
+// 1×1 slope controls
+useATRscale   = input.bool(true,  "Scale 1×1 by ATR")
+atrLen        = input.int(14,     "ATR Length")
+atrMult       = input.float(0.25, "ATR Multiplier", step=0.05)
+ticksPerBar   = input.int(5, "…or fixed ticks per bar", minval=1)
+
+// Trading filters
+enableLongs   = input.bool(true, "Enable Longs", inline="dir")
+enableShorts  = input.bool(true, "Enable Shorts", inline="dir")
+emaLen        = input.int(50, "EMA Trend Filter", minval=1)
+useBounce     = input.bool(false, "Use Bounce (touch + reverse) instead of pure breakout")
+
+// Order management
+useFanTP      = input.bool(true,  "TP: next fan line")
+useFanSL      = input.bool(true,  "SL: previous fan line")
+fallbackRR    = input.float(1.5,  "Fallback RR (if fan level missing)", step=0.1)
+trailATRmult  = input.float(0.0,  "Optional ATR Trailing Stop (0 = off)", step=0.1)
+
+// Visuals
+lineTransp    = input.int(20, "Fan transparency (0–100)", minval=0, maxval=100)
+plotEMA       = input.bool(false, "Plot EMA filter")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Precomputed series (typed)
+//──────────────────────────────────────────────────────────────────────────────
+float emaVal = na
+emaVal := ta.ema(src, emaLen)
+plot(plotEMA ? emaVal : na, "EMA", color=color.new(color.teal, 0), linewidth=2)
+
+// Anchor state (ints use sentinels, not na): anchorBar=-1 unset; anchorSign 0 unset / +1 low / -1 high
+var float anchorPrice = na
+var int   anchorBar   = -1
+var int   anchorSign  = 0
+
+// Resolve manual inputs (typed)
+float manualAnchorPrice = na
+manualAnchorPrice := manualAnchorPrice_in == 0.0 ? na : manualAnchorPrice_in
+int   manualAnchorBar = -1
+manualAnchorBar := manualAnchorBar_in == 0 ? -1 : manualAnchorBar_in
+
+// Latest pivots (typed)
+float pH = na
+float pL = na
+pH := ta.pivothigh(high, pivotLeft, pivotRight)
+pL := ta.pivotlow(low,  pivotLeft, pivotRight)
+int pivotHighBar = -1
+int pivotLowBar  = -1
+pivotHighBar := na(pH) ? -1 : (bar_index - pivotRight)
+pivotLowBar  := na(pL) ? -1 : (bar_index - pivotRight)
+
+// Predeclare selection variables (avoid declaring inside if)
+int   newBar   = -1
+float newPrice = na
+int   newSign  = 0
+bool  canSet   = false
+
+// Choose / refresh anchor
+if useAutoAnchor
+    bool haveLow  = pivotLowBar  >= 0
+    bool haveHigh = pivotHighBar >= 0
+    bool chooseLow  = haveLow  and (not haveHigh or pivotLowBar  > pivotHighBar)
+    bool chooseHigh = haveHigh and (not haveLow  or pivotHighBar > pivotLowBar)
+
+    newBar   := chooseLow ? pivotLowBar  : chooseHigh ? pivotHighBar : -1
+    newPrice := chooseLow ? pL           : chooseHigh ? pH          : na
+    newSign  := chooseLow ? 1            : chooseHigh ? -1          : 0
+
+    canSet := (anchorBar < 0) or (reanchorOnNewPivot and newBar >= 0 and newBar > anchorBar)
+    if canSet and newBar >= 0 and not na(newPrice) and newSign != 0
+        anchorBar   := newBar
+        anchorPrice := newPrice
+        anchorSign  := newSign
+else
+    if manualAnchorBar >= 0 and not na(manualAnchorPrice)
+        anchorBar   := manualAnchorBar
+        anchorPrice := manualAnchorPrice
+        anchorSign  := close >= anchorPrice ? 1 : -1
+
+float barsSinceAnchor = na
+barsSinceAnchor := anchorBar >= 0 ? float(bar_index - anchorBar) : na
+bool  validAnchor = (anchorBar >= 0) and (anchorSign != 0) and not na(anchorPrice) and not na(barsSinceAnchor) and barsSinceAnchor >= 0
+
+// 1×1 slope (price per bar) — ATR sanitized so no NA flows
+float atrNow   = na
+atrNow := ta.atr(atrLen)
+float oneByOne = na
+oneByOne := useATRscale ? nz(atrNow, 0) * atrMult : syminfo.mintick * ticksPerBar
+oneByOne := math.max(oneByOne, syminfo.mintick)  // never zero
+
+// Gann multipliers (typed)
+var float[] mults = array.from(1.0/8.0, 1.0/4.0, 1.0/3.0, 1.0/2.0, 1.0, 2.0, 3.0, 4.0, 8.0)
+
+// Global helper
+getY(m, dyBase, anchorPrice_, anchorSign_) =>
+    anchorSign_ == 1 ? anchorPrice_ + dyBase * m : anchorPrice_ - dyBase * m
+
+// Angle values at current bar (declare EACH variable on its own line)
+float dyBase = na
+float v0 = na
+float v1 = na
+float v2 = na
+float v3 = na
+float v4 = na
+float v5 = na
+float v6 = na
+float v7 = na
+float v8 = na
+
+if validAnchor
+    dyBase := oneByOne * barsSinceAnchor
+    v0 := getY(array.get(mults, 0), dyBase, anchorPrice, anchorSign)
+    v1 := getY(array.get(mults, 1), dyBase, anchorPrice, anchorSign)
+    v2 := getY(array.get(mults, 2), dyBase, anchorPrice, anchorSign)
+    v3 := getY(array.get(mults, 3), dyBase, anchorPrice, anchorSign)
+    v4 := getY(array.get(mults, 4), dyBase, anchorPrice, anchorSign) // 1x1
+    v5 := getY(array.get(mults, 5), dyBase, anchorPrice, anchorSign)
+    v6 := getY(array.get(mults, 6), dyBase, anchorPrice, anchorSign)
+    v7 := getY(array.get(mults, 7), dyBase, anchorPrice, anchorSign)
+    v8 := getY(array.get(mults, 8), dyBase, anchorPrice, anchorSign)
+
+// Plot fan lines
+color cR = color.new(color.red,   lineTransp)
+color cG = color.new(color.green, lineTransp)
+color cM = color.new(color.gray,  lineTransp)
+plot(validAnchor ? v0 : na, title="1x8", color=cR, linewidth=2)
+plot(validAnchor ? v1 : na, title="1x4", color=cR, linewidth=2)
+plot(validAnchor ? v2 : na, title="1x3", color=cR, linewidth=2)
+plot(validAnchor ? v3 : na, title="1x2", color=cR, linewidth=2)
+plot(validAnchor ? v4 : na, title="1x1", color=cM, linewidth=2)
+plot(validAnchor ? v5 : na, title="2x1", color=cG, linewidth=2)
+plot(validAnchor ? v6 : na, title="3x1", color=cG, linewidth=2)
+plot(validAnchor ? v7 : na, title="4x1", color=cG, linewidth=2)
+plot(validAnchor ? v8 : na, title="8x1", color=cG, linewidth=2)
+// Anchor marker
+plot(validAnchor ? anchorPrice : na, "Anchor Price", style=plot.style_circles, color=color.new(color.orange, 0))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Trading logic (booleans never receive NA)
+//──────────────────────────────────────────────────────────────────────────────
+bool inUpTrend   = close > nz(emaVal, close)
+bool inDownTrend = close < nz(emaVal, close)
+float val1x1 = v4
+
+bool longSig_breakout  = validAnchor and enableLongs  and inUpTrend   and not na(val1x1) and ta.crossover(close, val1x1)
+bool shortSig_breakout = validAnchor and enableShorts and inDownTrend and not na(val1x1) and ta.crossunder(close, val1x1)
+bool longSig_bounce    = validAnchor and enableLongs  and inUpTrend   and not na(val1x1) and (low  <= val1x1 and close > val1x1)
+bool shortSig_bounce   = validAnchor and enableShorts and inDownTrend and not na(val1x1) and (high >= val1x1 and close < val1x1)
+
+bool goLong  = useBounce ? longSig_bounce  : longSig_breakout
+bool goShort = useBounce ? shortSig_bounce : shortSig_breakout
+
+if goLong and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, comment="Long@fan")
+if goShort and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, comment="Short@fan")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Nearest fan levels ABOVE / BELOW (sentinels then convert to typed NA)
+//──────────────────────────────────────────────────────────────────────────────
+float INF  = 1e20
+float NINF = -1e20
+float ab   = INF
+float bl   = NINF
+
+if validAnchor
+    // ABOVE
+    if not na(v0) and v0 > close
+        ab := math.min(ab, v0)
+    if not na(v1) and v1 > close
+        ab := math.min(ab, v1)
+    if not na(v2) and v2 > close
+        ab := math.min(ab, v2)
+    if not na(v3) and v3 > close
+        ab := math.min(ab, v3)
+    if not na(v4) and v4 > close
+        ab := math.min(ab, v4)
+    if not na(v5) and v5 > close
+        ab := math.min(ab, v5)
+    if not na(v6) and v6 > close
+        ab := math.min(ab, v6)
+    if not na(v7) and v7 > close
+        ab := math.min(ab, v7)
+    if not na(v8) and v8 > close
+        ab := math.min(ab, v8)
+    // BELOW
+    if not na(v0) and v0 < close
+        bl := math.max(bl, v0)
+    if not na(v1) and v1 < close
+        bl := math.max(bl, v1)
+    if not na(v2) and v2 < close
+        bl := math.max(bl, v2)
+    if not na(v3) and v3 < close
+        bl := math.max(bl, v3)
+    if not na(v4) and v4 < close
+        bl := math.max(bl, v4)
+    if not na(v5) and v5 < close
+        bl := math.max(bl, v5)
+    if not na(v6) and v6 < close
+        bl := math.max(bl, v6)
+    if not na(v7) and v7 < close
+        bl := math.max(bl, v7)
+    if not na(v8) and v8 < close
+        bl := math.max(bl, v8)
+
+// Convert to NA in new, typed variables
+float bestAbove = ab < INF  ? ab : na
+float bestBelow = bl > NINF ? bl : na
+
+// Targets / Stops
+float longTP  = useFanTP ? bestAbove : na
+float longSL  = useFanSL ? bestBelow : na
+float shortTP = useFanTP ? bestBelow : na
+float shortSL = useFanSL ? bestAbove : na
+
+//──────────────────────────────────────────────────────────────────────────────
+// Exits (typed; ATR sanitized)
+//──────────────────────────────────────────────────────────────────────────────
+float entryPrice = na
+entryPrice := strategy.position_size != 0 ? strategy.position_avg_price : na
+float trailPts = na
+
+if strategy.position_size > 0
+    bool useTrailL = trailATRmult > 0
+    if (na(longTP) or na(longSL))
+        float riskL = nz(atrNow, 0)
+        longSL := na(longSL) ? entryPrice - riskL : longSL
+        longTP := na(longTP) ? entryPrice + math.abs(entryPrice - longSL) * fallbackRR : longTP
+    if useTrailL
+        trailPts := nz(atrNow, 0) * trailATRmult
+        strategy.exit(id="Long Exit", from_entry="Long", limit=longTP, trail_points=trailPts, trail_offset=trailPts)
+    else
+        strategy.exit(id="Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0
+    bool useTrailS = trailATRmult > 0
+    if (na(shortTP) or na(shortSL))
+        float riskS = nz(atrNow, 0)
+        shortSL := na(shortSL) ? entryPrice + riskS : shortSL
+        shortTP := na(shortTP) ? entryPrice - math.abs(shortSL - entryPrice) * fallbackRR : shortTP
+    if useTrailS
+        trailPts := nz(atrNow, 0) * trailATRmult
+        strategy.exit(id="Short Exit", from_entry="Short", limit=shortTP, trail_points=trailPts, trail_offset=trailPts)
+    else
+        strategy.exit(id="Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// Markers
+plotshape(goLong,  title="Long Signal",  style=shape.triangleup,   color=color.new(color.green, 0),
+          location=location.belowbar, size=size.tiny, text="▲Fan-BUY")
+plotshape(goShort, title="Short Signal", style=shape.triangledown, color=color.new(color.red, 0),
+          location=location.abovebar, size=size.tiny, text="▼Fan-SELL")
+
+View in Pine Editor・273 lines
+Use on chart
+1
+0
+4
+3 070
+Description
+
+A single-concept, rule-based strategy that trades around a programmatic Gann Fan.
+It anchors to a swing (or a manual point), builds 1×1 and related fan lines numerically, and triggers entries when price interacts with the 1×1 (breakout or bounce). Management is done entirely with the fan structure (next/previous line) plus optional ATR trailing.
+
+What TV indicators are used
+
+* Pivots: `ta.pivothigh/ta.pivotlow` to confirm swing highs/lows for anchor selection.
+* ATR: `ta.atr` only to scale the 1×1 slope (optional) and for an optional trailing stop.
+* EMA: `ta.ema` as a trend filter (e.g., only long above the EMA, short below).
+No RSI/MACD/Stoch/Heikin/etc. The logic is one coherent framework: Gann price–time geometry, with ATR as a scale and EMA as a risk filter.
+
+How it works
+
+1. Anchor
+* Auto: chooses the most recent *confirmed* pivot (you control Left/Right).
+* Manual: set a price and bar index and the fan will hold that point (no re-anchoring).
+* Optional Re-anchor when a newer pivot confirms.
+
+2. 1×1 Slope (numeric, not cosmetic)
+* ATR mode: `1×1 = ATR(Length) × Multiplier` (adapts to volatility).
+* Fixed mode: `ticks per bar` (constant slope).
+Because slope is numeric, it doesn’t change with chart zoom, unlike the drawing tool.
+
+3. Fan Lines
+Builds classic ratios around the 1×1: 1/8, 1/4, 1/3, 1/2, 1/1, 2/1, 3/1, 4/1, 8/1.
+
+4. Signals
+* Breakout: cross of price over/under the 1×1 in the EMA-aligned direction.
+* Bounce (optional): touch + reversal across the 1×1 to reduce whipsaw.
+
+5. Exits & Risk
+* Take-profit at the next fan line; Stop at the previous fan line.
+* If a level is missing (right after re-anchor), a fallback Risk-Reward (RR) is used.
+* Optional ATR trailing stop.
+
+Why this is unique
+
+* True numeric fan: The 1×1 slope is calculated from ATR or fixed ticks—not from screen geometry—so it is scale-invariant and reproducible across users/timeframes.
+* Deterministic anchor logic: Uses confirmed pivots (with your L/R settings). No look-ahead; anchors update only when the right bars complete.
+* Fan-native trade management: Both entries and exits come from the fan structure itself (with a minimal ATR/EMA assist), keeping the method pure.
+* Two entry archetypes: Breakout for momentum days; Bounce for range days—switchable without changing the core model.
+* Manual mode: Lock a session’s bias by anchoring to a chosen swing (e.g., day’s first major low/high) and keep the fan constant all day.
+
+
+Inputs (quick guide)
+
+* Auto Anchor (Left/Right): pivot sensitivity. Higher values = fewer, stronger anchors.
+* Re-anchor: refresh to newer pivots as they confirm.
+* Manual Anchor Price / Bar Index: fixes the fan (turn Auto off).
+* Scale 1×1 by ATR: on = adaptive; off = use ticks per bar.
+* ATR Length / ATR Multiplier: controls adaptive slope; start around 14 / 0.25–0.35.
+* Ticks per bar: exact fixed slope (match a hand-drawn fan by computing slope ÷ mintick).
+* EMA Trend Filter: e.g., 50–100; trades only in EMA direction.
+* Use Bounce: require touch + reverse across 1×1 (helps in chop).
+* TP/SL at fan lines; Fallback RR for missing levels; ATR Trailing Stop optional.
+* Transparency/Plot EMA: visual preferences.
+
+
+Tips
+
+* Range days: larger pivots (L/R 8–12), Bounce ON, ATR Multiplier \~0.30–0.40, EMA 100.
+* Trend days: L/R 5–6, Breakout, Multiplier \~0.20–0.30, EMA 50, ATR trail 1.0–1.5.
+* Match the TV Gann Fan drawing: turn ATR scale OFF, set ticks per bar = `(Δprice between anchor and 1×1 target) / (bars) / mintick`.
+
+
+Repainting & testing notes
+
+* Pivots require Right bars to confirm; anchors are set after confirmation (no look-ahead).
+* Signals use the current bar close with TradingView strategy mechanics; real-time vs. bar-close can differ slightly, as with any strategy.
+* Re-anchoring legitimately moves the structure when new pivots confirm—by design.
+
+⚠️ Disclaimer
+This script is provided for educational purposes only.
+Past performance does not guarantee future results.
+Trading involves risk, and users should exercise caution and use proper risk management when applying this strategy.

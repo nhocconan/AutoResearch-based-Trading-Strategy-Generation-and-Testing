@@ -1,0 +1,52 @@
+//@version=5
+strategy("BB + RSI Breakout Strategy (3% TP, No SL)", overlay=true, initial_capital=1000)
+
+// ————— Inputs —————
+bbLength = input.int(30, "BB Length")
+bbMult   = input.float(2.0, "BB Multiplier")
+rsiLen   = input.int(13, "RSI Length")
+rsiOB    = input.int(70, "RSI Overbought Level")
+rsiOS    = input.int(30, "RSI Oversold Level")
+
+takeProfitPercent = input.float(3.0, "Take Profit %")
+
+// ————— Bollinger Bands —————
+basis = ta.sma(close, bbLength)
+dev = bbMult * ta.stdev(close, bbLength)
+upper = basis + dev
+lower = basis - dev
+
+plot(basis, "BB Basis", color=color.blue)
+plot(upper, "BB Upper", color=color.red)
+plot(lower, "BB Lower", color=color.green)
+
+// ————— RSI —————
+rsi = ta.rsi(close, rsiLen)
+
+// ————— Buy & Sell Conditions —————
+buySignal  = close < lower and rsi < rsiOS
+sellSignal = close > upper and rsi > rsiOB
+
+// ————— Entries —————
+if (buySignal)
+    strategy.entry("BUY", strategy.long)
+
+if (sellSignal)
+    strategy.entry("SELL", strategy.short)
+
+// ————— 3% Take Profit (NO STOP LOSS) —————
+tpLong  = strategy.position_avg_price * (1 + takeProfitPercent / 100)
+tpShort = strategy.position_avg_price * (1 - takeProfitPercent / 100)
+
+strategy.exit("TP Long",  from_entry="BUY",  limit=tpLong)
+strategy.exit("TP Short", from_entry="SELL", limit=tpShort)
+
+View in Pine Editor・42 lines
+Use on chart
+2
+5
+6
+3
+4 474
+RSI PLUS BB Really good strategy with a tp of 3% win rate is 95
+

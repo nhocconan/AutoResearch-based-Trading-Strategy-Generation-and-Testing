@@ -1,0 +1,135 @@
+//@version=3
+strategy("IFT Stochastic + Trailing Stop", overlay=false, pyramiding = 0, calc_on_order_fills = false, commission_type =  strategy.commission.percent, commission_value = 0.0454, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+
+////inputs
+//renko
+atrLen = input(14, minval=1, title="ATR Length")
+isATR = input(false, title="ATR Renkos?")
+tradLen1 = input(94, minval=0, title="Input value for Non-ATR Renkos")
+wfil = input(50, minval=1, title="Warning zone, % of Renko")
+
+//resolution
+useCurrentRes = input(false, title="Use Current Chart Resolution?")
+resCustom = input(title="Use Different Timeframe, standart = 1Min", type=resolution, defval="1")
+
+//plots
+pla = input(true, title="plot buy/sell arrows")   
+plb = input(true, title="plot arrows if price cross warning zone")  
+plc = input(false, title="plot stochastic entry arrows")   
+barc = input(true, title="colored warning/entry bars")
+
+//stoch
+stf = input(false, title="use stochastic filtration, for TF 1min")   
+len = input(14, minval=1, title="Length for Main Stochastic") 
+smoothK = input(3, minval=1, title="SmoothK for Main Stochastic")
+smoothD = input(3, minval=1, title="SmoothD for Main Stochastic")
+upLevel = input(70, minval=1, maxval=100, title="Upper Level %")
+lowLevel = input(30, minval=1, maxval=100, title="Lower Level %")
+
+////functions RENKO    
+res = useCurrentRes ? period : resCustom
+tradLen = tradLen1 * .01
+param = isATR ? renko(tickerid, "open", "ATR", atrLen) : renko(tickerid, "open", "Traditional", tradLen)
+renko_close = security(param, res, close, lookahead=true)
+renko_open = security(param, res, open, lookahead=true)
+renko_dif = abs(renko_close - renko_open)
+
+////functions RENKO
+k = sma(stoch(close, high, low, len), smoothK)
+d = sma(k, smoothD)
+
+////plots
+//colors
+col = renko_close < renko_open ? red : lime
+col1 = renko_close < renko_open ? yellow : na
+col2 = renko_close > renko_open ? yellow : na
+col3 = renko_close < renko_open ? yellow : black
+col4 = renko_close > renko_open ? yellow : black
+col5 = renko_close < renko_open ? lime : na
+col6 = renko_close > renko_open ? red : na
+col7 = renko_close < renko_open ? lime : black
+col8 = renko_close > renko_open ? red : black
+col9 = renko_close < renko_open ? red : black
+col10 = renko_close < renko_open ? black : lime
+
+//renko lines
+p1=plot(renko_close+renko_dif, linewidth=1, color=col, title='renko close')
+p2=plot(renko_close-renko_dif, linewidth=1, color=col, title='renko open')
+p3=plot(renko_close+renko_dif+(renko_dif*(wfil/100)), linewidth=1, color=col1, title='renko sell warning')
+p4=plot(renko_close-renko_dif-(renko_dif*(wfil/100)), linewidth=1, color=col2, title='renko buy warning')
+p5=plot(renko_close+renko_dif+renko_dif, linewidth=1, color=col5, title='renko close level')
+p6=plot(renko_close-renko_dif-renko_dif, linewidth=1, color=col6, title='renko open level')
+p7=plot(renko_close, linewidth=1, color=col, title='renko close')
+
+//renko fills
+fill(p1, p2, color=col, transp=85, title='renko fill all')
+fill(p1, p7, color=col10, transp=95, title='renko fill mid')
+fill(p2, p7, color=col9, transp=80, title='renko fill mid')
+fill(p1, p3, color=col3, transp=85, title='renko warning fill')
+fill(p2, p4, color=col4, transp=85, title='renko warning fill')
+
+//stoch cross
+crossUp = (k[1] < d[1] and k[1] < lowLevel[1]) and (k > d)  ? 1 : 0
+crossDn = (k[1] > d[1] and k[1] > upLevel[1]) and (k < d) ? 1 : 0
+
+//strategy
+longCondition =  crossover(renko_close, renko_open)
+shortCondition = crossunder(renko_close, renko_open)
+longCondition2 = (renko_close > renko_open) and crossUp
+shortCondition2 = (renko_close < renko_open) and crossDn
+short = renko_close < renko_open
+long = renko_close > renko_open
+longClose = (close < renko_open-(renko_dif/2)) and long ? -1 :na
+shortClose = (close > renko_open+(renko_dif/2)) and short ? 1 :na
+
+if (stf==false)
+    strategy.entry("BUY", strategy.long, when = longCondition)
+    strategy.entry("SELL", strategy.short, when = shortCondition)
+
+if (stf==true)
+    strategy.entry("BUY", strategy.long, when = longCondition2)
+    strategy.entry("SELL", strategy.short, when = shortCondition2)
+    
+//arrows    
+longarrow = crossover(renko_close, renko_open) == 1? 1: na
+shortarrow = crossunder(renko_close, renko_open) == 1? -1: na
+longarrow2 = (renko_close > renko_open) and crossUp == 1? 1: na
+shortarrow2 = (renko_close < renko_open) and crossDn == 1? -1: na
+plotarrow(pla and longarrow ? longarrow :na, colorup = aqua, transp = 0, title='buy arrow')
+plotarrow(pla and shortarrow ? shortarrow :na, colordown = red, transp = 0, title='sell arrow')
+plotarrow(pla and plc and longarrow2 ? longarrow2 :na, colorup = blue, transp = 0, title='buy stoch arrow')
+plotarrow(pla and plc and shortarrow2 ? shortarrow2 :na, colordown = fuchsia, transp = 0, title='sell stoch arrow')
+plotarrow(pla and plb and longClose ? longClose :na, colordown = red, transp = 60, title='close buy arrow')
+plotarrow(pla and plb and shortClose ? shortClose :na, colorup = aqua, transp = 60, title='close sell arrow')
+
+//barcolor
+barcolor(barc and longClose ? yellow : na)
+barcolor(barc and shortClose ? yellow : na)
+barcolor(barc and longarrow ? aqua : na)
+barcolor(barc and shortarrow ? red : na)
+barcolor(barc and plc and longarrow2 ? blue : na)//
+barcolor(barc and plc and shortarrow2 ? fuchsia : na)
+
+View in Pine Editor・112 lines
+Use on chart
+3
+0
+5
+4
+8 331
+Jun 28, 2019
+Inverse fisher transform on stochastic strategy with trailing stop. Good work on flats with mid-wave length
+Jul 4, 2019
+Release Notes
+Brand new pine v4.
+Added dynamic trailing stop offset pips based on volatility.
+Added different timeframes.
+Added labels with text with offset pips for positions.
+New scale = 0 - 100
+Jul 29, 2019
+Release Notes
+Updated comission value, added some faetures
+Aug 2, 2019
+Release Notes
+fixed some bugs

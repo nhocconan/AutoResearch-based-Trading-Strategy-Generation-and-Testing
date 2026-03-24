@@ -1,0 +1,57 @@
+//@version=5
+strategy("Golden Cross VWMA & EMA 4h Pinescriptlabs",  overlay=true,  initial_capital=10000,  default_qty_type=strategy.cash, default_qty_value=100, commission_type=strategy.commission.percent,  commission_value=0.05)
+
+// Input para la EMA 200 del timeframe actual
+len = input.int(50, title="VWMA")
+
+// EMA 200 del timeframe actual
+vwma200 = ta.vwma(close, len)
+
+// HMA 444 del timeframe de 4 horas
+len_4h = input.int(200, title="EMA(4h)")
+hma_4h = request.security(syminfo.tickerid, "240", ta.sma(close, len_4h))
+
+// Señales de compra y venta
+buy_signal = ta.crossover(vwma200, hma_4h)
+sell_signal = ta.crossunder(vwma200, hma_4h)
+
+// Estrategia de entrada
+strategy.entry("buy_signal", strategy.long, when=buy_signal)
+strategy.entry("Sell", strategy.short, when=sell_signal)
+
+// Plot de las señales
+plotshape(series=buy_signal, title="Compra", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(series=sell_signal, title="Venta", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// Plot de EMA 200 y HMA 444
+plot(vwma200, color=#af09f7, linewidth=2, title="VWMA 200")
+plot(hma_4h, color=#e7f706, linewidth=2, title="EMA(4h)")
+
+// Relleno de color
+fill_color = vwma200 > hma_4h ? #09fa11 : #f90bed
+bgcolor(fill_color, transp=90)
+
+View in Pine Editor・32 lines
+Use on chart
+1
+6
+5
+5 738
+This strategy combines the 50-period Volume-Weighted Moving Average (VWMA) on the current timeframe with a 200-period Simple Moving Average (SMA) on the 4-hour timeframe. This combination of indicators with different characteristics and time horizons aims to identify strong and sustained trends across multiple timeframes.
+
+The VWMA is a variant of the moving average that assigns greater weight to periods of higher volatility, helping to avoid misleading signals. On the other hand, the 4-hour SMA is used as an additional trend filter in a shorter-term horizon. By combining these two indicators, the strategy can leverage the strength of the VWMA to capture the main trend, but only when confirmed by the SMA in the lower timeframe.
+
+Buy signals are generated when the VWMA crosses above the 4-hour SMA, indicating a potential bullish trend aligned in both timeframes. Sell signals occur on a bearish cross, suggesting a possible reversal of the main trend.
+
+The default parameters are a 50-period VWMA and a 200-period 4-hour SMA. It is recommended to adjust these lengths according to the traded instrument and the desired timeframe. It is also crucial to use stop losses and profit targets to properly manage risk.
+
+By combining indicators of different types and timeframes, this strategy aims to provide a more comprehensive view of trend strength.
+
+Español:
+
+Esta estrategia combina la Volume-Weighted Moving Average (VWMA) de 50 períodos en el timeframe actual con una Simple Moving Average (SMA) de 200 períodos en el timeframe de 4 horas. Esta combinación de indicadores de distinta naturaleza y horizontes temporales busca identificar tendencias fuertes y sostenidas en múltiples timeframes.
+La VWMA es una variante de la media móvil que asigna mayor ponderación a los períodos de mayor volatilidad, lo que ayuda a evitar señales engañosas. Por otro lado, la SMA de 4 horas se utiliza como un filtro adicional de tendencia en un horizonte de corto plazo. Al combinar estos dos indicadores, la estrategia puede aprovechar la fortaleza de la VWMA para capturar la tendencia principal, pero sólo cuando es confirmada por la SMA en el timeframe menor.
+Las señales de compra se generan cuando la VWMA cruza al alza la SMA de 4 horas, indicando una potencial tendencia alcista alineada en ambos horizontes temporales. Las señales de venta ocurren en el cruce bajista, sugiriendo una posible reversión de la tendencia principal.
+
+Los parámetros predeterminados son: VWMA de 50 períodos y SMA de 4 horas de 200 períodos. Se recomienda ajustar estas longitudes según el instrumento operado y el horizonte temporal deseado. También es crucial utilizar stops y objetivos de ganancias para controlar adecuadamente el riesgo.
+Al combinar indicadores de diferentes tipos y timeframes, esta estrategia busca brindar una visión más completa de la fuerza de la tendencia.

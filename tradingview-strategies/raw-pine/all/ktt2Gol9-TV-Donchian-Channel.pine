@@ -1,0 +1,105 @@
+//@version=5
+strategy(title = "[TV] Donchian Channel", overlay = true, commission_value = 0.1)
+
+//Settings
+needlong = input.bool(true, defval = true, title = "Long")
+needshort = input.bool(true, defval = true, title = "Short")
+tp = input.float(defval = 7.5, minval = 1, title = "Take-profit, %")
+tptype = input.string(defval = "3. Trailing", options = ["1. None", "2. Fix", "3. Trailing"], title = "TP type")
+sltype = input.string(defval = "2. Center", options = ["1. None", "2. Center"], title = "SL type")
+sizelong = input.float(100, defval = 100, minval = 1, maxval = 10000, title = "Lot long, %")
+sizeshort = input.float(100, defval = 100, minval = 1, maxval = 10000, title = "Lot short, %")
+pclen = input.int(50, minval = 1, title = "Price Channel Length")
+showll = input.bool(true, defval = true, title = "Show lines")
+
+detection_h = input.source(high)
+detection_l = input.source(low)
+
+timestamp_start = input.time(defval = timestamp("01 Jan 2014 00:00 +0000"), title = "Time Start", inline="time")
+timestamp_end = input.time(defval = timestamp("30 Dec 2050 23:59 +0000"), title = "Time End  ", inline="time")
+truetime = time > timestamp_start and time < timestamp_end
+
+//Price Channel
+h = ta.highest(detection_h, pclen)
+l = ta.lowest(detection_l, pclen)
+center = (h + l) / 2
+
+//Take-profit
+tpl = 0.0
+tpl := tptype == "2. Fix" and strategy.position_size > 0 ? tpl[1] : h * (100 + tp) / 100
+
+//Stop-loss
+tps = 0.0
+tps := tptype == "2. Fix" and strategy.position_size < 0 ? tps[1] : l * (100 - tp) / 100
+
+//Lines
+tplcol = showll and needlong and tptype != "1. None" ? color.lime : na
+pclcol = showll and needlong ? color.blue : na
+sllcol = showll and needlong and sltype != "1. None" ? color.red : na
+tpscol = showll and needshort and tptype != "1. None" ? color.lime : na
+pcscol = showll and needshort ? color.blue : na
+slscol = showll and needshort and sltype != "1. None" ? color.red : na
+plot(tpl, color = tplcol, title = "TP Long")
+plot(h, color = pclcol, title = "Channel High")
+plot(center, color = sllcol, title = "Close", color = color.orange)
+plot(l, color = pcscol, title = "Channel Low")
+plot(tps, color = tpscol, title = "TP Short")
+
+//Background
+size = strategy.position_size
+
+//Trading
+lotlong = 0.0
+lotlong := size != size[1] ? strategy.equity / close * sizelong / 100 : lotlong[1]
+lotshort = 0.0
+lotshort := size != size[1] ? strategy.equity / close * sizeshort / 100 : lotshort[1]
+mo = 0
+mo := strategy.position_size != 0 ? 0 : high >= center[1] and low <= center[1] ? 1 : mo[1]
+plotshape(mo == 1 ? 0 : 1, style=shape.xcross, location=location.top, size=size.small, color=color.orange, transp=0)
+
+if h > 0
+    longlimit = tptype == "1. None" ? na : tpl
+    longstop = sltype == "1. None" ? na : center
+    strategy.entry("Long", strategy.long, lotlong, stop = h, when = strategy.position_size <= 0 and needlong and truetime)
+    strategy.exit("TP Long", "Long", limit = longlimit, stop = longstop)
+    shortlimit = tptype == "1. None" ? na : tps
+    shortstop = sltype == "1. None" ? na : center
+    strategy.entry("Short", strategy.short, lotshort, stop = l, when = strategy.position_size >= 0 and needshort and truetime)
+    strategy.exit("Exit Short", "Short", limit = shortlimit, stop = shortstop)
+if time > timestamp_end
+    strategy.close_all()
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+View in Pine Editor・73 lines
+Use on chart
+1
+2
+517
+Feb 26
+Donchian Channel Trading Strategy
+
+The Donchian Channel Trading Strategy is a trend-following breakout system based on the Donchian Channel indicator, originally developed by Richard Donchian. The strategy identifies potential entry and exit points by tracking the highest high and lowest low over a specified lookback period.
+
+The upper band represents the highest price over the selected period, while the lower band represents the lowest price. A breakout above the upper band signals potential bullish momentum and may trigger a long position. Conversely, a breakout below the lower band signals bearish momentum and may trigger a short position.
+
+This strategy is designed to capture strong market trends and performs best in trending environments. During sideways or ranging markets, false breakouts may occur, so additional filters such as volume confirmation, moving averages, or volatility indicators can improve performance.
+
+Key features:
+
+Trend-following breakout logic
+
+Dynamic support and resistance levels
+
+Adjustable lookback period
+
+Suitable for multiple asset classes (Forex, stocks, crypto, futures)
+
+Works on various timeframes
+
+Risk management is essential when using this strategy. Stop-loss orders are typically placed on the opposite side of the channel or based on volatility measures to protect against sudden reversals.
+
+The Donchian Channel strategy is simple, systematic, and widely used by traders seeking to capture sustained price movements.
+Feb 28
+Release Notes
+Added an option to change the price source for channel plotting. Use only Open or Close values ​​when using a synthetic chart of the relationship between two assets.

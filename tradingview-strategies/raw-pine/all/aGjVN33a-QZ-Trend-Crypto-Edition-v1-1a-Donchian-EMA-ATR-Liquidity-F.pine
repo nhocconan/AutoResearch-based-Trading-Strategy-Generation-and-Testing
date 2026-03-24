@@ -1,0 +1,284 @@
+//@version=5
+strategy("QZ Trend (Crypto Edition) v1.1a: Donchian + EMA + ATR + Liquidity/Funding",
+     overlay=true, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.06,  // 按交易所调整：现货常见0.1%，永续吃单~0.06%
+     slippage=2, calc_on_order_fills=true, calc_on_every_tick=true,
+     pyramiding=10)
+
+//==================== 自定义 ADX（避免 ta.adx 兼容问题） ====================//
+f_adx(len) =>
+    upMove   = high - high[1]
+    downMove = low[1] - low
+    plusDM   = (upMove > 0 and upMove > downMove) ? upMove : 0.0
+    minusDM  = (downMove > 0 and downMove > upMove) ? downMove : 0.0
+    tr1      = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+    smTR     = ta.rma(tr1,    len)
+    smPDM    = ta.rma(plusDM, len)
+    smMDM    = ta.rma(minusDM,len)
+    plusDI   = 100.0 * smPDM / math.max(smTR, syminfo.mintick)
+    minusDI  = 100.0 * smMDM / math.max(smTR, syminfo.mintick)
+    denom    = plusDI + minusDI
+    dx       = (denom > 0) ? 100.0 * math.abs(plusDI - minusDI) / denom : 0.0
+    ta.rma(dx, len)
+
+//==================== 工具：对齐价格/数量 ====================//
+roundToTick(p) =>
+    tick = syminfo.mintick
+    math.round(p / tick) * tick
+
+floorToStep(x, step) =>
+    step <= 0 ? x : math.floor(x / step) * step
+
+//==================== 输入参数 ====================//
+gM = "市场/交易窗口"
+longOnly      = input.bool(false, "只做多头(现货)", group=gM)
+useSession    = input.bool(false, "启用自定义交易时段", group=gM)
+tradeSession  = input.session("0000-2359", "交易时段(本图表时区)", group=gM)
+tradeWeekends = input.bool(true, "允许周末交易", group=gM)
+
+avoidFunding = input.bool(true,  "避开资金费窗口(永续)", group=gM)
+fundHour1    = input.int(0,  "资金费小时1", minval=0, maxval=23, group=gM)
+fundHour2    = input.int(8,  "资金费小时2", minval=0, maxval=23, group=gM)
+fundHour3    = input.int(16, "资金费小时3", minval=0, maxval=23, group=gM)
+fundWindowM  = input.int(10, "避开窗口(分钟, ±)", minval=0, maxval=60, group=gM)
+
+gL = "流动性过滤"
+minDollarVol = input.float(1e6, "最小近似美元成交额/根 (close*volume)", step=1e5, group=gL)
+useDollarVol = input.bool(true, "启用成交额过滤", group=gL)
+
+g1 = "趋势/入场"
+donLen       = input.int(55,  "突破周期(唐奇安)", minval=2, group=g1)
+maLen        = input.int(50,  "趋势均线长度",     minval=2, group=g1)
+confirmAtrK  = input.float(0.3, "突破确认(ATR倍数)", minval=0, step=0.05, group=g1)
+adxLen       = input.int(14,  "ADX长度",        minval=2, group=g1)
+adxMin       = input.float(18, "最小ADX(0=不启用)", minval=0, step=1, group=g1)
+cooldownBars = input.int(5,   "出场后冷静期(根数)", minval=0, group=g1)
+
+g2 = "风控/止损"
+atrLen     = input.int(14,  "ATR长度",        minval=1, group=g2)
+slATR      = input.float(3.0, "初始止损(ATR倍数)", minval=0.1, step=0.1, group=g2)
+trailATR   = input.float(3.0, "移动止损(ATR倍数)", minval=0.1, step=0.1, group=g2)
+beAtR      = input.float(1.0, "盈利达到R后提至保本(0关闭)", minval=0, step=0.1, group=g2)
+maxBars    = input.int(0, "最长持仓(根, 0关闭)", minval=0, group=g2)
+
+g3 = "加仓(只在浮盈时)"
+maxAdds    = input.int(2,   "最多加仓次数", minval=0, maxval=5, group=g3)
+addStepATR = input.float(1.0, "每次加仓间距(ATR倍数)", minval=0.1, step=0.1, group=g3)
+addScale   = input.float(0.5,"每次加仓相对首仓比例", minval=0.1, maxval=1, step=0.1, group=g3)
+
+g4 = "资金/头寸"
+riskPct    = input.float(0.5, "单笔风险(占初始资金%)", minval=0.1, maxval=5, step=0.1, group=g4)
+qtyStep    = input.float(0.001, "数量步长(如BTC=0.001, 一些山寨=1)", step=0.0001, group=g4)
+minQty     = input.float(0.0, "最小下单数量(可留0)", step=0.0001, group=g4)
+
+//==================== 指标与条件 ====================//
+ema   = ta.ema(close, maLen)
+atr   = ta.atr(atrLen)
+adx   = f_adx(adxLen)
+
+upTr  = close > ema and ema > ema[1]
+dnTr  = close < ema and ema < ema[1]
+regOk = adx >= adxMin or adxMin == 0
+
+donHigh = ta.highest(high, donLen)[1]
+donLow  = ta.lowest(low,  donLen)[1]
+
+longBreak  = close > donHigh + confirmAtrK * atr
+shortBreak = close < donLow  - confirmAtrK * atr
+
+//==================== 24/7: 时段/周末/资金费窗口/流动性过滤 ====================//
+inSess    = useSession ? not na(time(timeframe.period, tradeSession)) : true
+isWeekend = dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+weekOk    = tradeWeekends or not isWeekend
+
+// 资金费窗口（仅在分/小时级别启用）
+isIntraday = timeframe.isintraday
+curMin = hour * 60 + minute
+
+f_ringDist(a, b) =>
+    d = math.abs(a - b)
+    math.min(d, 1440 - d)
+
+condFunding = f_ringDist(curMin, fundHour1*60) <= fundWindowM or
+              f_ringDist(curMin, fundHour2*60) <= fundWindowM or
+              f_ringDist(curMin, fundHour3*60) <= fundWindowM
+
+avoidFundingNow = avoidFunding and isIntraday
+inFundingWindow = avoidFundingNow and condFunding
+
+// 流动性过滤
+volUSD = close * volume
+liqOk  = useDollarVol ? (volUSD >= minDollarVol) : true
+
+allowedNow = inSess and weekOk and not inFundingWindow and liqOk
+
+flatNow = strategy.position_size == 0
+
+// 冷静期
+var int cooldownUntil = na
+justClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if justClosed and cooldownBars > 0
+    cooldownUntil := bar_index + cooldownBars
+coolOk = na(cooldownUntil) or bar_index >= cooldownUntil
+
+enterLong  = allowedNow and regOk and upTr and longBreak  and flatNow and coolOk
+enterShort = not longOnly and allowedNow and regOk and dnTr and shortBreak and flatNow and coolOk
+
+//==================== 头寸与风控状态变量 ====================//
+var float longStop        = na
+var float shortStop       = na
+var float baseEntryLong   = na
+var float baseStopLong    = na
+var float baseEntryShort  = na
+var float baseStopShort   = na
+var float lastAddPriceLong  = na
+var float lastAddPriceShort = na
+var int   longAdds = 0
+var int   shortAdds = 0
+var int   barsInPos = 0
+
+// 固定入场/出场ID
+var bool idsInit = false
+var string[] longIds     = array.new_string()
+var string[] longExitIds = array.new_string()
+var string[] shortIds     = array.new_string()
+var string[] shortExitIds = array.new_string()
+if not idsInit
+    for i = 0 to 10
+        array.push(longIds,     "L"  + str.tostring(i+1))
+        array.push(longExitIds, "LX" + str.tostring(i+1))
+        array.push(shortIds,     "S"  + str.tostring(i+1))
+        array.push(shortExitIds, "SX" + str.tostring(i+1))
+    idsInit := true
+
+// 单笔风险换算为数量（基于初始资金）
+riskCash = strategy.initial_capital * riskPct / 100.0
+calcQty(entryPrice, stopPrice) =>
+    riskPerUnit = math.max(math.abs(entryPrice - stopPrice), syminfo.mintick)
+    rawQty      = riskCash / riskPerUnit
+    finalQty    = math.max(minQty, rawQty)
+    floorToStep(finalQty, qtyStep)
+
+//==================== 入场 ====================//
+if enterLong
+    estEntry = close
+    initSL   = roundToTick(estEntry - slATR * atr)
+    if initSL < estEntry
+        q = calcQty(estEntry, initSL)
+        strategy.entry(array.get(longIds, 0), strategy.long, qty=q, comment="Breakout")
+        baseEntryLong     := estEntry
+        baseStopLong      := initSL
+        longStop          := initSL
+        lastAddPriceLong  := estEntry
+        longAdds := 0
+        barsInPos := 0
+        cooldownUntil := na
+
+if enterShort
+    estEntry = close
+    initSL   = roundToTick(estEntry + slATR * atr)
+    if initSL > estEntry
+        q = calcQty(estEntry, initSL)
+        strategy.entry(array.get(shortIds, 0), strategy.short, qty=q, comment="Breakout")
+        baseEntryShort     := estEntry
+        baseStopShort      := initSL
+        shortStop          := initSL
+        lastAddPriceShort  := estEntry
+        shortAdds := 0
+        barsInPos := 0
+        cooldownUntil := na
+
+//==================== 移动止损/保本/加仓/最长持仓 ====================//
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+if inLong or inShort
+    barsInPos += 1
+
+// Long
+if inLong
+    trl = roundToTick(close - trailATR * atr)
+    longStop := na(longStop) ? trl : math.max(longStop, trl)
+
+    if beAtR > 0 and not na(baseEntryLong) and not na(baseStopLong)
+        rNow = (close - baseEntryLong) / math.max(baseEntryLong - baseStopLong, syminfo.mintick)
+        if rNow >= beAtR
+            longStop := math.max(longStop, baseEntryLong)
+
+    // 时间止盈/止损
+    if maxBars > 0 and barsInPos >= maxBars
+        for i = 0 to maxAdds
+            strategy.close(array.get(longIds, i))
+    else
+        for i = 0 to maxAdds
+            strategy.exit(array.get(longExitIds, i), from_entry=array.get(longIds, i), stop=longStop)
+
+    // 金字塔加仓（仅浮盈且趋势强化）
+    canAdd = longAdds < maxAdds and close >= lastAddPriceLong + addStepATR * atr and upTr and regOk and allowedNow
+    if canAdd
+        baseQty = calcQty(baseEntryLong, baseStopLong)
+        addQty  = floorToStep(baseQty * addScale, qtyStep)
+        strategy.entry(array.get(longIds, longAdds + 1), strategy.long, qty=addQty, comment="Add")
+        lastAddPriceLong := close
+        longAdds += 1
+
+// Short
+if inShort
+    trl = roundToTick(close + trailATR * atr)
+    shortStop := na(shortStop) ? trl : math.min(shortStop, trl)
+
+    if beAtR > 0 and not na(baseEntryShort) and not na(baseStopShort)
+        rNow = (baseEntryShort - close) / math.max(baseStopShort - baseEntryShort, syminfo.mintick)
+        if rNow >= beAtR
+            shortStop := math.min(shortStop, baseEntryShort)
+
+    if maxBars > 0 and barsInPos >= maxBars
+        for i = 0 to maxAdds
+            strategy.close(array.get(shortIds, i))
+    else
+        for i = 0 to maxAdds
+            strategy.exit(array.get(shortExitIds, i), from_entry=array.get(shortIds, i), stop=shortStop)
+
+    canAdd = shortAdds < maxAdds and close <= lastAddPriceShort - addStepATR * atr and dnTr and regOk and allowedNow
+    if canAdd
+        baseQty = calcQty(baseEntryShort, baseStopShort)
+        addQty  = floorToStep(baseQty * addScale, qtyStep)
+        strategy.entry(array.get(shortIds, shortAdds + 1), strategy.short, qty=addQty, comment="Add")
+        lastAddPriceShort := close
+        shortAdds += 1
+
+//==================== 状态复位 ====================//
+flatNow2 = strategy.position_size == 0
+if flatNow2 and strategy.position_size[1] > 0
+    longStop := na, baseEntryLong := na, baseStopLong := na, lastAddPriceLong := na, longAdds := 0, barsInPos := 0
+if flatNow2 and strategy.position_size[1] < 0
+    shortStop := na, baseEntryShort := na, baseStopShort := na, lastAddPriceShort := na, shortAdds := 0, barsInPos := 0
+
+//==================== 可视化 ====================//
+plot(ema, "EMA", color=color.new(color.teal, 0), linewidth=2)
+plot(donHigh, "Donchian High", color=color.new(color.orange, 0))
+plot(donLow,  "Donchian Low",  color=color.new(color.orange, 0))
+plot(inLong  ? longStop  : na, "Long Stop",  color=color.new(color.red, 0),  style=plot.style_linebr)
+plot(inShort ? shortStop : na, "Short Stop", color=color.new(color.red, 0),  style=plot.style_linebr)
+
+bgcolor(adxMin > 0 and not regOk ? color.new(color.gray, 88) : na)
+bgcolor(avoidFunding and inFundingWindow ? color.new(color.yellow, 85) : na)
+bgcolor(not liqOk ? color.new(color.red, 92) : na)
+
+View in Pine Editor・266 lines
+Use on chart
+3
+0
+1 294
+The "QZ Trend (Crypto Edition)" is a rules-based trend-following breakout strategy for crypto spot or perpetual contracts, focusing on following trends, prioritizing risk control, seeking small losses and big wins, and trading only when advantageous.
+
+Key mechanisms include:
+- Market filters: Screen favorable conditions via ADX (trend strength), dollar volume (liquidity), funding fee windows, session/weekend restrictions, and spot-long-only settings.
+- Signals & entries: Based on price position relative to EMA and EMA trends, combined with breaking Donchian channel extremes (with ATR ratio confirmation), plus single-position rules and post-exit cooldowns.
+- Position sizing: Calculate positions by fixed risk percentage; initial stop-loss is ATR-based, complying with exchange min/max lot requirements.
+- Exits & risk management: Include initial stop-loss, trailing stop (tightens only), break-even rule (stop moves to entry when target floating profit is hit), time-based exit, and post-exit cooldowns.
+- Pyramiding: Add positions only when profitable with favorable momentum, requiring ATR-based spacing; add size is a fraction of the base position, with layers sharing stop logic but having unique order IDs.
+
+Charts display EMA, Donchian channels, current stop lines, and highlight low ADX, avoidable funding windows, and low-liquidity periods.
+
+Recommend starting with 4H or 1D timeframes, with typical parameters varying by cycle. Liquidity settings differ by token; perpetuals should enable funding window filters, while spot requires "long-only" and matching fees. The strategy performs well in trends with quick stop-losses but faces whipsaws in ranges (filters mitigate but don’t eliminate noise). Share your symbol and timeframe for tailored parameters.

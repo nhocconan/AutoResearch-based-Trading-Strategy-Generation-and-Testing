@@ -1,0 +1,199 @@
+//@version=6
+strategy("Smart Grid Scalping(Pullback) Strategy[BullByte]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=30, commission_type=strategy.commission.percent, commission_value=0.04, slippage=1)
+
+// === INPUTS ===
+atrLen       = input.int(10, "ATR Length")
+gridFactor   = input.float(0.35, "Grid Factor")  // Increased for more spacing
+profitTarget = input.float(0.004, "Profit Target", step=0.0001)
+noTradeZone  = input.float(0.003, "No-Trade Zone (%)", step=0.0001)
+shortLevel   = input.int(5, "Short Trigger Level", minval=0, maxval=14)
+longLevel    = input.int(5,  "Long Trigger Level", minval=0, maxval=14)
+minRSIShort  = input.int(70, "Min RSI for Short")
+maxRSILong   = input.int(30, "Max RSI for Long")
+
+// === CALCULATIONS ===
+atr = ta.atr(atrLen)
+rsi = ta.rsi(close, 14)
+basePrice = close[20]  // Use historical price to widen grid spacing
+
+// === GRID ARRAYS ===
+var float[] gridUp = array.new_float(15)
+var float[] gridDown = array.new_float(15)
+
+if bar_index > 20
+    for i = 0 to 14
+        array.set(gridUp, i, basePrice + (i + 1) * atr * gridFactor)
+        array.set(gridDown, i, basePrice - (i + 1) * atr * gridFactor)
+
+// === PLOT GRID LINES ===
+for i = 0 to 14
+    lineColorUp   = i == shortLevel ? color.red : color.new(color.red, 80)
+    lineColorDown = i == longLevel  ? color.green : color.new(color.green, 80)
+    line.new(bar_index - 1, array.get(gridUp, i), bar_index, array.get(gridUp, i), color=lineColorUp, width=i == shortLevel ? 2 : 1)
+    line.new(bar_index - 1, array.get(gridDown, i), bar_index, array.get(gridDown, i), color=lineColorDown, width=i == longLevel ? 2 : 1)
+
+// === ENTRY CONDITIONS ===
+shortCond = close > array.get(gridUp, shortLevel) and (high - low) / high > noTradeZone and rsi > minRSIShort and close < open
+longCond  = close < array.get(gridDown, longLevel) and (high - low) / low > noTradeZone and rsi < maxRSILong and close > open
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+if longCond
+    strategy.entry("Long", strategy.long)
+
+// === EXIT CONDITIONS ===
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "Long", limit=close * (1 + profitTarget), trail_price=close * (1 + profitTarget * 0.5), trail_offset=atr)
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", "Short", limit=close * (1 - profitTarget), trail_price=close * (1 - profitTarget * 0.5), trail_offset=atr)
+
+// === ENTRY LABELS ===
+plotshape(strategy.position_size > 0 and strategy.position_size[1] <= 0, location=location.belowbar, style=shape.labelup, color=color.green, text="LONG", textcolor=color.white)
+plotshape(strategy.position_size < 0 and strategy.position_size[1] >= 0, location=location.abovebar, style=shape.labeldown, color=color.red, text="SHORT", textcolor=color.white)
+
+View in Pine Editor・57 lines
+Use on chart
+1.1 K
+2
+27 377
+Apr 3, 2025
+The Smart Grid Scalping (Pullback) Strategy [BullByte] is a high-frequency trading strategy designed for short-term traders who seek to capitalize on market pullbacks. This strategy utilizes a dynamic ATR-based grid system to define optimal entry points, ensuring precise trade execution. It integrates volatility filtering and an RSI-based confirmation mechanism to enhance signal accuracy and reduce false entries.
+
+This strategy is specifically optimized for scalping by dynamically adjusting trade levels based on current market conditions. The grid-based system helps capture retracement opportunities while maintaining strict trade management through predefined profit targets and trailing stop-loss mechanisms.
+
+Key Features:
+
+1. ATR-Based Grid System:
+- Uses a 10-period ATR to dynamically calculate grid levels for entry points.
+- Prevents chasing trades by ensuring price has reached key levels before executing entries.
+
+2. No Trade Zone Protection:
+- Avoids low-volatility zones where price action is indecisive.
+- Ensures only high-momentum trades are executed to improve success rate.
+
+3. RSI-Based Entry Confirmation:
+- Long trades are triggered when RSI is below 30 (oversold) and price is in the lower grid zone.
+- Short trades are triggered when RSI is above 70 (overbought) and price is in the upper grid zone.
+
+4. Automated Trade Execution:
+- Long Entry: Triggered when price drops below the first grid level with sufficient volatility.
+- Short Entry: Triggered when price exceeds the highest grid level with sufficient volatility.
+
+5. Take Profit & Trailing Stop:
+- Profit target set at a customizable percentage (default 0.2%).
+- Adaptive trailing stop mechanism using ATR to lock in profits while minimizing premature exits.
+
+6. Visual Trade Annotations:
+- Clearly labeled "LONG" and "SHORT" markers appear at trade entries for better visualization.
+- Grid levels are plotted dynamically to aid decision-making.
+
+Strategy Logic:
+- The script first calculates the ATR-based grid levels and ensures price action has sufficient volatility before allowing trades.
+- An additional RSI filter is used to ensure trades are taken at ideal market conditions.
+- Once a trade is executed, the script implements a trailing stop and predefined take profit to maximize gains while reducing risks.
+
+---
+
+Disclaimer:
+Risk Warning:
+This strategy is provided for educational and informational purposes only. Trading involves significant risk, and past performance is not indicative of future results. Users are advised to conduct their own due diligence and risk management before using this strategy in live trading.
+
+The developer and publisher of this script are not responsible for any financial losses incurred by the use of this strategy. Market conditions, slippage, and execution quality can affect real-world trading outcomes.
+
+Use this script at your own discretion and always trade responsibly.
+
+
+Apr 14, 2025
+Release Notes
+// Added a 0.04% commission, 1 tick slippage, initial capital of $1000,
+// and position sizing set to 30% of equity to provide a clearer and more realistic performance report.
+Apr 18, 2025
+Release Notes
+✅ Overview
+This version of the Smart Grid Scalping (SGS) Strategy has been fine-tuned to capitalize on both bullish and bearish pullbacks using volatility-driven grid levels.
+
+⚙️ Backtest Configuration
+
+Parameter | Value
+Symbol | BTC/USD
+Timeframe | 15-minute
+Initial Capital | $1,000
+Position Size | 30% of equity per trade
+Commission | 0.04% per trade
+Slippage | 1%
+
+🧠 What’s New in This Script
+✅ 1. Bidirectional Grid Engine
+Built-in calculation of 15 upward grid levels (for short entries) and 15 downward grid levels (for long entries) using:
+
+basePrice = close[20]
+
+gridUp = basePrice + (i+1) * ATR * gridFactor
+
+gridDown = basePrice - (i+1) * ATR * gridFactor
+
+✅ 2. Dynamic Entry Logic (Both Long & Short)
+Long Condition:
+
+Price is below a selected gridDown level.
+
+RSI is below 30.
+
+Candle is bullish (close > open).
+
+Bar volatility exceeds noTradeZone filter.
+
+Short Condition:
+
+Price is above a selected gridUp level.
+
+RSI is above 70.
+
+Candle is bearish (close < open).
+
+Bar volatility exceeds noTradeZone filter.
+
+✅ 3. Trade Execution System
+Uses strategy.entry() to trigger both Long and Short positions with dynamic signals.
+
+✅ 4. Intelligent Exit Conditions
+Exits are handled with a dual mechanism:
+
+strategy.exit() includes:
+
+A fixed limit profit target.
+
+A trailing stop using ATR and a trailing anchor.
+
+Ensures trades capture the move but are protected from reversals.
+
+✅ 5. Visual Trade and Grid Display
+Plots:
+
+15 Green Grid Lines = Buy Zones
+
+15 Red Grid Lines = Sell Zones
+
+Bold lines indicate actual entry zones (longLevel, shortLevel)
+
+
+🧪 Script Input Parameters (Defaults from Script)
+
+Setting | Value
+ATR Length | 10
+Grid Factor | 0.35
+Profit Target | 0.004 (0.4%)
+No Trade Zone | 0.003 (0.3%)
+Short Trigger Level | 5
+Long Trigger Level | 5
+RSI Threshold for Short | 70
+RSI Threshold for Long | 30
+
+
+⚠️ Disclaimer
+This strategy script is designed for educational and experimental purposes only. While it uses volatility filtering, candle logic, and momentum thresholds to optimize trade signals, it is not a financial advisory tool. Please do not use this strategy as a sole trading system without proper risk management, position sizing, and multi-timeframe confirmation. Always paper trade extensively before using real capital.
+Apr 19, 2025
+Release Notes
+No functional changes. Updated metadata and comments for better clarity and compliance.

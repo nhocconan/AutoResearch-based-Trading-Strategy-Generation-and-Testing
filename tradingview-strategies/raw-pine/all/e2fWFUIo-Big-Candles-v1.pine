@@ -1,0 +1,24 @@
+//@version=2
+strategy("Big Candles", overlay=true)
+
+barHeight = input(.032)
+
+bigUp() => close > open and high-low > barHeight
+bigDown() => close < open and high-low > barHeight
+
+plotshape(bigUp(), color=green, style=shape.arrowup, text="Buy")
+plotshape(bigDown(), color=red, style=shape.arrowdown, text="Sell")
+barcolor(bigDown() ? red : bigUp() ? green : gray)
+
+View in Pine Editor・11 lines
+Use on chart
+4
+7
+7
+9
+20 141
+This script simply takes a user-defined bar height number (variable barHeight) to find large candles. Automatically colors large bullish and bearish candles green or red, respectively. The barHeight can be modified to fit your needs.
+
+Use this in a variety of ways:
+- Confirm breakouts of support / resistance
+- Identify new trends

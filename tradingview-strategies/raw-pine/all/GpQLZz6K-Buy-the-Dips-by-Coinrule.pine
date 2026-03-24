@@ -1,0 +1,62 @@
+//@version=3
+strategy(shorttitle='Buy the Dips',title='Buy the Dips (by Coinrule)', overlay=true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,  title = "From Month")     
+fromDay   = input(defval = 10,    title = "From Day")       
+fromYear  = input(defval = 2020, title = "From Year")       
+thruMonth = input(defval = 1,    title = "Thru Month")     
+thruDay   = input(defval = 1,    title = "Thru Day")     
+thruYear  = input(defval = 2112, title = "Thru Year")       
+
+showDate  = input(defval = true, title = "Show Date Range")
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+inp_lkb = input(1, title='Lookback Period')
+ 
+perc_change(lkb) =>
+    overall_change = ((close[0] - close[lkb]) / close[lkb]) * 100
+
+// Call the function    
+overall = perc_change(inp_lkb)
+
+//Entry
+
+dip= -(input(2))
+
+strategy.entry(id="long", long = true, when = overall< dip and window()) 
+
+//Exit
+Stop_loss= ((input (2))/100)
+Take_profit= ((input (2))/100)
+
+longStopPrice  = strategy.position_avg_price * (1 - Stop_loss)
+longTakeProfit = strategy.position_avg_price * (1 + Take_profit)
+
+strategy.close("long", when = close < longStopPrice or close > longTakeProfit and window())
+
+View in Pine Editor・42 lines
+Use on chart
+3
+0
+6
+2
+12 871
+Taking your first steps into automated trading may be challenging. Coinrule's mission is to make it as easy as possible, also for beginners.
+
+Here follows the best trading strategy to get started with Coinrule. This strategy doesn't involve complex indicators, yet was proved to be effective in the long term for many coins. Results seem to be improved when trading a coin vs Bitcoin.
+
+
+The strategy buys the dips of a coin to sell with a profit. A stop-loss protects every trade.
+
+
+Crypto markets offer high volatility and, thus, excellent opportunities for trading. Excluding times of severe downtrend, buying the dip is a simple and effective long-term trading strategy. The buy-signal is set to a 2% drop in a 30-minutes time frame.
+
+Each trade comes with a take profit and a stop loss. Both set at 2%.
+
+You can adjust these percentages to the market volatility as an advanced setup. You can backtest the outcomes using the backtesting tool from Tradingview
+
+The strategy assumes each order to trade 30% of the available capital. A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange.

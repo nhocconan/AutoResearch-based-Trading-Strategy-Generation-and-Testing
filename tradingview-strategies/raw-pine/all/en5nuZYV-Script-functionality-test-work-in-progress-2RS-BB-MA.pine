@@ -1,0 +1,81 @@
+//@version=2
+
+strategy(title = "Madrugada strat copy", overlay = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, currency = currency.USD)
+
+// === GENERAL INPUTS ===
+// RSI 1
+RSIlength = input(10,title="RSI") 
+RSIoverSold = input(65,title="OSold")
+RSIoverBought = input(35,title="OBought")
+price = close
+vrsi = rsi(price, RSIlength)
+// RSI 2
+RSIlength2 = input(6,title="RSI2") 
+RSIoverSold2 = input(65,title="OSold2")
+RSIoverBought2 = input(35,title="OBought2")
+price2 = close
+vrsi2 = rsi(price2, RSIlength2)
+
+//Bollinger Bands
+source = close
+Bollinger = input(20, minval=1), Desv = input(1.7, minval=0.001, maxval=50)
+basis = sma(source, Bollinger)
+dev = Desv * stdev(source, Bollinger)
+upper = basis + dev
+lower = basis - dev
+plot(basis, color=red, title="BB ma")
+p1 = plot(upper, color=blue, title="BBajo")
+p2 = plot(lower, color=blue, title="BAlto")
+fill(p1, p2)
+
+//Media movil
+short = input(3, minval=1, title="Media corta")
+long = input(10, minval=1, title="Media larga")
+src = close
+plot(sma(src, short), color=#00FF00, transp=0, linewidth=1, title="Media rapida")
+plot(sma(src, long), color=white, transp=0, linewidth=2, title="Media lenta")
+
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+enterLong() => vrsi < 30 and  vrsi2 < 27 and cross(lower, price)
+exitLong() => short < long
+strategy.entry(id = "Long", long = true, when = enterLong()) // use function or simple condition to decide when to get in
+// === STRATEGY - SHORT POSITION EXECUTION ===
+enterShort() => vrsi > 70 and vrsi2 > 70 and cross(upper, price)
+strategy.entry(id = "Short", long = false, when = enterShort())
+
+
+// Definición señales de compra
+buy_signals = vrsi < 30 and  vrsi2 < 27 and cross(lower, price)
+
+// Definición señales de venta
+sell_signals = vrsi > 70 and vrsi2 > 70 and cross(upper, price)
+
+// Dibuja las señales de compra venta en franjas de color
+b_color = (sell_signals) ? color(red,65) : (buy_signals) ? color(green,65) : na
+bgcolor(b_color)
+
+// Dibuja las señales de compra venta coloreando las velas
+barcolor(buy_signals ? white : sell_signals ? white : na)
+
+plot(vrsi, color=white, linewidth=1)
+plot(vrsi, color=white, linewidth=2)
+
+// Crea alarmas usables desde el desplegable para poder enviar mails a haas
+alertcondition(buy_signals, title='Buy-Signal', message='compra')
+alertcondition(sell_signals, title='Sell-Signal', message='vende')
+
+View in Pine Editor・66 lines
+Use on chart
+8
+6
+3
+4 255
+This is the first script I've written. Its sole purpose is to make me learn a bit of pine script. Its not intended to trade live.
+Feel free to modify it if you wish and let me know if you do it. Also any comments are welcome!
+
+Also i need help in two things:
+1. Im unable to print the "in-strategy" rsi on chart
+2. I want to ignore the first buy signal after each sell. I was looking to ad a counter to the signals but im unable to do it.
+
+Any help will be greatly appreciated!

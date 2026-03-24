@@ -1,0 +1,124 @@
+//@version=5
+strategy("NQ Futures $200/day Strategy", overlay=true)
+
+// Input Parameters
+fastLength = input.int(9, title="Fast MA Length")
+slowLength = input.int(21, title="Slow MA Length")
+dailyTarget = input.float(200, title="Daily Profit Target (Set to 0 to disable)", step=0.01)  
+stopLossAmount = input.float(100, title="Stop Loss Amount", step=0.01)
+trailOffset = input.float(20, title="Trailing Stop Offset", step=0.01)
+
+// Moving Averages
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// Crossover Conditions for Buy and Sell
+longCondition = ta.crossover(fastMA, slowMA)
+shortCondition = ta.crossunder(fastMA, slowMA)
+
+// Entry conditions
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+// Set Stop Loss and Trailing Stop
+if (strategy.opentrades > 0)
+    strategy.exit("Exit Long", from_entry="Buy", stop=strategy.position_avg_price - stopLossAmount, trail_offset=trailOffset)
+    strategy.exit("Exit Short", from_entry="Sell", stop=strategy.position_avg_price + stopLossAmount, trail_offset=trailOffset)
+
+// Conditional Daily Profit Target (disabled if dailyTarget is 0)
+if (dailyTarget > 0 and strategy.netprofit >= dailyTarget)
+    strategy.close_all(comment="Daily Target Reached")
+
+// Plotting the moving averages on the main chart
+plot(fastMA, color=color.blue, title="Fast MA")
+plot(slowMA, color=color.red, title="Slow MA")
+
+// Plot "Long" and "Short" signals on the main chart
+plotshape(series=longCondition, title="Long Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="Long")
+plotshape(series=shortCondition, title="Short Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="Short")
+
+// Markers for entry on the price chart
+plotshape(series=longCondition, title="Buy Marker", location=location.belowbar, color=color.green, style=shape.triangledown, size=size.small)
+plotshape(series=shortCondition, title="Sell Marker", location=location.abovebar, color=color.red, style=shape.triangleup, size=size.small)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+5
+0
+3 741
+Mac N Cheez Strategy (Set a $200 Take profit Manually)
+
+It's super cheesy. Strategy does the following:
+
+Here's a detailed explanation of what the entire script does, including its key components, functionality, and purpose.
+1. Strategy Setup and Input Parameters:
+
+Strategy Name: The script is named "NQ Futures $200/day Strategy" and is set as an overlay, meaning all elements (like moving averages and signals) are plotted on the price chart.
+Input Parameters:
+fastLength: This sets the length of the fast moving average. The user can adjust this value, and it defaults to 9.
+slowLength: This sets the length of the slow moving average. The user can adjust this value, and it defaults to 21.
+dailyTarget: The daily profit target, which defaults to $200. If set to 0, this disables the daily profit target.
+stopLossAmount: The fixed stop-loss amount per trade, defaulting to $100. This value is used to calculate how much you're willing to lose on a single trade.
+trailOffset: This value sets the distance for a trailing stop. It helps protect profits by automatically adjusting the stop-loss as the price moves in your favor.
+
+2. Calculating the Moving Averages:
+
+fastMA: The fast moving average is calculated using the ta.sma() function on the close price with a period length of fastLength. The ta.sma() function calculates the simple moving average.
+slowMA: The slow moving average is also calculated using ta.sma() but with the slowLength period.
+
+These moving averages are used to determine trend direction and identify entry points.
+3. Buy and Sell Signal Conditions:
+
+longCondition: This is the buy condition. It occurs when the fast moving average crosses above the slow moving average. The script uses ta.crossover() to detect this crossover event.
+shortCondition: This is the sell condition. It occurs when the fast moving average crosses below the slow moving average. The script uses ta.crossunder() to detect this crossunder event.
+
+4. Executing Buy and Sell Orders:
+
+Buy Orders: When the longCondition is true (i.e., fast MA crosses above slow MA), the script enters a long position using strategy.entry("Buy", strategy.long).
+Sell Orders: When the shortCondition is true (i.e., fast MA crosses below slow MA), the script enters a short position using strategy.entry("Sell", strategy.short).
+
+5. Setting Stop Loss and Trailing Stop:
+
+Stop-Loss for Long Positions: The stop-loss is calculated as the entry price minus the stopLossAmount. If the price falls below this level, the trade is exited automatically.
+Stop-Loss for Short Positions: The stop-loss is calculated as the entry price plus the stopLossAmount. If the price rises above this level, the short trade is exited.
+Trailing Stop: The trail_offset dynamically adjusts the stop-loss as the price moves in favor of the trade, locking in profits while still allowing room for market fluctuations.
+
+6. Conditional Daily Profit Target:
+
+The script includes a daily profit target that automatically closes all trades once the total profit for the day reaches or exceeds the dailyTarget.
+Conditional Logic:
+If the dailyTarget is greater than 0, the strategy checks whether the strategy.netprofit (total profit for the day) has reached or exceeded the target.
+If the strategy.netprofit >= dailyTarget, the script calls strategy.close_all(), closing all open trades for the day and stopping further trading.
+If dailyTarget is set to 0, this logic is skipped, and the script continues trading without a daily profit target.
+
+7. Plotting Moving Averages:
+
+plot(fastMA): This plots the fast moving average as a blue line on the price chart.
+plot(slowMA): This plots the slow moving average as a red line on the price chart. These help visualize the crossover points and the trend direction on the chart.
+
+8. Plotting Buy and Sell Signals:
+
+plotshape(): The script uses plotshape() to add visual markers when buy or sell conditions are met:
+"Long Signal": When a buy condition (longCondition) is met, a green marker is plotted below the price bar with the label "Long".
+"Short Signal": When a sell condition (shortCondition) is met, a red marker is plotted above the price bar with the label "Short".
+These markers help traders quickly see when buy or sell signals occurred on the chart.
+
+In addition, triangle markers are plotted:
+
+Green Triangle: Indicates where a buy entry occurred.
+Red Triangle: Indicates where a sell entry occurred.
+
+Summary of What the Script Does:
+
+Inputs: The script allows the user to adjust moving average lengths, daily profit targets, stop-loss amounts, and trailing stop offsets.
+Signals: It generates buy and sell signals based on the crossovers of the fast and slow moving averages.
+Order Execution: It executes long positions on buy signals and short positions on sell signals.
+Stop-Loss and Trailing Stop: It sets dynamic stop-losses and uses a trailing stop to protect profits.
+Daily Profit Target: The strategy stops trading for the day once the net profit reaches the daily target (unless the target is disabled by setting it to 0).
+Visual Markers: It plots moving averages and buy/sell signals directly on the main price chart to aid in visual analysis.
+
+This script is designed to trade based on moving average crossovers, with robust risk management features like stop-loss and trailing stops, along with an optional daily profit target to limit daily trading activity. Let me know if you need further clarification or want to adjust any specific part of the script!

@@ -1,0 +1,99 @@
+//@version=3
+strategy(title="NVT Signal with RMA and thresholds (Strategy / Backtest)",shorttitle="NVTS Strategy", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 10000, slippage = 5)
+// Thansk to @kishin for the study :)
+// https://www.tradingview.com/script/WfUY8ffF-NVT-Signal-with-RMA-and-thresholds-alertable/
+//
+// Idea: An NVT Signal indicator that can also tell you when NVT crosses or
+// deviates significantly from the NVTS (smoothed indicator).
+
+// What is NVT? - Median(14) of [Bitcoin market cap / Daily transaction volume in USD]
+// What is NVTS? - Bitcoin market cap / 90MA of Daily transaction volume in USD
+// Note: the 14-day median is applied to negate the sawtooth pattern on transaction volume.
+// Intention: To detect when Bitcoin is overvalued/undervalued compared to the
+// utility it serves beyond what numbers in a database (on exchange) can.
+// "How much is Bitcoin worth compared to the value moved on its blockchain?"
+
+// Credits to Willy Woo & Chris Burniske (NVT Ratio), Dimitry Kalichkin (NVT Signal)
+
+// Goal: Show NVTS, NVT Ratio, an MA representing the long-term trend,
+// highlight significant deviation from that trend, highlight "oversold" and
+// "overbought" backgrounds based on absolute value of NVTS.
+// Feel free to apply other indicators on NVTS, such as Bollinger Bands.
+
+// Inputs (optional)
+med_nvt = input(14,"Median period in NVT Ratio")
+ma_nvts = input(90,"MA used in NVTS")
+show_nvts_ma = input(true,"Show RMA of NVTS")
+nvts_ma_periods = input(90,"MA used in RMA of NVTS (deviation base)")
+nvts_deviation_threshold = input(0.35,"Deviation threshold from RMA")
+bgcolor_overbought_threshold = input(150,"'Overbought' NVTS value")
+bgcolor_oversold_threshold = input(60,"'Oversold' NVTS value")
+
+fixedSL = input(title="SL Activation", defval=300)
+trailSL = input(title="SL Trigger", defval=1)
+fixedTP = input(title="TP Activation", defval=150)
+trailTP = input(title="TP Trigger", defval=1)
+
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2019, title = "From Year", minval = 2017)
+ToMonth   = input(defval = 6, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 19, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2020, title = "To Year", minval = 2017)
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+startTimeOk()  => time >= start and time <= finish ? true : false // create function "within window of time" if statement true
+// QUANDL:BCHAIN/ETRVU is USD-denominated daily transaction value on BTC blockchain
+// QUANDL:BCHAIN/MKTCP is USD-denominated Bitcoin marketcap
+
+// Get data and calculate NVT Ratio
+ma90 = sma(close, ma_nvts)
+etrvu = security("QUANDL:BCHAIN/ETRVU","D",close)
+etrvu_ma90 = security("QUANDL:BCHAIN/ETRVU","D",ma90)
+mktcp = security("QUANDL:BCHAIN/MKTCP","D",close)
+nvt_not_medianed = mktcp/etrvu
+// This function is the same as median() except Tradingview doesn't have that...
+nvtratio = percentile_nearest_rank(nvt_not_medianed, med_nvt, 50)
+
+// Calculate NVTS
+nvts = mktcp/etrvu_ma90
+// Calculate RMA (EMA with a stronger bias for recent values) for NVTS
+// I realize this is an MA on an MA, but this is fine since we want to
+// notice deviations from the long-term trend
+nvts_rma = rma(nvts,nvts_ma_periods)
+// Deviation from RMA, absolute value to detect both high and low deviations
+nvts_ma_deviation = abs((nvts-nvts_rma)/nvts_rma)
+
+// Create boolean condition representing deviation
+c_deviation = nvts_ma_deviation>nvts_deviation_threshold
+// Create boolean condition for absolute overbought/oversold
+c_overbought = nvts > bgcolor_overbought_threshold
+c_oversold = nvts < bgcolor_oversold_threshold
+
+// Plot all data
+plot(nvtratio,"NVT Ratio",color=#333333,linewidth=3)
+// Colors line white if RMA deviation is above threshold
+plot(nvts,"NVT Signal",color=c_deviation?white:#ff9900,linewidth=2)
+plot(show_nvts_ma ? nvts_rma : na,"NVTS RMA",color=#f4ab3d)
+// Colors the background based on parameters set by user
+bgcolor(c_overbought?red:na)
+bgcolor(c_oversold?green:na)
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+strategy.entry("Long", strategy.long, when= c_oversold and startTimeOk())
+strategy.exit("Exit", qty_percent = 100, loss=fixedSL, trail_offset=trailTP, trail_points=fixedTP) 
+strategy.exit("Exit", when= c_overbought)
+// === STRATEGY - SHORT POSITION EXECUTION ===
+strategy.entry("Short", strategy.short, when= c_overbought and startTimeOk())
+strategy.exit("Exit", qty_percent = 100, loss=fixedSL, trail_offset=trailTP, trail_points=fixedTP)
+strategy.exit("Exit", when= c_oversold)
+
+View in Pine Editor・89 lines
+Use on chart
+7
+3
+2
+5
+17 136
+This is the strategy w/ backtester and trailing-stop / stop-loss for kishin's NVT alerts
+

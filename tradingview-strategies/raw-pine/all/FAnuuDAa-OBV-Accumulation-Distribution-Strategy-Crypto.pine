@@ -1,0 +1,53 @@
+//@version=4
+//@author SoftKill21
+strategy(title="OBV Accumulation / Distribution Strategy", overlay=true, initial_capital = 1, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent , commission_value=0.1 )
+
+
+// eachpoint = volume * ((close - open)/(high-low) )
+
+eachpoint2 = volume * ((close - nz(close[1]))/(high-low) )
+
+allpoints = cum(eachpoint2)
+
+len = input(20, minval=1, title="Length")
+src = allpoints
+EMA = ema(src, len)
+
+up = crossover(allpoints,EMA)
+down  = crossunder(allpoints,EMA)
+
+long = up and close > open and allpoints > allpoints[1] 
+short = down and close < open and allpoints < allpoints[1] and close < low[1] 
+
+strategy.entry("long",1,when=long)
+strategy.close("long",when=short)
+View in Pine Editor・23 lines
+Use on chart
+4
+9
+0
+1
+15 780
+This version its made for 8-12h and works amazingly on the ETH pairs. Can be adapted to others as well
+
+
+For this example, I used an initial 1$ account, using always full capital on each trade(without using any leverage), together with a 0.1% commission/fees for each deal, on Coinbase broker.
+
+This is a long only strategy
+
+The components for the inside of the strategy are the next one :
+1. OBV Accumulation/Distribution
+3. EMA
+
+
+The rules here are simple : we check for cross up or above on OBV and EMAmoving average and after that we check for the trend direction based on ascending/descending OBV. Based on this we enter long or exit long.
+
+
+
+
+RISK WARNING
+Trading on any financial market involves a risk of loss. Please consider carefully if such trading is appropriate for you. Past performance is not indicative of future results.
+
+
+
+If you have any questions or you are interested in trying it, private message me and I will give you as soon as I see the message a trial for it.

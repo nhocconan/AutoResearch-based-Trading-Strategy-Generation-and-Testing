@@ -1,0 +1,295 @@
+//@version=5
+strategy("ES EMA Pullback System", overlay=true,
+     initial_capital=50000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1)
+
+// ===== INPUTS =====
+fastEMA = input.int(9)
+midEMA  = input.int(21)
+slowEMA = input.int(50)
+
+atrLen = input.int(14)
+stopATR = input.float(1.6)
+targetATR = input.float(3.2)
+
+// ===== SESSION =====
+sessionInput = input.session("0930-1130,1330-1600")
+inSession = not na(time(timeframe.period, sessionInput))
+
+// ===== EMAs =====
+ema9  = ta.ema(close, fastEMA)
+ema21 = ta.ema(close, midEMA)
+ema50 = ta.ema(close, slowEMA)
+
+plot(ema9, color=color.blue)
+plot(ema21, color=color.orange)
+plot(ema50, color=color.red)
+
+// ===== TREND =====
+bearTrend = ema9 < ema21 and ema21 < ema50
+
+// ===== PULLBACK =====
+pullback = high >= ema9
+
+// ===== MOMENTUM =====
+bearMomentum = close < open
+
+// ===== ENTRY =====
+sellSignal =
+     bearTrend and
+     pullback and
+     bearMomentum
+
+// ===== ATR =====
+atr = ta.atr(atrLen)
+
+shortStop = close + atr * stopATR
+shortTarget = close - atr * targetATR
+
+// ===== EXECUTE =====
+if sellSignal and inSession
+    strategy.entry("SELL", strategy.short)
+
+strategy.exit("EXIT", "SELL",
+     stop=shortStop,
+     limit=shortTarget)
+
+// ===== LABEL =====
+if sellSignal and inSession
+    label.new(bar_index, high, "SELL",
+         style=label.style_label_down,
+         color=color.red,
+         textcolor=color.white,
+         size=size.tiny)
+
+View in Pine Editor・64 lines
+Use on chart
+7
+233
+Filter 1 — Trend Direction
+
+This is determined by the EMA stack.
+
+Bullish
+EMA9 > EMA21 > EMA50
+Bearish
+EMA9 < EMA21 < EMA50
+
+Illustration:
+
+UPTREND
+
+price
+↑
+│ ●
+│ ●
+│ ●
+│
+EMA9
+EMA21
+EMA50
+Filter 2 — Pullback to the Moving Average
+
+You want price to return to the EMA area.
+
+Trend move
+↑
+│
+│
+│
+│
+│
+↓ pullback
+
+Example:
+
+price
+│
+│ ●
+│ ●
+│ ●
+│ ●
+│●
+└────────────
+EMA9
+
+This is where new traders panic and exit.
+
+Professionals enter here.
+
+Filter 3 — Momentum Candle
+
+We need proof that the trend is resuming.
+
+Example bearish signal candle:
+
+│
+│ ▲ pullback
+│ ▲
+│▲
+│
+│ ▼ big red candle
+│ ▼
+
+This candle shows sellers are back in control.
+
+5️⃣ Bearish Trade Example
+
+Step-by-step:
+
+Step 1 — Confirm downtrend
+EMA9
+EMA21
+EMA50
+
+All sloping down.
+
+Step 2 — Wait for pullback
+
+Price retraces toward the EMA zone.
+
+downtrend
+↓
+↓
+↑ pullback
+↑
+Step 3 — Momentum candle
+
+A bearish candle appears.
+
+pullback
+↑
+↑
+▼ SELL candle
+Step 4 — Enter trade
+ENTRY = close of signal candle
+Step 5 — Stop and target
+
+Your system uses ATR risk management.
+
+Example:
+
+Entry: 5000
+Stop: 5008
+Target: 4984
+
+That gives 1:2 reward/risk.
+
+Illustration:
+
+stop
+│
+│
+entry ─────┼────────
+│
+│
+target
+6️⃣ Bullish Trade Example
+
+The rules are the mirror image.
+
+Step 1 — Confirm uptrend
+EMA9 above EMA21
+EMA21 above EMA50
+Step 2 — Wait for pullback
+trend up
+↑
+↑
+↓ pullback
+Step 3 — Bullish momentum candle
+pullback
+↓
+↓
+▲ strong green candle
+Step 4 — Enter
+buy at close of signal candle
+Step 5 — Stop and target
+target = 2x stop distance
+7️⃣ When NOT to Trade
+
+Your strategy fails in chop.
+
+Example:
+
+price
+│ ▲
+│ ▼
+│ ▲
+│ ▼
+│ ▲
+
+This sideways action causes:
+
+false signals
+stop outs
+drawdown
+
+Warning signs:
+
+🚫 EMAs tangled together
+🚫 No clear direction
+🚫 Small candles
+
+Illustration:
+
+EMA9
+EMA21
+EMA50
+all tangled
+
+Avoid trading then.
+
+8️⃣ Ideal Trading Session
+
+ES moves most during:
+
+9:30 – 11:30 AM
+1:30 – 4:00 PM
+
+Worst time:
+
+11:30 – 1:30 (lunch chop)
+9️⃣ Trade Management
+
+Your system is designed for:
+
+Win rate ≈ 35-40%
+Reward ≈ 2x risk
+
+That means:
+
+Many small losses
+Few big winners
+
+Example sequence:
+
+Loss
+Loss
+Win
+Loss
+Win
+Win
+
+Still profitable.
+
+🔑 The Core Idea
+
+Your strategy exploits one simple behavior:
+
+Trends
+pause
+then continue
+
+You enter during the pause.
+
+What a Perfect Setup Looks Like
+trend
+↓
+↓
+pullback
+↑
+↑
+momentum candle
+▼
+ENTRY

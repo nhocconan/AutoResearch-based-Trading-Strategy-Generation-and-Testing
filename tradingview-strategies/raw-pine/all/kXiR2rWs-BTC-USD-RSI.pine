@@ -1,0 +1,13 @@
+//@version=5
+first_buy_level=##input(defval=27,type='INPUT_INTEGER',##id='in_1')
+second_buy_level=##input(defval=18,type='INPUT_INTEGER',##id='in_2')
+first_sell_level=##input(defval=68,type='INPUT_INTEGER',##id='in_3')
+second_sell_level=##input(defval=80,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_0,first_sell_level,input__float)
+##root(root_metainfo,rm_1,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_2,second_sell_level,input__float)
+##root(root_metainfo,rm_3,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_4,first_buy_level,input__float)
+##root(root_metainfo,rm_5,hline.style_dashed,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_6,second_buy_level,input__float)
+##root(root_metainfo,rm_7,hline.style_dashed,cb__hline_style__integer,hline,linestyle)

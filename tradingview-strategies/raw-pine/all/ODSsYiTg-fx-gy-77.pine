@@ -1,0 +1,29 @@
+//@version=4
+strategy("fx_gy_77", overlay=false)
+
+isr = stoch(rsi(open,10),high,low,10)
+
+[macdLine, signalLine, histLine] = macd(close, 12, 26, 9)
+
+//plot(macdLine, color=color.blue)
+//plot(signalLine, color=color.orange)
+//plot(histLine, color=color.red, style=plot.style_histogram)
+
+plot(isr)
+
+longCondition = crossover(signalLine,macdLine)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(signalLine,macdLine)
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・20 lines
+Use on chart
+3
+4
+1 283
+fx_gy_77
+
+version one of script request to be built

@@ -1,0 +1,38 @@
+//@version=3
+strategy("QuantNomad - RSI Strategy - LTCUSDT - 5m", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+length     = input(3)
+overSold   = input(47)
+overBought = input(56)
+
+price = close
+
+vrsi = rsi(price, length)
+
+if (not na(vrsi))
+    if (crossover(vrsi, overSold))
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if (crossunder(vrsi, overBought))
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・18 lines
+Use on chart
+2
+5
+8
+11
+6 310
+Jun 8, 2019
+Really nice performance of Simple RSI Strategy for LTCUSDT ( Binance ) 5m chart.
+Params: RSI Length: 3, RSI OverSold level: 47, RSI OverBought Level: 56
+Performance: 391% profit, 2400 trades, 42% prof, 14.6% dd , 0.65 sharpe.
+
+I think this strategy can be a really nice base for a pretty good strategy. We have quite a lot of trades here you can add additional filters that will improve strategy a bit.
+
+And remember:
+Past performance does not guarantee future results.
+Oct 14, 2020
+Release Notes
+Cleaning the code

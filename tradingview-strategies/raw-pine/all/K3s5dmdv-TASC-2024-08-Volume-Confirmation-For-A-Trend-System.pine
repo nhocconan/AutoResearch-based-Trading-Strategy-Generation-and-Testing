@@ -1,0 +1,145 @@
+//@version=5
+string title = "TASC 2024.08 Volume Confirmation For A Trend System"
+string stitle = "VCTS"
+strategy(title, stitle, false)
+
+
+// Input
+lenADX  = input.int(14, "ADX Length", 1)
+smt     = input.int(14, "ADX Smoothing", 1, 50)
+fastTTI = input.int(13, "TTI Fast Average", 1)
+slowTTI = input.int(26, "TTI Slow Average", 1)
+smtTTI  = input.int(9,  "TTI Signal Length", 1)
+shortVP = input.int(5,  "VPCI Short-Term Average", 1)
+longVP  = input.int(25, "VPCI Long-Term Average", 1)
+
+
+// Functions
+// ADX
+adx(lenADX, smt) =>
+    upDM   =  ta.change(high)
+    dwDM   = -ta.change(low)
+    pDM    = na(upDM) ? na : upDM > dwDM and upDM > 0 ? upDM : 0
+    mDM    = na(dwDM) ? na : dwDM > upDM and dwDM > 0 ? dwDM : 0
+    ATR    = ta.atr(lenADX)
+    pDI    = fixnan(100 * ta.rma(pDM, lenADX) / ATR)
+    mDI    = fixnan(100 * ta.rma(mDM, lenADX) / ATR)
+    ADX    = 100*ta.rma(math.abs((pDI - mDI)  / (pDI + mDI)), smt)
+    ADX
+
+// TTI
+// See also: https://www.tradingview.com/script/B6a7HzVn/
+tti(price, fast, slow) =>
+    fastMA = ta.vwma(price, fast)  
+    slowMA = ta.vwma(price, slow)  
+    VWMACD = fastMA - slowMA 
+    vMult  = math.pow((fastMA / slowMA), 2) 
+    VEFA   = fastMA * vMult 
+    VESA   = slowMA / vMult
+    TTI    = VEFA - VESA
+    signal = ta.sma(TTI, smtTTI)
+    [TTI, signal]
+
+// VPCI
+// See also: https://www.tradingview.com/script/lmTqKOsa-Indicator-Volume-Price-Confirmation-Indicator-VPCI/
+vpci(long, short) =>
+    VPC    = ta.vwma(close, long)  - ta.sma(close, long)
+    VPR    = ta.vwma(close, short) / ta.sma(close, short)
+    VM     = ta.sma(volume, short) / ta.sma(volume, long)
+    VPCI   = VPC * VPR * VM
+    VPCI
+
+
+// Calculations
+float ADX     = adx(lenADX, smt)
+[TTI, signal] = tti(close, fastTTI, slowTTI) 
+float VPCI    = vpci(longVP, shortVP)
+
+
+// Plot
+col1  = #4daf4a50
+col2  = #e41a1c20
+col0  = #ffffff00
+adxL1 = plot(ADX,    "ADX", #984ea3)
+adxL0 = plot(30,     "ADX Threshold", #984ea350)
+ttiL1 = plot(TTI,    "TTI", #ff7f00)
+ttiL0 = plot(signal, "TTI Signal", #ff7f0050)
+vpcL1 = plot(VPCI*10,"VPCI", #377eb8)
+vpcL0 = plot(0,      "VPCI Zero", #377eb850)
+fill(adxL1, adxL0, ADX > 30 ? col1 : col0)
+fill(ttiL1, ttiL0, TTI > signal ? col1 : col0)
+fill(vpcL1, vpcL0, VPCI > 0 ? col1 : col2)
+
+
+// Strategy entry/exit rules 
+if ADX > 30
+    if TTI > signal
+        if VPCI > 0
+            strategy.entry("entry", strategy.long)
+if VPCI < 0
+    strategy.close_all("exit")
+
+View in Pine Editor・92 lines
+Use on chart
+5
+4
+0
+4
+10 003
+█ OVERVIEW
+
+This script demonstrates the use of volume data to validate price movements based on the techniques Buff Pelz Dormeier discusses in his "Volume Confirmation For A Trend System" article from the August 2024 edition of TASC's Traders' Tips
+. It presents a trend-following system implementation that utilizes a combination of three indicators: the Average Directional Index (ADX), the Trend Thrust Indicator (TTI), and the Volume Price Confirmation Indicator (VPCI).
+
+
+█ CONCEPTS
+
+In his article, Buff Pelz Dormeier recounts his search for an optimal trend-following strategy enhanced with volume data, starting with a simple system combining the ADX
+, MACD
+, and OBV
+ indicators. Even in these early tests, the author observed that the volume confirmation from OBV notably improved trading performance. Subsequently, the author replaced OBV with his VPCI, which considers the proportional weights of volume and price, to enhance the validation of trend momentum. Lastly, the author explored the inclusion of his TTI, a modified MACD that features volume-based enhancements, as a strategy component for improved trend-following performance.
+
+According to the author's research, the ADX+TTI+VPCI system outperformed similar strategies he tested in the article, yielding significantly higher returns and enhanced perceived reliability. Because the system's design revolves around catching pronounced trends, it performs best with a portfolio of individual stocks. The author applies the system in the article by allocating 5% of the equity to long positions in S&P 500 components that meet the ADX+TTI+VPCI entry criteria (see the Calculations section below for details). He uses the proceeds from closing positions to enter new positions in other stocks meeting the screening criteria, holding any excess proceeds in cash.
+
+
+█ CALCULATIONS
+
+The TTI is similar to the MACD. Its calculation entails the following steps:
+
+Calculate fast (short-term) and slow (long-term) volume-weighted moving averages (VWMAs).
+
+Compute the volume multiple (VM) as the square of the ratio of the fast VWMA to the slow VWMA.
+
+Adjust these averages by multiplying the fast VWMA by the VM and dividing the slow VWMA by the VM.
+
+Calculate the difference between the adjusted VWMAs to determine the TTI value, and take the average of that series to determine the signal line value.
+
+
+The VPCI utilizes differences and ratios between VWMAs and corresponding simple moving averages (SMAs) to provide an alternative volume-price confirmation tool. Its calculation is as follows:
+
+Subtract the slow SMA from the VWMA of the same length to calculate the volume-price confirmation/contradiction (VPC) value.
+
+Divide the fast VWMA by the corresponding fast SMA to determine the volume-price ratio (VPR).
+
+Divide the short-term VWMA by the long-term VWMA to calculate the VM.
+
+Compute the VPCI as the product of the VPC, VPR, and VM values.
+
+
+The long entry criteria of the ADX+TTI+VPCI system are as follows:
+
+The ADX is above 30.
+
+The TTI crosses above its signal line.
+
+The VPCI is above 0, confirming the trend.
+
+
+Signals to close positions occur when the VPCI is below 0, indicating a contradiction.
+
+NOTE: Unlike in the article, this script applies the ADX+TTI+VPCI system to one stock at a time, not a portfolio of S&P 500 constituents.
+
+
+█ DISCLAIMER
+
+This strategy script educates users on the trading system outlined by the TASC article. By default, it uses 10% of equity as the order size and a slippage amount of 5 ticks. Traders should adjust these settings and the commission amount when using this script.

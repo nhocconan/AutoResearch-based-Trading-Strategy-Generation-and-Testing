@@ -1,0 +1,204 @@
+//@version=4
+// Thanks to DonovanWall and Kiasaki for code ideas
+strategy("Gaussian MFI BF 🚀", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.15)
+
+/////////////// Time Frame ///////////////
+testStartYear = input(2017, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay, 0, 0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay, 0, 0)
+
+testPeriod() => time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////// MFI ///////////////
+length = input(title="MFI Length", defval=20, minval=1, maxval=2000)
+src = hlc3
+upper = sum(volume * (change(src) <= 0 ? 0 : src), length) // find out why the values here are higher than ROLDBOT
+lower = sum(volume * (change(src) >= 0 ? 0 : src), length)
+
+mf = rsi(upper, lower)
+y = (close / 100) * mf
+yColour = (y > y[1]) ? color.lime : (y < y[1]) ? color.red : color.gray
+plot(y, color=yColour, linewidth=2)
+
+/////////////// Rate Of Changee ///////////////
+source = close, rocL = input(16, minval=1), 
+pcntChange = input(5, minval=1)
+roc = 100 * (source - source[rocL]) / source[rocL] 
+emaroc = ema(roc, rocL / 2)
+isMoving() => emaroc > (pcntChange / 2) or emaroc < (0 - (pcntChange / 2))
+
+//Poles
+N = input(defval=4, minval=1, maxval=9, title="Poles")
+
+//Sampling Period
+per = input(defval=110, minval=2, title="Sampling Period")
+
+//Filtered True Range Multiplier
+mult = input(defval=1.414, minval=0, title="Filtered True Range Multiplier")
+
+//Reduced Lag Mode
+lagreduce = input(defval=true, title="Reduced Lag Mode")
+
+//Fast Response Mode
+fastresponse = input(defval=true, title="Fast Response Mode")
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+//Definitions
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+//Pi
+pi = 3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196442881097566593344612847564823378678316527120190914564856692346034861045432664821339360726024914127372458700660631558817488152092096282
+
+//Beta and Alpha Components
+beta = (1 - cos(2*pi/per))/(pow(1.414, 2/N) - 1)
+alpha = -beta + sqrt(pow(beta, 2) + 2*beta)
+x = 1 - alpha
+
+//Lag Reduction
+lag     = (per - 1)/(2*N)
+srcdata = lagreduce ? src + (src - src[lag]) : src
+trdata  = lagreduce ? tr + (tr - tr[lag]) : tr
+
+//Filters (1 - 9 poles)
+filt1  = 0.0
+filt1 := alpha*srcdata + x*nz(filt1[1])
+filt2  = 0.0
+filt2 := pow(alpha, 2)*srcdata + 2*x*nz(filt2[1]) - pow(x, 2)*nz(filt2[2])
+filt3  = 0.0
+filt3 := pow(alpha, 3)*srcdata + 3*x*nz(filt3[1]) - 3*pow(x, 2)*nz(filt3[2]) + pow(x, 3)*nz(filt3[3])
+filt4  = 0.0
+filt4 := pow(alpha, 4)*srcdata + 4*x*nz(filt4[1]) - 6*pow(x, 2)*nz(filt4[2]) + 4*pow(x, 3)*nz(filt4[3]) - pow(x, 4)*nz(filt4[4])
+filt5  = 0.0
+filt5 := pow(alpha, 5)*srcdata + 5*x*nz(filt5[1]) - 10*pow(x, 2)*nz(filt5[2]) + 10*pow(x, 3)*nz(filt5[3]) - 5*pow(x, 4)*nz(filt5[4]) + pow(x, 5)*nz(filt5[5])
+filt6  = 0.0
+filt6 := pow(alpha, 6)*srcdata + 6*x*nz(filt6[1]) - 15*pow(x, 2)*nz(filt6[2]) + 20*pow(x, 3)*nz(filt6[3]) - 15*pow(x, 4)*nz(filt6[4]) + 6*pow(x, 5)*nz(filt6[5]) - pow(x, 6)*nz(filt6[6])
+filt7  = 0.0
+filt7 := pow(alpha, 7)*srcdata + 7*x*nz(filt7[1]) - 21*pow(x, 2)*nz(filt7[2]) + 35*pow(x, 3)*nz(filt7[3]) - 35*pow(x, 4)*nz(filt7[4]) + 21*pow(x, 5)*nz(filt7[5]) - 7*pow(x, 6)*nz(filt7[6]) + pow(x, 7)*nz(filt7[7])
+filt8  = 0.0
+filt8 := pow(alpha, 8)*srcdata + 8*x*nz(filt8[1]) - 28*pow(x, 2)*nz(filt8[2]) + 56*pow(x, 3)*nz(filt8[3]) - 70*pow(x, 4)*nz(filt8[4]) + 56*pow(x, 5)*nz(filt8[5]) - 28*pow(x, 6)*nz(filt8[6]) + 8*pow(x, 7)*nz(filt8[7]) - pow(x, 8)*nz(filt8[8])
+filt9  = 0.0
+filt9 := pow(alpha, 9)*srcdata + 9*x*nz(filt9[1]) - 36*pow(x, 2)*nz(filt9[2]) + 84*pow(x, 3)*nz(filt9[3]) - 126*pow(x, 4)*nz(filt9[4]) + 126*pow(x, 5)*nz(filt9[5]) - 84*pow(x, 6)*nz(filt9[6]) + 36*pow(x, 7)*nz(filt9[7]) - 9*pow(x, 8)*nz(filt9[8]) + pow(x, 9)*nz(filt9[9])
+
+//Filter Selection
+filtn = N==1 ? filt1 : N==2 ? filt2 : N==3 ? filt3 : N==4 ? filt4 : N==5 ? filt5 : N==6 ? filt6 : N==7 ? filt7 : N==8 ? filt8 : N==9 ? filt9 : na
+rlfilt = (filtn + filt1)/2
+filt = fastresponse ? rlfilt : filtn
+
+//Filtered True Range (1 - 9 poles)
+filt1tr  = 0.0
+filt1tr := alpha*trdata + x*nz(filt1tr[1])
+filt2tr  = 0.0
+filt2tr := pow(alpha, 2)*trdata + 2*x*nz(filt2tr[1]) - pow(x, 2)*nz(filt2tr[2])
+filt3tr  = 0.0
+filt3tr := pow(alpha, 3)*trdata + 3*x*nz(filt3tr[1]) - 3*pow(x, 2)*nz(filt3tr[2]) + pow(x, 3)*nz(filt3tr[3])
+filt4tr  = 0.0
+filt4tr := pow(alpha, 4)*trdata + 4*x*nz(filt4tr[1]) - 6*pow(x, 2)*nz(filt4tr[2]) + 4*pow(x, 3)*nz(filt4tr[3]) - pow(x, 4)*nz(filt4tr[4])
+filt5tr  = 0.0
+filt5tr := pow(alpha, 5)*trdata + 5*x*nz(filt5tr[1]) - 10*pow(x, 2)*nz(filt5tr[2]) + 10*pow(x, 3)*nz(filt5tr[3]) - 5*pow(x, 4)*nz(filt5tr[4]) + pow(x, 5)*nz(filt5tr[5])
+filt6tr  = 0.0
+filt6tr := pow(alpha, 6)*trdata + 6*x*nz(filt6tr[1]) - 15*pow(x, 2)*nz(filt6tr[2]) + 20*pow(x, 3)*nz(filt6tr[3]) - 15*pow(x, 4)*nz(filt6tr[4]) + 6*pow(x, 5)*nz(filt6tr[5]) - pow(x, 6)*nz(filt6tr[6])
+filt7tr  = 0.0
+filt7tr := pow(alpha, 7)*trdata + 7*x*nz(filt7tr[1]) - 21*pow(x, 2)*nz(filt7tr[2]) + 35*pow(x, 3)*nz(filt7tr[3]) - 35*pow(x, 4)*nz(filt7tr[4]) + 21*pow(x, 5)*nz(filt7tr[5]) - 7*pow(x, 6)*nz(filt7tr[6]) + pow(x, 7)*nz(filt7tr[7])
+filt8tr  = 0.0
+filt8tr := pow(alpha, 8)*trdata + 8*x*nz(filt8tr[1]) - 28*pow(x, 2)*nz(filt8tr[2]) + 56*pow(x, 3)*nz(filt8tr[3]) - 70*pow(x, 4)*nz(filt8tr[4]) + 56*pow(x, 5)*nz(filt8tr[5]) - 28*pow(x, 6)*nz(filt8tr[6]) + 8*pow(x, 7)*nz(filt8tr[7]) - pow(x, 8)*nz(filt8tr[8])
+filt9tr  = 0.0
+filt9tr := pow(alpha, 9)*trdata + 9*x*nz(filt9tr[1]) - 36*pow(x, 2)*nz(filt9tr[2]) + 84*pow(x, 3)*nz(filt9tr[3]) - 126*pow(x, 4)*nz(filt9tr[4]) + 126*pow(x, 5)*nz(filt9tr[5]) - 84*pow(x, 6)*nz(filt9tr[6]) + 36*pow(x, 7)*nz(filt9tr[7]) - 9*pow(x, 8)*nz(filt9tr[8]) + pow(x, 9)*nz(filt9tr[9])
+
+//Filtered True Range Selection
+filtntr = N==1 ? filt1tr : N==2 ? filt2tr : N==3 ? filt3tr : N==4 ? filt4tr : N==5 ? filt5tr : N==6 ? filt6tr : N==7 ? filt7tr : N==8 ? filt8tr : N==9 ? filt9tr : na 
+rlfilttr = (filtntr + filt1tr)/2
+filttr = fastresponse ? rlfilttr : filtntr
+
+//Bands
+hband = filt + filttr*mult
+lband = filt - filttr*mult
+
+/////////////// STRATEGY ///////////////
+long = filt > filt[1] and isMoving() and mf > mf[1] 
+short = filt < filt[1] and isMoving() and mf < mf[1] 
+
+last_long = 0.0
+last_short = 0.0
+last_long := long ? time : nz(last_long[1])
+last_short := short ? time : nz(last_short[1])
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long_signal = 0.0
+last_open_short_signal = 0.0
+last_open_long_signal := long_signal ? open : nz(last_open_long_signal[1])
+last_open_short_signal := short_signal ? open : nz(last_open_short_signal[1])
+
+last_long_signal = 0.0
+last_short_signal = 0.0
+last_long_signal := long_signal ? time : nz(last_long_signal[1])
+last_short_signal := short_signal ? time : nz(last_short_signal[1])
+
+in_long_signal = last_long_signal > last_short_signal
+in_short_signal = last_short_signal > last_long_signal
+
+last_high = 0.0
+last_low = 0.0
+last_high := not in_long_signal ? na : in_long_signal and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_short_signal ? na : in_short_signal and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+sl_inp = input(2.0, title='Stop Loss %') / 100
+tp_inp = input(5000.0, title='Take Profit %') / 100
+ 
+take_level_l = strategy.position_avg_price * (1 + tp_inp)
+take_level_s = strategy.position_avg_price * (1 - tp_inp)
+
+since_longEntry = barssince(last_open_long_signal != last_open_long_signal[1]) 
+since_shortEntry = barssince(last_open_short_signal != last_open_short_signal[1])
+
+slLong = in_long_signal ? strategy.position_avg_price * (1 - sl_inp) : na
+slShort = strategy.position_avg_price * (1 + sl_inp)
+long_sl = in_long_signal ? slLong : na
+short_sl = in_short_signal ? slShort : na
+
+/////////////// Execution ///////////////
+if testPeriod()
+    strategy.entry("Long",  strategy.long, when=long)
+    strategy.entry("Short", strategy.short, when=short)
+    strategy.exit("L Ex", "Long", stop=long_sl, limit=take_level_l, when=since_longEntry > 0)
+    strategy.exit("S Ex", "Short", stop=short_sl, limit=take_level_s, when=since_shortEntry > 0)
+
+/////////////// Plotting ///////////////
+fcolor   = long ? color.lime : short ? color.red : color.orange
+hbandplot = plot(hband, color=fcolor, title="Filtered True Range High Band")
+lbandplot = plot(lband, color=fcolor, title="Filtered True Range Low Band")
+filtplot = plot(filt, color=fcolor, linewidth=3, title="Filter")
+fill(hbandplot, lbandplot, color=fcolor, transp=80, title="Channel Fill")
+bgcolor(isMoving() ? na : color.white, transp=90)
+bgcolor(long_signal ? color.lime : short_signal ? color.red : na, transp=70)
+
+View in Pine Editor・180 lines
+Use on chart
+2
+6
+5
+1
+9 728
+The signals are based on the Gaussian Channel calculated by Donovan Wall. Thanks also to Kiasaki for Rate of Change code.
+
+Simply going long and short based on Gaussian channel was not consistent enough so I also included an MFI filter. We only go long if Money Flow Index is greater than the last candle (more money is flowing in than out). The opposite for short. Also employed Rate of Change function (white background) to avoid sideways market.
+
+A 2% stop loss seems to be the most balanced for this strategy but can can altered in the settngs.
+Also included a take-profit function but it seems this is best not implemented for this strategy, at least in the case of XBT/USD.
+
+A derivative of The MFI is also plotted on the chart simply to compare the current candle with the last candle visually.
+
+Background color:
+Green = Long
+
+Red = Short
+
+White = No Trade
+

@@ -1,0 +1,109 @@
+//@version=5
+strategy("GC Asia VWAP Pullback Trend (Entries + Exits)", overlay=true,
+     initial_capital=10000, calc_on_every_tick=true, process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────
+// Idea (good for Gold in Asia):
+// 1) Trade ONLY during the Asia session.
+// 2) Use session VWAP as the trend anchor.
+// 3) Enter on pullbacks to VWAP in the direction of the trend.
+// 4) Optional confirmation: candle closes back in trend direction.
+// 5) Exits: ATR or fixed, plus optional time exit.
+// ─────────────────────────────────────────────────────────────
+
+// ───────── Inputs
+tz          = input.string("America/New_York", "Timezone")
+asiaSession = input.session("1800-0300", "Asia Session (trade only)")
+
+useEma      = input.bool(false, "Use EMA Trend Filter (optional)")
+emaLen      = input.int(100, "EMA Length", minval=1)
+
+vwapBand    = input.float(0.60, "VWAP pullback band ($)", minval=0.0, step=0.05)
+confirmClose= input.bool(true, "Require close back through VWAP after touch")
+
+useATR      = input.bool(true, "Use ATR stop/target")
+atrLen      = input.int(14, "ATR Length", minval=1)
+stopATR     = input.float(1.2, "Stop = ATR x", minval=0.1, step=0.1)
+tgtATR      = input.float(1.8, "Target = ATR x", minval=0.1, step=0.1)
+
+useFixed    = input.bool(false, "Use fixed $ stop/target (overrides ATR if ON)")
+stopDol     = input.float(4.0, "Stop ($)", minval=0.1, step=0.1)
+tgtDol      = input.float(7.0, "Target ($)", minval=0.1, step=0.1)
+
+useTimeExit    = input.bool(true, "Time exit at session end")
+oneTradePerDay = input.bool(false, "Max 1 trade per day")
+
+// ───────── Session flag
+inAsia = not na(time(timeframe.period, asiaSession, tz))
+
+// New day (in tz)
+dayKey = time("D", tz)
+newDay = ta.change(dayKey)
+
+// One-trade gate (optional)
+var bool tradedToday = false
+if newDay
+    tradedToday := false
+canTrade = (not oneTradePerDay) or (oneTradePerDay and not tradedToday)
+
+// ───────── Anchors
+// Built-in VWAP is anchored to the session/day in TradingView.
+vwap = ta.vwap(hlc3)
+plot(vwap, "VWAP", color=color.new(color.aqua, 0), linewidth=2)
+
+ema = ta.ema(close, emaLen)
+plot(useEma ? ema : na, "EMA", color=color.new(color.yellow, 0))
+
+trendLongOk  = close > vwap and (not useEma or close > ema)
+trendShortOk = close < vwap and (not useEma or close < ema)
+
+// ─────────────────────────────────────────────────────────────
+// Entry logic: pullback touch into a small VWAP band, then resume trend
+// Long: trend up, price dips to near/below VWAP band, then closes back above VWAP (optional)
+// Short: trend down, price pops to near/above VWAP band, then closes back below VWAP (optional)
+// ─────────────────────────────────────────────────────────────
+touchLong  = inAsia and canTrade and trendLongOk  and low  <= (vwap + vwapBand) and low  >= (vwap - vwapBand)
+touchShort = inAsia and canTrade and trendShortOk and high >= (vwap - vwapBand) and high <= (vwap + vwapBand)
+
+longSignal  = touchLong  and (not confirmClose or close > vwap)
+shortSignal = touchShort and (not confirmClose or close < vwap)
+
+// Entries
+if longSignal
+    strategy.entry("L", strategy.long)
+    tradedToday := true
+
+if shortSignal
+    strategy.entry("S", strategy.short)
+    tradedToday := true
+
+// ─────────────────────────────────────────────────────────────
+// Exits
+// ─────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+stopDist = useFixed ? stopDol : atr * stopATR
+tgtDist  = useFixed ? tgtDol  : atr * tgtATR
+
+longStop   = strategy.position_avg_price - stopDist
+longLimit  = strategy.position_avg_price + tgtDist
+shortStop  = strategy.position_avg_price + stopDist
+shortLimit = strategy.position_avg_price - tgtDist
+
+strategy.exit("L-Exit", from_entry="L", stop=longStop, limit=longLimit)
+strategy.exit("S-Exit", from_entry="S", stop=shortStop, limit=shortLimit)
+
+// Time exit at session end
+sessionEndingNow = useTimeExit and (not inAsia) and (inAsia[1])
+if sessionEndingNow
+    strategy.close("L", comment="Session End Exit")
+    strategy.close("S", comment="Session End Exit")
+
+// Visuals
+plotshape(longSignal,  title="Long Pullback",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
+plotshape(shortSignal, title="Short Pullback", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="S")
+
+View in Pine Editor・103 lines
+Use on chart
+7
+363
+This strategy trades Gold (GC) during the Asia session using VWAP as a trend anchor. Trades are taken when price pulls back toward VWAP and then resumes in the direction of the prevailing trend. Optional EMA filtering can be used to align trades with broader market direction. The strategy includes configurable risk management with ATR-based or fixed stop losses and profit targets, along with optional session-based exits to avoid holding positions outside the trading window.

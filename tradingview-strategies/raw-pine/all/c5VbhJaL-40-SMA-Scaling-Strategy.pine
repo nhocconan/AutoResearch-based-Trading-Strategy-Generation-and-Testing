@@ -1,0 +1,62 @@
+//@version=5
+strategy("40 SMA Scaling Strategy", overlay=true, initial_capital=100000, default_qty_type=strategy.cash, default_qty_value=100000)
+
+// --- Inputs ---
+smaLength = input.int(40, "SMA Length")
+tpStepPercent = input.float(1.0, "TP Step % (e.g., 1% increase)") / 100
+tpSizePercent = input.float(25.0, "TP Size % (Percent of INITIAL position)") / 100
+
+// --- Calculations ---
+smaValue = ta.sma(close, smaLength)
+
+// --- Logic Variables ---
+var float entryPrice = na
+var int tpCount = 0
+
+// --- Entry Logic ---
+// Open 100% of equity on a close above the 40 SMA
+if (ta.crossover(close, smaValue) and strategy.position_size == 0)
+    entryPrice := close
+    tpCount := 0
+    strategy.entry("Long", strategy.long, qty=strategy.equity / close)
+
+// --- Exit Logic ---
+if (strategy.position_size > 0)
+    // 1. Close out everything if price closes below the 40 SMA
+    if (close < smaValue)
+        strategy.close("Long", comment="Exit: Below SMA")
+        entryPrice := na
+
+    // 2. Take Profit: 25% of original position every 1% increase
+    // We calculate the next target price based on the step (1%, 2%, 3%, etc)
+    float nextTPTarget = entryPrice * (1 + (tpStepPercent * (tpCount + 1)))
+    
+    if (high >= nextTPTarget)
+        tpCount += 1
+        // We close 25% of the original entry quantity
+        strategy.exit("TP " + str.tostring(tpCount), "Long", limit=nextTPTarget, qty_percent=25)
+
+// --- Visualization ---
+plot(smaValue, color=color.blue, title="40 SMA")
+plot(strategy.position_size > 0 ? entryPrice : na, color=color.gray, style=plot.style_linebr, title="Entry Line")
+
+View in Pine Editor・41 lines
+Use on chart
+1
+0
+590
+This trend-following strategy focuses on capturing momentum when price breaks above the 40-period Simple Moving Average (SMA) while utilizing a systematic scale-out (Take Profit) approach to lock in gains during extended runs.
+
+Strategy Logic
+Entry: Opens a Long position with 100% of current equity when the price closes above the 40 SMA. This ensures maximum capital efficiency at the start of a new perceived trend.
+
+Scaling Take Profits: To reduce risk as the trade progresses, the strategy automatically closes 25% of the initial position for every 1% increase in price from the entry point.
+
+Exit: The entire remaining position is closed immediately if the price closes below the 40 SMA, acting as a trailing stop that adapts to the moving average.
+
+Key Features
+Capital-Efficient: Starts with a full account allocation to maximize exposure to the initial breakout.
+
+Systematic De-risking: By scaling out in 25% increments, the strategy banks profits early while leaving a portion of the trade active for potential "moon shots."
+
+Trend-Following Exit: Uses a classic SMA filter to exit, aiming to stay in the trade as long as the medium-term trend remains bullish.

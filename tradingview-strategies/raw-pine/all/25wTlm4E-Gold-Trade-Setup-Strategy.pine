@@ -1,0 +1,5 @@
+//@version=6
+upCss=##input(defval=#089981,type='INPUT_COLOR',##id='in_3')
+dnCss=##input(defval=#F23645,type='INPUT_COLOR',##id='in_4')
+##root(root_metainfo,plot_0_0,dnCss,input__color)
+##root(root_metainfo,plot_0_1,upCss,input__color)

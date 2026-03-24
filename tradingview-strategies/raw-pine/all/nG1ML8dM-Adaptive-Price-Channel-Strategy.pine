@@ -1,0 +1,91 @@
+//@version=5
+strategy("Adaptive Price Channel Strategy", overlay=true)
+
+length = input(20, title="Length")
+exit_length = input(10, title="Exit After X Periods")
+atr_multiplier = input(3.2, title="ATR Multiplier")
+
+startDate = input.time(defval = timestamp("2019-01-15T08:15:15+00:00"), title = "Start Date")
+endDate = input.time(defval = timestamp("2023-04-01T08:15:00+00:00"), title = "End Date")
+
+hh = ta.highest(high, length)
+ll = ta.lowest(low, length)
+atr = ta.atr(length)
+
+// calculate +DI and -DI
+upMove = high - high[1]
+downMove = low[1] - low
+plusDM = na(upMove[1]) ? na : (upMove > downMove and upMove > 0 ? upMove : 0)
+minusDM = na(downMove[1]) ? na : (downMove > upMove and downMove > 0 ? downMove : 0)
+plusDI = ta.rma(plusDM, length) / atr * 100
+minusDI = ta.rma(minusDM, length) / atr * 100
+
+// calculate ADX
+dx = math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100
+adx = ta.rma(dx, length)
+
+var int barSinceEntry = na
+
+if (not na(close[length]) and time >= startDate and time <= endDate)
+    if (adx < 25) // Sideways market
+        if (close > hh - atr_multiplier * atr)
+            strategy.entry("PChLE", strategy.long, comment="PChLE")
+            barSinceEntry := 0
+        else if (close < ll + atr_multiplier * atr)
+            strategy.entry("PChSE", strategy.short, comment="PChSE")
+            barSinceEntry := 0
+    else if (adx >= 25 and plusDI > minusDI) // Bullish market
+        if (close > hh - atr_multiplier * atr)
+            strategy.entry("PChLE", strategy.long, comment="PChLE")
+            barSinceEntry := 0
+    else if (adx >= 25 and plusDI < minusDI) // Bearish market
+        if (close < ll + atr_multiplier * atr)
+            strategy.entry("PChSE", strategy.short, comment="PChSE")
+            barSinceEntry := 0
+
+if (na(barSinceEntry))
+    barSinceEntry := barSinceEntry[1] + 1
+else if (barSinceEntry >= exit_length)
+    strategy.close("PChLE")
+    strategy.close("PChSE")
+    barSinceEntry := na
+
+plot(hh, title="Highest High", color=color.green, linewidth=2)
+plot(ll, title="Lowest Low", color=color.red, linewidth=2)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+4
+1
+1
+4 663
+This strategy is an adaptive price channel strategy based on the Average True Range (ATR) indicator and the Average Directional Index (ADX). It aims to identify sideways markets and trends in the price movements and make trades accordingly.
+
+The strategy uses a length parameter for the ATR and ADX indicators, which determines the length of the calculation for these indicators. The strategy also uses an ATR multiplier, which is multiplied by the ATR to determine the upper and lower bounds of the price channel.
+
+The first step of the strategy is to calculate the highest high (HH) and lowest low (LL) over the specified length. The ATR is also calculated over the same length. Then the strategy calculates the positive directional indicator (+DI) and negative directional indicator (-DI) based on the up and down moves in the price, and uses these to calculate the ADX.
+
+If the ADX is less than 25, the market is considered to be in a sideways phase. In this case, if the price closes above the upper bound of the price channel (HH - ATR multiplier * ATR), the strategy enters a long position, and if the price closes below the lower bound of the price channel (LL + ATR multiplier * ATR), the strategy enters a short position.
+
+If the ADX is greater than or equal to 25 and the +DI is greater than the -DI, the market is considered to be in a bullish phase. In this case, if the price closes above the upper bound of the price channel, the strategy enters a long position. If the ADX is greater than or equal to 25 and the +DI is less than the -DI, the market is considered to be in a bearish phase. In this case, if the price closes below the lower bound of the price channel, the strategy enters a short position.
+
+The strategy exits a position after a certain number of bars have passed since the entry, as specified by the exit_length input.
+
+In summary, this strategy attempts to trade in accordance with the prevailing market conditions by identifying sideways markets and trends and making trades based on price movements within a dynamically-adjusted price channel.
+
+This strategy takes a read on the market and either takes a channel strategy or trades volatility based on current trend. Works well on 2, 3 ,4, 12 hour for BTC. It’s my first attempt and creating a strategy. I am very interested in constructive criticism. I will look into better risk management, maybe a trailing stop loss. Other suggestions welcome. This is my first attempt at a strategy.
+
+Here are the settings I used.
+Inputs
+Length 20
+Exit 10
+ATR 3.2
+Dates I picked when I got into Crypto
+
+Properties
+Capital 1000
+Order size 2 Contracts
+Pyramiding 1
+Commission .05
+

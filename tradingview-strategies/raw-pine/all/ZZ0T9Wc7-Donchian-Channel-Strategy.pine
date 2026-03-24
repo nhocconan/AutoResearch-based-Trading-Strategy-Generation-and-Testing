@@ -1,0 +1,29 @@
+//@version=4
+strategy("Donchian Channel Strategy", overlay=true)
+
+length = input(20)
+longRule = input("Higher High", "Long Entry", options=["Higher High", "Basis"])
+shortRule = input("Lower Low", "Short Entry", options=["Lower Low", "Basis"])
+
+hh = highest(high, length)
+ll = lowest(low, length)
+
+up = plot(hh, 'Upper Band', color = color.green)
+dw = plot(ll, 'Lower Band', color = color.red)
+mid = (hh + ll) / 2
+midPlot = plot(mid, 'Basis', color = color.orange)
+fill(up, midPlot, color=color.green, transp = 95)
+fill(dw, midPlot, color=color.red, transp = 95)
+
+if (not na(close[length]))
+    strategy.entry("Long", strategy.long, stop=longRule=='Basis' ? mid : hh)
+    strategy.entry("Short", strategy.short, stop=shortRule=='Basis' ? mid : ll)
+
+View in Pine Editor・23 lines
+Use on chart
+5
+0
+5
+3
+15 123
+Long and Short entries based on the Donchian Channel indicator. The entry can be set to Higher High/Lower Low or the basis line.

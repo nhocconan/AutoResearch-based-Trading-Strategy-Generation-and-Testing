@@ -1,0 +1,192 @@
+//@version=6
+strategy("LW Outside Day Strategy[SpeculationLab]", overlay=true,pyramiding=0,fill_orders_on_standard_ohlc = true,
+          initial_capital = 120000,default_qty_type = strategy.fixed,
+          commission_type = strategy.commission.percent,commission_value = 0.01,slippage = 1)
+
+min_ratio   = input.float(2, "实体最小倍数", step=0.1,minval=1,
+              tooltip = "设定外包线实体相对于前一根K线实体的最小倍数。数值越大,要求外包线实体越长,过滤掉较小或无效的形态。",display=display.none)
+stop_mode   = input.string("Prev Low/High", "止损模式", options=["Prev Low/High", "ATR","Fixed Pips"],
+              tooltip ="选择止损方式（前低/高止损,ATR动态止损,固定点数止损",display=display.none)
+target_mode = input.string("FPO", "止盈模式", options=["PHL","RR", "FPO"],
+              tooltip ="选择止盈方式（前高/低止盈,固定盈亏比,隔夜开盘止盈",display=display.none) 
+
+
+buffer_multi= input.float(2,"缓冲倍速",step=0.1,tooltip="用于Prev Low/High止损模式,用于多加一些额外偏移值",display=display.none)
+atr_len     = input.int  (14,"ATR 长度",tooltip="计算ATR周期长短",display=display.none)
+atr_multi   = input.float(0.5,"ATR 乘数",step=0.1,tooltip="用于ATR止损模式,倍数越大止损越宽",display=display.none)
+
+fixed_pips  = input.int  (200, "固定止损",step=1,tooltip="用于fixed pips止损模式,固定点数止损",display=display.none)
+pip_factor  = input.int  (10, "Pip 因子", step=1,tooltip="1 pip包含多少最小跳动单位,默认为10,适用于绝大多数外汇主流货币对",display=display.none)
+
+rr          = input.float(2,"盈亏比",minval=1,step=0.5,tooltip="改变风险回报比",display=display.none)
+
+//通过设置条件，也就是当前K线的高点高于前一根的高点，同时低点又低于前一根的低点。筛选出了符合要求的外包线 outside bar。
+outside_bar = high > high[1] and low < low[1]
+
+//过滤低于前低的收盘价
+down_close = close< low[1]
+//过滤高于前高的收盘价
+up_close   = close> high[1]
+
+//过滤实体大小
+body      = math.abs(close - open)
+body_prev = math.abs(close[1] - open[1])
+big_bar   = body > body_prev * min_ratio
+
+//设定买入卖出信号
+long_signal  = outside_bar and down_close and big_bar and barstate.isconfirmed 
+short_signal = outside_bar and up_close   and big_bar and barstate.isconfirmed 
+
+//设置储存变量
+var float t_target = na
+var float t_stop   = na
+
+//设置止损止盈
+
+atr_value    = ta.atr(atr_len)
+atr_stop     = atr_value*atr_multi
+
+buffer_value = atr_value*buffer_multi
+
+pip_value    = syminfo.mintick * pip_factor * fixed_pips
+
+
+
+long_stop    = stop_mode == "Prev Low/High" ? low-buffer_value : 
+               stop_mode == "ATR"? close-atr_stop : close - pip_value
+short_stop   = stop_mode == "Prev Low/High" ? high+buffer_value :
+               stop_mode == "ATR"? close+atr_stop : close + pip_value
+
+long_dis     = close-long_stop
+short_dis    = short_stop-close
+
+long_target  = target_mode == "PHL" ? high:close+(long_dis*rr)
+short_target = target_mode == "PHL" ? low : close-(short_dis*rr)
+
+
+//设置入场条件
+if long_signal and strategy.position_size == 0
+    t_stop   := long_stop
+    t_target := long_target
+    strategy.entry("BUY",strategy.long,qty=1)
+    line.new(bar_index, t_stop, bar_index+3, t_stop, color=color.red)
+    if target_mode != "FPO"
+        line.new(bar_index, t_target, bar_index+3, t_target, color=color.green)
+
+if short_signal and strategy.position_size == 0
+    t_stop   := short_stop
+    t_target := short_target
+    strategy.entry("SELL",strategy.short,qty=1)
+    line.new(bar_index, t_stop, bar_index+3, t_stop, color=color.red)
+    if target_mode != "FPO"
+        line.new(bar_index, t_target, bar_index+3, t_target, color=color.green)
+
+//=== FPO 检测 ===
+entry_price = strategy.position_avg_price
+have_long   = strategy.position_size > 0
+have_short  = strategy.position_size < 0
+
+fpo_long = close > entry_price and barstate.isconfirmed
+fpo_short= close < entry_price and barstate.isconfirmed
+
+
+//出场设定
+if target_mode == "RR" or target_mode == "PHL"
+    if have_long
+        strategy.exit("LONG Exit", "BUY",  stop=t_stop, limit=t_target)
+    if have_short
+        strategy.exit("SHORT Exit","SELL",limit=t_target,stop=t_stop)
+if target_mode == "FPO"
+    if have_long
+        strategy.exit("LONG Exit", "BUY", stop=t_stop)
+        if fpo_long
+            strategy.close("BUY", comment="FPO Long Close")
+    if have_short
+        strategy.exit("SHORT Exit", "SELL", stop=t_stop)
+        if fpo_short
+            strategy.close("SELL", comment="FPO Short Close")
+
+
+//绘出信号
+plotshape(long_signal ,style=shape.triangleup,    location = location.belowbar, color=color.green,size=size.tiny)
+plotshape(short_signal,style=shape.triangledown,  location = location.abovebar, color=color.red,  size=size.tiny)
+
+View in Pine Editor・115 lines
+Use on chart
+2
+0
+6
+3 287
+This strategy is inspired by the “Outside Day” concept introduced by Larry Williams in Long-Term Secrets to Short-Term Trading, and has been extended with configurable risk management tools and realistic backtesting parameters.
+
+Concept
+The “Outside Day” is a classic price action pattern that reflects strong market rejection or continuation pressure.
+An Outside Bar occurs when the current bar’s high exceeds the previous high and the low falls below the previous low.
+A body-size filter ensures only significant candles are included.
+
+Entry Logic
+Buy setup: Price closes below the previous low (bullish rejection).
+Sell setup: Price closes above the previous high (bearish rejection).
+Only confirmed bars are used (no intrabar signals).
+
+Stop-Loss Modes
+Prev Low/High: Uses the previous swing point ± ATR-based buffer.
+ATR: Dynamic stop based on Average True Range × multiplier.
+Fixed Pips: User-defined fixed distance (for forex testing).
+
+Take-Profit Modes
+Prev High/Low (PHL): Exits near the opposite swing.
+Risk-Reward (RR): Targets a user-defined multiple of the stop distance (default = 2 : 1).
+Following Price Open (FPO): Exits on the next bar’s open if price opens in profit (used to test overnight price continuation).
+
+Risk Management & Backtest Settings
+Default risk per trade is set at 10% of account equity (user-adjustable).
+Commission = 0.1% and slippage = 2 ticks are applied to simulate realistic conditions.
+For reliable statistics, test on data that yields over 100 trades.
+Suitable for daily and 4-hour timeframes across stocks, forex, and crypto markets.
+
+Visual Elements
+Green and red triangles show entry signals.
+Stop-loss (red) and take-profit (green) reference lines are drawn for clarity.
+Optional alerts notify when a valid setup forms.
+
+Disclaimer
+This script is for educational and research purposes only.
+It does not constitute financial advice or guarantee profits.
+Always backtest thoroughly and manage your own risk.
+
+Enhancements over Classic Outside Bar Models
+Adjustable stop and target logic with ATR and buffer multipliers.
+“Following Price Open” exit logic for realistic day-end management.
+Optimized to avoid repainting and bar-confirmation issues.
+Built with realistic trading costs and position sizing.
+
+策略逻辑
+
+外包线识别
+当日最高价高于前一日最高价，且当日最低价低于前一日最低价，即形成外包线。
+同时过滤掉较小实体的 K 线，仅保留实体显著大于前一根的形态。
+
+方向过滤
+收盘价低于前一日最低价 → 视为买入信号。
+收盘价高于前一日最高价 → 视为卖出信号。
+
+止损设置（可选参数）
+前低/高止损：以形态前低/前高为止损，带有缓冲倍数。
+ATR 止损：根据平均波动率（ATR）动态调整。
+固定点数止损：按照用户设定的点数作为止损范围。
+
+止盈设置（可选参数）
+前高/低止盈（PHL）：以前高/前低为目标。
+固定盈亏比（RR）：根据用户设定的风险回报比自动计算。
+隔夜开盘（FPO）：若次日开盘价高于进场价（多单）或低于进场价（空单），则平仓。
+
+信号标记
+在图表中标注买入/卖出信号（三角形标记）。
+绘制止损与目标位参考线。
+
+使用说明
+适用周期：建议用于 日线图（Daily）。
+适用市场：股票、外汇、加密货币等各类市场均可。
+提示：此策略为历史研究与学习用途，不构成投资建议。实际交易请结合自身风险管理。
+

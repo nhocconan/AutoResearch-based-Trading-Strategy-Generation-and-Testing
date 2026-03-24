@@ -1,0 +1,369 @@
+//@version=6
+strategy("Estrategia Multi-Indicador INTELIGENTE - V2.1 CORREGIDA", overlay=true, margin_long=100, margin_short=100)
+
+// =====================================================
+// PARÁMETROS DE ENTRADA
+// =====================================================
+
+// Tamaño de posición
+position_size_usdt = input.float(5, "Tamaño de Posición (USDT)", minval=1.0, step=0.5, group="Gestión de Riesgo")
+
+// Stop Loss y Take Profit
+use_sl_tp = input.bool(true, "Usar Stop Loss / Take Profit", group="Gestión de Riesgo")
+sl_percent = input.float(2.0, "Stop Loss (%)", minval=0.1, step=0.1, group="Gestión de Riesgo") / 100
+tp_percent = input.float(4.0, "Take Profit (%)", minval=0.1, step=0.1, group="Gestión de Riesgo") / 100
+
+// Trailing Stop
+use_trailing = input.bool(true, "Usar Trailing Stop", group="Gestión de Riesgo")
+trailing_percent = input.float(1.5, "Trailing Stop (%)", minval=0.1, step=0.1, group="Gestión de Riesgo") / 100
+
+// Confirmaciones mínimas
+min_confirmations = input.int(4, "Confirmaciones Mínimas", minval=2, maxval=8, group="Filtros de Señal")
+
+// Filtros
+use_trend_filter = input.bool(true, "Filtro de Tendencia EMA200", group="Filtros de Señal")
+use_volatility_filter = input.bool(true, "Filtro de Volatilidad ATR", group="Filtros de Señal")
+use_volume_filter = input.bool(true, "Filtro de Volumen", group="Filtros de Señal")
+
+// Periodos de indicadores
+ema_fast = input.int(8, "EMA Rápida", minval=1, group="Indicadores")
+ema_slow = input.int(21, "EMA Lenta", minval=1, group="Indicadores")
+ema_trend = input.int(200, "EMA Tendencia", minval=1, group="Indicadores")
+
+rsi_length = input.int(14, "RSI Periodo", minval=1, group="Indicadores")
+rsi_ob = input.int(70, "RSI Sobrecompra", minval=50, maxval=90, group="Indicadores")
+rsi_os = input.int(30, "RSI Sobreventa", minval=10, maxval=50, group="Indicadores")
+
+macd_fast = input.int(12, "MACD Rápido", minval=1, group="Indicadores")
+macd_slow = input.int(26, "MACD Lento", minval=1, group="Indicadores")
+macd_signal = input.int(9, "MACD Señal", minval=1, group="Indicadores")
+
+bb_length = input.int(20, "Bollinger Bands Periodo", minval=1, group="Indicadores")
+bb_mult = input.float(2.0, "Bollinger Bands Multiplicador", minval=0.1, step=0.1, group="Indicadores")
+
+adx_length = input.int(14, "ADX Periodo", minval=1, group="Indicadores")
+adx_threshold = input.int(25, "ADX Umbral", minval=10, maxval=50, group="Indicadores")
+
+stoch_k = input.int(14, "Stochastic %K", minval=1, group="Indicadores")
+stoch_d = input.int(3, "Stochastic %D", minval=1, group="Indicadores")
+stoch_smooth = input.int(3, "Stochastic Suavizado", minval=1, group="Indicadores")
+
+vol_ma_length = input.int(20, "Volumen MA Periodo", minval=1, group="Indicadores")
+
+atr_length = input.int(14, "ATR Periodo", minval=1, group="Indicadores")
+atr_mult = input.float(0.8, "ATR Multiplicador Volatilidad", minval=0.1, step=0.1, group="Indicadores")
+
+// =====================================================
+// CÁLCULO DE INDICADORES
+// =====================================================
+
+// EMAs
+ema8 = ta.ema(close, ema_fast)
+ema21 = ta.ema(close, ema_slow)
+ema55 = ta.ema(close, 55)
+ema200 = ta.ema(close, ema_trend)
+
+// 1. CRUCES DE EMAs
+ema_aligned_bull = ema8 > ema21 and ema21 > ema55 and ema55 > ema200
+price_above_emas = close > ema8 and close > ema21
+price_below_emas = close < ema8 and close < ema21
+ema_cross_up = ta.crossover(ema8, ema21)
+ema_cross_down = ta.crossunder(ema8, ema21)
+
+// 2. MOMENTUM (RSI + MACD)
+rsi = ta.rsi(close, rsi_length)
+
+// Pre-calcular valores para evitar llamadas en condicionales
+rsi_prev1 = rsi[1]
+rsi_prev2 = rsi[2]
+rsi_is_rising = rsi > rsi_prev1 and rsi_prev1 > rsi_prev2
+rsi_is_falling = rsi < rsi_prev1 and rsi_prev1 < rsi_prev2
+
+rsi_bullish = rsi > 50 and rsi < rsi_ob and rsi_is_rising
+rsi_bearish = rsi < 50 and rsi > rsi_os and rsi_is_falling
+
+// Pre-calcular divergencias RSI
+close_low_14 = ta.lowest(close, 14)
+close_high_14 = ta.highest(close, 14)
+rsi_low_14 = ta.lowest(rsi, 14)
+rsi_high_14 = ta.highest(rsi, 14)
+
+rsi_divergence_bull = close_low_14 < close_low_14[14] and rsi_low_14 > rsi_low_14[14]
+rsi_divergence_bear = close_high_14 > close_high_14[14] and rsi_high_14 < rsi_high_14[14]
+
+[macd_line, signal_line, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// Pre-calcular valores MACD
+macd_hist_prev1 = macd_hist[1]
+macd_hist_prev2 = macd_hist[2]
+macd_hist_is_rising = macd_hist > macd_hist_prev1 and macd_hist_prev1 > macd_hist_prev2
+macd_hist_is_falling = macd_hist < macd_hist_prev1 and macd_hist_prev1 < macd_hist_prev2
+
+macd_bull = macd_line > signal_line and macd_hist > 0 and macd_hist_is_rising
+macd_bear = macd_line < signal_line and macd_hist < 0 and macd_hist_is_falling
+macd_cross_up = ta.crossover(macd_line, signal_line)
+macd_cross_down = ta.crossunder(macd_line, signal_line)
+
+// 3. VOLATILIDAD (Bollinger Bands)
+[bb_upper, bb_basis, bb_lower] = ta.bb(close, bb_length, bb_mult)
+bb_width = bb_upper - bb_lower
+bb_width_ma = ta.sma(bb_width, 50)
+bb_squeeze = bb_width < bb_width_ma
+
+price_at_lower_bb = close <= bb_lower * 1.02
+price_at_upper_bb = close >= bb_upper * 0.98
+bb_breakout_up = ta.crossover(close, bb_upper)
+bb_breakout_down = ta.crossunder(close, bb_lower)
+
+// 4. FUERZA DE TENDENCIA (ADX)
+[diPlus, diMinus, adx] = ta.dmi(adx_length, adx_length)
+strong_trend = adx > adx_threshold
+very_strong_trend = adx > adx_threshold * 1.5
+
+// Pre-calcular ADX rising
+adx_prev = adx[3]
+trend_strengthening = adx > adx_prev
+
+// 5. VOLUMEN
+vol_ma = ta.sma(volume, vol_ma_length)
+volume_surge = volume > vol_ma * 2
+volume_above_avg = volume > vol_ma
+high_volume = volume_surge or volume_above_avg  // CORREGIDO: Variable declarada
+
+// 6. STOCHASTIC RSI
+stoch_rsi_k = ta.stoch(rsi, rsi, rsi, stoch_k)
+stoch_rsi_d = ta.sma(stoch_rsi_k, stoch_d)
+
+stoch_rsi_oversold = stoch_rsi_k < 20
+stoch_rsi_overbought = stoch_rsi_k > 80
+
+// 7. ATR para volatilidad
+atr = ta.atr(atr_length)
+atr_ma = ta.sma(atr, 50)
+
+high_volatility = atr > atr_ma * 1.2
+low_volatility = atr < atr_ma * 0.8
+
+// =====================================================
+// SISTEMA DE PUNTUACIÓN
+// =====================================================
+
+long_score = 0
+short_score = 0
+
+// Tendencia (peso: 2 puntos)
+if ema_aligned_bull
+    long_score := long_score + 2
+if price_above_emas
+    long_score := long_score + 1
+if price_below_emas
+    short_score := short_score + 1
+if ema_cross_up
+    long_score := long_score + 2
+if ema_cross_down
+    short_score := short_score + 2
+
+// Momentum (peso: 2 puntos)
+if rsi_bullish
+    long_score := long_score + 1
+if rsi_bearish
+    short_score := short_score + 1
+if rsi_divergence_bull
+    long_score := long_score + 2
+if rsi_divergence_bear
+    short_score := short_score + 2
+
+if macd_bull
+    long_score := long_score + 1
+if macd_bear
+    short_score := short_score + 1
+if macd_cross_up
+    long_score := long_score + 2
+if macd_cross_down
+    short_score := short_score + 2
+
+// Volatilidad (peso: 1 punto)
+if bb_squeeze
+    long_score := long_score + 1
+    short_score := short_score + 1
+if price_at_lower_bb
+    long_score := long_score + 1
+if price_at_upper_bb
+    short_score := short_score + 1
+if bb_breakout_up
+    long_score := long_score + 2
+if bb_breakout_down
+    short_score := short_score + 2
+
+// Fuerza de tendencia (peso: 2 puntos)
+if strong_trend and diPlus > diMinus
+    long_score := long_score + 1
+if strong_trend and diMinus > diPlus
+    short_score := short_score + 1
+if very_strong_trend and diPlus > diMinus
+    long_score := long_score + 2
+if very_strong_trend and diMinus > diPlus
+    short_score := short_score + 2
+if trend_strengthening and diPlus > diMinus
+    long_score := long_score + 1
+if trend_strengthening and diMinus > diPlus
+    short_score := short_score + 1
+
+// Volumen (peso: 1 punto)
+if volume_surge
+    long_score := long_score + 1
+    short_score := short_score + 1
+if volume_above_avg
+    long_score := long_score + 1
+    short_score := short_score + 1
+
+// Stochastic RSI (peso: 1 punto)
+if stoch_rsi_oversold
+    long_score := long_score + 1
+if stoch_rsi_overbought
+    short_score := short_score + 1
+
+// =====================================================
+// FILTROS
+// =====================================================
+
+trend_ok_long = not use_trend_filter or close > ema200
+trend_ok_short = not use_trend_filter or close < ema200
+
+volatility_ok = not use_volatility_filter or (atr > atr_ma * atr_mult)
+
+volume_ok = not use_volume_filter or volume_above_avg
+
+// =====================================================
+// SEÑALES FINALES
+// =====================================================
+
+long_signal = long_score >= min_confirmations and trend_ok_long and volatility_ok and volume_ok
+short_signal = short_score >= min_confirmations and trend_ok_short and volatility_ok and volume_ok
+
+// Calidad de señal
+signal_strength_long = long_score >= 8 ? "MUY FUERTE" : long_score >= 6 ? "FUERTE" : long_score >= 4 ? "MODERADA" : "DÉBIL"
+signal_strength_short = short_score >= 8 ? "MUY FUERTE" : short_score >= 6 ? "FUERTE" : short_score >= 4 ? "MODERADA" : "DÉBIL"
+
+// =====================================================
+// EJECUCIÓN DE TRADES
+// =====================================================
+
+// Calcular cantidad en contratos basado en USDT
+qty_in_contracts = position_size_usdt / close
+
+// LONG ENTRY
+if long_signal and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, qty=qty_in_contracts)
+    
+// SHORT ENTRY
+if short_signal and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short, qty=qty_in_contracts)
+
+// SALIDAS con Stop Loss y Take Profit
+if strategy.position_size > 0 and use_sl_tp
+    strategy.exit("EXIT LONG", "LONG", 
+         stop=strategy.position_avg_price * (1 - sl_percent), 
+         limit=strategy.position_avg_price * (1 + tp_percent),
+         trail_price=use_trailing ? strategy.position_avg_price * (1 + trailing_percent) : na,
+         trail_offset=use_trailing ? strategy.position_avg_price * trailing_percent : na)
+
+if strategy.position_size < 0 and use_sl_tp
+    strategy.exit("EXIT SHORT", "SHORT", 
+         stop=strategy.position_avg_price * (1 + sl_percent), 
+         limit=strategy.position_avg_price * (1 - tp_percent),
+         trail_price=use_trailing ? strategy.position_avg_price * (1 - trailing_percent) : na,
+         trail_offset=use_trailing ? strategy.position_avg_price * trailing_percent : na)
+
+// =====================================================
+// VISUALIZACIÓN
+// =====================================================
+
+// Plot EMAs
+plot(ema8, "EMA 8", color=color.blue, linewidth=1)
+plot(ema21, "EMA 21", color=color.orange, linewidth=1)
+plot(ema55, "EMA 55", color=color.purple, linewidth=1)
+plot(ema200, "EMA 200", color=color.red, linewidth=2)
+
+// Plot Bollinger Bands
+p1 = plot(bb_upper, "BB Superior", color=color.gray)
+p2 = plot(bb_lower, "BB Inferior", color=color.gray)
+fill(p1, p2, color=color.new(color.gray, 90))
+
+// Señales en el gráfico
+plotshape(long_signal, "Señal LONG", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(short_signal, "Señal SHORT", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Background de señales fuertes
+bgcolor(long_score >= 8 ? color.new(color.green, 90) : na)
+bgcolor(short_score >= 8 ? color.new(color.red, 90) : na)
+
+// =====================================================
+// TABLA DE INFORMACIÓN
+// =====================================================
+
+var table panel = table.new(position.top_right, 3, 8)
+
+if barstate.islast
+    // Header
+    table.cell(panel, 0, 0, "Indicador", bgcolor=color.gray, text_color=color.white)
+    table.cell(panel, 1, 0, "Valor", bgcolor=color.gray, text_color=color.white)
+    table.cell(panel, 2, 0, "Estado", bgcolor=color.gray, text_color=color.white)
+    
+    // RSI
+    table.cell(panel, 0, 1, "RSI", text_color=color.white)
+    table.cell(panel, 1, 1, str.tostring(math.round(rsi, 2)), text_color=color.yellow)
+    table.cell(panel, 2, 1, rsi > 70 ? "Sobrecompra" : rsi < 30 ? "Sobreventa" : "Neutral", 
+         text_color=rsi > 70 ? color.red : rsi < 30 ? color.green : color.yellow)
+    
+    // MACD
+    table.cell(panel, 0, 2, "MACD", text_color=color.white)
+    table.cell(panel, 1, 2, str.tostring(math.round(macd_hist, 4)), text_color=color.yellow)
+    table.cell(panel, 2, 2, macd_hist > 0 ? "Alcista" : "Bajista", 
+         text_color=macd_hist > 0 ? color.green : color.red)
+    
+    // ADX
+    table.cell(panel, 0, 3, "ADX", text_color=color.white)
+    table.cell(panel, 1, 3, str.tostring(math.round(adx, 2)), text_color=color.yellow)
+    table.cell(panel, 2, 3, adx > 25 ? "Tendencia Fuerte" : "Sin Tendencia", 
+         text_color=adx > 25 ? color.green : color.orange)
+    
+    // Volatilidad
+    table.cell(panel, 0, 4, "ATR", text_color=color.white)
+    table.cell(panel, 1, 4, str.tostring(math.round(atr, 2)), text_color=color.yellow)
+    table.cell(panel, 2, 4, high_volatility ? "Alta" : low_volatility ? "Baja" : "Normal", 
+         text_color=high_volatility ? color.orange : color.yellow)
+    
+    // Volumen
+    table.cell(panel, 0, 5, "Volumen", text_color=color.white)
+    table.cell(panel, 1, 5, high_volume ? "ALTO" : "NORMAL", text_color=color.yellow)
+    table.cell(panel, 2, 5, volume_surge ? "⚠️ Pico" : "Normal", 
+         text_color=volume_surge ? color.orange : color.yellow)
+    
+    // Scores
+    table.cell(panel, 0, 6, "LONG Score", text_color=color.white)
+    table.cell(panel, 1, 6, str.tostring(long_score), text_color=color.green)
+    table.cell(panel, 2, 6, signal_strength_long, text_color=color.green)
+    
+    table.cell(panel, 0, 7, "SHORT Score", text_color=color.white)
+    table.cell(panel, 1, 7, str.tostring(short_score), text_color=color.red)
+    table.cell(panel, 2, 7, signal_strength_short, text_color=color.red)
+
+// =====================================================
+// ALERTAS - CORREGIDAS
+// =====================================================
+
+// Convertir scores a simple string antes de alertcondition
+if long_signal
+    alert("Señal LONG - Score: " + str.tostring(long_score), alert.freq_once_per_bar_close)
+
+if short_signal
+    alert("Señal SHORT - Score: " + str.tostring(short_score), alert.freq_once_per_bar_close)
+
+View in Pine Editor・361 lines
+Use on chart
+1
+5
+1
+482
+Varios indicadores que operan simultaneamente y tienen que sumar puntos para entrsr

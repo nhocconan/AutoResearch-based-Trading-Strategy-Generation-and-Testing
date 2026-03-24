@@ -1,0 +1,180 @@
+//@version=6
+strategy("DEMATR Guard", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, initial_capital=100000)
+
+// ─── Inputs ─────────────────────────────────────────────────────────────────
+grp_dema = "DEMA Settings"
+dema_fast_len    = input.int(8,  "DEMA Fast Length", minval=2, group=grp_dema)
+dema_slow_len    = input.int(21, "DEMA Slow Length", minval=2, group=grp_dema)
+
+grp_ema = "EMA Floor"
+ema_floor_len    = input.int(50, "EMA Floor Length", minval=5, group=grp_ema)
+
+grp_ich = "Ichimoku Cloud"
+ich_conv_len     = input.int(9,  "Conversion Period", minval=1, group=grp_ich)
+ich_base_len     = input.int(26, "Base Period", minval=1, group=grp_ich)
+ich_span_len     = input.int(52, "Span B Period", minval=1, group=grp_ich)
+ich_displacement = input.int(26, "Displacement", minval=1, group=grp_ich)
+
+grp_atr = "ATR Volatility Filter"
+atr_len          = input.int(14,  "ATR Length", minval=1, group=grp_atr)
+atr_median_len   = input.int(50,  "ATR Median Lookback", minval=10, group=grp_atr)
+atr_mult         = input.float(1.5, "ATR Rejection Multiplier", minval=1.0, step=0.1, group=grp_atr, tooltip="Reject entries when ATR% is this many times above its median. Lower = stricter filter.")
+
+// ─── DEMA Calculation ───────────────────────────────────────────────────────
+dema(src, len) =>
+    ema1 = ta.ema(src, len)
+    ema2 = ta.ema(ema1, len)
+    2 * ema1 - ema2
+
+dema_fast = dema(close, dema_fast_len)
+dema_slow = dema(close, dema_slow_len)
+
+// ─── EMA 50 (Floor for exits) ──────────────────────────────────────────────
+ema_floor = ta.ema(close, ema_floor_len)
+
+// ─── Ichimoku Cloud ─────────────────────────────────────────────────────────
+donchian(len) =>
+    math.avg(ta.lowest(len), ta.highest(len))
+
+conversion_line = donchian(ich_conv_len)
+base_line       = donchian(ich_base_len)
+lead_line_a     = math.avg(conversion_line, base_line)
+lead_line_b     = donchian(ich_span_len)
+
+senkou_a = lead_line_a[ich_displacement]
+senkou_b = lead_line_b[ich_displacement]
+
+// ─── ATR Volatility Filter ─────────────────────────────────────────────────
+// Reject entries when volatility is abnormally high (overextended moves)
+atr_val     = ta.atr(atr_len)
+atr_pct     = atr_val / close * 100
+atr_median  = ta.percentile_nearest_rank(atr_pct, atr_median_len, 50)
+atr_ok      = atr_pct < atr_median * atr_mult
+
+// ─── Entry Conditions ───────────────────────────────────────────────────────
+dema_cross_up     = ta.crossover(dema_fast, dema_slow)
+price_above_cloud = close > senkou_a and close > senkou_b
+
+long_entry = dema_cross_up and price_above_cloud and atr_ok
+
+// ─── Exit Conditions ────────────────────────────────────────────────────────
+dema_cross_down   = ta.crossunder(dema_fast, dema_slow)
+price_below_floor = close < ema_floor
+
+long_exit = dema_cross_down and price_below_floor
+
+// ─── Strategy Execution ─────────────────────────────────────────────────────
+if long_entry
+    strategy.entry("Long", strategy.long)
+
+if long_exit
+    strategy.close("Long")
+
+// ─── Plots ──────────────────────────────────────────────────────────────────
+plot(dema_fast, "DEMA 8", color=color.new(color.blue, 0), linewidth=2)
+plot(dema_slow, "DEMA 21", color=color.new(color.orange, 0), linewidth=2)
+plot(ema_floor, "EMA 50 (Floor)", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_line)
+
+// Ichimoku Cloud
+p_senkou_a = plot(lead_line_a, offset=ich_displacement, title="Senkou A", color=color.new(color.green, 80))
+p_senkou_b = plot(lead_line_b, offset=ich_displacement, title="Senkou B", color=color.new(color.red, 80))
+fill(p_senkou_a, p_senkou_b, color=lead_line_a > lead_line_b ? color.new(color.green, 90) : color.new(color.red, 90), title="Cloud")
+
+plot(conversion_line, "Tenkan-sen", color=color.new(color.teal, 70))
+plot(base_line, "Kijun-sen", color=color.new(color.maroon, 70))
+
+// ─── ATR Filter Visual ─────────────────────────────────────────────────────
+// Red background when ATR filter would reject a signal
+atr_rejected = dema_cross_up and price_above_cloud and not atr_ok
+bgcolor(atr_rejected ? color.new(color.red, 85) : na, title="ATR Rejected Signal")
+
+// ─── Signal Markers ─────────────────────────────────────────────────────────
+plotshape(long_entry, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="B")
+plotshape(long_exit, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="S")
+plotshape(atr_rejected, title="Rejected", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny, text="ATR")
+
+// ─── Background ─────────────────────────────────────────────────────────────
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : na, title="In Position")
+
+View in Pine Editor・100 lines
+Use on chart
+2
+5
+688
+Feb 14
+The DEMATR Guard is a sophisticated trend-following strategy built to capture momentum while shielding you from high-volatility traps. It leverages the speed of Double EMAs, the structural context of the Ichimoku Cloud, and an adaptive volatility engine.
+
+Core Logic
+
+The Engine: Dual DEMA cross (8/21) for rapid signal detection with less lag than traditional moving averages.
+
+The Trend Shield: Ichimoku Cloud filter ensuring entries only occur in bullish territory (above Span A and B).
+
+Volatility Guard: Automatic ATR-based filtering that rejects signals when the market is overextended or hyper-volatile.
+
+The Safety Floor: A 50 EMA baseline used as a structural exit to preserve capital during trend reversals.
+
+
+
+What the DEMATR Guard Handles Automatically
+The script takes care of the mechanical heavy lifting: DEMA crossovers, Ichimoku Cloud positioning, EMA 50 floor exits, and the rejection of excessive volatility (ATR Filter).
+
+Your Essential Checklist (Human Discretion)
+While the script handles the math, your value as a trader comes from analyzing what a backtest cannot see. When you see a BUY triangle, check these points:
+
+
+Volume: Is there a noticeable volume spike on the signal candle?
+
+VRVP: Is there a heavy "volume wall" (resistance) right above you? If the path is clear, it's a higher-quality trade.
+
+Space to Run: Ensure there is at least 2-3% of room before the next major horizontal resistance.
+
+Future Cloud: Look to the right—is the Ichimoku cloud green for the future period?
+
+ADX: Is the trend strength above 15? Avoid taking signals in dead or sideways markets.
+
+
+
+Interpreting "ATR!" Markers
+The orange "ATR!" cross signals a rejected entry. This means the trend was valid, but the price move was too violent or overextended. These markers are designed to protect you from "buying the peak" of an exhausted rally.
+Feb 14
+Release Notes
+DEMATR Guard: High-Precision Trend Momentum
+
+The DEMATR Guard is a sophisticated trend-following strategy built to capture momentum while shielding you from high-volatility traps. It leverages the speed of Double EMAs, the structural context of the Ichimoku Cloud, and an adaptive volatility engine.
+
+Core Logic
+
+
+The Engine: Dual DEMA cross (8/21) for rapid signal detection with less lag than traditional moving averages.
+
+The Trend Shield: Ichimoku Cloud filter ensuring entries only occur in bullish territory (above Span A and B).
+
+Volatility Guard: Automatic ATR-based filtering that rejects signals when the market is overextended or hyper-volatile.
+
+The Safety Floor: A 50 EMA baseline used as a structural exit to preserve capital during trend reversals.
+
+
+
+What the DEMATR Guard Handles Automatically
+The script takes care of the mechanical heavy lifting: DEMA crossovers, Ichimoku Cloud positioning, EMA 50 floor exits, and the rejection of excessive volatility (ATR Filter).
+
+Your Essential Checklist (Human Discretion)
+While the script handles the math, your value as a trader comes from analyzing what a backtest cannot see. When you see a BUY triangle, check these points:
+
+
+Volume: Is there a noticeable volume spike on the signal candle?
+
+VRVP: Is there a heavy "volume wall" (resistance) right above you? If the path is clear, it's a higher-quality trade.
+
+Space to Run: Ensure there is at least 2-3% of room before the next major horizontal resistance.
+
+Future Cloud: Look to the right—is the Ichimoku cloud green for the future period?
+
+ADX: Is the trend strength above 15? Avoid taking signals in dead or sideways markets.
+
+
+
+Interpreting "ATR!" Markers
+
+The orange "ATR!" cross signals a rejected entry. This means the trend was valid, but the price move was too violent or overextended. These markers are designed to protect you from "buying the peak" of an exhausted rally.

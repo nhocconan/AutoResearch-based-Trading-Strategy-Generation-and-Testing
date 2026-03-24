@@ -1,0 +1,24 @@
+//@version=3
+strategy("CryptoTrader", overlay=true)
+
+longCondition = crossover(sma(close, 50), sma(close, 200))
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(sma(close, 50), sma(close, 200))
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・10 lines
+Use on chart
+2
+4
+4
+4
+4 551
+Works well on 4h charts, ETHUSD,BTCUSD,and XRPUSD but can be tested also on other crypto's.
+On those pairs no need of sofisticate scripts to trade.
+Can add a trailing stop, but as you see works perfect as it is.
+KISS (Keep It Simple Stupid).
+
+

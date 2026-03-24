@@ -1,0 +1,350 @@
+//@version=5
+strategy("TX_Smart_Cross_Session_TrendFollow", overlay=true, max_lines_count=100, max_labels_count=100, process_orders_on_close=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ==========================================
+// SECTION 0: LOCALIZATION CONSTANTS
+// ==========================================
+const string MSG_ENTRY_BREAK_LONG = "突破多"
+const string MSG_ENTRY_BREAK_SHORT= "跌破空"
+const string MSG_ENTRY_REV_LONG   = "支撐多"
+const string MSG_ENTRY_REV_SHORT  = "壓力空"
+const string MSG_ENTRY_TREND_L    = "追擊多" // New text for re-entry
+const string MSG_ENTRY_TREND_S    = "追擊空" // New text for re-entry
+
+const string MSG_EXIT_TP          = "停利"
+const string MSG_EXIT_SL          = "停損"
+const string MSG_EXIT_TRAIL       = "移停"
+
+const string MSG_ALERT_MICRO_UP   = "【快訊】突破跨盤中線 (轉強)"
+const string MSG_ALERT_MICRO_DOWN = "【快訊】跌破跨盤中線 (轉弱)"
+const string LABEL_BREAK_MID      = "突破中點"
+const string LABEL_DROP_MID       = "跌破中點"
+const string LABEL_MICRO_RES      = "微壓 "
+const string LABEL_MICRO_SUP      = "微撐 "
+const string LABEL_MICRO_MID      = "跨盤中點 "
+
+// Group Names
+const string GRP_ANALYSIS = "1. 市場結構分析 (大支撐/大壓力)"
+const string GRP_STRATEGY = "2. 策略執行設定 (進出場開關)"
+const string GRP_RISK     = "2.1. 風險管理 (停利/停損/移動)"
+const string GRP_FILTER   = "2.2. 進場過濾 (冷卻與追價)" // Modified
+const string GRP_MICRO    = "3. 微型撐壓 (跨盤水平線)"
+const string GRP_DISPLAY  = "4. 資訊面板設定"
+
+// ==========================================
+// SECTION 1: CONFIGURATION (INPUTS)
+// ==========================================
+
+// -- 1. Market Structure --
+pivotLookupLength = input.int(10, minval=2, title="波段判斷長度 (K棒數)", group=GRP_ANALYSIS)
+
+// -- 2. Strategy Execution --
+enableBreakLong  = input.bool(true, title="啟用「突破多」策略", group=GRP_STRATEGY)
+enableBreakShort = input.bool(true, title="啟用「跌破空」策略", group=GRP_STRATEGY)
+enableRevLong    = input.bool(true, title="啟用「支撐多」策略", group=GRP_STRATEGY)
+enableRevShort   = input.bool(true, title="啟用「壓力空」策略", group=GRP_STRATEGY)
+safetyBuffer     = input.int(20, title="安全邊際/過濾 (點)", minval=0, group=GRP_STRATEGY)
+
+// -- 2.1 Risk Management --
+takeProfitPoints = input.int(50, title="固定停利目標 (點)", minval=5, group=GRP_RISK)
+stopLossPoints   = input.int(30, title="固定停損防守 (點)", minval=5, group=GRP_RISK)
+
+useTrailingStop  = input.bool(true, title="啟用移動停損 (保護獲利)", group=GRP_RISK)
+trailTrigger     = input.int(15, title="移動停損-啟動點 (點)", minval=1, group=GRP_RISK)
+trailOffset      = input.int(5, title="移動停損-回檔點 (點)", minval=1, group=GRP_RISK)
+
+// -- 2.2 Filters & Re-entry (UPDATED) --
+cooldownBars     = input.int(3, title="交易冷卻 K 棒數", minval=1, group=GRP_FILTER, tooltip="平倉後等待幾根 K 棒才允許再次進場？(建議 3-5)")
+enableTrendReEntry = input.bool(true, title="🔥 啟用「停利後追價」模式", group=GRP_FILTER, tooltip="打勾後：如果停利出場後，價格依然強勢且有獲利空間，冷卻結束後會自動再次進場(追擊)。\n不打勾：只會在突破瞬間進場一次。")
+
+// -- 3. Micro Structure --
+enableMicro     = input.bool(true, title="顯示跨盤微型水平線", group=GRP_MICRO)
+microLineColor  = color.new(color.purple, 0)
+sessMorningDef  = input.session("0845-1345", title="日盤時段定義", group=GRP_MICRO)
+sessNightDef    = input.session("1500-0530", title="夜盤時段定義", group=GRP_MICRO)
+
+// -- 4. Dashboard --
+panelPosition   = input.string("右下", title="面板顯示位置", options=["右下", "右上", "左下", "左上"], group=GRP_DISPLAY)
+
+// ==========================================
+// SECTION 2: DATA FETCHING
+// ==========================================
+standardTicker = ticker.standard(syminfo.tickerid)
+[srcOpen, srcHigh, srcLow, srcClose] = request.security(standardTicker, timeframe.period, [open, high, low, close])
+
+// ==========================================
+// SECTION 3: UTILITY FUNCTIONS
+// ==========================================
+checkProfitRoom(currentPrice, level1, level2, threshold, isLong) =>
+    float nearestLevel = na
+    bool isSafe = true
+    if isLong
+        if not na(level1) and level1 > currentPrice
+            nearestLevel := level1
+        else if not na(level2) and level2 > currentPrice
+            nearestLevel := level2
+        if not na(nearestLevel) and (nearestLevel - currentPrice) < threshold
+            isSafe := false
+    else
+        if not na(level1) and level1 < currentPrice
+            nearestLevel := level1
+        else if not na(level2) and level2 < currentPrice
+            nearestLevel := level2
+        if not na(nearestLevel) and (currentPrice - nearestLevel) < threshold
+            isSafe := false
+    isSafe
+
+getLineStyle(isResistance, priceLevel) =>
+    if isResistance
+        if srcClose > priceLevel
+            [color.green, line.style_solid, "壓轉撐: "] 
+        else
+            [color.red, line.style_dashed, "壓力: "]   
+    else
+        if srcClose < priceLevel
+            [color.red, line.style_solid, "撐轉壓: "]   
+        else
+            [color.green, line.style_dashed, "支撐: "] 
+
+// ==========================================
+// SECTION 4: CORE LOGIC - MACRO PIVOT POINTS
+// ==========================================
+isPivotHigh = srcHigh[pivotLookupLength] == ta.highest(srcHigh, pivotLookupLength * 2 + 1)
+isPivotLow  = srcLow[pivotLookupLength] == ta.lowest(srcLow, pivotLookupLength * 2 + 1)
+
+var float resistanceLevel1 = na
+var float resistanceLevel2 = na
+var float supportLevel1    = na
+var float supportLevel2    = na
+
+if isPivotHigh
+    resistanceLevel2 := resistanceLevel1
+    resistanceLevel1 := srcHigh[pivotLookupLength]
+
+if isPivotLow
+    supportLevel2 := supportLevel1
+    supportLevel1 := srcLow[pivotLookupLength]
+
+// ==========================================
+// SECTION 5: MICRO STRUCTURE
+// ==========================================
+var float rec_Morning_H = na, var float rec_Morning_L = na
+var float rec_Night_H   = na, var float rec_Night_L   = na
+var float static_H   = na, var float static_L   = na, var float static_Mid = na
+
+bool isInMorning = not na(time(timeframe.period, sessMorningDef))
+bool isInNight   = not na(time(timeframe.period, sessNightDef))
+
+if isInMorning
+    if not isInMorning[1] 
+        rec_Morning_H := srcHigh
+        rec_Morning_L := srcLow
+        static_H   := rec_Night_H
+        static_L   := rec_Night_L
+        static_Mid := math.avg(rec_Night_H, rec_Night_L)
+    else
+        rec_Morning_H := math.max(rec_Morning_H, srcHigh)
+        rec_Morning_L := math.min(rec_Morning_L, srcLow)
+
+if isInNight
+    if not isInNight[1] 
+        rec_Night_H := srcHigh
+        rec_Night_L := srcLow
+        static_H   := rec_Morning_H
+        static_L   := rec_Morning_L
+        static_Mid := math.avg(rec_Morning_H, rec_Morning_L)
+    else
+        rec_Night_H := math.max(rec_Night_H, srcHigh)
+        rec_Night_L := math.min(rec_Night_L, srcLow)
+
+var line l_micro_h = na, var label lbl_micro_h = na
+var line l_micro_l = na, var label lbl_micro_l = na
+var line l_micro_m = na, var label lbl_micro_m = na
+
+line.delete(l_micro_h), label.delete(lbl_micro_h)
+line.delete(l_micro_l), label.delete(lbl_micro_l)
+line.delete(l_micro_m), label.delete(lbl_micro_m)
+
+if enableMicro and not na(static_H) and not na(static_L)
+    int start_x = bar_index - 15
+    int end_x   = bar_index + 25 
+
+    l_micro_h := line.new(start_x, static_H, end_x, static_H, color=microLineColor, style=line.style_solid, width=1)
+    lbl_micro_h := label.new(end_x, static_H, text=LABEL_MICRO_RES + str.tostring(static_H, "#"), color=color.new(color.purple, 100), textcolor=microLineColor, style=label.style_none, textalign=text.align_left)
+
+    l_micro_l := line.new(start_x, static_L, end_x, static_L, color=microLineColor, style=line.style_solid, width=1)
+    lbl_micro_l := label.new(end_x, static_L, text=LABEL_MICRO_SUP + str.tostring(static_L, "#"), color=color.new(color.purple, 100), textcolor=microLineColor, style=label.style_none, textalign=text.align_left)
+
+    l_micro_m := line.new(start_x, static_Mid, end_x, static_Mid, color=microLineColor, style=line.style_solid, width=2)
+    lbl_micro_m := label.new(end_x, static_Mid, text=LABEL_MICRO_MID + str.tostring(static_Mid, "#"), color=color.new(color.purple, 100), textcolor=microLineColor, style=label.style_none, textalign=text.align_left)
+
+var int last_micro_signal = 0 
+bool crossOverMicro_Raw  = enableMicro and ta.crossover(srcClose, static_Mid)
+bool crossUnderMicro_Raw = enableMicro and ta.crossunder(srcClose, static_Mid)
+bool valid_Breakout = false
+bool valid_Breakdown = false
+
+if crossOverMicro_Raw and last_micro_signal != 1
+    valid_Breakout := true
+    last_micro_signal := 1 
+if crossUnderMicro_Raw and last_micro_signal != -1
+    valid_Breakdown := true
+    last_micro_signal := -1 
+
+if valid_Breakout
+    label.new(bar_index, srcHigh, LABEL_BREAK_MID, color=color.new(color.purple, 0), style=label.style_label_down, textcolor=color.white, size=size.small, tooltip=MSG_ALERT_MICRO_UP)
+if valid_Breakdown
+    label.new(bar_index, srcLow, LABEL_DROP_MID, color=color.new(color.purple, 0), style=label.style_label_up, textcolor=color.white, size=size.small, tooltip=MSG_ALERT_MICRO_DOWN)
+
+alertcondition(valid_Breakout, title="Micro Mid Breakout", message=MSG_ALERT_MICRO_UP)
+alertcondition(valid_Breakdown, title="Micro Mid Breakdown", message=MSG_ALERT_MICRO_DOWN)
+
+// ==========================================
+// SECTION 6: VISUALIZATION (MACRO S/R)
+// ==========================================
+var line l_res1 = na, var label lbl_res1 = na
+var line l_res2 = na, var label lbl_res2 = na
+var line l_sup1 = na, var label lbl_sup1 = na
+var line l_sup2 = na, var label lbl_sup2 = na
+
+line.delete(l_res1), label.delete(lbl_res1)
+line.delete(l_res2), label.delete(lbl_res2)
+line.delete(l_sup1), label.delete(lbl_sup1)
+line.delete(l_sup2), label.delete(lbl_sup2)
+
+drawLine(level, isRes, opacity) =>
+    if not na(level)
+        [c, s, txt] = getLineStyle(isRes, level)
+        lineVal = line.new(bar_index - 50, level, bar_index + 10, level, color=color.new(c, opacity), style=s)
+        labelVal = label.new(bar_index + 8, level, text=txt + str.tostring(level, "#"), color=color.new(c, 100), textcolor=color.new(c, opacity), style=label.style_none, textalign=text.align_left)
+        [lineVal, labelVal]
+
+[l1, lb1] = drawLine(resistanceLevel1, true, 0)
+l_res1 := l1, lbl_res1 := lb1
+
+[l2, lb2] = drawLine(resistanceLevel2, true, 50)
+l_res2 := l2, lbl_res2 := lb2
+
+[l3, lb3] = drawLine(supportLevel1, false, 0)
+l_sup1 := l3, lbl_sup1 := lb3
+
+[l4, lb4] = drawLine(supportLevel2, false, 50)
+l_sup2 := l4, lbl_sup2 := lb4
+
+// ==========================================
+// SECTION 7: STRATEGY EXECUTION (HYBRID LOGIC)
+// ==========================================
+
+// 7.0 Cool-down Logic
+var int last_exit_bar = 0
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    last_exit_bar := bar_index
+
+bool is_cooling_down = (bar_index - last_exit_bar) < cooldownBars
+
+// 7.1 Entry Signal Logic
+// A. Crossover (Strict entry for initial breakout)
+bool xOverLong  = ta.crossover(srcClose, resistanceLevel1)
+bool xOverShort = ta.crossunder(srcClose, supportLevel1)
+
+// B. Trend Follow (Re-entry after cool-down if trend persists)
+// Only valid if: Enabled AND Not cooling down AND Position is flat AND Price > Level
+bool trendLong  = enableTrendReEntry and not is_cooling_down and strategy.position_size == 0 and srcClose > resistanceLevel1
+bool trendShort = enableTrendReEntry and not is_cooling_down and strategy.position_size == 0 and srcClose < supportLevel1
+
+// Combine signals
+bool signalBreakout   = xOverLong or trendLong
+bool signalBreakdown  = xOverShort or trendShort
+bool signalRebound    = (srcLow <= supportLevel1 * 1.001 and srcClose > supportLevel1)
+bool signalRejection  = (srcHigh >= resistanceLevel1 * 0.999 and srcClose < resistanceLevel1)
+
+// 7.2 Safety Checks (Common for all)
+bool isSafeToLong  = checkProfitRoom(srcClose, resistanceLevel1, resistanceLevel2, safetyBuffer, true)
+bool isSafeToShort = checkProfitRoom(srcClose, supportLevel1, supportLevel2, safetyBuffer, false)
+
+// 7.3 Execution
+if enableBreakLong and signalBreakout and isSafeToLong
+    // Detect if it's a Crossover or a Trend-Follow entry for the comment
+    string msg = xOverLong ? MSG_ENTRY_BREAK_LONG : MSG_ENTRY_TREND_L
+    strategy.entry("ENT_L_BRK", strategy.long, comment=msg)
+
+if enableBreakShort and signalBreakdown and isSafeToShort
+    string msg = xOverShort ? MSG_ENTRY_BREAK_SHORT : MSG_ENTRY_TREND_S
+    strategy.entry("ENT_S_BRK", strategy.short, comment=msg)
+
+// Reversal logic (remains strict)
+if enableRevLong and signalRebound and isSafeToLong and strategy.position_size == 0
+    strategy.entry("ENT_L_REV", strategy.long, comment=MSG_ENTRY_REV_LONG)
+
+if enableRevShort and signalRejection and isSafeToShort and strategy.position_size == 0
+    strategy.entry("ENT_S_REV", strategy.short, comment=MSG_ENTRY_REV_SHORT)
+
+// 7.4 Exit Management
+float trail_activate = useTrailingStop ? trailTrigger : na
+float trail_dist     = useTrailingStop ? trailOffset  : na
+
+if strategy.position_size > 0
+    strategy.exit("EXIT_L", from_entry="ENT_L_BRK", profit=takeProfitPoints, loss=stopLossPoints, trail_points=trail_activate, trail_offset=trail_dist, comment_profit=MSG_EXIT_TP, comment_loss=MSG_EXIT_SL, comment_trailing=MSG_EXIT_TRAIL)
+    strategy.exit("EXIT_L_R", from_entry="ENT_L_REV", profit=takeProfitPoints, loss=stopLossPoints, trail_points=trail_activate, trail_offset=trail_dist, comment_profit=MSG_EXIT_TP, comment_loss=MSG_EXIT_SL, comment_trailing=MSG_EXIT_TRAIL)
+
+if strategy.position_size < 0
+    strategy.exit("EXIT_S", from_entry="ENT_S_BRK", profit=takeProfitPoints, loss=stopLossPoints, trail_points=trail_activate, trail_offset=trail_dist, comment_profit=MSG_EXIT_TP, comment_loss=MSG_EXIT_SL, comment_trailing=MSG_EXIT_TRAIL)
+    strategy.exit("EXIT_S_R", from_entry="ENT_S_REV", profit=takeProfitPoints, loss=stopLossPoints, trail_points=trail_activate, trail_offset=trail_dist, comment_profit=MSG_EXIT_TP, comment_loss=MSG_EXIT_SL, comment_trailing=MSG_EXIT_TRAIL)
+
+// ==========================================
+// SECTION 8: DASHBOARD
+// ==========================================
+var table_pos = position.bottom_right
+if panelPosition == "右上"
+    table_pos := position.top_right
+else if panelPosition == "左下"
+    table_pos := position.bottom_left
+else if panelPosition == "左上"
+    table_pos := position.top_left
+
+var table infoPanel = table.new(table_pos, 2, 5, border_width=1)
+
+if barstate.islast
+    table.cell(infoPanel, 0, 0, "市場狀態", bgcolor=color.new(color.gray, 60), text_color=color.white)
+    
+    string trendText = "盤整"
+    color trendColor = color.gray
+    if srcClose > resistanceLevel1
+        trendText := "偏多"
+        trendColor := color.blue
+    else if srcClose < supportLevel1
+        trendText := "偏空"
+        trendColor := color.orange
+    
+    // Status Logic
+    if is_cooling_down
+        trendText := "冷卻中"
+        trendColor := color.black
+        
+    table.cell(infoPanel, 1, 0, trendText, bgcolor=trendColor, text_color=color.white)
+    
+    string rStatus = srcClose > resistanceLevel1 ? "突破" : "有效"
+    color rCol = srcClose > resistanceLevel1 ? color.green : color.red
+    table.cell(infoPanel, 0, 1, "關鍵壓力", bgcolor=rCol, text_color=color.white)
+    table.cell(infoPanel, 1, 1, str.tostring(resistanceLevel1, "#") + "\n(" + rStatus + ")", bgcolor=color.black, text_color=rCol)
+    
+    string sStatus = srcClose < supportLevel1 ? "跌破" : "有效"
+    color sCol = srcClose < supportLevel1 ? color.red : color.green
+    table.cell(infoPanel, 0, 2, "關鍵支撐", bgcolor=sCol, text_color=color.white)
+    table.cell(infoPanel, 1, 2, str.tostring(supportLevel1, "#") + "\n(" + sStatus + ")", bgcolor=color.black, text_color=sCol)
+
+    table.cell(infoPanel, 0, 3, "目前倉位", bgcolor=color.new(color.gray, 60), text_color=color.white)
+    string posInfo = "空手"
+    if strategy.position_size > 0
+        posInfo := "多單"
+    else if strategy.position_size < 0
+        posInfo := "空單"
+    table.cell(infoPanel, 1, 3, posInfo, bgcolor=color.black, text_color=color.white)
+
+View in Pine Editor・342 lines
+Use on chart
+1
+0
+0
+1 681
+A Pine Script v5 strategy for Taiwan Index Futures (TX). Features macro pivot analysis, cross-session micro-structure (Chen Kuei concept), dynamic risk management, and smart trend-following logic.

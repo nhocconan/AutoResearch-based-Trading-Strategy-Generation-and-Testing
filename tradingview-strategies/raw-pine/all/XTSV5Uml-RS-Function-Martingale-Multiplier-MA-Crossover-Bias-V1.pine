@@ -1,0 +1,45 @@
+//@version=2
+strategy(title='[RS]Function Martingale Multiplier - MA Crossover Bias V1', overlay=false, default_qty_type=strategy.cash, default_qty_value=1000, initial_capital=100000, currency=currency.USD)
+wins_multiplier = input(defval=1.00, title='Scaling Multiplier for Consecutive Wins:')
+losses_multiplier = input(defval=2.00, title='Scaling Multiplier for Consecutive Losses:')
+src = input(close)
+fast_ma = ema(src, input(5))
+slow_ma = ema(src, input(55))
+// Setup trading conditions based on last performed trades performance.
+direction = na(direction[1]) ? 1 : crossunder(fast_ma, slow_ma) and direction[1] > 0 ? -1 : crossover(fast_ma, slow_ma) and direction[1] < 0 ? 1 : direction[1]
+
+buy_cond = direction > 0 and strategy.opentrades < 1
+sel_cond = direction < 0 and strategy.opentrades < 1
+
+f_martingale_wins_multiplier(_multiplier) => _return = na(_return[1]) ? 1 : change(strategy.losstrades) > 0 ? 1 : change(strategy.wintrades) > 0 or change(strategy.eventrades) > 0 ? _return[1] * _multiplier : _return[1]
+f_martingale_loss_multiplier(_multiplier) => _return = na(_return[1]) ? 1 : change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 or change(strategy.eventrades) > 0 ? _return[1] * _multiplier : _return[1]
+
+mode = change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 ? -1 : nz(mode[1], 1)
+trade_multiplier = mode > 0 ? f_martingale_wins_multiplier(wins_multiplier) : f_martingale_loss_multiplier(losses_multiplier)
+
+trade_size = input(defval=100, title='Base trade value:')
+trade_size_multiplied = trade_size * trade_multiplier
+
+strategy.entry('B', long=true, qty=trade_size_multiplied, when=buy_cond)
+strategy.entry('S', long=false, qty=trade_size_multiplied, when=sel_cond)
+
+take_profit = input(defval=250, title='TP in ticks(1/10 of a pip):')
+stop_loss = input(defval=100, title='SL in ticks(1/10 of a pip):')
+strategy.exit('B', from_entry='B', profit=take_profit, loss=stop_loss)
+strategy.exit('S', from_entry='S', profit=take_profit, loss=stop_loss)
+
+plot(series=strategy.equity, title='Equity', color=black, linewidth=2)
+plot(series=lowest(strategy.equity, 100), title='Base', color=red)
+
+View in Pine Editor・32 lines
+Use on chart
+3
+6
+9
+8
+10 683
+EXPERIMENTAL:
+WARNING: Martingale is subject to HUGE drawdown spikes, use at your own risk!
+
+updated function to also double(aply multiplier) on even trades, example with a MA's crossover.
+

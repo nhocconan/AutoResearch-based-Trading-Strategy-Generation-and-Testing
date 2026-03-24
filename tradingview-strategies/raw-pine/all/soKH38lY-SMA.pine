@@ -1,0 +1,44 @@
+//@version=3
+strategy("SMA",overlay=true)
+//
+src = input(close, title="Source")
+
+//Volume
+
+
+//SMA
+plot(sma(close,10),color = orange,linewidth=4, title = '10')
+plot(sma(close,20),color = gray, linewidth=4, title = '20')
+plot(sma(close,50),color = blue, linewidth=3, title = '50')
+plot(sma(close,100),color = green, linewidth=4, title = '100')
+plot(sma(close,200),color = purple, linewidth=3, title = '200')
+
+//SMA High Low
+//plot(sma(high,10),color = gray,linewidth=1, title = '10 High')
+//plot(sma(low,200),color = red,linewidth=1, title = '200 Low')
+
+
+//Golden Cross MA 50 & 200
+ma50= input(50, minval=1, title="Moving Average 50")
+ma200= input(200, minval=1, title="Moving Average 200")
+
+exponential = input(false, title="Exponential MA")
+select1 = exponential ? ema(src, ma50) : sma(src, ma50)
+select2 = exponential ? ema(src, ma200) : sma(src, ma200)
+
+golden_cross() => select1 > select2
+death_cross() => select1 < select2
+
+Golden() => golden_cross() and death_cross()[1]
+Death() => death_cross() and golden_cross()[1]
+bgcolor(Golden() ? #FFD700 : Death() ? #D3D3D3 : na,transp=0, title="Golden & Death Cross Background Color")
+
+plotshape(Golden(), color=black, style=shape.xcross, text="Golden Cross", location=location.top)
+plotshape(Death(), color=black, style=shape.xcross, text="Death Cross", location=location.top)
+
+View in Pine Editor・37 lines
+Use on chart
+2.7 K
+10
+108 488
+SMA 100 200 10 20 50

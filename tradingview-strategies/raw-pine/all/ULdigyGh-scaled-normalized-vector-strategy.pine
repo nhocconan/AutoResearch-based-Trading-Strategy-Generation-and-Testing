@@ -1,0 +1,202 @@
+//@version=5
+strategy("Normalized Vector Strategy [5]", 'NVS[5]', false, precision=2,
+         initial_capital=1000, pyramiding=0, margin_long=10, margin_short=10, process_orders_on_close=true, 
+         slippage=10, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=75)  // default_qty_type=strategy.percent_of_equity, default_qty_value=75
+
+import TradingView/ta/7
+// This is a scaled Normalized Vector Strategy with a Karobein Oscillator
+// original: Drkhodakarami (https://www.tradingview.com/script/Fxv2xFWe-Normalized-Vector-Strategy-By-Drkhodakarami-Opensource/)
+
+// Repainting: in general there two types of repainting:
+// * when the last candle is constantly being redrawn
+// * when the indicator draws a different configuration after it has been deactivated/reactivated, i.e. refreshed
+
+// The former is a natural behaviour, which presents a constant source of frustration, 
+// when a signal directly depends on the current market situation and can be overcome 
+// with various indirect techniques like divergence.
+
+// The latter suggests a flaw in the indicator design.
+// Unfortunately, the Normalized Vector Strategy is repainting in the latter sense, although being
+// really promising. Would be nice if our community suggests a solution to this problem ))
+
+// This strat consistently performs with high accuracy, showing up to 96% scores
+// Here are some of the best parameters:
+// TF     Lookback   Performance (ca.)
+// 1m     13         92%
+// 3m     34         92%
+// 5m     85         92%
+// 15m    210        90%
+// 30m    360        89%
+// 1H     1440,720   94%, 87%
+
+// The Karobein Oscillator has an intrinsic sinusoidal behaviour that helps in determining direction and timing.
+// It does not repaint.
+// original: alexgrover (https://www.tradingview.com/script/JiNi0f62-Karobein-Oscillator/)
+
+StartDate  = input.time (timestamp('01 Dec 2023 00:00:00'), 'Start Date')
+StopDate   = input.time (timestamp('31 Dec 2025 23:45:00'), 'Stop Date')
+Data       = input.source(close,   'Data')
+TF1        = input.int   (2,      'Timeframe 1', 1, 1440)
+TF2        = input.int   (10,     'Timeframe 2', 1, 1440) 
+Sense      = input.float (13000.0, 'Sensitivity [0.1..n]', minval=0.1, step=0.1) / 100000000
+Period     = input.int   (13,      'Karobein Oscillator Period', 2)
+Holding    = input.int   (4,       'Holding Period', 1, tooltip='Set to 100+ to remove all the stops')
+Backtest   = input.bool  (false,   'Backtest',    inline='bool')
+// Trailing  = input.bool  (false,    'Trailing',          inline='bools')
+// Info      = input.bool  (true,     'Info',              inline='bools')
+
+//-- Constants
+
+color green = color.new(color.teal, 10),   color red  = color.new(color.red, 10), 
+color black = color.new(color.black, 100), color gray = color.new(color.gray, 50)
+
+//-- Types
+
+type Signal
+    int BUY   = 1
+    int SELL  =-1
+    int CLEAR = 0
+
+//-- Variables
+
+var Signal stype      = Signal.new()
+var int    signal     = stype.CLEAR
+var int    hp_counter = 0     // holding period counter
+var label  lb         = label.new(na, na, '', xloc.bar_index, yloc.price, color.black, label.style_label_upper_left, 
+                                 color.white, size.small, text.align_left, '', font.family_monospace)
+var int    timebuy    = 0
+var int    timesell   = 0
+
+//-- Methods
+
+method minimax(float u, float min, float max, int p=0) => 
+    float hi = p==0 ? ta.max(u) : ta.highest(u, p)
+    float lo = p==0 ? ta.min(u) : ta.lowest(u, p)
+    (max - min) * (u - lo)/(hi - lo) + min
+
+method karo(float u, int p) => // Karobein Oscillator
+    float data        = ta.ema(u, p) 
+    float a           = ta.ema(data < data[1] ? data / data[1] : 0, p)
+    float b           = ta.ema(data > data[1] ? data / data[1] : 0, p)
+    float c           = (data / data[1]) / (data / data[1] + b)
+    2 * ((data / data[1]) / (data / data[1] + c * a)) - 1
+
+//-- Logic
+
+int timeframe1 = math.min(TF1, TF2)
+int timeframe2 = math.max(TF1, TF2)
+
+if timeframe1 == timeframe2 
+    timeframe2 += 1
+
+lower_close  = request.security('', str.tostring(timeframe1), close)
+higher_close = request.security('', str.tostring(timeframe2), close)
+
+float ratio = lower_close / higher_close - 1  
+float upper =  Sense 
+float lower = -Sense 
+
+float karo = minimax(karo(Data, Period), -1, 1)
+
+//-- Signals
+
+bool long  = ta.crossover(ratio, upper)  and karo > 0 and timebuy  != time_close
+bool short = ta.crossunder(ratio, lower) and karo < 0 and timesell != time_close
+bool clear = not(long and short)
+
+// assemble a signal
+signal :=  long  ? stype.BUY   : 
+           short ? stype.SELL  : 
+           //clear ? stype.CLEAR : 
+           nz(signal)
+
+bool changed = bool(ta.change(signal))
+
+hp_counter := changed ? 0 : hp_counter + 1
+
+bool longCondition   = changed and signal==stype.BUY
+bool shortCondition  = changed and signal==stype.SELL
+bool end_long_cond   = signal==stype.BUY  and hp_counter==Holding 
+bool end_short_cond  = signal==stype.SELL and hp_counter==Holding  
+bool clear_condition = end_long_cond or end_short_cond
+
+//
+
+upper := minimax(upper, -1, 1)
+lower := minimax(lower, -1, 1)
+ratio := minimax(ratio, -1, 1)
+
+color bg = longCondition ? green : shortCondition ? red : black
+color cl = ratio > upper ? color.teal : ratio < lower ? color.red : color.silver
+
+//-- Visuls
+
+hline(0,    '', gray, hline.style_dotted, editable=false)
+plot(upper, '', green, editable=false)
+plot(lower, '', red,   editable=false)
+
+plot(end_long_cond  ? 0  : na, 'StopBuy',  color.yellow, 3, plot.style_cross)
+plot(end_short_cond ? 0  : na, 'StopSell', color.yellow, 3, plot.style_cross)
+
+plot(ratio, '', color.new(cl,70), 1, plot.style_histogram, editable=false)
+plot(ratio, 'Prediction', cl, 1, plot.style_linebr, editable=false)
+plot(karo, color=color.orange)
+bgcolor(bg, editable=false)
+
+//-- Notificaction
+
+alertcondition(longCondition,  'Long', 'Long Signal!')
+alertcondition(shortCondition, 'Short', 'Short Signal!')
+alert("NVS[5]: " +  (longCondition ? "🡅" : shortCondition ? "🡇" : 'Hold!'), alert.freq_once_per_bar_close)
+
+//-- Backtest
+
+if Backtest and time >= StartDate and time <= StopDate ? true : false
+    if longCondition   
+        timebuy := time_close
+        strategy.entry("Long", strategy.long)   
+        strategy.close("Short")
+    if shortCondition   
+        timesell := time_close
+        strategy.entry("Short", strategy.short)  
+        strategy.close("Long") 
+    if clear_condition //and Clear
+        timesell := time_close
+        strategy.close_all()
+
+View in Pine Editor・169 lines
+Use on chart
+5
+1
+3
+19
+14 048
+Aug 16, 2019
+This is a scaled Normalized Vector Strategy with a Karobein Oscillator
+Original: Drkhodakarami (tradingview.com/script/Fxv2x...)
+
+Repainting: in general there two types of repainting:
+* when the last candle is constantly being redrawn
+* when the indicator draws a different configuration after it has been deactivated/reactivated, i.e. refreshed.
+
+The former is a natural behaviour, which presents a constant source of frustration, when a signal directly depends on the current market situation and can be overcome with various indirect techniques like divergence.
+
+The latter suggests a flaw in the indicator design.
+Unfortunately, the Normalized Vector Strategy is repainting in the latter sense, although being really promising. Would be nice if our community suggests a solution to this problem ))
+As it is this strat should be refreshed each time a decision is being taken.
+
+This strat consistently performs with high accuracy, showing up to 96% scores. Here are some of the best parameters:
+TF Lookback Performance (ca.)
+1m 13 92%
+3m 34 92%
+5m 85 92%
+15m 210 90%
+30m 360 89%
+1H 1440, 720 94%, 87%
+
+The Karobein Oscillator has an intrinsic sinusoidal behaviour that helps in determining direction and timing. It does not repaint.
+Original: alexgrover (tradingview.com/script/JiNi0...)
+Apr 10, 2024
+Release Notes
+Major fixes. Updated to PineScript version 5.

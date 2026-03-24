@@ -1,0 +1,116 @@
+//@version=5
+strategy("VSA + Absorption Proxy – Holmes / Bookmap Style", overlay=true)
+
+// ────────────────────────────────────────
+// Inputs
+// ────────────────────────────────────────
+lenDelta   = input.int(5, "Delta Lookback")
+spreadMult = input.float(1.6, "Wide Spread × ATR")
+volMult    = input.float(1.7, "High Volume × SMA20")
+riskPct    = input.float(1.0, "Risk %")
+rrTarget   = input.float(3.5, "R:R Target")
+
+// ────────────────────────────────────────
+// Proxy Delta (aggressive buy/sell volume difference)
+delta = volume * (close - open) / (high - low)   // simple directional volume proxy
+avgDelta = ta.sma(delta, lenDelta)
+deltaUp = delta > avgDelta
+deltaDown = delta < avgDelta
+
+wideSpread = (high - low) > ta.atr(14) * spreadMult
+highVol    = volume > ta.sma(volume, 20) * volMult
+
+// Absorption proxy (high vol down bar + delta turns up)
+absorptionBull = highVol and close > open and deltaUp and deltaDown[1]
+
+// Rejection proxy (high vol up bar + delta turns down)
+rejectionBear = highVol and close < open and deltaDown and deltaUp[1]
+
+// ────────────────────────────────────────
+// Entry / Exit
+// ────────────────────────────────────────
+if absorptionBull
+    strategy.entry("Absorb Long", strategy.long)
+
+if rejectionBear
+    strategy.entry("Reject Short", strategy.short)
+
+strategy.exit("Exit Long", "Absorb Long", stop=low * (1 - riskPct/100), limit=close * (1 + riskPct*rrTarget/100))
+strategy.exit("Exit Short", "Reject Short", stop=high * (1 + riskPct/100), limit=close * (1 - riskPct*rrTarget/100))
+
+// ────────────────────────────────────────
+// Visuals
+bgcolor(absorptionBull ? color.new(color.green, 88) : na, title="Absorption Bull")
+bgcolor(rejectionBear ? color.new(color.red, 88) : na, title="Rejection Bear")
+plotshape(absorptionBull, "Buy Signal", shape.triangleup, location.belowbar, color.green)
+plotshape(rejectionBear, "Sell Signal", shape.triangledown, location.abovebar, color.red)
+
+View in Pine Editor・46 lines
+Use on chart
+1
+7
+1 277
+VSA + Absorption Proxy – Holmes / Bookmap Style (No Delta Data Required)
+
+This open-source strategy is a simplified, VSA (Volume Spread Analysis) inspired scalper that approximates **absorption** and **rejection** patterns commonly observed in professional order-flow tools (Bookmap, Holmes, Jigsaw, etc.) — using only standard OHLCV data.
+
+Core Concept & Why This Proxy?
+In VSA and order-flow trading, **absorption** occurs when aggressive selling is met with strong buying support (high volume + wide spread + reversal up), often signaling exhaustion of sellers and potential reversal/continuation up. **Rejection** is the mirror: aggressive buying met with strong selling (high volume + wide spread + reversal down).
+
+Because true bid/ask delta is not available in standard Pine Script, this script uses a directional volume proxy:
+- delta ≈ volume × (close - open) / (high - low)
+- Combined with wide spread (vs ATR) + high volume (vs SMA) + delta flip
+
+This creates a reasonable proxy for spotting climactic volume bars where one side gets absorbed/rejected.
+
+Entry & Exit Logic
+Long (Absorption Bull):
+- High volume bar (volume > SMA(volume,20) × multiplier)
+- Wide spread (range > ATR(14) × multiplier)
+- Bullish candle (close > open)
+- Delta turns positive after being negative previous bar
+
+Short (Rejection Bear): mirror logic (bearish candle + delta turns negative)
+
+Risk Management (fixed %):
+- Stop Loss: entry low/high adjusted by riskPct (default 1%)
+- Take Profit: risk × rrTarget (default 3.5:1)
+
+Visuals
+- Green background + triangle below bar → Absorption Bull signal
+- Red background + triangle above bar → Rejection Bear signal
+
+Important Realism & Backtesting Guidelines
+To avoid misleading results, publish/test with:
+
+- Initial Capital: $10,000 – $50,000 (realistic retail/futures account)
+- Position sizing: 1–3% equity per trade (adjust via strategy properties)
+- Commission: $4–$10 round-turn per contract (futures) or 0.03–0.05% (forex/stocks)
+- Slippage: 1–4 ticks (futures) or 0.5–2 pips (forex) — higher during news
+- Dataset: ≥12–36 months on chosen timeframe (aim for 400–1000+ trades)
+- Risk per trade: 0.5–2% max — never exceed sustainable levels
+
+Expectations:
+- Works best on high-volume instruments (NQ, ES, GC, BTC, major forex) during active sessions
+- Fewer signals in low-volatility/choppy periods
+- Drawdowns common during strong trends — this is a counter-trend / absorption catcher, not trend-following
+- News events (FOMC, NFP, earnings) can cause false signals — avoid or widen stops
+
+How to Use
+1. Apply to high-liquidity symbols (NQ1!, ES1!, GC1!, BTCUSD, EURUSD, XAUUSD)
+2. Timeframes: 3m–15m for scalping, 30m–1h for swing context
+3. Trade during high-volume sessions (London/NY overlap for forex, US open for futures)
+4. Look for confluence:
+- Absorption + nearby support / demand zone → stronger long
+- Rejection + nearby resistance / supply zone → stronger short
+5. Forward-test on demo extensively — absorption setups are high-conviction but low-frequency
+6. Always use proper position sizing — never risk more than 1–2% per trade
+
+Publish Recommendation
+- Use a clean chart: only this strategy, no extra indicators/drawings
+- Show realistic Strategy Tester results with commission/slippage applied
+- Screenshot during active session with visible absorption/rejection signal + background tint
+
+Educational tool — open-source for learning VSA/order-flow concepts. This is a proxy approximation — not true delta/order-flow. Trading involves substantial risk of loss. Test thoroughly and trade responsibly.
+
+Feedback welcome — especially parameter tuning ideas for different instruments!

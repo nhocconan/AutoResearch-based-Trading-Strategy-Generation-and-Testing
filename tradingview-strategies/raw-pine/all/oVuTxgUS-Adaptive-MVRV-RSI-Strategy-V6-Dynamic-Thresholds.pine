@@ -1,0 +1,157 @@
+//@version=5
+strategy("Adaptive MVRV & RSI Strategy V6 (Dynamic Thresholds)",
+         overlay=true, 
+         initial_capital=10000, 
+         pyramiding=100,
+         commission_type=strategy.commission.percent, 
+         commission_value=0.1)
+
+// Custom function to remap a value from one range to another
+f_remap(value, from1, to1, from2, to2) =>
+    from2 + (value - from1) * (to2 - from2) / (to1 - from1)
+
+// ================================================================= //
+// === INPUTS ===
+// ================================================================= //
+
+// --- Dynamic Threshold Settings ---
+ma_len = input.int(200, "Threshold MA Length (Weeks)", group="Dynamic Thresholds")
+mvrv_high_stdev = input.float(2.2, "MVRV High STDEV Multiplier", group="Dynamic Thresholds")
+mvrv_low_stdev = input.float(1.0, "MVRV Low STDEV Multiplier", group="Dynamic Thresholds")
+rsi_high_stdev = input.float(2.0, "RSI High STDEV Multiplier", group="Dynamic Thresholds")
+rsi_low_stdev = input.float(1.5, "RSI Low STDEV Multiplier", group="Dynamic Thresholds")
+
+// --- Scaling End-Point Settings (Extremes) ---
+mvrv_low_max_scale = input.float(0.7, "Max Buying at MVRV (Bottom)", group="Scaling Extremes")
+mvrv_high_max_scale = input.float(4.0, "Max Selling at MVRV (Top)", group="Scaling Extremes")
+rsi_low_max_scale = input.float(20, "Max Buying at RSI (Oversold)", group="Scaling Extremes")
+rsi_high_max_scale = input.float(95, "Max Selling at RSI (Overbought)", group="Scaling Extremes")
+
+// --- Dynamic Percentage Settings ---
+rsi_length = input.int(14, "RSI Length", group="Percentage Settings")
+buy_pct_min = input.float(1.0, "Min Buy % of Cash", group="Percentage Settings")
+buy_pct_max = input.float(10.0, "Max Buy % of Cash", group="Percentage Settings")
+sell_pct_min = input.float(1.0, "Min Sell % of Position", group="Percentage Settings")
+sell_pct_max = input.float(10.0, "Max Sell % of Position", group="Percentage Settings")
+
+// --- General Settings ---
+startDate = input.time(timestamp("2014-01-01T00:00:00"), title="Start Date", group="General")
+endDate = input.time(timestamp("2025-12-31T23:59:59"), title="End Date", group="General")
+isInDateRange = time >= startDate and time <= endDate
+
+// === CASH TRACKING ===
+var float available_cash = 0.0
+if (barstate.isfirst)
+    available_cash := strategy.initial_capital
+
+// === INDICATOR CALCULATION (NON-REPAINTING) ===
+// To prevent repainting, we ensure all calculations are based on consistent weekly data series.
+// The strategy should be run on the Daily timeframe for the logic to work correctly.
+mvrv_data_daily = request.security("BTC_MVRV", "D", close) // Get daily MVRV for current day's signal
+weekly_rsi_data = request.security(syminfo.tickerid, "W", ta.rsi(close, rsi_length))
+weekly_mvrv_data = request.security("BTC_MVRV", "W", close) // Get weekly MVRV for stable calculations
+
+// === DYNAMIC THRESHOLD CALCULATION ===
+// Calculate weekly moving averages and standard deviations from the weekly series
+mvrv_ma = ta.sma(weekly_mvrv_data, ma_len)
+mvrv_stdev = ta.stdev(weekly_mvrv_data, ma_len)
+rsi_ma = ta.sma(weekly_rsi_data, ma_len)
+rsi_stdev = ta.stdev(weekly_rsi_data, ma_len)
+
+// Request the calculated weekly values on the current (daily) timeframe
+mvrv_ma_daily = request.security(syminfo.tickerid, "W", mvrv_ma)
+mvrv_stdev_daily = request.security(syminfo.tickerid, "W", mvrv_stdev)
+rsi_ma_daily = request.security(syminfo.tickerid, "W", rsi_ma)
+rsi_stdev_daily = request.security(syminfo.tickerid, "W", rsi_stdev)
+
+// Calculate the dynamic start points for scaling
+float mvrv_low_start_scale = mvrv_ma_daily - (mvrv_stdev_daily * mvrv_low_stdev)
+float mvrv_high_start_scale = mvrv_ma_daily + (mvrv_stdev_daily * mvrv_high_stdev)
+float rsi_low_start_scale = rsi_ma_daily - (rsi_stdev_daily * rsi_low_stdev)
+float rsi_high_start_scale = rsi_ma_daily + (rsi_stdev_daily * rsi_high_stdev)
+
+// === PLOTTING ===
+plot(mvrv_data_daily, title="MVRV Plot", color=color.new(color.orange, 0), linewidth=2)
+plot(mvrv_high_start_scale, "MVRV Dynamic Sell Threshold", color=color.red, style=plot.style_linebr)
+plot(mvrv_low_start_scale, "MVRV Dynamic Buy Threshold", color=color.green, style=plot.style_linebr)
+
+plot(weekly_rsi_data, title="Weekly RSI Plot", color=color.new(color.purple, 0), linewidth=2)
+plot(rsi_high_start_scale, "RSI Dynamic Sell Threshold", color=color.red, style=plot.style_linebr)
+plot(rsi_low_start_scale, "RSI Dynamic Buy Threshold", color=color.green, style=plot.style_linebr)
+
+plot(available_cash, title="Available Cash", color=color.new(color.blue, 0), linewidth=2)
+
+// === STRATEGY CONDITIONS ===
+is_in_mvrv_buy_zone = mvrv_data_daily < mvrv_low_start_scale
+is_in_mvrv_sell_zone = mvrv_data_daily > mvrv_high_start_scale
+is_in_rsi_buy_zone = weekly_rsi_data < rsi_low_start_scale
+is_in_rsi_sell_zone = weekly_rsi_data > rsi_high_start_scale
+
+// === DYNAMIC PERCENTAGE CALCULATION ===
+float buy_pct_mvrv = 0.0
+if (is_in_mvrv_buy_zone)
+    buy_pct_mvrv := mvrv_data_daily <= mvrv_low_max_scale ? buy_pct_max : f_remap(mvrv_data_daily, mvrv_low_start_scale, mvrv_low_max_scale, buy_pct_min, buy_pct_max)
+
+float sell_pct_mvrv = 0.0
+if (is_in_mvrv_sell_zone)
+    sell_pct_mvrv := mvrv_data_daily >= mvrv_high_max_scale ? sell_pct_max : f_remap(mvrv_data_daily, mvrv_high_start_scale, mvrv_high_max_scale, sell_pct_min, sell_pct_max)
+
+float buy_pct_rsi = 0.0
+if (is_in_rsi_buy_zone)
+    buy_pct_rsi := weekly_rsi_data <= rsi_low_max_scale ? buy_pct_max : f_remap(weekly_rsi_data, rsi_low_start_scale, rsi_low_max_scale, buy_pct_min, buy_pct_max)
+
+float sell_pct_rsi = 0.0
+if (is_in_rsi_sell_zone)
+    sell_pct_rsi := weekly_rsi_data >= rsi_high_max_scale ? sell_pct_max : f_remap(weekly_rsi_data, rsi_high_start_scale, rsi_high_max_scale, sell_pct_min, sell_pct_max)
+
+float total_buy_pct = buy_pct_mvrv + buy_pct_rsi
+int active_buy_signals = (is_in_mvrv_buy_zone ? 1 : 0) + (is_in_rsi_buy_zone ? 1 : 0)
+float final_buy_pct = active_buy_signals > 0 ? total_buy_pct / active_buy_signals : 0
+
+float total_sell_pct = sell_pct_mvrv + sell_pct_rsi
+int active_sell_signals = (is_in_mvrv_sell_zone ? 1 : 0) + (is_in_rsi_sell_zone ? 1 : 0)
+float final_sell_pct = active_sell_signals > 0 ? total_sell_pct / active_sell_signals : 0
+
+// === STRATEGY EXECUTION ===
+string STRATEGY_ID = "MVRV_RSI_DCA"
+
+if (final_buy_pct > 0 and available_cash > 10 and isInDateRange)
+    cash_to_invest = available_cash * (final_buy_pct / 100)
+    buy_qty = cash_to_invest / close
+    
+    strategy.entry(STRATEGY_ID, strategy.long, qty=buy_qty)
+    available_cash := available_cash - cash_to_invest
+
+if (final_sell_pct > 0 and strategy.position_size > 0 and isInDateRange)
+    sell_qty = strategy.position_size * (final_sell_pct / 100)
+    
+    strategy.order(STRATEGY_ID, strategy.short, qty=sell_qty)
+    
+    cash_from_sale = sell_qty * close
+    available_cash := available_cash + cash_from_sale
+
+View in Pine Editor・131 lines
+Use on chart
+8
+6
+2 349
+Strategy Explanation
+This is an advanced Dollar-Cost Averaging (DCA) strategy for Bitcoin that aims to adapt to long-term market cycles and changing volatility. Instead of relying on fixed buy/sell signals, it uses a dynamic, weighted approach based on a combination of on-chain data and classic momentum.
+
+Core Components:
+
+Dual-Indicator Signal: The strategy combines two powerful indicators for a more robust signal:
+
+MVRV Ratio: An on-chain metric to identify when Bitcoin is fundamentally over or undervalued relative to its historical cost basis.
+
+Weekly RSI: A classic momentum indicator to gauge long-term market strength and identify overbought/oversold conditions.
+
+Dynamic, Self-Adjusting Thresholds: The core innovation of this strategy is that it avoids fixed thresholds (e.g., "sell when RSI is 70"). Instead, the buy and sell zones are dynamically calculated based on a long-term (2-year) moving average and standard deviation of each indicator. This allows the strategy to automatically adapt to Bitcoin's decreasing volatility and changing market structure over time.
+
+Weighted DCA (Scaling In & Out): The strategy doesn't just buy or sell a fixed amount. The size of its trades is scaled based on conviction:
+
+Buying: As the MVRV and RSI fall deeper into their "undervalued" zones, the percentage of available cash used for each purchase increases.
+
+Selling: As the indicators rise further into "overvalued" territory, the percentage of the current position sold also increases.
+
+This creates an adaptive system that systematically accumulates during periods of fear and distributes during periods of euphoria, with the intensity of its actions directly tied to the extremity of market conditions.

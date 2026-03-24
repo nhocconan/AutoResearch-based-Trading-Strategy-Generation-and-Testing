@@ -1,0 +1,143 @@
+//@version=5
+strategy("Reversal Wave", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- LOGIC DEFINITION ---
+
+// 1. Identify previous bearish candle
+// Define the midpoint of the previous candle's BODY ((Open + Close) / 2)
+prevOpen = open[1]
+prevClose = close[1]
+isPrevBearish = prevClose < prevOpen
+prevBodyMidpoint = (prevOpen + prevClose) / 2
+
+// 2. Identify current bullish candle
+isCurrBullish = close > open
+
+// 3. Entry Condition
+// The current candle is bullish AND closes above the midpoint of the previous bearish one
+longCondition = isPrevBearish and isCurrBullish and (close > prevBodyMidpoint)
+
+// --- POSITION MANAGEMENT (SL and TP) ---
+
+// Variables to store SL and TP prices for the current trade
+var float entryPrice = na
+var float slPrice = na
+var float tpPrice = na
+
+if (longCondition and strategy.position_size == 0)
+    // Set SL at the low of the current candle (the signal candle)
+    slPrice := low
+    // Estimated entry price is the close of this candle (or open of the next)
+    entryPrice := close
+    
+    // Calculate risk distance
+    float risk = entryPrice - slPrice
+    
+    // TP with 1:1 Ratio
+    tpPrice := entryPrice + (risk * 1)
+    
+    // Execute the order
+    strategy.entry("Long", strategy.long)
+
+// If we are currently in a position, send conditional exit orders
+if (strategy.position_size > 0)
+    strategy.exit("Long Exit", "Long", stop=slPrice, limit=tpPrice)
+
+// --- VISUALIZATION ---
+
+// Paint the background green when there is an entry signal
+bgcolor(longCondition ? color.new(color.green, 90) : na)
+
+// Plot SL and TP lines when a position is open
+plot(strategy.position_size > 0 ? slPrice : na, "Stop Loss", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? tpPrice : na, "Take Profit", color=color.green, style=plot.style_linebr)
+
+View in Pine Editor・56 lines
+Use on chart
+5
+3
+2
+1 173
+This is the type of quantitative system that can get you hated on investment forums, now that the Random Walk Theory is back in fashion. The strategy has simple price action rules, zero over-optimization, and is validated by a historical record of nearly a century on both Gold and the S&P 500 index.
+
+
+Recommended Markets
+
+SPX (Weekly, Monthly)
+SPY (Monthly)
+Tesla (Weekly)
+XAUUSD (Weekly, Monthly)
+NVDA (Weekly, Monthly)
+Meta (Weekly, Monthly)
+GOOG (Weekly, Monthly)
+MSFT (Weekly, Monthly)
+AAPL (Weekly, Monthly)
+
+
+System Rules and Parameters
+
+Total capital: $10,000
+We will use 10% of the total capital per trade
+Commissions will be 0.1% per trade
+
+Condition 1: Previous Bearish Candle (isPrevBearish) (the closing price was lower than the opening price).
+
+Condition 2: Midpoint of the Body The script calculates the exact midpoint of the body of that previous bearish candle.
+
+• Formula: (Previous Open + Previous Close) / 2.
+
+Condition 3: 50% Recovery (longCondition) The current candle must be bullish (green) and, most importantly, its closing price must be above the midpoint calculated in the previous step.
+
+Once these parameters are met, the system executes a long entry and calculates the exit parameters:
+
+Stop Loss (SL): Placed at the low of the candle that generated the entry signal.
+
+Take Profit (TP): Calculated by projecting the risk distance upward.
+
+• Calculation: Entry Price + (Risk * 1).
+
+Risk:Reward Ratio of 1:1.
+
+
+About the Profit Factor
+
+In my experience, TradingView calculates profits and losses based on the percentage of movement, which can cause returns to not match expectations. This doesn’t significantly affect trending systems, but it can impact systems with a high win rate and a well-defined risk-reward ratio. It only takes one large entry candle that triggers the SL to translate into a major drop in performance.
+
+For example, you might see a system with a 60% win rate and a 1:1 risk-reward ratio generating losses, even though commissions are under control relative to the number of trades.
+
+My recommendation is to manually calculate the performance of systems with a well-defined risk-reward ratio, assuming you will trade using a fixed amount per trade and limit losses to a fixed percentage.
+
+Remember that, even if candles are larger or smaller in size, we can maintain a fixed loss percentage by using leverage (in cases of low volatility) or reducing the capital at risk (when volatility is high).
+
+Implementing leverage or capital reduction based on volatility is something I haven’t been able to incorporate into the code, but it would undoubtedly improve the system’s performance dramatically, as it would fix a consistent loss percentage per trade, preventing losses from fluctuating with volatility swings.
+
+For example, we can maintain a fixed loss percentage when volatility is low by using the following formula:
+
+Leverage = % of SL you’re willing to risk / % volatility from entry point to exit or SL
+
+And if volatility is high and exceeds the fixed percentage we want to expose per trade (if SL is hit), we could reduce the position size.
+
+For example, imagine we only want to risk 15% per SL on Tesla, where volatility is high and would cause a 23.57% loss. In this case, we subtract 23.57% from 15% (the loss percentage we’re willing to accept per trade), then subtract the result from our usual position size.
+
+23.57% - 15% = 8.57%
+
+Suppose I use $200 per trade.
+
+To calculate 8.57% of $200, simply multiply 200 by 8.57/100. This simple calculation shows that 8.57% equals about $17.14 of the $200. Then subtract that value from $200:
+
+$200 - $17.14 = $182.86
+
+In summary, if we reduced the position size to $182.86 (from the usual $200, where we’re willing to lose 15%), no matter whether Tesla moves up or down 23.57%, we would still only gain or lose 15% of the $200, thus respecting our risk management.
+
+Final Notes
+
+The code is extremely simple, and every step of its development is detailed within it.
+
+If you liked this strategy, which complements very well with others I’ve already published, stay tuned. Best regards.
+
+
+
+
+
+
+

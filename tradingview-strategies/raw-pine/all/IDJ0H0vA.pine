@@ -1,0 +1,45 @@
+//@version=4
+strategy("Stochastic Strategy", shorttitle="Stoch Strategy", overlay=true)
+
+length = 7
+smoothK = 2
+smoothD = 2
+overbought = 50
+oversold = 50
+
+K = sma(stoch(close, high, low, length), smoothK)
+D = sma(K, smoothD)
+
+longCondition = crossover(K, oversold)
+shortCondition = crossunder(K, overbought)
+
+plotshape(series=longCondition, location=location.belowbar, color=color.green, style=shape.triangleup, title="Long Signal")
+plotshape(series=shortCondition, location=location.abovebar, color=color.red, style=shape.triangledown, title="Short Signal")
+
+strategy.entry("Long", strategy.long, when=longCondition)
+strategy.entry("Short", strategy.short, when=shortCondition)
+
+View in Pine Editor・20 lines
+Use on chart
+1
+8
+9
+4 747
+This strategy is designed to make trading decisions based on the Stochastic Oscillator (Stoch) indicator with settings of (7,2,2). The strategy opens a long (buy) position when the Stoch indicator crosses above the 50 level from below. Conversely, it opens a short (sell) position when the Stoch indicator crosses below the 50 level from above. Additionally, when a long position is opened, any existing short position is closed, and vice versa.
+
+Key Parameters:
+
+Stochastic Oscillator Settings: Length = 7, SmoothK = 2, SmoothD = 2.
+Overbought Level: 80.
+Oversold Level: 20.
+
+Strategy Description:
+
+The Stochastic Oscillator (Stoch) is calculated based on the closing price, high price, and low price with a period of 7, and both the %K and %D lines are smoothed with periods of 2.
+When the %K line crosses above the oversold level (20), it generates a long (buy) signal.
+When the %K line crosses below the overbought level (80), it generates a short (sell) signal.
+The strategy visually marks long and short signals on the chart using upward and downward triangles, respectively.
+The strategy automatically enters long or short positions when the respective conditions are met.
+If a long position is opened, any existing short position is closed, and vice versa.
+
+Please note that this is a basic example of a trading strategy and does not take into account all possible risk factors or optimizations. Before using this strategy in live trading, it's essential to thoroughly test and customize it to suit your specific needs, and carefully analyze the results. Trading carries risks, and it's important to use proper risk management techniques when implementing any trading strategy.

@@ -1,0 +1,76 @@
+//@version=2
+strategy(" MACD DEMA STRATEGY ", overlay=true)
+
+source=close
+price=source
+
+
+
+fastmacd = input(12,title='MACD Fast  Line Length')
+slowmacd = input(26,title='MACD Slow Line Length')
+signalmacd = input(9,title='Signal Line Length')
+
+macdslowline1 = ema(close,slowmacd)
+macdslowline2 = ema(macdslowline1,slowmacd)
+DEMAslow = ((2 * macdslowline1) - macdslowline2 )
+
+macdfastline1 = ema(close,fastmacd)
+macdfastline2 = ema(macdfastline1,fastmacd)
+DEMAfast = ((2 * macdfastline1) - macdfastline2)
+
+MACDLine = (DEMAfast - DEMAslow)
+
+SignalLine1 = ema(MACDLine, signalmacd)
+SignalLine2 = ema(SignalLine1, signalmacd)
+SignalLine = ((2 * SignalLine1) - SignalLine2 )
+
+
+MACDSignal = SignalLine-MACDLine
+
+
+colorbar= MACDSignal>0?green:red
+
+
+
+
+yearfrom = input(2018)
+yearuntil =input(2019)
+monthfrom =input(1)
+monthuntil =input(12)
+dayfrom=input(1)
+dayuntil=input(31)
+
+
+
+
+
+
+
+if ( crossover(MACDLine,SignalLine)  and   year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil) 
+    strategy.entry("MMAL", strategy.long, stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="AL")
+    
+else
+    strategy.cancel(id="MMAL")
+
+
+if (  crossunder(MACDLine,SignalLine) and  year >= yearfrom and year <= yearuntil and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil ) 
+
+    strategy.entry("MMSAT", strategy.short,stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="SAT")
+else
+    strategy.cancel(id="MMSAT")
+
+View in Pine Editor・60 lines
+Use on chart
+1
+1
+6
+3
+5 795
+A strategy based on ToFFF MACD DEMA indicator
+
+Even so , ı dont recommended using MACD DEMA alone.
+
+Combine its code with your favorite indicators.
+
+
+You can visit ToFFF's indicator : https://www.tradingview.com/script/NL1z2SYw-MACD-DEMA/

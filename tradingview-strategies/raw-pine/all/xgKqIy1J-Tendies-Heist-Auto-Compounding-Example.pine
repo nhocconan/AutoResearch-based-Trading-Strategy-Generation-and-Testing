@@ -1,0 +1,47 @@
+//@version=4
+strategy("Tendies Heist Auto Compounding Example", overlay=true)
+
+    
+leverage = input(10000)
+
+maxps = input(25, "max position size")
+strategy.risk.max_position_size(maxps)
+
+balance = max(1,floor(strategy.equity / leverage))
+
+o        = 1
+ps       = true
+size     = 0.
+balance2 = size[1] < balance
+balance3 = size[1] > balance
+l        = balance3
+w        = balance2
+
+if ps
+    size := w ? size[1]+o : l ? size[1]-o : nz(size[1],o)
+if size > maxps
+    size := maxps
+
+longCondition = crossover(sma(close, 14), sma(close, 28))
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long,qty=size)
+
+shortCondition = crossunder(sma(close, 14), sma(close, 28))
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short,qty=size)
+
+View in Pine Editor・32 lines
+Use on chart
+2
+5
+3 184
+This is an example of how we can use compounding to control our position size. This example shows how we can automatically add and reduce position size based on account equity. The "initial capital" in properties is the starting account equity. At default its set to 100,000. If our max position size is set to 25 then the very first position that's taken has a position size of 10, IF our leverage is set to 10,000. Account equity divided by leverage equals position size. So in that example 100,000 divided by 10,000 in leverage gives us a max position size of 10. However the max position size was set to 25 meaning we would need 250k in equity for it to open a position size of 25 with the leverage set at 10k. Now if the initial capital was set to 100,000 and the max position size was set to 5 and leverage remained at 10,000, all though 100,000 divided by 10,000 equals 10 it will ONLY open a position size of 5, because the max position size in this example was set at 5. Since this works for strategies you may look through the trade log on the posted back test and check out the position size, you can see in this back test the default 100k is used for the initial capital and the default 10k was used for the leverage. You will be able to see as this logic loses money it takes contracts away and as it gains money it adds contracts. I'm using trading view's basic strategy logic example to provide an example of how the compounding logic works.
+
+
+Note, don't forget to add the syntax below to your strategy.entry call for this logic to work.
+
+qty = size
+
+
+
+Tendies Heist LLC 2021

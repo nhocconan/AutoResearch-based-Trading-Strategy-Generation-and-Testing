@@ -1,0 +1,100 @@
+//@version=5
+strategy('T7 JNSAR', overlay=true)
+
+smafilter = input(title='SMA Filter', defval=true)
+candles = input(title='HA Candle / Normal Candle - Check for HA Candles and Un Check for Normal Candles', defval=false)
+backtest = input(title='Enable Backtest', defval=true)
+t7_backtest_FP = input(title='T7 Backtest - Fixed Position Value - Normalized to 1 lot Nifty Spot @ 8500', defval=true)
+t7_backtest_PE = input(title='T7 Backtest - Fixed %Equity - Fixed @0.5% of equity', defval=0)
+t7_backtest_FL = input(title='T7 Backtest - Fixed Lot Size of 75', defval=0)
+custom_backtest = input(title='Custom Backtest - Postion Size taken from Properties Tab', defval=0)
+
+Period = 5
+
+psize = backtest ? t7_backtest_FP ? 8500 / close * 75 : t7_backtest_PE ? strategy.equity / close * 0.5 : t7_backtest_FL ? 75 : na : na
+
+exrem(condition1, condition2) =>
+    temp = 0.0
+    temp := na(temp[1]) ? 0.0 : not temp[1] and condition1 ? 1.0 : temp[1] and condition2 ? 0.0 : temp[1]
+    ta.change(temp) == 1 ? 1 : 0
+
+Close = 0.0
+Open = 0.0
+High = 0.0
+Low = 0.0
+
+Close := candles != false ? (open + high + low + close) / 4 : close
+Open := candles != false ? na(Open[1]) ? (open + close) / 2 : (Open[1] + Close[1]) / 2 : open
+High := candles != false ? high > Open ? high > Close ? high : Close : Open > Close ? Open : Close : high
+Low := candles != false ? low < Open ? low < Close ? low : Close : Open < Close ? Open : Close : low
+
+sum = ta.ema(High, Period) + ta.ema(low, Period) + ta.ema(close, Period)
+sum := sum + ta.ema(High[1], Period) + ta.ema(Low[1], Period) + ta.ema(Close[1], Period)
+sum := sum + ta.ema(High[2], Period) + ta.ema(Low[2], Period) + ta.ema(Close[2], Period)
+sum := sum + ta.ema(High[3], Period) + ta.ema(Low[3], Period) + ta.ema(Close[3], Period)
+sum := sum + ta.ema(High[4], Period) + ta.ema(Low[4], Period) + ta.ema(Close[4], Period)
+
+jnsar = math.round(sum / (3 * Period))
+
+buy = false
+short = false
+Buy = false
+Short = false
+
+buy := Close > jnsar and (smafilter ? Close > ta.sma(Close, 22) : 1)
+short := Close < jnsar and (smafilter ? Close < ta.sma(Close, 22) : 1)
+Buy := exrem(buy, short)
+Short := exrem(short, buy)
+
+plot(jnsar, color=color.new(color.green, 0), linewidth=4)
+plot(smafilter ? ta.sma(Close, 22) : na, color=color.new(color.red, 0), linewidth=4)
+plotshape(Buy, color=color.new(color.green, 0), style=shape.arrowup, location=location.belowbar)
+plotshape(Short, color=color.new(color.red, 0), style=shape.arrowdown, location=location.abovebar)
+
+if backtest != 0
+    if t7_backtest_FP or t7_backtest_PE or t7_backtest_FL
+        strategy.entry('JNSARLong', strategy.long, qty=psize, comment='JNSARLong', when=Buy != 0)
+        strategy.entry('JNSARShort', strategy.short, qty=psize, comment='JNSARShort', when=Short != 0)
+    if custom_backtest != 0
+        strategy.entry('JNSARLong', strategy.long, comment='JNSARLong', when=Buy != 0)
+        strategy.entry('JNSARShort', strategy.short, comment='JNSARShort', when=Short != 0)
+
+View in Pine Editor・64 lines
+Use on chart
+2
+4
+0
+12
+6 120
+Feb 14, 2017
+JNSAR stands for Just Nifty -0.14% Stop & Reverse. This is a Trend Following Daily Bar Trading System for NIFTY -0.14% . Original idea belongs to ILLANGO @ I coded the pine version of this system based on a request from @stocksonfire. Use it at your own risk after validation at your end. Neither me or my company is responsible for any losses you may incur using this system. Hope you like this system and enjoy trading it !!!
+
+Updated V3 code for the T7 JNSAR system earlier published here V2
+and here V1
+
+
+Following updates made to the code
+
+1. Added a 22 Period Simple moving average filter over and above the standard JNSAR value for generating trading signals. This simple filter reduces the whipsaw trades drastically along with similar improvements in the max draw down and overall profitability of the system. The SMA filter is turned ON by default but can be turned OFF by user through the settings window.
+2. Backtest option is now turned ON by default.
+
+Also am republishing the trading rules here again with some modification
+
+1. Go Long when the daily close is above the JNSAR line. Go Short when the daily close is below the JNSAR line. JNSAR line is the varying green line overlayed over the price chart. Once a signal comes at market close enter in the direction of the signal @ market price @ next day market open.
+
+2. Trade only Nifty -0.14% Index. This system was developed and backtested only for NIFTY -0.14% Index. So trade in its Futures or Options, as you may deem fit. My recommendation is to choose futures for simplicity. If you want to reduce the trading cost and go with options, trade with deep in the money options, preferably 2 strikes far from the spot price.
+
+3. Trade all signals. Markets trend only 30-35% of the time and hence the system is only accurate to that extend. But system tends to make enough money, in this small trending window, to keep the overall profitability in good health. But one never knows when a big trend may come and when it comes its absolutely imperative that you take it. To ensure that, trade all signals and don't be choosy about what signals you are going to trade. Also I wouldn't recommend using your own analysis to trade this system. Too many drivers will crash the car.
+
+4. Like all trend following systems, this system will have many whipsaws during flat markets along with large trade and account drawdowns. Also some months and even years may not be profitable. But to trade this system profitably, it is necessary to take these in one's stride and keep trading. As the backtester results from 1990 to 2017 proves, this system is profitable overall thus far. Take confidence from that objective fact.
+
+5. Trade with only that amount of money you can afford to loose. Initial capital that you need to have to trade one lot of NIFTY -0.14% should be atleast - (Margin Money required to take and hold 1 lot position + maximum drawdown amount per lot)*1.2. Be prepared to add more if need be, but the above formula will give a rough idea of what you need to have to start trading and be in the game always.
+
+6. Place an After Market Order @ Market Price with your broker after market close so that you get to execute the trade next trading day @ Market open to capture near similar price as the daily open price seen on the chart. This execution mode will give you the best chance to minimize the slippage and mimic the backtester results as closely as practically possible.
+
+7. Follow all the 6 rules above religiously, as if your life depends on it. If you cant, then don't trade this system; You will certainly loose money.
+
+Happy Trading !!! As always am looking out for your valuable feedback.
+Oct 15, 2021
+Release Notes
+Updated to Pine V5. Happy Trading !!!

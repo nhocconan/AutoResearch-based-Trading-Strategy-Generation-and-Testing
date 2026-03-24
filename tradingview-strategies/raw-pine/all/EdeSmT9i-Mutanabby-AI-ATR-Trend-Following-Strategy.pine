@@ -1,0 +1,394 @@
+//@version=6
+strategy(title="Mutanabby_AI | ATR+ | ", 
+         shorttitle="Mutanabby_AI | ATR+", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent, 
+         commission_value=0.1,
+         slippage=2,
+         fill_orders_on_standard_ohlc=true)  // Ensures realistic execution
+
+// 📊 INPUT PARAMETERS
+//=============================================================================
+a = input.int(1, title="🔧 Key Value (Sensitivity)", minval=1, maxval=10, 
+              tooltip="Lower = More signals, Higher = Fewer signals")
+c = input.int(10, title="📈 ATR Period", minval=1, maxval=500,
+              tooltip="Period for ATR calculation")
+
+// 🕯️ HEIKIN ASHI METHOD SELECTION
+//=============================================================================
+ha_method = input.string("Manual Calculation", title="🕯️ Heikin Ashi Method", 
+                         options=["Manual Calculation", "ticker.heikinashi()", "Regular Candles"], 
+                         tooltip="Manual = Most reliable, ticker.heikinashi = Good, Regular = Standard OHLC")
+
+// 🛡️ STOP LOSS SETTINGS
+//=============================================================================
+use_stop_loss = input.bool(false, title="🛡️ Enable Stop Loss", 
+                           tooltip="Enable stop loss at entry price level")
+stop_loss_type = input.string("Percentage", title="📊 Stop Loss Type", 
+                               options=["Percentage", "Fixed Points"], 
+                               tooltip="Choose stop loss calculation method")
+stop_loss_percent = input.float(2.0, title="📉 Stop Loss %", minval=0.1, maxval=50.0, step=0.1,
+                                 tooltip="Stop loss percentage below entry price")
+stop_loss_points = input.float(10.0, title="📉 Stop Loss Points", minval=0.1, step=0.1,   tooltip="Stop loss in price points below entry price")
+
+// 📅 BACKTESTING DATE RANGE
+//=============================================================================
+use_date_filter = input.bool(true, title="📅 Use Date Filter")
+start_date = input.time(timestamp("01 Jan 2000 00:00 +0000"), title="📅 Start Date")
+end_date = input.time(timestamp("31 Dec 2030 23:59 +0000"), title="📅 End Date")
+
+// Date condition
+date_condition = not use_date_filter or (time >= start_date and time <= end_date)
+
+// 🎨 VISUAL SETTINGS
+//=============================================================================
+show_signals = input.bool(true, title="🎯 Show Buy/Sell Signals")
+show_trailing_stop = input.bool(true, title="📈 Show ATR Trailing Stop")
+show_stop_loss = input.bool(true, title="🛡️ Show Stop Loss Line")
+show_bar_colors = input.bool(true, title="🎨 Color Bars")
+show_position_info = input.bool(true, title="📊 Show Position Info")
+
+// 🧮 HEIKIN ASHI CALCULATIONS
+//=============================================================================
+
+// METHOD 1: MANUAL HEIKIN ASHI CALCULATION (MOST RELIABLE)
+//=============================================================================
+// Manual HA calculation - most transparent and reliable
+var float ha_open_manual = na
+ha_close_manual = (open + high + low + close) / 4
+ha_open_manual := na(ha_open_manual[1]) ? (open + close) / 2 : (ha_open_manual[1] + ha_close_manual[1]) / 2
+ha_high_manual = math.max(high, math.max(ha_open_manual, ha_close_manual))
+ha_low_manual = math.min(low, math.min(ha_open_manual, ha_close_manual))
+
+// METHOD 2: TICKER.HEIKINASHI() (GOOD ALTERNATIVE)
+//=============================================================================
+// Get Heikin Ashi data via ticker.heikinashi() - non-repainting
+ha_ticker = ticker.heikinashi(syminfo.tickerid)
+[ha_open_ticker, ha_high_ticker, ha_low_ticker, ha_close_ticker] =   request.security(ha_ticker, timeframe.period, [open[1], high[1], low[1], close[1]],  lookahead=barmerge.lookahead_on)  // Use confirmed bars to prevent repainting
+
+// METHOD 3: REGULAR CANDLES
+//=============================================================================
+// Regular OHLC data
+ha_open_regular = open
+ha_high_regular = high
+ha_low_regular = low
+ha_close_regular = close
+
+// SELECT METHOD BASED ON USER INPUT
+//=============================================================================
+src = ha_method == "Manual Calculation" ? ha_close_manual : 
+      ha_method == "ticker.heikinashi()" ? ha_close_ticker : ha_close_regular
+
+source_open = ha_method == "Manual Calculation" ? ha_open_manual : 
+              ha_method == "ticker.heikinashi()" ? ha_open_ticker : ha_open_regular
+              
+source_high = ha_method == "Manual Calculation" ? ha_high_manual : 
+              ha_method == "ticker.heikinashi()" ? ha_high_ticker : ha_high_regular
+              
+source_low = ha_method == "Manual Calculation" ? ha_low_manual : 
+             ha_method == "ticker.heikinashi()" ? ha_low_ticker : ha_low_regular
+
+// 📊 ATR TRAILING STOP CALCULATION
+//=============================================================================
+// Calculate True Range using selected method
+tr1 = source_high - source_low
+tr2 = math.abs(source_high - src[1])
+tr3 = math.abs(source_low - src[1])
+tr = math.max(tr1, math.max(tr2, tr3))
+
+// ATR calculation
+xATR = ta.sma(tr, c)
+nLoss = a * xATR
+
+// ATR Trailing Stop logic
+var float xATRTrailingStop = na
+xATRTrailingStop := if src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0)
+    math.max(nz(xATRTrailingStop[1]), src - nLoss)
+else if src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0)
+    math.min(nz(xATRTrailingStop[1]), src + nLoss)
+else if src > nz(xATRTrailingStop[1], 0)
+    src - nLoss
+else
+    src + nLoss
+
+// Position state tracking
+var int pos = na
+pos := if src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0)
+    1
+else if src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0)
+    -1
+else
+    nz(pos[1], 0)
+
+// 🎯 SIGNAL GENERATION
+//=============================================================================
+// EMA for crossover detection
+ema_val = ta.ema(src, 1)
+
+// Crossover conditions
+above = ta.crossover(ema_val, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, ema_val)
+
+// Buy and sell signals
+buy_signal = src > xATRTrailingStop and above
+sell_signal = src < xATRTrailingStop and below
+
+// Trend direction
+is_uptrend = src > xATRTrailingStop
+is_downtrend = src < xATRTrailingStop
+
+// 🛡️ STOP LOSS CALCULATION
+//=============================================================================
+var float entry_price = na
+var float stop_loss_level = na
+
+// Calculate stop loss level
+calculate_stop_loss(entry_price_val) =>
+    if stop_loss_type == "Percentage"
+        entry_price_val * (1 - stop_loss_percent / 100)
+    else
+        entry_price_val - stop_loss_points
+
+// 📈 LONG ONLY STRATEGY LOGIC
+//=============================================================================
+var bool in_long_position = false
+
+// Entry condition: Buy signal when not in position
+long_entry = buy_signal and date_condition and not in_long_position
+
+// Exit conditions - CRITICAL: Use real prices for stop loss, not HA prices
+atr_exit = sell_signal and date_condition and in_long_position
+stop_loss_hit = use_stop_loss and in_long_position and low <= stop_loss_level  // Uses real low price
+
+// Combined exit condition
+long_exit = atr_exit or stop_loss_hit
+
+// Execute trades - Orders execute at REAL market prices
+if long_entry
+    strategy.entry("LONG", strategy.long, comment="🚀 LONG")
+    in_long_position := true
+    entry_price := close  // REAL entry price, not HA price
+    stop_loss_level := use_stop_loss ? calculate_stop_loss(entry_price) : na
+
+if long_exit
+    exit_reason = stop_loss_hit ? "🛡️ STOP LOSS" : "💰 ATR EXIT"
+    strategy.close("LONG", comment=exit_reason)
+    in_long_position := false
+    entry_price := na
+    stop_loss_level := na
+
+// 🎨 VISUAL ELEMENTS
+//=============================================================================
+// Trailing stop line color
+stop_color = pos == 1 ? color.green : pos == -1 ? color.red : color.blue
+
+// Plot ATR Trailing Stop
+plot(show_trailing_stop ? xATRTrailingStop : na, 
+     color=stop_color, 
+     linewidth=2, 
+     title="ATR Trailing Stop")
+
+// Plot Stop Loss Level
+plot(show_stop_loss and use_stop_loss and in_long_position ? stop_loss_level : na,
+     color=color.new(color.red, 0), 
+     linewidth=2, 
+     style=plot.style_linebr,
+     title="Stop Loss Level")
+
+// Plot buy/sell signals
+plotshape(show_signals and buy_signal, 
+          title="Buy Signal", 
+          text="BUY", 
+          style=shape.labelup, 
+          location=location.belowbar,
+          color=color.new(color.green, 0), 
+          textcolor=color.white, 
+          size=size.small)
+
+plotshape(show_signals and sell_signal, 
+          title="Sell Signal", 
+          text="SELL", 
+          style=shape.labeldown, 
+          location=location.abovebar,
+          color=color.new(color.red, 0), 
+          textcolor=color.white, 
+          size=size.small)
+
+// Plot stop loss hit signal
+plotshape(show_signals and stop_loss_hit, 
+          title="Stop Loss Hit", 
+          text="SL", 
+          style=shape.labeldown, 
+          location=location.abovebar,
+          color=color.new(color.orange, 0), 
+          textcolor=color.white, 
+          size=size.small)
+
+// Bar coloring
+barcolor(show_bar_colors ? (is_uptrend ? color.new(color.green, 70) : 
+         is_downtrend ? color.new(color.red, 70) : na) : na)
+
+// Position status background
+bgcolor(show_position_info and strategy.position_size > 0 ?  color.new(color.green, 95) : show_position_info and strategy.position_size == 0 ?   color.new(color.gray, 98) : na,   title="Position Status")
+
+// Entry price line - shows REAL entry price
+plot(show_position_info and strategy.position_size > 0 ? strategy.position_avg_price : na,
+     color=color.new(color.blue, 0), 
+     linewidth=1, 
+     style=plot.style_linebr, 
+     title="Entry Price")
+
+// 📊 INFORMATION TABLE
+//=============================================================================
+if show_position_info and barstate.islast
+    var table info_table = table.new(position.top_right, 3, 11, 
+                                      bgcolor=color.white, 
+                                      border_width=1,
+                                      border_color=color.gray,
+                                      frame_width=1,
+                                      frame_color=color.black)
+    
+    // Table headers
+    table.cell(info_table, 0, 0, "Mutanabby_AI | Manual HA | ATR | SL", text_color=color.white, bgcolor=color.blue, text_size=size.small)
+    table.cell(info_table, 1, 0, "", text_color=color.white, bgcolor=color.blue)
+    table.cell(info_table, 2, 0, "", text_color=color.white, bgcolor=color.blue)
+    
+    // Strategy info
+    table.cell(info_table, 0, 1, "HA Method:", text_color=color.rgb(10, 10, 10), text_size=size.small)
+    method_color = ha_method == "Manual Calculation" ? color.green : 
+                   ha_method == "ticker.heikinashi()" ? color.blue : color.gray
+    table.cell(info_table, 1, 1, ha_method, text_color=method_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 2, "Key Value:", text_color=color.rgb(10, 10, 10), text_size=size.small)
+    table.cell(info_table, 1, 2, str.tostring(a), text_color=color.blue, text_size=size.small)
+    
+    table.cell(info_table, 0, 3, "ATR Period:", text_color=color.rgb(2, 2, 2), text_size=size.small)
+    table.cell(info_table, 1, 3, str.tostring(c), text_color=color.blue, text_size=size.small)
+    
+    table.cell(info_table, 0, 4, "Stop Loss:", text_color=color.rgb(3, 3, 3), text_size=size.small)
+    table.cell(info_table, 1, 4, use_stop_loss ? "ON" : "OFF", 
+               text_color=use_stop_loss ? color.green : color.gray, text_size=size.small)
+    
+    table.cell(info_table, 0, 5, "Position:", text_color=color.rgb(3, 3, 3), text_size=size.small)
+    table.cell(info_table, 1, 5, strategy.position_size > 0 ? "LONG" : "NONE", 
+               text_color=strategy.position_size > 0 ? color.green : color.gray, text_size=size.small)
+    
+    table.cell(info_table, 0, 6, "Trend:", text_color=color.rgb(0, 0, 0), text_size=size.small)
+    table.cell(info_table, 1, 6, is_uptrend ? "UP" : "DOWN", 
+               text_color=is_uptrend ? color.green : color.red, text_size=size.small)
+    
+    table.cell(info_table, 0, 7, "Current Price:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 7, str.tostring(close, "#.##"), text_color=color.black, text_size=size.small)
+    
+    table.cell(info_table, 0, 8, "Trailing Stop:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 8, str.tostring(xATRTrailingStop, "#.##"), text_color=color.blue, text_size=size.small)
+    
+    // Show stop loss level if enabled and in position
+    if use_stop_loss and in_long_position
+        table.cell(info_table, 0, 9, "Stop Loss:", text_color=color.black, text_size=size.small)
+        table.cell(info_table, 1, 9, str.tostring(stop_loss_level, "#.##"), text_color=color.red, text_size=size.small)
+    else
+        table.cell(info_table, 0, 9, "Stop Loss:", text_color=color.black, text_size=size.small)
+        table.cell(info_table, 1, 9, "N/A", text_color=color.gray, text_size=size.small)
+    
+    table.cell(info_table, 0, 10, "Last Signal:", text_color=color.black, text_size=size.small)
+    signal_text = buy_signal ? "BUY" : sell_signal ? "SELL" : stop_loss_hit ? "STOP LOSS" : "NONE"
+    signal_color = buy_signal ? color.green : sell_signal ? color.red : stop_loss_hit ? color.orange : color.gray
+    table.cell(info_table, 1, 10, signal_text, text_color=signal_color, text_size=size.small)
+
+// 🚨 ALERTS
+//=============================================================================
+// Alert conditions
+alertcondition(buy_signal, title="🚀 Mutanabby_AI | ATR+ LONG Entry", 
+               message="Mutanabby_AI | ATR+ : BUY signal at {{close}}")
+
+alertcondition(sell_signal, title="💰 Mutanabby_AI | ATR+ LONG Exit", 
+               message="Mutanabby_AI | ATR+ : SELL signal at {{close}}")
+
+alertcondition(stop_loss_hit, title="🛡️ Mutanabby_AI | ATR+ Stop Loss Hit", 
+               message="Mutanabby_AI | ATR+ : STOP LOSS hit at {{close}}")
+
+alertcondition(buy_signal or sell_signal or stop_loss_hit, title="🔔 Mutanabby_AI | ATR+ Any Signal", 
+               message="Mutanabby_AI| ATR+ : {{ticker}} - {{close}} - Signal: {{strategy.position_size > 0 ? 'EXIT' : 'ENTRY'}}")
+
+//=============================================================================
+// 📝 STRATEGY NOTES:
+//
+// 🎯 OPTIMAL IMPLEMENTATION for realistic backtesting:
+// 📈 Uses manual HA calculation for transparency and reliability
+// 💰 Orders execute at REAL market prices (not synthetic HA prices)  
+// 🛡️ Stop loss uses real market prices for accurate risk management
+// 🔧 Multiple HA methods available for comparison and validation
+// ⚡ Added fill_orders_on_standard_ohlc=true for extra protection
+// 
+// 🎯 METHOD COMPARISON:
+// 🥇 Manual Calculation: Most reliable, transparent, no external dependencies
+// 🥈 ticker.heikinashi(): Good alternative, uses confirmed bars to prevent repainting
+// 🥉 Regular Candles: Standard OHLC for comparison purposes
+//
+// 💡 BEST PRACTICES IMPLEMENTED:
+// ✅ Always run on regular candlestick charts (not native HA charts)
+// ✅ Use confirmed/historical HA values to prevent repainting
+// ✅ Execute all orders at real market prices
+// ✅ Stop loss based on real prices, not synthetic HA prices
+// ✅ Entry price tracking uses actual fill prices
+// ✅ Transparent calculation methods for verification
+//
+// 🚨 AVOID:
+// ❌ Running strategies directly on TradingView's native HA charts
+// ❌ Using current bar HA values (causes repainting)
+// ❌ Stop loss based on HA prices instead of real prices
+//=============================================================================
+
+View in Pine Editor・343 lines
+Use on chart
+3
+7
+8
+1
+10 171
+This document presents the Mutanabby_AI | ATR+ Pine Script strategy, a systematic approach designed for trend identification and risk-managed position entry in financial markets. The strategy is engineered for long-only positions and integrates volatility-adjusted components to enhance signal robustness and trade management.
+
+Strategic Design and Methodological Basis
+The Mutanabby_AI | ATR+ strategy is constructed upon a foundation of established technical analysis principles, with a focus on objective signal generation and realistic trade execution.
+
+Heikin Ashi for Trend Filtering: The core price data is processed via Heikin Ashi (HA) methodology to mitigate transient market noise and accentuate underlying trend direction. The script offers three distinct HA calculation modes, allowing for comparative analysis and validation:
+
+Manual Calculation: Provides a transparent and deterministic computation of HA values.
+
+ticker.heikinashi(): Utilizes TradingView's built-in function, employing confirmed historical bars to prevent repainting artifacts.
+
+Regular Candles: Allows for direct comparison with standard OHLC price action.
+This multi-methodological approach to trend smoothing is critical for robust signal generation.  
+
+Adaptive ATR Trailing Stop: A key component is the Average True Range (ATR)-based trailing stop. ATR serves as a dynamic measure of market volatility. The strategy incorporates user-defined parameters (  
+
+Key Value and ATR Period) to calibrate the sensitivity of this trailing stop, enabling adaptation to varying market volatility regimes. This mechanism is designed to provide a dynamic exit point, preserving capital and locking in gains as a trend progresses.
+
+EMA Crossover for Signal Generation: Entry and exit signals are derived from the interaction between the Heikin Ashi derived price source and an Exponential Moving Average (EMA). A crossover event between these two components is utilized to objectively identify shifts in momentum, signaling potential long entry or exit points.  
+
+Rigorous Stop Loss Implementation: A critical feature for risk mitigation, the strategy includes an optional stop loss. This stop loss can be configured as a percentage or fixed point deviation from the entry price. Importantly, stop loss execution is based on real market prices, not the synthetic Heikin Ashi values. This design choice ensures that risk management is grounded in actual market liquidity and price levels, providing a more accurate representation of potential drawdowns during backtesting and live operation.
+
+Backtesting Protocol: The strategy is configured for realistic backtesting, employing fill_orders_on_standard_ohlc=true to simulate order execution at standard OHLC prices. A configurable Date Filter is included to define specific historical periods for performance evaluation.
+
+Data Visualization and Metrics: The script provides on-chart visual overlays for buy/sell signals, the ATR trailing stop, and the stop loss level. An integrated information table displays real-time strategy parameters, current position status, trend direction, and key price levels, facilitating immediate quantitative assessment.
+
+Applicability
+The Mutanabby_AI | ATR+ strategy is particularly suited for:
+
+Cryptocurrency Markets: The inherent volatility of assets such as #Bitcoin and #Ethereum makes the ATR-based trailing stop a relevant tool for dynamic risk management.  
+
+Systematic Trend Following: Individuals employing systematic methodologies for trend capture will find the objective signal generation and rule-based execution aligned with their approach.
+
+Pine Script Developers and Quants: The transparent code structure and emphasis on realistic backtesting provide a valuable framework for further analysis, modification, and integration into broader quantitative models.
+
+Automated Trading Systems: The clear, deterministic entry and exit conditions facilitate integration into automated trading environments.
+
+Implementation and Evaluation
+To evaluate the Mutanabby_AI | ATR+ strategy, apply the script to your chosen chart on TradingView. Adjust the input parameters (Key Value, ATR Period, Heikin Ashi Method, Stop Loss Settings) to observe performance across various asset classes and timeframes. Comprehensive backtesting is recommended to assess the strategy's historical performance characteristics, including profitability, drawdown, and risk-adjusted returns.
+
+
+I'd love to hear your thoughts, feedback, and any optimizations you discover! Drop a comment below, give it a like if you find it useful, and share your results.
+

@@ -1,0 +1,78 @@
+//@version=6
+strategy('3-Bar Low Strategy', overlay = true, precision = 4, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+in_start_time = input.time(timestamp('1 Jan 2014'), title = 'Start Time', group = 'Time Settings')
+in_end_time = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+in_window = time >= in_start_time and time <= in_end_time
+
+maPeriod = input.int(defval = 200)
+useEmaFilter = input.bool(defval = false, title = 'Use EMA Filter?')
+
+_ma = ta.ema(close, maPeriod)
+
+_lowest = ta.lowest(close, 3)
+_highest = ta.highest(close, 7)
+
+longCondition = close < _lowest[1] and in_window
+exitCondition = close > _highest[1]
+
+if useEmaFilter
+    longCondition := longCondition and close > _ma
+
+if longCondition
+    strategy.entry('long', strategy.long)
+if exitCondition
+    strategy.close_all()
+
+plot(_highest[1])
+
+View in Pine Editor・30 lines
+Use on chart
+9
+1
+2 158
+█ STRATEGY DESCRIPTION
+The "3-Bar Low Strategy" is a mean-reversion strategy designed to identify potential buying opportunities when the price drops below the lowest low of the previous three bars. It enters a long position when specific conditions are met and exits when the price exceeds the highest high of the previous seven bars. This strategy is suitable for use on various timeframes.
+
+█ WHAT IS THE 3-BAR LOW?
+The 3-Bar Low is the lowest price observed over the last three bars. This level is used as a reference to identify potential oversold conditions and reversal points.
+
+█ WHAT IS THE 7-BAR HIGH?
+The 7-Bar High is the highest price observed over the last seven bars. This level is used as a reference to identify potential overbought conditions and exit points.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The close price is below the lowest low of the previous three bars (`close < _lowest[1]`).
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+If the EMA Filter is enabled, the close price must also be above the 200-period Exponential Moving Average (EMA).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the current closing price exceeds the highest high of the previous seven bars (`close > _highest[1]`). This indicates that the price has shown strength, potentially confirming the reversal and prompting the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+MA Period: The lookback period for the 200-period EMA used in the EMA Filter. Default is 200.
+
+Use EMA Filter: Enables or disables the EMA Filter for long entries. Default is disabled.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for mean-reverting markets and performs best when the price frequently oscillates around key support and resistance levels.
+
+It is sensitive to oversold conditions, as indicated by the 3-Bar Low, and overbought conditions, as indicated by the 7-Bar High.
+
+Backtesting results should be analyzed to optimize the MA Period and EMA Filter settings for specific instruments.
+

@@ -1,0 +1,149 @@
+//@version=2
+//created by XPloRR 04-03-2018
+
+strategy("XPloRR MA-Trailing-Stop Strategy",overlay=true, initial_capital=1000,default_qty_type=strategy.percent_of_equity,default_qty_value=100)
+
+testStartYear = input(2005, "Start Year")
+testStartMonth = input(1, "Start Month")
+testStartDay = input(1, "Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2050, "Stop Year")
+testStopMonth = input(12, "Stop Month")
+testStopDay = input(31, "Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriodBackground = input(title="Background", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+ema1Period = input(12, "Fast EMA Buy")
+sma1Period = input(54, "Slow SMA Buy")
+strength1 = input(52, "Minimum Buy Strength")
+
+ema2Period = input(18, "Fast EMA Sell")
+sma2Period = input(55, "Slow SMA Sell")
+strength2 = input(100, "Minimum Sell Strength")
+
+delta = input(8, "Trailing Stop (#ATR)")
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+ema1val=ema(close,ema1Period)
+sma1val=sma(close,sma1Period)
+ema1strength=10000*(ema1val-ema1val[1])/ema1val[1]
+
+ema2val=ema(close,ema2Period)
+sma2val=sma(close,sma2Period)
+ema2strength=10000*(ema2val-ema2val[1])/ema2val[1]
+
+plot(ema1val,color=blue,linewidth=1)
+plot(sma1val,color=orange,linewidth=1)
+plot(ema2val,color=navy,linewidth=1)
+plot(sma2val,color=red,linewidth=1)
+
+long=crossover(ema1val,sma1val) and (ema1strength > strength1) 
+short=crossunder(ema2val,sma2val) and (ema2strength < -strength2)
+
+stopval=ema(close,6)
+atr=sma((high-low),15)
+
+inlong=0
+buy=0
+stop=0
+if testPeriod()
+    if (inlong[1])
+        inlong:=inlong[1]
+        buy:=close
+        stop:=iff((stopval>(stop[1]+delta*atr)),stopval-delta*atr,stop[1])
+    if (long) and (not inlong[1])
+        strategy.entry("buy",strategy.long)
+        inlong:=close
+        buy:=close
+        stop:=stopval-delta*atr
+plot(buy,color=iff(close<inlong,red,lime),style=columns,transp=90,linewidth=1)
+plot(stop,color=iff((short or (stopval<stop)) and (close<inlong),red,lime),style=columns,transp=60,linewidth=1)
+if testPeriod()
+    if (short or (stopval<stop)) and (inlong[1])
+        strategy.close("buy")
+        inlong:=0
+        stop:=0
+        buy:=0
+
+View in Pine Editor・72 lines
+Use on chart
+4
+0
+7
+8
+8 546
+XPloRR MA-Trailing-Stop Strategy
+
+Long term MA-Trailing-Stop strategy with Adjustable Signal Strength to beat Buy&Hold strategy
+
+None of the strategies that I tested can beat the long term Buy&Hold strategy. That's the reason why I wrote this strategy.
+Purpose: beat Buy&Hold strategy with around 10 trades. 100% capitalize sold trade into new trade.
+
+My buy strategy is triggered by the fast buy EMA (blue) crossing over the slow buy SMA curve (orange) and the fast buy EMA has a certain up strength.
+
+My sell strategy is triggered by either one of these conditions:
+
+the EMA(6) of the close value is crossing under the trailing stop value (green) or
+
+the fast sell EMA (navy) is crossing under the slow sell SMA curve (red) and the fast sell EMA has a certain down strength.
+
+
+The trailing stop value (green) is set to a multiple of the ATR(15) value.
+ATR(15) is the SMA(15) value of the difference between the high and low values.
+
+The scripts shows a lot of graphical information:
+
+The close value is shown in light-green. When the close value is lower then the buy value, the close value is shown in light-red. This way it is possible to evaluate the virtual losses during the trade.
+
+the trailing stop value is shown in dark-green. When the sell value is lower then the buy value, the last color of the trade will be red (best viewed when zoomed)(in the example, there are 2 trades that end in gain and 2 in loss (red line at end))
+
+the EMA and SMA values for both buy and sell signals are shown as a line
+
+the buy and sell(close) signals are labeled in blue
+
+
+
+How to use this strategy?
+Every stock has it's own "DNA", so first thing to do is tune the right parameters to get the best strategy values voor EMA , SMA, Strength for both buy and sell and the Trailing Stop (#ATR).
+Look in the strategy tester overview to optimize the values Percent Profitable and Net Profit (using the strategy settings icon, you can increase/decrease the parameters)
+Then keep using these parameters for future buy/sell signals only for that particular stock.
+Do the same for other stocks.
+Important: optimizing these parameters is no guarantee for future winning trades!
+
+Here are the parameters:
+
+Fast EMA Buy: buy trigger when Fast EMA Buy crosses over the Slow SMA Buy value (use values between 10-20)
+
+Slow SMA Buy: buy trigger when Fast EMA Buy crosses over the Slow SMA Buy value (use values between 30-100)
+
+Minimum Buy Strength: minimum upward trend value of the Fast SMA Buy value (directional coefficient)(use values between 0-120)
+
+Fast EMA Sell: sell trigger when Fast EMA Sell crosses under the Slow SMA Sell value (use values between 10-20)
+
+Slow SMA Sell: sell trigger when Fast EMA Sell crosses under the Slow SMA Sell value (use values between 30-100)
+
+Minimum Sell Strength: minimum downward trend value of the Fast SMA Sell value (directional coefficient)(use values between 0-120)
+
+Trailing Stop (#ATR): the trailing stop value as a multiple of the ATR(15) value (use values between 2-20)
+
+
+
+Example parameters for different stocks (Start capital: 1000, Order=100% of equity, Period 1/1/2005 to now) compared to the Buy&Hold Strategy(=do nothing):
+
+BEKB(Bekaert): EMA-Buy=12, SMA-Buy=44, Strength-Buy=65, EMA-Sell=12, SMA-Sell=55, Strength-Sell=120, Stop#ATR=20
+NetProfit: 996%, #Trades: 6, %Profitable: 83%, Buy&HoldProfit: 78%
+
+BAR(Barco): EMA-Buy=16, SMA-Buy=80, Strength-Buy=44, EMA-Sell=12, SMA-Sell=45, Strength-Sell=82, Stop#ATR=9
+NetProfit: 385%, #Trades: 7, %Profitable: 71%, Buy&HoldProfit: 55%
+
+AAPL(Apple): EMA-Buy=12, SMA-Buy=45, Strength-Buy=40, EMA-Sell=19, SMA-Sell=45, Strength-Sell=106, Stop#ATR=8
+NetProfit: 6900%, #Trades: 7, %Profitable: 71%, Buy&HoldProfit: 2938%
+
+TNET(Telenet): EMA-Buy=12, SMA-Buy=45, Strength-Buy=27, EMA-Sell=19, SMA-Sell=45, Strength-Sell=70, Stop#ATR=14
+NetProfit: 129%, #Trade

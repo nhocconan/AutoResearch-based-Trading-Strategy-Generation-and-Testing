@@ -1,0 +1,157 @@
+//@version=6
+strategy("FX Institutional SMC – Clean Dark Zones vFinal", overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// =====================
+// USER SETTINGS
+// =====================
+riskPercent      = input.float(0.5, "Risk % per Trade", step=0.1)
+rrTarget         = input.float(2.0, "RR Target", step=0.1)
+atrLen           = input.int(14, "ATR Length")
+atrMult          = input.float(2.2, "ATR Multiplier")
+smaTrendLen      = input.int(50, "Trend SMA Length")
+maxTrades        = input.int(2, "Max Trades per Day")
+sessionInput     = input.session("0000-2359", "Trading Session (UTC)")
+
+// === Customizable Colors & Sizes ===
+weeklyColor      = input.color(color.white, "Weekly Zone Color")
+dailyColor       = input.color(color.red, "Daily Zone Color")
+fourHColor       = input.color(color.blue, "4H Zone Color")
+confluenceColor  = input.color(color.yellow, "Confluence Color")
+atrLongColor     = input.color(color.green, "ATR Long Stop Color")
+atrShortColor    = input.color(color.red, "ATR Short Stop Color")
+labelBuyColor    = input.color(color.green, "BUY Label Color")
+labelSellColor   = input.color(color.red, "SELL Label Color")
+labelTextColor   = input.color(color.white, "Label Text Color")
+labelSizeCustom  = input.string("normal", "Label Size", options=["tiny","small","normal","large"])
+zoneTransparency = input.int(80, "Zone Transparency (0-100)")
+
+// =====================
+// DAILY TRACKER
+// =====================
+var float dailyLossAmount = 0
+var int tradesToday = 0
+var int lastDay = na
+if dayofmonth != lastDay
+    tradesToday := 0
+    dailyLossAmount := 0
+    lastDay := dayofmonth
+
+// =====================
+// MULTI-TIMEFRAME LEVELS
+// =====================
+weeklyHigh = request.security(syminfo.tickerid, "W", ta.highest(high, 1))
+weeklyLow  = request.security(syminfo.tickerid, "W", ta.lowest(low, 1))
+dailyHigh  = request.security(syminfo.tickerid, "D", ta.highest(high, 1))
+dailyLow   = request.security(syminfo.tickerid, "D", ta.lowest(low, 1))
+fourHHigh  = request.security(syminfo.tickerid, "240", ta.highest(high, 1))
+fourHLow   = request.security(syminfo.tickerid, "240", ta.lowest(low, 1))
+
+// =====================
+// ATR STOPS
+// =====================
+atr = ta.atr(atrLen)
+longStop  = close - atr*atrMult
+shortStop = close + atr*atrMult
+
+// =====================
+// TREND FILTER
+// =====================
+smaTrend = ta.sma(close, smaTrendLen)
+longTrend  = close > smaTrend
+shortTrend = close < smaTrend
+
+// =====================
+// SESSION FILTER
+// =====================
+inSession = not na(time(timeframe.period, sessionInput))
+
+// =====================
+// SMART MONEY CONCEPTS
+// =====================
+var float fvgHigh = na
+var float fvgLow = na
+var bool fvgActive = false
+if high > high[2] and low < low[2]
+    fvgHigh := high
+    fvgLow := low
+    fvgActive := true
+
+bosUp   = ta.crossover(close, ta.highest(close, 5)[1])
+bosDown = ta.crossunder(close, ta.lowest(close, 5)[1])
+
+// =====================
+// MULTI-TIMEFRAME BIAS
+// =====================
+bullBias = close > weeklyLow and close > dailyLow and close > fourHLow
+bearBias = close < weeklyHigh and close < dailyHigh and close < fourHHigh
+
+// =====================
+// FULL WIDTH ZONES USING BOXES
+// =====================
+var box weeklyBox = na
+var box dailyBox  = na
+var box fourHBox  = na
+var box confBox   = na
+
+if not na(weeklyBox)
+    box.delete(weeklyBox)
+if not na(dailyBox)
+    box.delete(dailyBox)
+if not na(fourHBox)
+    box.delete(fourHBox)
+if not na(confBox)
+    box.delete(confBox)
+
+// Weekly zone
+weeklyBox := box.new(left=bar_index-500, top=weeklyHigh, bottom=weeklyLow, right=bar_index+50, border_width=1, bgcolor=color.new(weeklyColor, zoneTransparency))
+// Daily zone
+dailyBox := box.new(left=bar_index-500, top=dailyHigh, bottom=dailyLow, right=bar_index+50, border_width=1, bgcolor=color.new(dailyColor, zoneTransparency))
+// 4H zone
+fourHBox := box.new(left=bar_index-500, top=fourHHigh, bottom=fourHLow, right=bar_index+50, border_width=1, bgcolor=color.new(fourHColor, zoneTransparency))
+// Confluence zone
+confluenceTop = math.min(weeklyHigh, dailyHigh, fourHHigh)
+confluenceBottom = math.max(weeklyLow, dailyLow, fourHLow)
+confBox := box.new(left=bar_index-500, top=confluenceTop, bottom=confluenceBottom, right=bar_index+50, bgcolor=color.new(confluenceColor, 70))
+
+// =====================
+// ENTRY LOGIC
+// =====================
+longSignal  = bullBias and longTrend and bosUp and fvgActive and tradesToday < 2 and dailyLossAmount < 2 and inSession
+shortSignal = bearBias and shortTrend and bosDown and fvgActive and tradesToday < 2 and dailyLossAmount < 2 and inSession
+
+// =====================
+// POSITION SIZING
+// =====================
+calcSize(entry, stop) =>
+    riskAmount = strategy.equity * (riskPercent / 100)
+    stopDist = math.abs(entry - stop)
+    stopDist > syminfo.mintick ? riskAmount / stopDist : 1.0
+
+// =====================
+// EXECUTION
+// =====================
+if longSignal and strategy.position_size <= 0
+    size = calcSize(close, longStop)
+    strategy.entry("Long", strategy.long, qty=size)
+    strategy.exit("Long Exit", "Long", stop=longStop, limit=close + atr*rrTarget)
+    tradesToday += 1
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=labelBuyColor, textcolor=labelTextColor, size=labelSizeCustom)
+
+if shortSignal and strategy.position_size >= 0
+    size = calcSize(close, shortStop)
+    strategy.entry("Short", strategy.short, qty=size)
+    strategy.exit("Short Exit", "Short", stop=shortStop, limit=close - atr*rrTarget)
+    tradesToday += 1
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=labelSellColor, textcolor=labelTextColor, size=labelSizeCustom)
+
+// =====================
+// ATR STOPS PLOTS
+// =====================
+plot(longStop, "Long ATR Stop", color=atrLongColor, linewidth=1, style=plot.style_line)
+plot(shortStop,"Short ATR Stop", color=atrShortColor, linewidth=1, style=plot.style_line)
+
+View in Pine Editor・151 lines
+Use on chart
+3
+466
+here is a strategy that iv been working on using AI. I'm new to using code and trying to get better whilst producing a healthy win rate percentage. Any input and advice would be appreciated.

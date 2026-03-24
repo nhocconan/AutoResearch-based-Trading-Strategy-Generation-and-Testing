@@ -1,0 +1,70 @@
+//@version=5
+strategy("CM Ultimate MA MTF – Strategy Version",
+     overlay = true,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.04,
+     pyramiding = 0)
+
+// ————— INPUTS
+src        = close
+useCurrent = input.bool(true, "Use Current Chart Resolution?")
+resCustom  = input.timeframe("D", "Use Different Timeframe?")
+len        = input.int(20, "Moving Average Length")
+atype      = input.int(1, minval=1, maxval=7, title="1=SMA 2=EMA 3=WMA 4=Hull 5=VWMA 6=RMA 7=TEMA")
+
+doma2      = input.bool(true, "Use 2nd Moving Average for Signals")
+len2       = input.int(50, "2nd MA Length")
+atype2     = input.int(1, minval=1, maxval=7, title="2nd MA Type")
+
+smoothe    = input.int(2, minval=1, title="Color Smoothing")
+
+res = useCurrent ? timeframe.period : resCustom
+
+// ————— MA FUNCTION
+f_ma(_type, _src, _len) =>
+    hull = ta.wma(2 * ta.wma(_src, _len / 2) - ta.wma(_src, _len), math.round(math.sqrt(_len)))
+    ema1 = ta.ema(_src, _len)
+    ema2 = ta.ema(ema1, _len)
+    ema3 = ta.ema(ema2, _len)
+    tema = 3 * (ema1 - ema2) + ema3
+    _type == 1 ? ta.sma(_src, _len) :
+     _type == 2 ? ta.ema(_src, _len) :
+     _type == 3 ? ta.wma(_src, _len) :
+     _type == 4 ? hull :
+     _type == 5 ? ta.vwma(_src, _len) :
+     _type == 6 ? ta.rma(_src, _len) :
+     tema
+
+ma1 = f_ma(atype, src, len)
+ma2 = f_ma(atype2, src, len2)
+
+// MTF
+out1 = request.security(syminfo.tickerid, res, ma1)
+out2 = request.security(syminfo.tickerid, res, ma2)
+
+// ————— TREND COLORS (GÖRSEL)
+ma_up   = out1 >= out1[smoothe]
+ma_down = out1 <  out1[smoothe]
+
+plot(out1, "MA 1", color = ma_up ? color.lime : color.red, linewidth=3)
+plot(doma2 ? out2 : na, "MA 2", color=color.orange, linewidth=2)
+
+// ————— STRATEGY LOGIC (TERS SİNYALDE ÇIKIŞ & FLIP)
+
+longCondition  = doma2 and ta.crossover(out1, out2)
+shortCondition = doma2 and ta.crossunder(out1, out2)
+
+// Pozisyon tersine dönünce otomatik flip
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・63 lines
+Use on chart
+1
+5
+456
+Sadece deneme için yapılan bir çalışma, geliştirdikçe paylaşacağm, lütfen fazla dikkate almayınız.

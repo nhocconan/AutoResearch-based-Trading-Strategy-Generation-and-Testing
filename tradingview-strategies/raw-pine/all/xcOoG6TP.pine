@@ -1,0 +1,9 @@
+//@version=4
+delta_bull=##input(defval=14.9,type='INPUT_FLOAT',##id='in_0')
+delta_bear=##input(defval=-17.2,type='INPUT_FLOAT',##id='in_1')
+##root(root_metainfo,rm_0,5,input__integer,plot,style)
+##root(root_metainfo,rm_1,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_2,delta_bull,input__float)
+##root(root_metainfo,rm_3,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_4,delta_bear,input__float)
+##root(root_metainfo,rm_5,1,input__integer,hline,linestyle)

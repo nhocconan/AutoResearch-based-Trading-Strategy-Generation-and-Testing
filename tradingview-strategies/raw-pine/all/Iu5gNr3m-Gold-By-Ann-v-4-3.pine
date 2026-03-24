@@ -1,0 +1,627 @@
+//@version=5
+strategy("Gold By Ann v.4.3", overlay=true, margin_long=100, margin_short=100)
+
+// === Inputs ===
+leftBars        = input.int(4, "Pivot Lookback Left")
+rightBars       = input.int(2, "Pivot Lookback Right")
+atrLength       = input.int(14, "ATR Length")
+atrMult         = input.float(2.0, "ATR Multiplier")
+atrThreshold    = input.float(0.2, "ATR Threshold")
+cooldownMinutes = input.int(10, "Cooldown Minutes")
+waitBarsInput   = input.int(3, "Bars to Wait After TP")
+volMult         = input.float(1.5, "Volume Strength Multiplier")
+
+var bool subTpTaken = false // Existing: Tracks sub-TP for SHORT
+var bool subTpTakenLong = false // ADDED: Tracks sub-TP for LONG
+var bool waitForSqueezeRelease=false
+var spikeDirection=0
+adxLength = input.int(14, "ADX Length")
+adxThreshold = input.int(20, "ADX Trend Threshold")
+[di_plus, di_minus, adx] = ta.dmi(adxLength, adxLength)
+isTrending = adx > adxThreshold
+
+is_tuesday = dayofweek == 3
+is_wed = dayofweek == 4
+// แปลงเวลาปัจจุบันเป็น ชั่วโมง และ นาที (ในเขตเวลา UTC+7)
+thai_hour = hour(time, "GMT+7")
+is_forbidden_wednesday = is_wed and ((thai_hour == 8) or (thai_hour== 22))
+// เงื่อนไข: วันอังคาร ตั้งแต่เวลา 15:00 น. เป็นต้นไป
+is_forbidden_tuesday = is_tuesday and thai_hour >= 15
+
+// canTrade: เทรดได้ทุกวัน ยกเว้นช่วงบ่ายวันอังคารที่ระบุไว้
+// (หมายเหตุ: เมื่อถึง 00:00 วันพุธ เงื่อนไข is_tuesday จะกลายเป็น false และกลับมาเทรดได้เองอัตโนมัติ)
+ 
+
+canTrade = dayofweek >= 2 and dayofweek >= 3 and dayofweek <= 4 and dayofweek <= 5 and dayofweek <= 6 and not is_forbidden_tuesday and not is_forbidden_wednesday
+
+// === Pivots & Trend ===
+ph = ta.pivothigh(leftBars, rightBars)
+pl = ta.pivotlow(leftBars, rightBars)
+lastHighPivot = ta.valuewhen(not na(ph), ph, 0)
+lastLowPivot  = ta.valuewhen(not na(pl), pl, 0)
+
+ma = ta.sma(close,50)
+slope = ma - ma[5]
+
+// threshold for "not much slope"
+flatThreshold = 0.1  // adjust if needed
+
+maColor =
+     slope > flatThreshold  ? color.green :
+     slope < -flatThreshold ? color.red :
+                              color.white
+
+
+plot(ma, color=maColor, linewidth=2, title="Dynamic SMA 50")
+
+// 3. Define Candle Coloring Condition
+// Condition: Price is below the MA AND the slope is positive (Green state)
+// Note: If you want candles red whenever price is below MA regardless of slope, 
+// simply use: candleCondition = close < ma
+
+
+// 4. Apply Bar Color
+// This turns the entire candle red if the condition is met
+determinedColor = (slope < -flatThreshold) ? color.red : color.rgb(27, 17, 223)
+
+barcolor(determinedColor)
+
+bullishTrend = close > ma
+bearishTrend = close < ma
+
+// === RSI & ATR ===
+rsi = ta.rsi(close, 14)
+atrValue = ta.atr(atrLength)
+
+// === Volume Confirmation ===
+volAvg = ta.sma(volume, 20)
+strongVolUp = volume > volAvg * volMult and close > open
+strongVolDown = volume > volAvg * volMult and close < open
+
+// === Cooldown Logic ===
+var float cooldownEnd = na
+if atrValue < atrThreshold and na(cooldownEnd)
+    cooldownEnd := timenow + cooldownMinutes * 60 * 1000
+if not na(cooldownEnd) and timenow > cooldownEnd
+    cooldownEnd := na
+inCooldown = not na(cooldownEnd)
+
+// === Candle Filter ===
+rangeBar = high - low
+isTall = rangeBar > ta.atr(5) * atrMult
+// --- Sub-TP Addition ---
+subTpPercent = input.float(0.0035, "Sub-TP Percent (Short)", tooltip="Percentage for the first partial TP on short trades")
+subTpReEntryPercent = input.float(0.0015, "Sub-TP Re-Entry Percent (Short)", tooltip="Percentage for the first partial TP on short re-entry trades")
+
+baseClose = ta.sma(close, 30)
+// ADDED: Sub-TP Calculation
+subTpValue = baseClose * subTpPercent
+subTpReValue = baseClose * subTpReEntryPercent
+
+
+// ADDED: Sub-TP Inputs for LONG side
+subTpPercentLong = input.float(0.0035, "Sub-TP Percent (Long)", tooltip="Percentage for the first partial TP on long trades")
+subTpReEntryLong = input.float(0.0015, "Sub-TP Re-Entry Percent (Long)", tooltip="Percentage for the first partial TP on long re-entry trades")
+
+
+// === SL & TP Settings ===
+
+slPercent = 0.0045
+tpPercent = 0.0060
+tpReEntryPercent = 0.0030
+stopReEntryPercent = 0.0020
+
+slValue   = baseClose * slPercent
+tpValue   = baseClose * tpPercent
+tpReValue = baseClose * tpReEntryPercent
+stopReEntryValue = baseClose * stopReEntryPercent
+
+subTpValueLong = baseClose * subTpPercentLong
+subTpReValueLong = baseClose * subTpReEntryLong
+
+riskPercent = input.float(1.0, "Risk Per Trade %", minval=0.1)
+riskAmount = (riskPercent / 100) * strategy.equity
+
+
+maxRiskValue = input.float(80, "Max Position Value ($)", tooltip="Sets a cap on the total value of any single position, e.g., 5000 USD") 
+calculatedSize = riskAmount / slValue
+maxSizeByValue = maxRiskValue / close // Calculate max shares/contracts based on cap
+positionSize = math.min(calculatedSize, maxSizeByValue) // Use the smaller of the two sizes
+// === Re-entry state flag ===
+var bool isReEntry = false
+var int waitBars = 0  // waiting counter after TP
+var int lastPos = 0   // ADDED: Tracks last position direction. 1 for long, -1 for short
+// ADDED: Tracks if the sub-TP has been taken on the current short position
+
+// ======== 1-MINUTE REAL-TIME SPIKE DETECTOR ========
+// Inputs to control the sensitivity of the 1-minute detection
+min1_timeWindow = input.int(1, title="1m Spike Check (Minutes)", tooltip="How many of the last 1-minute candles to analyze for a spike. 2-3 is a good starting point.")
+min1_priceThreshold = input.float(10, title="1m Price Spike Threshold ($)", tooltip="The minimum price move (in dollars/points) within the time window to trigger the alert. Adjust this based on the asset's volatility.")
+min1_volumeMultiplier = input.float(1.5, title="1m Volume Spike Multiplier", tooltip="How much higher the recent volume must be compared to its 60-minute average. e.g., 3.0 means 300% or 3x the average.")
+
+// This function requests data from the 1-minute timeframe and performs the spike calculation.
+f_detect_1m_spike() =>
+    // Define the calculations to be performed on the 1-minute data
+    // 1. Calculate the price range over the last 'min1_timeWindow' minutes
+    priceRange_1m = ta.highest(high, min1_timeWindow) - ta.lowest(low, min1_timeWindow)
+    
+    // 2. Calculate the average volume over the last 'min1_timeWindow' minutes
+    recentAvgVolume_1m = ta.sma(volume, min1_timeWindow)
+    
+    // 3. Calculate a baseline average volume over the last 60 minutes
+    baselineAvgVolume_1m = ta.sma(volume,20)
+    
+    // 4. Determine the direction of the move
+    isUpMove = close > open[min1_timeWindow - 1]
+    
+    // 5. Check if the spike conditions are met
+    priceSpike = priceRange_1m >= min1_priceThreshold
+    volumeSpike = recentAvgVolume_1m > (baselineAvgVolume_1m * min1_volumeMultiplier)
+    
+    // Return a tuple: [isBullSpike, isBearSpike]
+    [priceSpike and volumeSpike and isUpMove, priceSpike and volumeSpike and not isUpMove]
+
+// Use request.security() to call our function on the '1' minute timeframe.
+// This runs on every tick, giving us real-time intra-bar data.
+[isBullishSpike_1m, isBearishSpike_1m] = request.security(syminfo.tickerid, "1", f_detect_1m_spike())
+
+// For debugging: Plot a shape when a 1m spike is detected on your chart
+plotshape(isBearishSpike_1m, "1m Bearish Spike", shape.labeldown, location.abovebar, color.new(color.maroon, 0), text="BEAR SPIKE", textcolor=color.white, size=size.tiny)
+plotshape(isBullishSpike_1m, "1m Bullish Spike", shape.labelup, location.belowbar, color.new(color.teal, 0), text="BULL SPIKE", textcolor=color.white, size=size.tiny)
+
+
+// This is the same request.security call from before. It's needed for both the strategy and plotting.
+[isBullishSpike_1m_realtime, isBearishSpike_1m_realtime] = request.security(
+     syminfo.tickerid, 
+     "5", 
+     [isBullishSpike_1m, isBearishSpike_1m], 
+     lookahead=barmerge.lookahead_off)
+
+// Check if a Bearish Spike has occurred on the 1-minute timeframe
+if (isBearishSpike_1m)
+    var string tpLabel = ""
+    // ==> SCENARIO 1: CLOSE A LONG POSITION (STOP LOSS)
+    // Check if the strategy is currently in a long position
+    if (strategy.position_size > 0)
+        // Close the long position. You must specify the ID of the entry order.
+        // Replace "Long Entry ID" with the actual ID from your strategy.entry() call.
+        tpLabel := subTpTakenLong ? "SL Long (Final)" : "SL Long (Full)"
+    
+    // 2. ใช้ tpLabel ใน comment ของ strategy.close
+        strategy.close("PivExtLE", comment=tpLabel)
+        //strategy.close("PivExtLE", comment="SL LONG spike(Full)")
+        subTpTakenLong := false
+      
+    if (strategy.position_size < 0)
+        // Close the short position using its entry ID
+        //strategy.close("PivExtSE", comment="SL SHORT spike(Full)")
+        tpLabel := subTpTaken ? "SL Short (Final)" : "SL Short (Full)"
+        
+        // ปิดสถานะ Short โดยใช้ Label ที่เลือกไว้
+        strategy.close("PivExtSE", comment=tpLabel)
+        subTpTaken := false
+        //strategy.entry("PivExtLE", strategy.long, comment="Long Entry (Pivot Low)")
+
+    // ==> SCENARIO 2: CLOSE A SHORT POSITION (TAKE PROFIT)
+    // Check if the strategy is currently in a short position
+    waitForSqueezeRelease := true
+    spikeDirection := -1
+// --- Plotting the Real-time Signals ---
+var string tpLabel=""
+if (isBullishSpike_1m)
+        
+    // ==> SCENARIO 1: CLOSE A LONG POSITION (TAKE PROFIT)
+    // Check if the strategy is currently in a long position
+    if (strategy.position_size > 0)
+        // Close the long position. You must specify the ID of the entry order.
+        // Replace "Long Entry ID" with the actual ID from your strategy.entry() call.
+        tpLabel := subTpTakenLong ? "SL Long (Final)" : "SL Long (Full)"
+    
+    // 2. ใช้ tpLabel ใน comment ของ strategy.close
+        strategy.close("PivExtLE", comment=tpLabel)
+        //strategy.close("PivExtLE", comment="SL LONG spike(Full)")    
+        subTpTaken := false
+    if (strategy.position_size < 0)
+        // Close the short position using its entry ID
+        //strategy.close(id="PivExtSE", comment="SL SHORT spike(Full)")
+        tpLabel := subTpTaken ? "SL Short (Final)" : "SL Short (Full)"
+        
+        // ปิดสถานะ Short โดยใช้ Label ที่เลือกไว้
+        strategy.close("PivExtSE", comment=tpLabel)
+        subTpTaken := false
+        //strategy.entry("PivExtLE", strategy.long, comment="Long Entry (Pivot Low)")
+
+    waitForSqueezeRelease := true
+    spikeDirection := 1
+
+// 🔺 Plot a green triangle below the bar when a bullish 1m spike is detected.
+plotshape(series=isBullishSpike_1m_realtime,
+     title="Bullish 1m Spike",
+     location=location.belowbar,
+     color=color.new(color.black, 0),
+     style=shape.triangleup,
+     size=size.small,
+     text="S↑")
+
+// 🔻 Plot a red triangle above the bar when a bearish 1m spike is detected.
+plotshape(series=isBearishSpike_1m_realtime,
+     title="Bearish 1m Spike",
+     location=location.abovebar,
+     color=color.new(color.red, 0),
+     style=shape.triangledown,
+     size=size.small,
+     text="S↓")
+
+
+underRedMA = maColor == color.red and close < ma
+
+ema_len      = input.int(50, "Trend Filter EMA")
+pivot_lb     = input.int(180, "Pivot Lookback (60 bars)")
+vol_ma_len   = input.int(20, "Volume MA Length")
+rsi_len      = input.int(14, "RSI Length")
+show_labels  = input.bool(true, "Show Daily % Label")
+
+// --- CALCULATIONS ---
+new_day = ta.change(time("D"))
+var float D_price = na
+var float D_high  = na
+var float D_low   = na
+if new_day
+    D_price := open
+
+if new_day
+    D_price := open
+    D_high  := high
+    D_low   := low
+else
+    D_high := math.max(D_high, high)
+    D_low  := math.min(D_low, low)
+
+// Define "Already High" - Price is in the top 25% of today's range
+dailyRange = D_high - D_low
+isTooHigh  = dailyRange > 0 and close > (D_low + (dailyRange * 0.95))
+
+ema_val = ta.ema(close, ema_len)
+rsi_val = ta.rsi(close, rsi_len)
+vol_ma  = ta.sma(volume, vol_ma_len)
+
+
+lookback_2h = 120 // ปรับเป็น 24 ถ้าใช้กราฟ 5 นาที
+price_2h_ago = ta.valuewhen(bar_index > lookback_2h, close[lookback_2h], 0)
+move_2h_percent = ((close - price_2h_ago) / price_2h_ago) * 100
+
+// ตั้งเกณฑ์: ถ้าขึ้นเกิน 1.5% ใน 2 ชม. ถือว่าอันตราย (ปรับตัวเลขได้ตามความซิ่งของทอง)
+max_move_threshold = input.float(2, "Max 2h Move % Filter", step=0.1)
+is_overextended = move_2h_percent > max_move_threshold
+// --- 1. PATTERN: MORNING STAR ---
+is_c1_bear  = close[2] < open[2]
+is_c2_star  = math.abs(close[1] - open[1]) < (math.abs(close[2] - open[2]) * 0.5)
+is_c3_bull  = close > open and close > ((open[2] + close[2]) / 2)
+morning_star = is_c1_bear and is_c2_star and is_c3_bull
+
+// --- 2. PATTERN: 60-BAR PIVOT LOW ---
+var int pl_idx = 0
+if not na(pl)
+    pl_idx := bar_index
+
+major_low_nearby = (bar_index - pl_idx) <= pivot_lb
+
+// --- STRICT FILTERS ---
+// Filter 1: Volume must be higher than average (confirms big players)
+vol_filter = volume > vol_ma
+
+// Filter 2: RSI Trend (Looking for momentum moving UP from the bottom)
+rsi_filter = rsi_val > 45 and rsi_val < 65
+
+// Filter 3: Price must be above EMA 50 (The Trend Filter)
+trend_filter = close > ema_val
+
+// --- FINAL SUPER BUY (WITH TRIGGER GUARD) ---
+// Combined check for Morning Star OR a structural Major Low
+pattern_found = morning_star or major_low_nearby
+
+// The "raw" signal requires all conditions to be met
+raw_signal = (close < D_price) and pattern_found and trend_filter and vol_filter and rsi_filter
+
+// TRIGGER GUARD: Only fires the first time conditions are met
+var int last_signal_bar = 0
+super_buy = false
+
+if raw_signal and (bar_index - last_signal_bar > 10) // 10 bar cooldown to stop stacking
+    super_buy := true
+    last_signal_bar := bar_index
+
+// --- VISUALS ---
+plot(D_price, "Daily Open", color=color.orange, linewidth=3)
+plot(ema_val, "Trend EMA", color=color.new(color.gray, 50))
+
+// Signal Shape
+//plotshape(super_buy, "SUPER BUY", shape.triangleup, location.belowbar, color=color.green, size=size.large, text="SUPER BUY")
+
+// Daily % Label
+if show_labels and barstate.islast and not na(D_price)
+    perc = ((close - D_price) / D_price) * 100
+    label.new(bar_index, high, str.tostring(perc, "#.##") + "%", color=perc >= 0 ? color.green : color.red, textcolor=color.white)
+[h1_open, h1_close, m30_open, m30_close] = request.security(syminfo.tickerid, "60", [open[2], close[2], open[1], close[1]], lookahead=barmerge.lookahead_off)
+[m30_o, m30_c] = request.security(syminfo.tickerid, "30", [open, close], lookahead=barmerge.lookahead_off)
+
+is_h1_green  = h1_close > h1_open
+is_m30_green = m30_c > m30_o
+// === Entry Logic (Normal) ===
+if not inCooldown and not isTall and canTrade and (is_h1_green and slope > -flatThreshold) and not isTooHigh and not is_overextended
+    if strategy.position_size == 0 and waitBars == 0 and not waitForSqueezeRelease 
+        if not na(pl)
+            if underRedMA
+                strategy.entry("PivExtLE", strategy.long, comment="Long Entry (Pivot Low)x2")
+            else
+                strategy.entry("PivExtLE", strategy.long, comment="Long Entry (Pivot Low)")
+
+            isReEntry := false
+            subTpTakenLong := false
+
+        // MODIFIED: Added Trend and RSI confirmation for initial short entry
+        if not na(ph) and bearishTrend and rsi < 50
+            strategy.entry("PivExtSE", strategy.short, comment="Short Entry (Pivot High)")
+            isReEntry := false
+            subTpTaken := false
+
+// === Smart Decision Filters ===
+f_should_reenter_long() =>
+    bullishTrend and rsi > 55 and strongVolUp and close > lastHighPivot
+
+f_should_flip_short() =>
+    bearishTrend and rsi < 45 and strongVolDown and close < lastLowPivot
+
+f_should_reenter_short() =>
+    bearishTrend and rsi < 45 and strongVolDown and close < lastLowPivot
+
+f_should_flip_long() =>
+    bullishTrend and rsi > 55 and strongVolUp and close > lastHighPivot
+isBullishBreakout() =>
+    isTrending and bullishTrend and ta.crossover(rsi, 55) and strongVolUp and close > lastHighPivot
+
+// Defines a strong bearish breakdown condition with Trend + Momentum confirmation
+isBearishBreakdown() =>
+    isTrending and bearishTrend and ta.crossunder(rsi, 45) and strongVolDown and close < lastLowPivot
+
+bool bullishSignal = isBullishBreakout()
+bool bearishSignal = isBearishBreakdown()
+
+// =====================================================
+// === Take Profit / Stop Loss + Smart Pivot Wait ===
+// =====================================================
+
+// LONG
+// LONG
+if strategy.position_size > 0 and not isTall
+    entryPrice = strategy.position_avg_price
+
+    
+    // Determine the relevant TP/Sub-TP values based on if it's a re-entry
+    currentTpValue = isReEntry ? tpReValue : tpValue
+    currentSubTpValueLong = isReEntry ? subTpReValueLong : subTpValueLong
+    
+    tpLevel = entryPrice + currentTpValue
+    subTpLevelLong = entryPrice + currentSubTpValueLong
+
+    // Stop for re-entry
+    if isReEntry and close <= entryPrice - stopReEntryValue
+        strategy.close("PivExtLE", comment="Stop Re-Entry Long (-0.2%)")
+        label.new(bar_index, close, "Stop Re-Entry Long", color=color.red, style=label.style_label_down, textcolor=color.white)
+        isReEntry := false
+        subTpTakenLong := false
+
+    // ** ADDED: SUB-TAKE PROFIT (Partial Close) **
+    // Check if close hits the sub-TP level AND we haven't taken it yet
+    else if not subTpTakenLong and close >= subTpLevelLong
+        // Use 'limit' to set the price at which the partial exit should occur (50% of position)
+        strategy.exit(id="SubTPLE", from_entry="PivExtLE", qty_percent=50, limit=subTpLevelLong, 
+             comment=isReEntry ? "Sub-TP Long (Re-Entry)" : "Sub-TP Long")
+        
+        subTpTakenLong := true // Mark that the sub-TP has been taken
+       // label.new(bar_index, close, "Sub-TP Long ✅", color=color.new(color.green, 0), style=label.style_label_up, textcolor=color.white)
+
+
+    // ** MAIN TAKE PROFIT (Remaining Close) **
+    else if close >= tpLevel
+        // --- MODIFICATION START ---
+        // Determine comment and label based on whether sub-TP was hit
+        string tpComment = ""
+        string tpLabel = ""
+        if isReEntry
+            // Comments for Re-Entry TPs
+            tpComment := subTpTakenLong ? "TP Re-Entry (Final)" : "TP Re-Entry (Full)"
+            tpLabel := subTpTakenLong ? "TP Re-Entry (Final) 🎯" : "TP Re-Entry (Full) 🎯"
+        else
+            // Comments for regular TPs
+            tpComment := subTpTakenLong ? "TP Long (Final)" : "TP Long (Full)"
+            tpLabel := subTpTakenLong ? "TP Long (Final) 🎯" : "TP Long (Full) 🎯"
+        // --- MODIFICATION END ---
+        
+        strategy.close("PivExtLE", comment=tpComment) // Use new comment
+        waitBars := waitBarsInput // wait before next action
+        lastPos := 1 // Mark that the last closed position was a long
+        
+        //label.new(bar_index, close, tpLabel, color=color.new(color.green, 0), style=label.style_label_up, textcolor=color.white) // Use new label
+
+
+    // Stop Loss
+    else if close <= entryPrice - slValue
+        // --- MODIFICATION START ---
+        // Add comment based on whether sub-TP was hit
+        string slComment = subTpTakenLong ? "SL Long (Final)" : "SL Long (Full)"
+        // --- MODIFICATION END ---
+
+        strategy.close("PivExtLE", comment=slComment) // Use new comment
+        subTpTakenLong := false // Reset state
+
+        // MODIFIED: Only flip to short if market conditions are confirmed bearish
+        if f_should_flip_short() or bearishSignal
+            strategy.entry("PivExtSE", strategy.short, comment="Flip to Short (SL)")
+         //   label.new(bar_index, close, "Flip to Short (SL)", color=color.red, style=label.style_label_down, textcolor=color.white)
+            isReEntry := false
+            subTpTaken := false
+        
+    // ** MODIFIED: Early Exit / Spike SL **
+    // (Assuming 'isBearishSpike_1m' is defined elsewhere in your script)
+    else if isBearishSpike_1m or bearishSignal
+        // --- MODIFICATION START ---
+        // Add comment based on whether sub-TP was hit
+        string spikeComment = subTpTakenLong ? "SL Long Spike (Final)" : "SL Long Spike (Full)"
+        // --- MODIFICATION END ---
+        waitForSqueezeRelease := true
+        spikeDirection := -1
+        strategy.close("PivExtLE", comment=spikeComment) // Use new comment
+      //  label.new(bar_index, close, "Early Exit Long 📉", color=color.orange, style=label.style_label_down, textcolor=color.white)
+        subTpTakenLong := false // Reset state
+// SHORT
+if strategy.position_size < 0 and not isTall
+    entryPrice = strategy.position_avg_price
+    
+    // Determine the relevant TP/Sub-TP values based on if it's a re-entry
+    currentTpValue = isReEntry ? tpReValue : tpValue
+    currentSubTpValue = isReEntry ? subTpReValue : subTpValue
+    
+    tpLevel = entryPrice - currentTpValue
+    subTpLevel = entryPrice - currentSubTpValue
+
+    // Stop for re-entry (Unchanged)
+    if isReEntry and close >= entryPrice + stopReEntryValue
+        strategy.close("PivExtSE", comment="Stop Re-Entry Short (-0.2%)")
+      //  label.new(bar_index, close, "Stop Re-Entry Short", color=color.red, style=label.style_label_up, textcolor=color.white)
+        isReEntry := false
+        subTpTaken := false
+    // ** ADDED: SUB-TAKE PROFIT (Partial Close) **
+    // Check if close hits the sub-TP level AND we haven't taken it yet
+    else if not subTpTaken and close <= subTpLevel
+        // Exit 50% of the position with a specific ID
+        strategy.exit(id="SubTPSE", from_entry="PivExtSE", qty_percent=50, limit=subTpLevel,comment=isReEntry ? "Sub-TP Short (Re-Entry)" : "Sub-TP Short")
+        subTpTaken := true // Mark that the sub-TP has been taken
+      //  label.new(bar_index, close, "Sub-TP Short ✅", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white)
+
+
+    // ** MAIN TAKE PROFIT (Remaining Close) **
+    // Check if the remaining position hits the main TP level
+    // This will close the *rest* of the position as it's the final strategy.exit/close logic
+    else if close <= tpLevel
+        strategy.close("PivExtSE", comment=isReEntry ? "TP Short (Re-Entry)(Final)" : "TP Short(Final)")
+        waitBars := waitBarsInput
+        lastPos := -1 // Mark that the last closed position was a short
+        subTpTaken := false
+       // label.new(bar_index, close, "TP Short (Final) 🎯", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white)
+
+
+    // Stop Loss (Unchanged - uses full SL)
+    else if close >= entryPrice + slValue 
+        strategy.close("PivExtSE", comment="SL Short(Full)")
+        // The flip logic is already here
+       // strategy.entry("PivExtLE", strategy.long, comment="Flip to Long (SL)")
+       // label.new(bar_index, close, "Flip to Long (SL)", color=color.green, style=label.style_label_up, textcolor=color.white)
+        isReEntry := false
+        subTpTakenLong := false // <-- ADDED RESET
+        
+    else if isBullishSpike_1m or bullishSignal
+        strategy.close("PivExtLE", comment="SL Long spike (Full)")
+        waitForSqueezeRelease := true
+        spikeDirection := 1
+       
+
+// === Wait After TP ===
+// MODIFIED: Restructured this entire block to handle both long and short re-entries/flips
+if waitBars > 0
+    waitBars := waitBars - 1
+    if waitBars == 1 and not waitForSqueezeRelease
+        // --- Logic if last trade was LONG ---
+        if lastPos == 1
+            if f_should_reenter_long() or bullishSignal
+                strategy.entry("ReEnterLong", strategy.long, qty=positionSize, comment="Re-Enter Long (Breakout + Volume)")
+
+                isReEntry := true
+                subTpTakenLong := false
+               // label.new(bar_index, close, "Re-Enter Long 🔥", color=color.new(color.green, 0), style=label.style_label_up, textcolor=color.white)
+            else if f_should_flip_short() or bearishSignal
+                strategy.entry("FlipShort", strategy.short, comment="Flip Short (Breakdown + Volume)")
+                isReEntry := false
+                subTpTaken := false
+              //  label.new(bar_index, close, "Flip to Short ⚡", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white)
+           
+        // --- ADDED: Logic if last trade was SHORT ---
+        if lastPos == -1
+            if f_should_reenter_short() or bearishSignal
+                strategy.entry("ReEnterShort", strategy.short, comment="Re-Enter Short (Breakdown + Volume)")
+                isReEntry := true
+                subTpTaken := false
+              //  label.new(bar_index, close, "Re-Enter Short 🔥", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white)
+            else if f_should_flip_long() or bullishSignal
+                strategy.entry("FlipLong", strategy.long, comment="Flip Long (Breakout + Volume)")
+                isReEntry := false
+                subTpTakenLong := false
+              //  label.new(bar_index, close, "Flip to Long ⚡", color=color.new(color.green, 0), style=label.style_label_up, textcolor=color.white)
+
+
+
+
+plot(ma, title="50 SMA", color=maColor, linewidth=2)
+// === Plot reference lines ===
+//plot(ma, title="50 SMA", color=color.new(#e8f312, 0))
+plot(rsi, title="RSI(14)", color=color.new(color.purple, 0))
+plot(lastHighPivot, "Resistance (Last Pivot High)", color=color.new(color.red, 60))
+plot(lastLowPivot, "Support (Last Pivot Low)", color=color.new(color.black, 60))
+plot(volAvg, "Volume Average", color=color.new(color.gray, 50))
+
+
+// --- INPUTS ---
+length = input.int(30, title="BB Length")
+mult = input.float(2, title="BB MultFactor")
+lengthKC = input.int(20, title="KC Length")
+multKC = input.float(3, title="KC MultFactor")
+useTrueRange = input.bool(true, title="Use TrueRange for KC")
+source = input.source(close, "Source")
+
+// --- CALCULATIONS (Copied directly from your indicator) ---
+
+// Bollinger Bands
+basis = ta.sma(source, length)
+dev = multKC * ta.stdev(source, length)
+upperBB = basis + dev
+lowerBB = basis - dev
+
+// Keltner Channels
+ma2 = ta.sma(source, lengthKC)
+ranger = useTrueRange ? ta.tr : (high - low)
+rangema = ta.sma(ranger, lengthKC)
+upperKC = ma2 + rangema * multKC
+lowerKC = ma2 - rangema * multKC
+
+// Squeeze Conditions
+sqzOn  = (lowerBB > lowerKC) and (upperBB < upperKC)
+sqzOff = (lowerBB < lowerKC) and (upperBB > upperKC)
+noSqz  = not sqzOn and not sqzOff
+
+// Momentum Oscillator
+val = ta.linreg(source - math.avg(math.avg(ta.highest(high, lengthKC), ta.lowest(low, lengthKC)), ta.sma(close, lengthKC)), lengthKC, 0)
+// --- PLOT BACKGROUND COLOR ---
+// If squeeze is on, background is gray. Otherwise, use the momentum colors.
+bool isBullishMomentum = val > 0 // Green/Lime BG
+bool isBearishMomentum = val <= 0 // Red/Maroon BG
+// === Wait After Spike ===
+// ADDED: New conditional wait logic
+if waitForSqueezeRelease
+    if spikeDirection == -1 and isBullishMomentum // Was bearish spike, wait for bullish momentum (green bg)
+        waitForSqueezeRelease := false
+        spikeDirection := 0
+    else if spikeDirection == 1 and isBearishMomentum // Was bullish spike, wait for bearish momentum (red bg)
+        waitForSqueezeRelease := false
+        spikeDirection := 0
+
+momentumColor = val > 0 ? (val > nz(val[1]) ? color.lime : color.green) : (val < nz(val[1]) ? color.red : color.maroon)
+bgColor = sqzOn ? color.new(color.gray, 85) : momentumColor
+bgcolor(bgColor, transp=95)
+
+View in Pine Editor・619 lines
+Use on chart
+3
+9
+1
+851
+when price swing and 1 min only . no trade order monday friday and some other time , try it and tell me feed back

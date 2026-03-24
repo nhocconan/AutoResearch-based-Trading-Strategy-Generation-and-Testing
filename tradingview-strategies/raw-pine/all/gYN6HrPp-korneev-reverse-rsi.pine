@@ -1,0 +1,49 @@
+//@version=5
+strategy("Korneev Reverse RSI", shorttitle = "KRRSI", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0, commission_value = 0.01, initial_capital = 10000)
+
+rsperiod = input(defval = 14, title = "RSI Period")
+rs = ta.rsi(length = rsperiod, source = ohlc4)
+ma = ta.ema(source = rs, length = 14)
+sh = input(defval = false, title = "Include Shorts (Not recommended)")
+
+if (ma>80)
+    strategy.entry(id = "Long", comment= "Open Long", direction=strategy.long)
+
+if (ma<40)
+    strategy.close(id = "Long", comment= "Close Long")
+
+if (sh)
+    if (ma<20)
+        strategy.entry(id = "Short", comment= "Open Short", direction=strategy.short)
+    if (ma>60)
+        strategy.close(id = "Short", comment= "Close Short")
+
+
+// in memory John Welles Wilder Jr.
+
+View in Pine Editor・25 lines
+Use on chart
+6
+8
+2 675
+Rethinking the Legendary Relative Strength Index by John Welles Wilder
+
+The essence of the new approach lies in the reverse use of the so-called "overbought" and "oversold" zones. In his 1978 book, "New Concepts in Technical Trading Systems," where the RSI mechanism was thoroughly described, Wilder writes that one way to use the oscillator is to open a long position when the RSI drops into oversold territory (below 30) and to open a short position when the RSI rises to overbought levels (above 70). However, backtesting this strategy with such inputs yields rather mediocre results.
+
+Based on the calculation formula, the RSI calculates the rate of price change over a certain period. Therefore, overbought and oversold zones will have relative significance (relative to the set calculation period). It is no coincidence that the word "relative" was added to the name of the oscillator. It is worth accepting as an axiom the assertion that the price of an asset is fair at every moment in time.
+
+Essentially, the RSI calculates the strength of a trend. If the oscillator value is above 70, it is highly likely that an upward movement is occurring in the market. Therefore, in the current strategy, a long position is opened precisely at the moment of greatest buyer strength (when RSI > 80), i.e., in the direction of the trend, since counter-trend trading with the RSI has proven to be ineffective. The position is closed after the buyers lose their advantage and the RSI drops to 40.
+
+The strategy is recommended to be used only with long positions, as short positions show negative results. The strategy uses a moving average for the RSI with a period of 14 to smooth the oscillator data.
+
+--------------------------------------------------------------------------------------------
+
+Переосмысление легендарного осциллятора Relative strength index Джона Уэллса Уайлдера
+
+Суть нового подхода заключается в реверсивном использовании так называемых зон "перекупленности" и "перепроданности". В своей книге от 1978 года "New concepts in tecnical trading systems", в которой был подробно описан механизм работы RSI, Уайлдер пишет, что один из способов использования осциллятора - открытие длинной позиции при снижении RSI в перепроданность (ниже 30) и открытие короткой позиции при повышении RSI до перекупленности (выше 70). Однако бэктест стратегии с такими вводными дает весьма посредственные результаты.
+
+Исходя из формулы расчета, RSI рассчитывает скорость изменения цены за определенный период. Поэтому зоны перекупленности и перепроданности будут иметь относительное значение (относительно установленного периода расчета). Не зря ведь в названии осциллятора было добавлено слово "относительной". Стоит принять за аксиому утверждение, что цена актива справедлива в каждый момент времени.
+
+По сути, RSI рассчитывает силу тренда. Если значение осциллятора выше 70, то на рынке с высокой долей вероятности происходит восходящее движение. Поэтому в текущей стратегии открытие лонга происходит именно в момент наибольшей силы покупателей (когда RSI > 80), то есть в сторону тренда, поскольку контртрендовая торговля по RSI показала свою несостоятельность. Закрытие позиции происходит после того, как покупатели теряют преимущество и RSI снижается до 40.
+
+Стратегию рекомендуется использовать только с длинными позициями, поскольку короткие позиции показывают отрицательный результат. В стратегии используется скользящая средняя для RSI с периодом 14 для сглаживания данных осциллятора.

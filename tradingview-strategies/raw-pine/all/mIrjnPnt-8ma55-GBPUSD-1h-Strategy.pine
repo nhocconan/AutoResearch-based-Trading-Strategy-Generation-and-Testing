@@ -1,0 +1,25 @@
+//@version=2
+strategy("8ma55 GU 1h", shorttitle="gu 1h", overlay=true, pyramiding=0, max_bars_back=720, default_qty_value=10000, initial_capital=5000, currency="USD")
+fastLength = input(8)
+slowLength = input(55)
+price = close
+
+mafast = sma(price, fastLength)
+maslow = sma(price, slowLength)
+
+if (crossover(mafast, maslow))
+    strategy.entry("Long", strategy.long, comment="Buy")
+
+if (crossunder(mafast, maslow))
+    strategy.entry("Short", strategy.short, comment="Sell")
+
+strategy.exit("exit", "Long", profit = 960, loss = 1400)
+strategy.exit("exit", "Short", profit = 960, loss = 1400)
+
+View in Pine Editor・17 lines
+Use on chart
+9
+3
+2
+3 309
+Strategy + Indicator Script (with the same name)

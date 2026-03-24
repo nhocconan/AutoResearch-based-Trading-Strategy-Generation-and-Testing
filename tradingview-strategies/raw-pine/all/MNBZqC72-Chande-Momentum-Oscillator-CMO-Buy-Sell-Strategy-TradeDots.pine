@@ -1,0 +1,8 @@
+//@version=5
+overbought_tresh=##input(defval=40,type='INPUT_INTEGER',##id='in_5')
+oversold_tresh=##input(defval=-40,type='INPUT_INTEGER',##id='in_6')
+##root(root_metainfo,rm_0,5,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_2,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_3,overbought_tresh,input__float)
+##root(root_metainfo,rm_4,oversold_tresh,input__float)

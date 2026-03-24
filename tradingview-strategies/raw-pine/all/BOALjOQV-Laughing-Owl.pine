@@ -1,0 +1,22 @@
+//@version=3
+strategy(title="Laughing Owl", overlay=true)
+short = sma(close, 13)
+medium = sma(close, 34)
+long = sma(close, 75)
+plot(short, color = green)
+plot(medium, color = yellow)
+plot(long, color = red)
+
+strategy.entry("enter long", true, 34, when = short > long and medium > long and short > medium)
+strategy.entry("enter short", false, 34, when = short < long and medium < long and short < medium)
+
+strategy.close("enter long", when = short < medium)
+strategy.close("enter short", when = short > medium)
+
+View in Pine Editor・14 lines
+Use on chart
+4
+2
+3
+2 248
+Let the owl make you a fortune and keep you out of harm's way. Laugh your way all the way to the bank..

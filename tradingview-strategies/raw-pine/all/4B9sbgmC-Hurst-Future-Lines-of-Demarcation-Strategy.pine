@@ -1,0 +1,163 @@
+//@version=5
+strategy("Hurst Future Lines of Demarcation Strategy", overlay=true, initial_capital= 100000, default_qty_type= strategy.percent_of_equity, default_qty_value=5.0 ,commission_type=strategy.commission.percent, commission_value=0.02, slippage=1)
+
+// FLD Settings
+source      = input(ohlc4, 'Source')
+smoothFLD   = input.bool(false, 'Smooth FLD')
+FLDtransp   = input(33, 'FLD transparency')
+FLDsmooth   = input.int(5, "FLD Smoothing", minval=1, tooltip="Number of trading days to smooth the FLD")   
+FLD_out = ta.sma(source , smoothFLD ? FLDsmooth : 1)
+
+close_buy_in_1 = input.string('Price', 'Input Close Trigger 1', options=['Price', 'Signal', 'Trade', 'Trend', 'None'])
+close_buy_in_2 = input.string('Trade', 'Input Close Trigger 2', options=['Price', 'Signal', 'Trade', 'Trend', 'None'])
+
+// Quarter Cycle (Default: 20 day) Length Pivot Cycle
+col_q = input.color(#da00ff, "Quarter Cycle Color")
+cyc_q = input.int(5, "Signal Cycle Length")
+plot(FLD_out, color=color.new(col_q, FLDtransp), title='Signal FLD', offset = math.round(cyc_q/2) )
+
+// Trade Cycle (Default: 40 day) Length Pivot Cycle
+col = input.color(#ff9800, "Trade Cycle Color")
+cyc = input.int(20, "Trade Cycle Length")
+plot(FLD_out, color=color.new(col, FLDtransp), title='Trade FLD', offset = math.round(cyc/2) )
+
+// Double Cycle (Default: 80 day) Length Pivot Cycle
+col_d = input.color(color.aqua, "Double Cycle Color")
+cyc_d = input.int(80, "Trend Cycle Length")
+plot(FLD_out, color=color.new(col_d, FLDtransp), title='Trend FLD', offset = math.round(cyc_d/2) )
+
+// Strategy Plots
+price = source
+signal = FLD_out[math.round(cyc_q/2)]
+trade = FLD_out[math.round(cyc/2)]
+trend = FLD_out[math.round(cyc_d/2)]
+
+// Trend State aka FLD Interaction State
+var state = 0
+if signal > trade and trade > trend 
+    state := 1 // (A)
+    state
+if state == 1 and price < signal
+    state := 2 // (B)
+    state
+if signal < trade and trade > trend 
+    state := 3 // (C)
+    state
+if state == 3 and price < signal 
+    state := 4 // (D)
+    state
+if signal < trade and trade < trend 
+    state := 5 // (E)
+    state
+if state == 5 and price < signal
+    state := 6 // (F)
+    state
+if signal > trade and trade < trend
+    state := 7 // (G)
+    state
+if state == 7 and price < signal
+    state := 8 // (H)
+    state
+state := state
+
+// Strategy Definitions
+close_buy_out_1 = close_buy_in_1 == 'Price' ? price : close_buy_in_1 == 'Signal' ? signal : close_buy_in_1 == 'Trade' ? trade : close_buy_in_1 == 'Trend' ? trend : na
+close_buy_out_2 = close_buy_in_2 == 'Price' ? price : close_buy_in_2 == 'Signal' ? signal : close_buy_in_2 == 'Trade' ? trade : close_buy_in_2 == 'Trend' ? trend : na
+buy = ta.crossover(price, signal) and state == 1
+close_buy = strategy.position_size>0 and ta.crossunder(close_buy_out_1, close_buy_out_2)
+sell = ta.crossunder(price, signal) and state == 6
+close_sell = strategy.position_size<0 and ta.crossover(close_buy_out_1, close_buy_out_2)
+
+// FLD Interaction State Background
+interaction_color = state == 1 ? color.green : // A
+  state == 2 ? color.aqua : // B
+  state == 3 ? color.blue : // C
+  state == 4 ? color.purple : // D
+  state == 5 ? color.white : // E
+  state == 6 ? color.red :// F
+  state == 7 ? color.orange : // G
+  state == 8 ? color.yellow : na // H
+
+bgcolor(color.new(interaction_color, 90), title= "A-H Background")
+
+bar_color = strategy.position_size>0 ? #00ff0a : strategy.position_size<0 ? #FF0000 : na
+barcolor(bar_color)
+
+if buy
+    strategy.entry("Buy", strategy.long)
+if close_buy
+    strategy.close("Buy", qty_percent=100)
+
+if sell
+    strategy.entry("Sell", strategy.short)
+if close_sell
+    strategy.close("Sell", qty_percent=100)
+
+// EoS made w/ ❤ by @BarefootJoey ✌💗📈
+
+View in Pine Editor・99 lines
+Use on chart
+5
+7
+1
+4
+16 143
+Apr 5, 2024
+J. M. Hurst introduced a concept in technical analysis known as the Future Line of Demarcation (FLD), which serves as a forward-looking tool by incorporating a simple yet profound line into future projections on a financial chart. Specifically, the FLD is constructed by offsetting the price half a cycle ahead into the future on the time axis, relative to the Hurst Cycle of interest. For instance, in the context of a 40 Day Cycle, the FLD would be represented by shifting the current price data 20 days forward on the chart, offering an idea of future price movement anticipations.
+
+The utility of FLDs extends into three critical areas of insight, which form the backbone of the FLD Trading Strategy:
+
+A price crossing the FLD signifies the confirmation of either a peak or trough formation, indicating pivotal moments in price action.
+
+Such crossings also help determine precise price targets for the upcoming peak or trough, aligned with the cycle of examination.
+
+Additionally, the occurrence of a peak in the FLD itself signals a probable zone where the price might experience a trough, helping to anticipate of future price movements.
+
+
+These insights by Hurst in his "Cycles Trading Course" during the 1970s, are instrumental for traders aiming to determine entry and exit points, and to forecast potential price movements within the market.
+
+To use the FLD Trading Strategy, for example when focusing on the 40 Day Cycle, a trader should primarily concentrate on the interplay between three Hurst Cycles:
+
+The 20 Day FLD (Signal) - Half the length of the Trade Cycle
+
+The 40 Day FLD (Trade) - The Cycle you want to trade
+
+The 80 Day FLD (Trend) - Twice the length of the Trade Cycle
+
+
+
+Traders can gauge trend or consolidation by watching for two critical patterns:
+
+Cascading patterns, characterized by several FLDs running parallel with a consistent separation, typically emerge during pronounced market trends, indicating strong directional momentum.
+
+Consolidation patterns, on the other hand, occur when multiple FLDs intersect and navigate within the same price bandwidth, often reversing direction to traverse this range multiple times. This tangled scenario results in the formation of Pause Zones, areas where price momentum is likely to temporarily stall or where the emergence of a significant trend might be delayed.
+
+
+
+This simple FLD indicator provides 3 FLDs with optional source input and smoothing, A-through-H FLD interaction background, adjustable “Close the Trade” triggers, and a simple strategy for backtesting it all.
+
+The A-through-H FLD interactions are a framework designed to classify the different types of price movements as they intersect with or diverge from the Future Line of Demarcation (FLD). Each interaction (designated A through H by color) represents a specific phase or characteristic within the cycle, and understanding these can help traders anticipate future price movements and make informed decisions.
+
+The adjustable “Close the Trade” triggers are for setting the crossover/under that determines the trade exits. The options include: Price, Signal FLD, Trade FLD, or Trend FLD. For example, a trader may want to exit trades only when price finally crosses the Trade FLD line.
+
+Shoutouts & Credits for all the raw code, helpful information, ideas & collaboration, conversations together, introductions, indicator feedback, and genuine/selfless help:
+🏆 TerryPascoe
+🏅 HPotter
+👏 parisboy
+
+Apr 8, 2024
+Release Notes
+This strategy has been updated to include more realistic default trading strategy settings including:
+
+Starting capital = $100,000
+
+Trade quantity type = percent of capital
+
+Trade quantity value = 5.0% of capital per trade
+
+Commission type = percent
+
+Commission value = 0.02
+
+Slippage = 1
+

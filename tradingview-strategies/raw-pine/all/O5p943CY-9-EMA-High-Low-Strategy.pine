@@ -1,0 +1,195 @@
+//@version=5
+strategy(
+     title             = "9 EMA (High/Low) Strategy",
+     shorttitle        = "9EMA HL Strat",
+     overlay           = true,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+emaLen   = input.int(9,    title = "EMA Length",  minval = 1)
+tgtPct   = input.float(0.62, title = "Target %",   minval = 0.01, step = 0.01)
+slPct    = input.float(0.3, title = "Stop-Loss %", minval = 0.01, step = 0.01)
+tablePos = input.string("Bottom Right", title = "PnL Table Position", options = ["Bottom Right","Bottom Left","Top Right","Top Left"])
+
+// ─────────────────────────────────────────────
+// BACKTEST DATE RANGE
+// ─────────────────────────────────────────────
+startDate  = input.int(1,    title = "Start Date",  minval = 1,    maxval = 31)
+startMonth = input.int(7,    title = "Start Month", minval = 1,    maxval = 12)
+startYear  = input.int(2020, title = "Start Year",  minval = 1800, maxval = 2100)
+endDate    = input.int(31,   title = "End Date",    minval = 1,    maxval = 31)
+endMonth   = input.int(12,   title = "End Month",   minval = 1,    maxval = 12)
+endYear    = input.int(2027, title = "End Year",    minval = 1800, maxval = 2100)
+
+inDateRange = time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0) and time < timestamp(syminfo.timezone, endYear, endMonth, endDate, 0, 0)
+
+// ─────────────────────────────────────────────
+// EMA
+// ─────────────────────────────────────────────
+emaHigh = ta.ema(high, emaLen)
+emaLow  = ta.ema(low,  emaLen)
+
+// ─────────────────────────────────────────────
+// SIGNALS
+// ─────────────────────────────────────────────
+buySignal  = close > emaHigh
+sellSignal = close < emaLow
+//buySignal  = ta.crossover(close, emaHigh)
+//sellSignal = ta.crossunder(close, emaLow)
+// ─────────────────────────────────────────────
+// POSITION STATE
+// ─────────────────────────────────────────────
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// ─────────────────────────────────────────────
+// ENTRIES  (only within date range)
+// ─────────────────────────────────────────────
+if inDateRange and buySignal and not inLong
+    if inShort
+        strategy.close("Short", comment = "Short->Long")
+    strategy.entry("Long", strategy.long, comment = "BUY")
+
+if inDateRange and sellSignal and not inShort
+    if inLong
+        strategy.close("Long", comment = "Long->Short")
+    strategy.entry("Short", strategy.short, comment = "SELL")
+
+// ─────────────────────────────────────────────
+// CLOSE ALL when date range ends
+// ─────────────────────────────────────────────
+if not inDateRange
+    strategy.close_all(comment = "Date Range End")
+
+// ─────────────────────────────────────────────
+// EXITS  – TP & SL
+// ─────────────────────────────────────────────
+entryPrice = strategy.position_avg_price
+
+if inLong
+    strategy.exit("Long Exit", from_entry = "Long",
+         limit          = entryPrice * (1 + tgtPct / 100),
+         stop           = entryPrice * (1 - slPct  / 100),
+         comment_profit = "Long TP",
+         comment_loss   = "Long SL")
+
+if inShort
+    strategy.exit("Short Exit", from_entry = "Short",
+         limit          = entryPrice * (1 - tgtPct / 100),
+         stop           = entryPrice * (1 + slPct  / 100),
+         comment_profit = "Short TP",
+         comment_loss   = "Short SL")
+
+// ═════════════════════════════════════════════
+// MONTHLY / YEARLY PnL TABLE
+// ═════════════════════════════════════════════
+
+var float[] monthlyPnL = array.new_float(240, 0.0)
+var int[]   yearList   = array.new_int(0)
+var int     lastCount  = 0
+
+var table pnlTable = table.new(position.bottom_right, 14, 22, border_color = color.new(color.gray, 40), border_width = 1, frame_color = color.new(color.gray, 20), frame_width = 2)
+
+currentCount = strategy.closedtrades
+if currentCount > lastCount
+    for i = lastCount to currentCount - 1
+        tradeProfit = strategy.closedtrades.profit(i)
+        tradeTime   = strategy.closedtrades.exit_time(i)
+        tradeYear   = year(tradeTime)
+        tradeMon    = month(tradeTime) - 1
+
+        if array.indexof(yearList, tradeYear) == -1
+            array.push(yearList, tradeYear)
+
+        yIdx = array.indexof(yearList, tradeYear)
+        if yIdx >= 0 and yIdx < 20
+            bucket = yIdx * 12 + tradeMon
+            array.set(monthlyPnL, bucket, array.get(monthlyPnL, bucket) + tradeProfit)
+    lastCount := currentCount
+
+if barstate.islast and array.size(yearList) > 0
+    array.sort(yearList, order.ascending)
+    numYears = array.size(yearList)
+
+    tPos = tablePos == "Bottom Right" ? position.bottom_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Right" ? position.top_right : position.top_left
+    table.set_position(pnlTable, tPos)
+
+    hdrBg = color.new(color.navy, 15)
+
+    table.cell(pnlTable, 0,  0, "Year",  text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 1,  0, "Jan",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 2,  0, "Feb",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 3,  0, "Mar",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 4,  0, "Apr",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 5,  0, "May",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 6,  0, "Jun",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 7,  0, "Jul",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 8,  0, "Aug",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 9,  0, "Sep",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 10, 0, "Oct",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 11, 0, "Nov",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 12, 0, "Dec",   text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(pnlTable, 13, 0, "Total", text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+
+    float[] colTotals = array.new_float(12, 0.0)
+
+    for yi = 0 to numYears - 1
+        yr        = array.get(yearList, yi)
+        row       = yi + 1
+        yearTotal = 0.0
+
+        table.cell(pnlTable, 0, row, str.tostring(yr), text_color = color.new(color.silver, 0), text_size = size.small, bgcolor = color.new(color.gray, 70), text_halign = text.align_center)
+
+        for m = 0 to 11
+            pnl = array.get(monthlyPnL, yi * 12 + m)
+            yearTotal += pnl
+            array.set(colTotals, m, array.get(colTotals, m) + pnl)
+            cellTxt = pnl == 0.0 ? "-" : str.tostring(math.round(pnl, 2))
+            cellBg  = pnl > 0 ? color.new(color.green, 55) : pnl < 0 ? color.new(color.red, 55) : color.new(color.gray, 80)
+            table.cell(pnlTable, m + 1, row, cellTxt, text_color = color.white, text_size = size.small, bgcolor = cellBg, text_halign = text.align_right)
+
+        ytBg = yearTotal > 0 ? color.new(color.green, 25) : yearTotal < 0 ? color.new(color.red, 25) : color.new(color.gray, 60)
+        table.cell(pnlTable, 13, row, str.tostring(math.round(yearTotal, 2)), text_color = color.white, text_size = size.small, bgcolor = ytBg, text_halign = text.align_right)
+
+    totRow     = numYears + 1
+    grandTotal = 0.0
+
+    table.cell(pnlTable, 0, totRow, "Total", text_color = color.white, text_size = size.small, bgcolor = hdrBg, text_halign = text.align_center)
+
+    for m = 0 to 11
+        ct    = array.get(colTotals, m)
+        grandTotal += ct
+        ctTxt = ct == 0.0 ? "-" : str.tostring(math.round(ct, 2))
+        ctBg  = ct > 0 ? color.new(color.green, 25) : ct < 0 ? color.new(color.red, 25) : color.new(color.gray, 60)
+        table.cell(pnlTable, m + 1, totRow, ctTxt, text_color = color.white, text_size = size.small, bgcolor = ctBg, text_halign = text.align_right)
+
+    gtBg = grandTotal > 0 ? color.new(color.green, 5) : grandTotal < 0 ? color.new(color.red, 5) : color.new(color.gray, 50)
+    table.cell(pnlTable, 13, totRow, str.tostring(math.round(grandTotal, 2)), text_color = color.white, text_size = size.small, bgcolor = gtBg, text_halign = text.align_right)
+
+// ─────────────────────────────────────────────
+// PLOTS
+// ─────────────────────────────────────────────
+plot(emaHigh, title = "8 EMA High", color = color.new(color.green, 0), linewidth = 2)
+plot(emaLow,  title = "8 EMA Low",  color = color.new(color.red,   0), linewidth = 2)
+
+plotshape(buySignal  and not inLong  and not inShort and inDateRange, title = "Buy Signal",  style = shape.triangleup,   location = location.belowbar, color = color.new(color.lime,   0), size = size.small, text = "BUY")
+plotshape(sellSignal and not inShort and not inLong  and inDateRange, title = "Sell Signal", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,    0), size = size.small, text = "SELL")
+plotshape(buySignal  and inShort and inDateRange,                     title = "Flip Long",   style = shape.triangleup,   location = location.belowbar, color = color.new(color.aqua,   0), size = size.small, text = "FLIP->L")
+plotshape(sellSignal and inLong  and inDateRange,                     title = "Flip Short",  style = shape.triangledown, location = location.abovebar, color = color.new(color.orange, 0), size = size.small, text = "FLIP->S")
+
+bgcolor(inLong  ? color.new(color.green, 90) : na, title = "Long Background")
+bgcolor(inShort ? color.new(color.red,   90) : na, title = "Short Background")
+bgcolor(inDateRange ? color.new(color.blue, 97) : na, title = "Date Range Background")
+
+View in Pine Editor・188 lines
+Use on chart
+1
+7
+355
+ema 9 when price closes above of ema gives a bullish trend and price closes below ema gives a bearish trend

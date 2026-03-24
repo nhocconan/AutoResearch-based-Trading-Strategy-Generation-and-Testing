@@ -1,0 +1,1012 @@
+//@version=6
+strategy("ATR Trailing Stop Multi-Strategy v7 with Pivot & GST", "ATS-Multi v7", overlay=true, max_labels_count=500, pyramiding=0, process_orders_on_close=true)
+
+// ===== НАСТРОЙКИ ТЕОРИИ ДОУ =====
+volumeThreshold = input.float(1.5, "Volume Threshold (x MA)", minval=1.0, maxval=3.0, step=0.1, group="Dow Theory Settings")
+natrThreshold = input.float(1.0, "NATR Threshold (%)", minval=0.2, maxval=2.0, step=0.1, group="Dow Theory Settings")
+
+// ===== НАСТРОЙКИ СТОП-ЛОССА =====
+stopLossPercent = input.float(2.5, "Stop Loss %", minval=0.5, maxval=10.0, step=0.1, group="Stop Loss Settings")
+
+// ===== ATR TRAILING STOP SETTINGS =====
+useATRTrailSignals = input.bool(true, "Use ATR Trail Signals", group="ATR Trailing Stop Settings")
+showATRTrail = input.bool(true, "Show ATR Trail Lines", group="ATR Trailing Stop Settings")
+
+// Fast Trail Settings
+fastATRPeriod = input.int(5, "Fast ATR Period", minval=1, group="ATR Trailing Stop Settings")
+fastATRMult = input.float(0.5, "Fast ATR Multiplier", minval=0.1, step=0.1, group="ATR Trailing Stop Settings")
+
+// Medium Trail Settings
+mediumATRPeriod = input.int(10, "Medium ATR Period", minval=1, group="ATR Trailing Stop Settings")
+mediumATRMult = input.float(1.5, "Medium ATR Multiplier", minval=0.1, step=0.1, group="ATR Trailing Stop Settings")
+
+// Slow Trail Settings
+slowATRPeriod = input.int(20, "Slow ATR Period", minval=1, group="ATR Trailing Stop Settings")
+slowATRMult = input.float(3.0, "Slow ATR Multiplier", minval=0.1, step=0.1, group="ATR Trailing Stop Settings")
+
+// ===== ФИЛЬТР CCI =====
+useCCIFilter = input.bool(true, "Use CCI Filter", group="CCI Filter Settings")
+cciLength = input.int(20, "CCI Length", minval=5, maxval=50, group="CCI Filter Settings")
+cciOverbought = input.int(100, "CCI Overbought", minval=50, maxval=200, group="CCI Filter Settings")
+cciOversold = input.int(-100, "CCI Oversold", minval=-200, maxval=-50, group="CCI Filter Settings")
+
+// ===== ФИЛЬТР ПО ВОЛАТИЛЬНОСТИ =====
+useVolatilityFilter = input.bool(true, "Use Volatility Filter", group="Volatility Filter Settings")
+minAtrPercent = input.float(0.3, "Min ATR % of Price", minval=0.1, maxval=1.0, step=0.05, group="Volatility Filter Settings")
+
+// ===== ФИЛЬТР ПО ДИСТАНЦИИ ОТ ALLIGATOR =====
+useDistanceFilter = input.bool(true, "Use Distance Filter", group="Distance Filter Settings")
+minDistancePips = input.int(10, "Min Distance (pips)", minval=5, maxval=50, group="Distance Filter Settings")
+
+// ===== ENTRY BLOCK FILTERS (ThirdEye) =====
+use_adx_filter = input.bool(false, "Use ADX Filter", group="Entry Block Filters")
+adx_len = input.int(14, "ADX Length", minval=1, group="Entry Block Filters")
+adx_long_min = input.float(15.0, "ADX: Long min", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+adx_long_max = input.float(60.0, "ADX: Long max", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+adx_short_min = input.float(15.0, "ADX: Short min", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+adx_short_max = input.float(60.0, "ADX: Short max", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+
+use_rsi_filter = input.bool(false, "Use RSI Filter", group="Entry Block Filters")
+rsi_len = input.int(14, "RSI Length", minval=1, group="Entry Block Filters")
+rsi_long_min = input.float(20.0, "RSI: Long min", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+rsi_long_max = input.float(70.0, "RSI: Long max", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+rsi_short_min = input.float(30.0, "RSI: Short min", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+rsi_short_max = input.float(80.0, "RSI: Short max", minval=0.0, maxval=100.0, step=0.1, group="Entry Block Filters")
+
+use_natr_filter = input.bool(false, "Use NATR Filter", group="Entry Block Filters")
+natr_len = input.int(14, "NATR Length", minval=1, group="Entry Block Filters")
+natr_long_min = input.float(0.5, "NATR: Long min", minval=0.0, maxval=1000.0, step=0.1, group="Entry Block Filters")
+natr_long_max = input.float(5.0, "NATR: Long max", minval=0.0, maxval=1000.0, step=0.1, group="Entry Block Filters")
+natr_short_min = input.float(0.5, "NATR: Short min", minval=0.0, maxval=1000.0, step=0.1, group="Entry Block Filters")
+natr_short_max = input.float(5.0, "NATR: Short max", minval=0.0, maxval=1000.0, step=0.1, group="Entry Block Filters")
+
+// ===== ALLIGATOR =====
+showAlligator = input.bool(true, "Show Alligator", group="Alligator Settings")
+jawLength = input.int(13, minval=1, title="Jaw Length", group="Alligator Settings")
+teethLength = input.int(8, minval=1, title="Teeth Length", group="Alligator Settings")
+lipsLength = input.int(5, minval=1, title="Lips Length", group="Alligator Settings")
+jawOffset = input.int(8, title="Jaw Offset", group="Alligator Settings")
+teethOffset = input.int(5, title="Teeth Offset", group="Alligator Settings")
+lipsOffset = input.int(3, title="Lips Offset", group="Alligator Settings")
+
+// ===== VWMA =====
+showVWMA = input.bool(true, "Show VWMA", group="VWMA Settings")
+vwmaLength = input.int(20, "Length", minval=1, group="VWMA Settings")
+vwmaSrc = input(close, "Source", group="VWMA Settings")
+vwmaOffset = input.int(0, "Offset", minval=-500, maxval=500, group="VWMA Settings")
+
+// ===== KAMA ИНДИКАТОР =====
+showKAMA = input.bool(true, "Show KAMA", group="KAMA Settings")
+useKAMASignals = input.bool(true, "Use KAMA Signals", group="KAMA Settings")
+kamaLength1 = input(10, "KAMA Length 1", group="KAMA Settings")
+kamaLength2 = input(24, "KAMA Length 2", group="KAMA Settings")
+kamaFast = input(2, "KAMA Fast Alpha", group="KAMA Settings")
+kamaSlow = input(30, "KAMA Slow Alpha", group="KAMA Settings")
+
+// ===== MULTI-INDICATOR SETTINGS =====
+useAlligatorSignals = input.bool(true, "Use Alligator Signals", group="Multi-Indicator Settings")
+useVWMASignals = input.bool(true, "Use VWMA Signals", group="Multi-Indicator Settings")
+
+// ===== PIVOT POINTS SETTINGS =====
+pivotTypeInput = input.string(title="Type", defval="Traditional", options=["Traditional", "Fibonacci", "Woodie", "Classic", "DM", "Camarilla"], group="Pivot Points Settings")
+pivotAnchorInput = input.string(title="Pivots Timeframe", defval="Auto", options=["Auto", "Daily", "Weekly", "Monthly", "Quarterly", "Yearly", "Biyearly", "Triyearly", "Quinquennially", "Decennially"], group="Pivot Points Settings")
+maxHistoricalPivotsInput = input.int(title="Number of Pivots Back", defval=15, minval=1, maxval=200, group="Pivot Points Settings")
+keepOnlyLatestPivots = input.bool(true, title="Keep Only Latest Pivot Levels", group="Pivot Points Settings")
+isDailyBasedInput = input.bool(title="Use Daily-based Values", defval=true, group="Pivot Points Settings")
+showPivotLabelsInput = input.bool(title="Show Pivot Labels", defval=true, group="Pivot Points Settings")
+showPivotPricesInput = input.bool(title="Show Pivot Prices", defval=true, group="Pivot Points Settings")
+positionLabelsInput = input.string("Left", "Labels Position", options=["Left", "Right"], group="Pivot Points Settings", active=showPivotLabelsInput or showPivotPricesInput)
+pivotLinewidthInput = input.int(title="Pivot Line Width", defval=1, minval=1, maxval=100, group="Pivot Points Settings")
+
+DEFAULT_COLOR = #FB8C00
+
+showLevel2and3 = pivotTypeInput != "DM"
+showLevel4 = pivotTypeInput != "DM" and pivotTypeInput != "Fibonacci"
+showLevel5 = pivotTypeInput == "Traditional" or pivotTypeInput == "Camarilla"
+
+pColorInput = input.color(DEFAULT_COLOR, "P‏  ‏  ‏", inline="P", group="Pivot Levels Colors", display=display.data_window)
+pShowInput = input.bool(true, "", inline="P", group="Pivot Levels Colors", display=display.data_window)
+s1ColorInput = input.color(DEFAULT_COLOR, "S1", inline="S1/R1", group="Pivot Levels Colors", display=display.data_window)
+s1ShowInput = input.bool(true, "", inline="S1/R1", group="Pivot Levels Colors", display=display.data_window)
+r1ColorInput = input.color(DEFAULT_COLOR, "‏  ‏  ‏  ‏  ‏  ‏  ‏  ‏R1", inline="S1/R1", group="Pivot Levels Colors", display=display.data_window)
+r1ShowInput = input.bool(true, "", inline="S1/R1", group="Pivot Levels Colors", display=display.data_window)
+s2ColorInput = input.color(DEFAULT_COLOR, "S2", inline="S2/R2", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+s2ShowInput = input.bool(true, "", inline="S2/R2", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+r2ColorInput = input.color(DEFAULT_COLOR, "‏  ‏  ‏  ‏  ‏  ‏  ‏  ‏R2", inline="S2/R2", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+r2ShowInput = input.bool(true, "", inline="S2/R2", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+s3ColorInput = input.color(DEFAULT_COLOR, "S3", inline="S3/R3", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+s3ShowInput = input.bool(true, "", inline="S3/R3", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+r3ColorInput = input.color(DEFAULT_COLOR, "‏  ‏  ‏  ‏  ‏  ‏  ‏  ‏R3", inline="S3/R3", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+r3ShowInput = input.bool(true, "", inline="S3/R3", group="Pivot Levels Colors", display=display.data_window, active=showLevel2and3)
+s4ColorInput = input.color(DEFAULT_COLOR, "S4", inline="S4/R4", group="Pivot Levels Colors", display=display.data_window, active=showLevel4)
+s4ShowInput = input.bool(true, "", inline="S4/R4", group="Pivot Levels Colors", display=display.data_window, active=showLevel4)
+r4ColorInput = input.color(DEFAULT_COLOR, "‏  ‏  ‏  ‏  ‏  ‏  ‏  ‏R4", inline="S4/R4", group="Pivot Levels Colors", display=display.data_window, active=showLevel4)
+r4ShowInput = input.bool(true, "", inline="S4/R4", group="Pivot Levels Colors", display=display.data_window, active=showLevel4)
+s5ColorInput = input.color(DEFAULT_COLOR, "S5", inline="S5/R5", group="Pivot Levels Colors", display=display.data_window, active=showLevel5)
+s5ShowInput = input.bool(true, "", inline="S5/R5", group="Pivot Levels Colors", display=display.data_window, active=showLevel5)
+r5ColorInput = input.color(DEFAULT_COLOR, "‏  ‏  ‏  ‏  ‏  ‏  ‏  ‏R5", inline="S5/R5", group="Pivot Levels Colors", display=display.data_window, active=showLevel5)
+r5ShowInput = input.bool(true, "", inline="S5/R5", group="Pivot Levels Colors", display=display.data_window, active=showLevel5)
+
+// ===== GAUSSIAN SMOOTH TREND SETTINGS =====
+useGSTSignals = input.bool(true, "Use Gaussian Smooth Trend Signals", group="Gaussian Smooth Trend Settings")
+showGST = input.bool(true, "Show Gaussian Smooth Trend", group="Gaussian Smooth Trend Settings")
+useGSTInStrategy = input.bool(true, "Include GST in Strategy", group="Gaussian Smooth Trend Settings")
+
+// DEMA Settings
+gstSrcDEMA = input(close, "DEMA Source", group="Gaussian Smooth Trend Settings")
+gstLenDEMA = input.int(7, "DEMA Length", group="Gaussian Smooth Trend Settings")
+
+// Gaussian Filter Settings
+gstLenFG = input.int(4, title='Gaussian length', minval=1, group='Gaussian Smooth Trend Settings', step=1)
+gstSigmaFG = input.float(2.0, title='Gaussian Sigma', minval=0.1, step=0.1, group='Gaussian Smooth Trend Settings')
+
+// SMMA Settings
+gstLenS = input.int(12, 'SMMA length', group='Gaussian Smooth Trend Settings')
+
+// SD Filter Settings
+gstLenSD = input.int(30, title='SD length', minval=1, step=1, group='Gaussian Smooth Trend Settings')
+gstMultSDup = input.float(2.5, minval=0, step=0.1, title='SD Mult Up', group='Gaussian Smooth Trend Settings')
+gstMultSDdn = input.float(1.8, minval=0, step=0.1, title='SD Mult Down', group='Gaussian Smooth Trend Settings')
+
+// Визуальные настройки GST
+gstColMode = input.string("Strategy", title="Color Mode", group="Gaussian Smooth Trend Settings", options=["Strategy", "Solar", "Warm", "Cool", "Classic", "Magic"])
+
+[gstColorUp, gstColorDn, gstColorNu] = switch gstColMode
+    "Strategy" => [color.rgb(23, 191, 238), color.rgb(103, 2, 2), color.gray]
+    "Solar" => [color.rgb(43, 56, 247), #ee6728, color.gray]
+    "Warm" => [#ffbb00, #770737, color.gray]
+    "Cool" => [#0aede9, color.rgb(12, 16, 218), color.gray]
+    "Classic" => [#04f7e7, color.maroon, color.gray]
+    "Magic" => [color.rgb(114, 44, 246), color.rgb(214, 245, 42), color.gray]
+
+// ===== VISUAL SETTINGS =====
+showSignalArrows = input.bool(true, "Show Signal Arrows", group="Visual Settings")
+showEntryLabels = input.bool(true, "Show Entry Labels", group="Visual Settings")
+showExitLines = input.bool(true, "Show Exit Lines", group="Visual Settings")
+showExitLabels = input.bool(true, "Show Exit Labels", group="Visual Settings")
+
+// ===== ВЫЧИСЛЕНИЕ НАТР И ОБЪЕМА =====
+atrValue = ta.atr(14)
+srcNATR = atrValue / close * 100
+volumeMA = ta.sma(volume, 20)
+volumeCondition = volumeMA > 0 and volume > volumeMA * volumeThreshold
+
+// ===== ВЫЧИСЛЕНИЕ ATR% =====
+atrPercent = (atrValue / close) * 100
+
+adx_tr = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+adx_upMove = high - high[1]
+adx_downMove = low[1] - low
+adx_plusDM = na(adx_upMove) ? na : (adx_upMove > adx_downMove and adx_upMove > 0 ? adx_upMove : 0)
+adx_minusDM = na(adx_downMove) ? na : (adx_downMove > adx_upMove and adx_downMove > 0 ? adx_downMove : 0)
+adx_smoothTR = ta.rma(adx_tr, adx_len)
+adx_smoothPlusDM = ta.rma(adx_plusDM, adx_len)
+adx_smoothMinusDM = ta.rma(adx_minusDM, adx_len)
+adx_plusDI = 100 * adx_smoothPlusDM / adx_smoothTR
+adx_minusDI = 100 * adx_smoothMinusDM / adx_smoothTR
+adx_diDiff = math.abs(adx_plusDI - adx_minusDI)
+adx_diSum = adx_plusDI + adx_minusDI
+adx_dx = adx_diSum == 0 ? 0 : 100 * adx_diDiff / adx_diSum
+adx = ta.rma(adx_dx, adx_len)
+
+adx_long_ok_raw = adx >= adx_long_min and adx <= adx_long_max
+adx_short_ok_raw = adx >= adx_short_min and adx <= adx_short_max
+adx_long_pass = not use_adx_filter or adx_long_ok_raw
+adx_short_pass = not use_adx_filter or adx_short_ok_raw
+
+rsi = ta.rsi(close, rsi_len)
+rsi_long_ok_raw = rsi >= rsi_long_min and rsi <= rsi_long_max
+rsi_short_ok_raw = rsi >= rsi_short_min and rsi <= rsi_short_max
+rsi_long_pass = not use_rsi_filter or rsi_long_ok_raw
+rsi_short_pass = not use_rsi_filter or rsi_short_ok_raw
+
+natr = 100.0 * ta.atr(natr_len) / close
+natr_long_ok_raw = natr >= natr_long_min and natr <= natr_long_max
+natr_short_ok_raw = natr >= natr_short_min and natr <= natr_short_max
+natr_long_pass = not use_natr_filter or natr_long_ok_raw
+natr_short_pass = not use_natr_filter or natr_short_ok_raw
+
+// ===== ФУНКЦИЯ ФОРМАТИРОВАНИЯ ОБЪЕМА =====
+formatVolume(value) =>
+    if value >= 1000000
+        str.tostring(value / 1000000, "#.##") + "M"
+    else if value >= 1000
+        str.tostring(value / 1000, "#.##") + "K"
+    else
+        str.tostring(value, "#.##")
+
+// ===== ЛОГИКА ТЕОРИИ ДОУ (ТОЛЬКО ДЛЯ ТЕКУЩЕГО ТАЙМФРЕЙМА) =====
+getDowSignal(tf) =>
+    [srcClose, srcHigh, srcLow, srcVolume, srcATR, srcMA20, srcMA50] = request.security(syminfo.tickerid, tf, [close, high, low, volume, ta.atr(14), ta.sma(close, 20), ta.sma(close, 50)], barmerge.gaps_on, barmerge.lookahead_off)
+    
+    tfVolumeMA = ta.sma(srcVolume, 20)
+    tfVolumeCondition = tfVolumeMA > 0 and srcVolume > tfVolumeMA * volumeThreshold
+    
+    tfNATR = srcATR / srcClose * 100
+    tfVolatilityCondition = tfNATR > natrThreshold
+    
+    ma20 = srcMA20
+    ma50 = srcMA50
+    
+    trendDirection = 0
+    if srcClose > ma20 and ma20 > ma50
+        trendDirection := 1
+    else if srcClose < ma20 and ma20 < ma50
+        trendDirection := -1
+    
+    signal = 0
+    if tfVolumeCondition and tfVolatilityCondition
+        if trendDirection == 1
+            signal := 1
+        else if trendDirection == -1
+            signal := -1
+    
+    signal
+
+currentTF = timeframe.period
+currentSignal = getDowSignal(currentTF)
+
+dowFinalSignal = "Neutral"
+if currentSignal >= 1
+    dowFinalSignal := "Long"
+else if currentSignal <= -1
+    dowFinalSignal := "Short"
+
+// ===== ALLIGATOR =====
+smma(src, length) =>
+    smaValue = ta.sma(src, length)
+    smma = 0.0
+    smma := na(smma[1]) ? smaValue : (smma[1] * (length - 1) + src) / length
+    smma
+
+jaw = smma(hl2, jawLength)
+teeth = smma(hl2, teethLength)
+lips = smma(hl2, lipsLength)
+
+// ===== VWMA =====
+vwmaValue = ta.vwma(vwmaSrc, vwmaLength)
+
+// ===== CCI ФИЛЬТР =====
+cciValue = ta.cci(close, cciLength)
+
+// Функция проверки фильтра для любого направления (без условий Доу для не-Dow индикаторов)
+getFilterConditionForOthers(direction) =>
+    // CCI условие
+    cciCond = not useCCIFilter or (direction == 1 and cciValue > cciOversold and cciValue > cciValue[1]) or (direction == -1 and cciValue < cciOverbought and cciValue < cciValue[1]) or direction == 0
+    
+    // Волатильность условие
+    volatilityCond = not useVolatilityFilter or atrPercent >= minAtrPercent
+    
+    // Дистанция от Alligator условие
+    distanceCond = not useDistanceFilter or (direction == 1 and ((close - lips) / syminfo.mintick) >= minDistancePips) or (direction == -1 and ((lips - close) / syminfo.mintick) >= minDistancePips) or direction == 0
+    
+    // Alligator структура условие
+    alligatorStructCond = not useDistanceFilter or (direction == 1 and lips > teeth and teeth > jaw and close > lips) or (direction == -1 and lips < teeth and teeth < jaw and close < lips) or direction == 0
+    
+    cciCond and volatilityCond and distanceCond and alligatorStructCond
+
+// Функция проверки фильтра для Dow Theory (с условиями Доу)
+getFilterConditionForDow(direction) =>
+    baseCondition = getFilterConditionForOthers(direction)
+    
+    volumeCond = volumeCondition or direction == 0
+    natrCond = srcNATR > natrThreshold or direction == 0
+    
+    baseCondition and volumeCond and natrCond
+
+// Вычисление условий фильтров на каждом баре
+filterPassLongForOthers = getFilterConditionForOthers(1)
+filterPassShortForOthers = getFilterConditionForOthers(-1)
+filterPassLongForDow = getFilterConditionForDow(1)
+filterPassShortForDow = getFilterConditionForDow(-1)
+
+// ===== KAMA ИНДИКАТОР =====
+kama(src, length, fastSC, slowSC) =>
+    kamaFinal = 0.0
+    change = math.abs(src - src[length])
+    volatility = math.sum(math.abs(src - src[1]), length)
+    er = change / volatility
+    sc = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    kamaFinal := nz(kamaFinal[1], src) + sc * (src - nz(kamaFinal[1]))
+
+fastSC = 2 / (kamaFast + 1)
+slowSC = 2 / (kamaSlow + 1)
+
+kama1 = kama(close, kamaLength1, fastSC, slowSC)  // Синяя KAMA (быстрая)
+kama2 = kama(close, kamaLength2, fastSC, slowSC)  // Красная KAMA (медленная)
+
+// Сигналы KAMA (только при пересечении)
+kamaCrossUp = ta.crossover(kama1, kama2)
+kamaCrossDown = ta.crossunder(kama1, kama2)
+
+// Состояние KAMA
+var int kamaState = 0
+kamaState := kamaCrossUp ? 1 : kamaCrossDown ? -1 : kamaState[1]
+kamaSignal = kamaState
+
+// KAMA с фильтром (без условий Доу)
+kamaSignalFiltered = kamaSignal
+if (kamaSignal == 1 and not filterPassLongForOthers) or (kamaSignal == -1 and not filterPassShortForOthers)
+    kamaSignalFiltered := 0
+
+// ===== ATR TRAILING STOP ИНДИКАТОР =====
+atrTrailLine(period, multiplier) =>
+    src = close
+    sl = multiplier * ta.atr(period)
+    trail = 0.0
+    
+    iff1 = src > nz(trail[1], 0) ? src - sl : src + sl
+    iff2 = src < nz(trail[1], 0) and src[1] < nz(trail[1], 0) ? math.min(nz(trail[1], 0), src + sl) : iff1
+    trail := src > nz(trail[1], 0) and src[1] > nz(trail[1], 0) ? math.max(nz(trail[1], 0), src - sl) : iff2
+    
+    trail
+
+// Расчет трех линий ATR Trailing Stop
+atrTrailFast = atrTrailLine(fastATRPeriod, fastATRMult)
+atrTrailMedium = atrTrailLine(mediumATRPeriod, mediumATRMult)
+atrTrailSlow = atrTrailLine(slowATRPeriod, slowATRMult)
+
+// Определение состояния ATR Trail
+atrTrailState = 0
+if atrTrailMedium > atrTrailSlow and atrTrailFast > atrTrailMedium
+    atrTrailState := 1
+else if atrTrailMedium < atrTrailSlow and atrTrailFast < atrTrailMedium
+    atrTrailState := -1
+
+// Сигналы пересечения ATR Trail
+atrTrailCrossUp = atrTrailMedium > atrTrailSlow and atrTrailState[1] <= 0 and atrTrailState == 1
+atrTrailCrossDown = atrTrailMedium < atrTrailSlow and atrTrailState[1] >= 0 and atrTrailState == -1
+
+// Изменение состояния ATR Trail
+var int atrTrailStateFiltered = 0
+if atrTrailCrossUp
+    atrTrailStateFiltered := 1
+else if atrTrailCrossDown
+    atrTrailStateFiltered := -1
+else
+    atrTrailStateFiltered := atrTrailStateFiltered[1]
+
+// ATR Trail с фильтром (без условий Доу)
+atrTrailSignal = atrTrailStateFiltered
+if (atrTrailSignal == 1 and not filterPassLongForOthers) or (atrTrailSignal == -1 and not filterPassShortForOthers)
+    atrTrailSignal := 0
+
+// ===== PIVOT POINTS INDICATOR (только для отображения) =====
+type graphicSettings
+    string levelName
+    color levelColor
+    bool showLevel
+
+var graphicSettingsArray = array.from(
+      graphicSettings.new(" P", pColorInput, pShowInput),
+      graphicSettings.new("R1", r1ColorInput, r1ShowInput), graphicSettings.new("S1", s1ColorInput, s1ShowInput),
+      graphicSettings.new("R2", r2ColorInput, r2ShowInput), graphicSettings.new("S2", s2ColorInput, s2ShowInput),
+      graphicSettings.new("R3", r3ColorInput, r3ShowInput), graphicSettings.new("S3", s3ColorInput, s3ShowInput),
+      graphicSettings.new("R4", r4ColorInput, r4ShowInput), graphicSettings.new("S4", s4ColorInput, s4ShowInput),
+      graphicSettings.new("R5", r5ColorInput, r5ShowInput), graphicSettings.new("S5", s5ColorInput, s5ShowInput))
+
+autoAnchor = switch
+    timeframe.isintraday => timeframe.multiplier <= 15 ? "1D" : "1W"
+    timeframe.isdaily => "1M"
+    => "12M"
+
+pivotTimeframe = switch pivotAnchorInput
+    "Auto" => autoAnchor
+    "Daily" => "1D"
+    "Weekly" => "1W"
+    "Monthly" => "1M"
+    "Quarterly" => "3M"
+    => "12M"
+
+pivotYearMultiplier = switch pivotAnchorInput
+    "Biyearly" => 2
+    "Triyearly" => 3
+    "Quinquennially" => 5
+    "Decennially" => 10
+    => 1
+
+type pivotGraphic
+    line pivotLine
+    label pivotLabel
+
+method delete(pivotGraphic graphic) =>
+    graphic.pivotLine.delete()
+    graphic.pivotLabel.delete()
+
+var drawnGraphics = matrix.new<pivotGraphic>()
+
+localPivotTimeframeChange = timeframe.change(pivotTimeframe) and year % pivotYearMultiplier == 0
+securityPivotTimeframeChange = timeframe.change(timeframe.period) and year % pivotYearMultiplier == 0
+
+pivotTimeframeChangeCounter(condition) =>
+    var count = 0
+    if condition and bar_index > 0
+        count += 1
+    count
+
+localPivots = ta.pivot_point_levels(pivotTypeInput, localPivotTimeframeChange)
+securityPivotPointsArray = ta.pivot_point_levels(pivotTypeInput, securityPivotTimeframeChange)
+
+securityTimeframe = timeframe.isintraday ? "1D" : timeframe.period
+[securityPivots, securityPivotCounter] = request.security(syminfo.tickerid, pivotTimeframe, [securityPivotPointsArray, pivotTimeframeChangeCounter(securityPivotTimeframeChange)], lookahead=barmerge.lookahead_on)
+pivotPointsArray = isDailyBasedInput ? securityPivots : localPivots
+
+affixOldPivots(endTime) =>
+    if drawnGraphics.rows() > 0
+        lastGraphics = drawnGraphics.row(drawnGraphics.rows() - 1)
+        for graphic in lastGraphics
+            graphic.pivotLine.set_x2(endTime)
+            if positionLabelsInput == "Right"
+                graphic.pivotLabel.set_x(endTime)
+
+drawNewPivots(startTime) =>
+    newGraphics = array.new<pivotGraphic>()
+    for [index, coord] in pivotPointsArray
+        levelSettings = graphicSettingsArray.get(index)
+        if not na(coord) and levelSettings.showLevel
+            lineEndTime = startTime + timeframe.in_seconds(pivotTimeframe) * 1000 * pivotYearMultiplier
+            pivotLine = line.new(startTime, coord, lineEndTime, coord, xloc=xloc.bar_time, color=levelSettings.levelColor, width=pivotLinewidthInput)
+            pivotLabel = label.new(x=positionLabelsInput == "Left" ? startTime : lineEndTime,
+                                   y=coord,
+                                   text=(showPivotLabelsInput ? levelSettings.levelName + " " : "") + (showPivotPricesInput ? "(" + str.tostring(coord, format.mintick) + ")" : ""),
+                                   style=positionLabelsInput == "Left" ? label.style_label_right : label.style_label_left,
+                                   textcolor=levelSettings.levelColor,
+                                   color=#00000000,
+                                   xloc=xloc.bar_time)
+            newGraphics.push(pivotGraphic.new(pivotLine, pivotLabel))
+    drawnGraphics.add_row(array_id=newGraphics)
+    maxRows = keepOnlyLatestPivots ? 1 : maxHistoricalPivotsInput
+    if drawnGraphics.rows() > maxRows
+        oldGraphics = drawnGraphics.remove_row(0)
+        for graphic in oldGraphics
+            graphic.delete()
+
+localPivotDrawConditionStatic = not isDailyBasedInput and localPivotTimeframeChange
+securityPivotDrawConditionStatic = isDailyBasedInput and securityPivotCounter != securityPivotCounter[1]
+
+localPivotDrawConditionDeveloping = not isDailyBasedInput and time_close == time_close(pivotTimeframe) and not array.from("Biyearly", "Triyearly", "Quinquennially", "Decennially").includes(pivotAnchorInput)
+securityPivotDrawConditionDeveloping = false
+
+if (securityPivotDrawConditionStatic or localPivotDrawConditionStatic)
+    affixOldPivots(time)
+    drawNewPivots(time)
+
+FIRST_BAR_TIME = time
+if (barstate.islastconfirmedhistory and drawnGraphics.columns() == 0)
+    if not na(securityPivots) and securityPivotCounter > 0
+        if isDailyBasedInput
+            drawNewPivots(FIRST_BAR_TIME)
+        else
+            runtime.error("Not enough intraday data to calculate Pivot Points. Lower the Pivots Timeframe or turn on the 'Use Daily-based Values' option in the indicator settings.")
+    else
+        runtime.error("Not enough data to calculate Pivot Points. Lower the Pivots Timeframe in the indicator settings.")
+
+// ===== GAUSSIAN SMOOTH TREND INDICATOR (включая логику для стратегии) =====
+// DEMA Function
+F_DEMA(SRC, LEN) =>
+    E1 = ta.ema(SRC, LEN)
+    E2 = ta.ema(E1, LEN)
+    2 * E1 - E2
+
+// Gaussian Function
+F_Gaussian(src, len_FG, sigma) =>
+    sum_G = 0.0
+    weightedSum_G = 0.0
+    for i = 0 to len_FG - 1 by 1
+        weight = math.exp(-0.5 * math.pow((i - (len_FG - 1) / 2) / sigma, 2))
+        sum_G += weight
+        weightedSum_G += src[i] * weight
+    weightedSum_G / sum_G
+
+// SMMA Function
+F_SMMA(src_s, len_s) =>
+    float SMMA = na
+    dema = F_DEMA(src_s, len_s)
+    if bar_index >= len_s - 1
+        alpha_val = 1 / len_s
+        SMMA := na(SMMA[1]) ? dema : (src_s - SMMA[1]) * alpha_val + SMMA[1]
+        SMMA
+    else
+        SMMA := src_s
+        SMMA
+    SMMA
+
+// Расчет значений GST
+DEMA = useGSTInStrategy ? F_DEMA(gstSrcDEMA, gstLenDEMA) : na
+filter_Gaussian = useGSTInStrategy ? F_Gaussian(DEMA, gstLenFG, gstSigmaFG) : na
+SMMA = useGSTInStrategy ? F_SMMA(filter_Gaussian, gstLenS) : na
+filter_SD = useGSTInStrategy ? ta.stdev(SMMA, gstLenSD) : na
+
+LongV = useGSTInStrategy ? SMMA + filter_SD * gstMultSDup : na
+ShortV = useGSTInStrategy ? SMMA - filter_SD * gstMultSDdn : na
+
+// Расчет сигнала GST
+Long_C = useGSTInStrategy ? close > LongV : false
+Short_C = useGSTInStrategy ? close < ShortV : false
+
+var int gstState = 0
+if useGSTInStrategy
+    if Long_C and not Short_C
+        gstState := 1
+    else if Short_C
+        gstState := -1
+    else
+        gstState := 0
+else
+    gstState := 0
+
+// GST с фильтром (без условий Доу)
+gstSignalFiltered = gstState
+if (gstState == 1 and not filterPassLongForOthers) or (gstState == -1 and not filterPassShortForOthers)
+    gstSignalFiltered := 0
+
+// Определение изменений состояния GST
+gstStateChanged = gstState != gstState[1]
+
+// ===== СИГНАЛЫ ИНДИКАТОРОВ С ФИЛЬТРАМИ =====
+// Alligator сигналы
+var int alligatorState = 0
+alligatorLongCondition = lips > teeth and teeth > jaw and close > lips
+alligatorShortCondition = lips < teeth and teeth < jaw and close < lips
+
+alligatorState := alligatorLongCondition ? 1 : alligatorShortCondition ? -1 : alligatorState[1]
+alligatorSignal = alligatorState
+
+alligatorSignalFiltered = alligatorSignal
+if (alligatorSignal == 1 and not filterPassLongForOthers) or (alligatorSignal == -1 and not filterPassShortForOthers)
+    alligatorSignalFiltered := 0
+
+// VWMA сигналы
+var int vwmaState = 0
+vwmaCrossUp = ta.crossover(close, vwmaValue)
+vwmaCrossDown = ta.crossunder(close, vwmaValue)
+vwmaState := vwmaCrossUp ? 1 : vwmaCrossDown ? -1 : vwmaState[1]
+vwmaSignal = vwmaState
+
+vwmaSignalFiltered = vwmaSignal
+if (vwmaSignal == 1 and not filterPassLongForOthers) or (vwmaSignal == -1 and not filterPassShortForOthers)
+    vwmaSignalFiltered := 0
+
+// Dow Theory сигналы
+var int dowState = 0
+dowState := currentSignal >= 1 ? 1 : currentSignal <= -1 ? -1 : 0
+dowSignal = dowState
+
+dowSignalFiltered = dowSignal
+if (dowSignal == 1 and not filterPassLongForDow) or (dowSignal == -1 and not filterPassShortForDow)
+    dowSignalFiltered := 0
+
+// Определение изменений состояний индикаторов
+kamaStateChanged = kamaState != kamaState[1]
+vwmaStateChanged = vwmaState != vwmaState[1]
+alligatorStateChanged = alligatorState != alligatorState[1]
+dowStateChanged = dowState != dowState[1]
+atrTrailStateChanged = atrTrailStateFiltered != atrTrailStateFiltered[1]
+
+// ===== СИСТЕМА ПОДТВЕРЖДЕНИЯ СИГНАЛОВ С ФИЛЬТРАМИ =====
+// Подсчет сигналов с разными весами
+longCount = 0
+shortCount = 0
+
+// Dow Theory имеет вес 2
+if dowSignalFiltered > 0
+    longCount := longCount + 2
+else if dowSignalFiltered < 0
+    shortCount := shortCount + 2
+
+// ATR Trail имеет вес 2
+if useATRTrailSignals and atrTrailSignal > 0
+    longCount := longCount + 2
+else if useATRTrailSignals and atrTrailSignal < 0
+    shortCount := shortCount + 2
+
+// Gaussian Smooth Trend имеет вес 1 (по требованию)
+if useGSTSignals and useGSTInStrategy and gstSignalFiltered > 0
+    longCount := longCount + 1
+else if useGSTSignals and useGSTInStrategy and gstSignalFiltered < 0
+    shortCount := shortCount + 1
+
+// Остальные индикаторы имеют вес 1
+if useKAMASignals and kamaSignalFiltered > 0
+    longCount := longCount + 1
+else if useKAMASignals and kamaSignalFiltered < 0
+    shortCount := shortCount + 1
+
+if useVWMASignals and vwmaSignalFiltered > 0
+    longCount := longCount + 1
+else if useVWMASignals and vwmaSignalFiltered < 0
+    shortCount := shortCount + 1
+
+if useAlligatorSignals and alligatorSignalFiltered > 0
+    longCount := longCount + 1
+else if useAlligatorSignals and alligatorSignalFiltered < 0
+    shortCount := shortCount + 1
+
+// ===== УПРАВЛЕНИЕ СДЕЛКАМИ НА ОСНОВЕ ПОДТВЕРЖДЕНИЯ =====
+var bool inMultiPosition = false
+var bool wasMultiLong = false
+var bool wasMultiShort = false
+var float multiEntryPrice = na
+var string lastMultiSignal = "NONE"
+var float plAbsolute = 0.0
+var float plPercent = 0.0
+
+// Расчет стоп-лоссов
+stopLossMultiplierLong = (100 - stopLossPercent) / 100
+stopLossMultiplierShort = (100 + stopLossPercent) / 100
+
+// Определение сигналов входа (требуется ≥3 веса)
+enterMultiLong = longCount >= 3 and not inMultiPosition and adx_long_pass and rsi_long_pass and natr_long_pass
+enterMultiShort = shortCount >= 3 and not inMultiPosition and adx_short_pass and rsi_short_pass and natr_short_pass
+
+// Проверка стоп-лосса
+stopLossExitLong = inMultiPosition and wasMultiLong and close <= multiEntryPrice * stopLossMultiplierLong
+stopLossExitShort = inMultiPosition and wasMultiShort and close >= multiEntryPrice * stopLossMultiplierShort
+
+// Определение сигналов выхода (≥3 веса противоположного направления ИЛИ стоп-лосс)
+exitMultiLong = (shortCount >= 3 and inMultiPosition and wasMultiLong) or stopLossExitLong
+exitMultiShort = (longCount >= 3 and inMultiPosition and wasMultiShort) or stopLossExitShort
+
+if enterMultiLong
+    strategy.entry("LONG", strategy.long)
+else if enterMultiShort
+    strategy.entry("SHORT", strategy.short)
+
+if exitMultiLong
+    strategy.close("LONG")
+else if exitMultiShort
+    strategy.close("SHORT")
+
+// Обновление состояния позиций
+if enterMultiLong
+    inMultiPosition := true
+    wasMultiLong := true
+    wasMultiShort := false
+    multiEntryPrice := close
+    lastMultiSignal := "LONG"
+    plAbsolute := 0.0
+    plPercent := 0.0
+else if enterMultiShort
+    inMultiPosition := true
+    wasMultiLong := false
+    wasMultiShort := true
+    multiEntryPrice := close
+    lastMultiSignal := "SHORT"
+    plAbsolute := 0.0
+    plPercent := 0.0
+else if exitMultiLong
+    plAbsolute := close - multiEntryPrice
+    plPercent := ((close - multiEntryPrice) / multiEntryPrice) * 100
+    inMultiPosition := false
+    lastMultiSignal := stopLossExitLong ? "EXIT " + str.tostring(stopLossPercent, "#.#") + "%" : "EXIT SHORT"
+else if exitMultiShort
+    plAbsolute := multiEntryPrice - close
+    plPercent := ((multiEntryPrice - close) / multiEntryPrice) * 100
+    inMultiPosition := false
+    lastMultiSignal := stopLossExitShort ? "EXIT " + str.tostring(stopLossPercent, "#.#") + "%" : "EXIT LONG"
+
+// Расчет текущего P/L для открытых позиций
+if inMultiPosition and wasMultiLong
+    plAbsolute := close - multiEntryPrice
+    plPercent := ((close - multiEntryPrice) / multiEntryPrice) * 100
+else if inMultiPosition and wasMultiShort
+    plAbsolute := multiEntryPrice - close
+    plPercent := ((multiEntryPrice - close) / multiEntryPrice) * 100
+
+// ===== ВИЗУАЛИЗАЦИЯ =====
+// KAMA стрелки
+plotshape(showSignalArrows and useKAMASignals and kamaCrossUp and filterPassLongForOthers, title="KAMA Long", 
+     location=location.belowbar, color=color.blue, style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and useKAMASignals and kamaCrossDown and filterPassShortForOthers, title="KAMA Short", 
+     location=location.abovebar, color=color.blue, style=shape.triangledown, size=size.small)
+
+// VWMA стрелки
+plotshape(showSignalArrows and useVWMASignals and vwmaCrossUp and filterPassLongForOthers, title="VWMA Long", 
+     location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and useVWMASignals and vwmaCrossDown and filterPassShortForOthers, title="VWMA Short", 
+     location=location.abovebar, color=color.green, style=shape.triangledown, size=size.small)
+
+// Alligator стрелки
+plotshape(showSignalArrows and useAlligatorSignals and alligatorStateChanged and alligatorState == 1 and filterPassLongForOthers, 
+     title="Alligator Long", location=location.belowbar, color=color.orange, style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and useAlligatorSignals and alligatorStateChanged and alligatorState == -1 and filterPassShortForOthers, 
+     title="Alligator Short", location=location.abovebar, color=color.orange, style=shape.triangledown, size=size.small)
+
+// Dow Theory стрелки
+plotshape(showSignalArrows and dowStateChanged and dowState == 1 and filterPassLongForDow, title="Dow Long", 
+     location=location.belowbar, color=color.purple, style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and dowStateChanged and dowState == -1 and filterPassShortForDow, title="Dow Short", 
+     location=location.abovebar, color=color.purple, style=shape.triangledown, size=size.small)
+
+// ATR Trail стрелки
+plotshape(showSignalArrows and useATRTrailSignals and atrTrailStateChanged and atrTrailStateFiltered == 1 and filterPassLongForOthers, 
+     title="ATR Trail Long", location=location.belowbar, color=color.rgb(0, 191, 255), style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and useATRTrailSignals and atrTrailStateChanged and atrTrailStateFiltered == -1 and filterPassShortForOthers, 
+     title="ATR Trail Short", location=location.abovebar, color=color.rgb(0, 191, 255), style=shape.triangledown, size=size.small)
+
+// Gaussian Smooth Trend стрелки
+plotshape(showSignalArrows and useGSTSignals and useGSTInStrategy and gstStateChanged and gstState == 1 and filterPassLongForOthers, 
+     title="GST Long", location=location.belowbar, color=gstColorUp, style=shape.triangleup, size=size.small)
+plotshape(showSignalArrows and useGSTSignals and useGSTInStrategy and gstStateChanged and gstState == -1 and filterPassShortForOthers, 
+     title="GST Short", location=location.abovebar, color=gstColorDn, style=shape.triangledown, size=size.small)
+
+// ===== МЕТКИ ВХОДА =====
+if showEntryLabels
+    if enterMultiLong
+        label.new(bar_index, low, text="LONG\n" + str.tostring(close, format.mintick), 
+             style=label.style_label_up, color=color.green, textcolor=color.white,
+             size=size.small)
+    if enterMultiShort
+        label.new(bar_index, high, text="SHORT\n" + str.tostring(close, format.mintick), 
+             style=label.style_label_down, color=color.red, textcolor=color.white,
+             size=size.small)
+
+// ===== ГОРИЗОНТАЛЬНЫЕ ЛИНИИ ВЫХОДА =====
+if showExitLines
+    if inMultiPosition and wasMultiLong
+        if useKAMASignals and kamaStateChanged and kamaState == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_solid)
+        if useVWMASignals and vwmaStateChanged and vwmaState == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_dashed)
+        if useAlligatorSignals and alligatorStateChanged and alligatorState == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_dotted)
+        if dowStateChanged and dowState == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_dotted)
+        if useATRTrailSignals and atrTrailStateChanged and atrTrailStateFiltered == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_dashed)
+        if useGSTSignals and useGSTInStrategy and gstStateChanged and gstState == -1 and filterPassShortForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.red, width=2, style=line.style_dotted)
+    
+    if inMultiPosition and wasMultiShort
+        if useKAMASignals and kamaStateChanged and kamaState == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_solid)
+        if useVWMASignals and vwmaStateChanged and vwmaState == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_dashed)
+        if useAlligatorSignals and alligatorStateChanged and alligatorState == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_dotted)
+        if dowStateChanged and dowState == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_dotted)
+        if useATRTrailSignals and atrTrailStateChanged and atrTrailStateFiltered == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_dashed)
+        if useGSTSignals and useGSTInStrategy and gstStateChanged and gstState == 1 and filterPassLongForOthers
+            line.new(bar_index-10, close, bar_index+10, close, 
+                 color=color.green, width=2, style=line.style_dotted)
+
+// ===== МЕТКИ ВЫХОДА =====
+if showExitLabels
+    if exitMultiLong
+        exitText = stopLossExitLong ? "EXIT " + str.tostring(stopLossPercent, "#.#") + "%" : "EXIT"
+        exitColor = stopLossExitLong ? color.red : color.blue
+        label.new(bar_index, high, text=exitText + "\n" + str.tostring(close, format.mintick), 
+             style=label.style_label_down, color=exitColor, textcolor=color.white,
+             size=size.small)
+    if exitMultiShort
+        exitText = stopLossExitShort ? "EXIT " + str.tostring(stopLossPercent, "#.#") + "%" : "EXIT"
+        exitColor = stopLossExitShort ? color.red : color.blue
+        label.new(bar_index, low, text=exitText + "\n" + str.tostring(close, format.mintick), 
+             style=label.style_label_up, color=exitColor, textcolor=color.white,
+             size=size.small)
+
+// ===== ОТОБРАЖЕНИЕ ИНДИКАТОРОВ НА ГРАФИКЕ =====
+plot(showKAMA ? kama1 : na, "KAMA Fast", color=color.blue, linewidth=2)
+plot(showKAMA ? kama2 : na, "KAMA Slow", color=color.red, linewidth=2)
+
+plot(showVWMA ? vwmaValue : na, "VWMA", color=#2962FF, offset = vwmaOffset)
+
+plot(showAlligator ? jaw : na, "Jaw", offset = jawOffset, color=#2962FF)
+plot(showAlligator ? teeth : na, "Teeth", offset = teethOffset, color=#E91E63)
+plot(showAlligator ? lips : na, "Lips", offset = lipsOffset, color=#66BB6A)
+
+plot(showATRTrail ? atrTrailFast : na, "ATR Trail Fast", color=color.rgb(255, 165, 0), linewidth=2)
+plot(showATRTrail ? atrTrailMedium : na, "ATR Trail Medium", color=color.rgb(30, 144, 255), linewidth=2)
+plot(showATRTrail ? atrTrailSlow : na, "ATR Trail Slow", color=color.rgb(138, 43, 226), linewidth=2)
+
+// Отображение Gaussian Smooth Trend
+gstColorVal = gstState == 1 ? gstColorUp : gstState == -1 ? gstColorDn : gstColorNu
+plot(showGST and useGSTInStrategy ? SMMA : na, color=gstColorVal, linewidth=2, title="GST SMMA")
+plot(showGST and useGSTInStrategy ? LongV : na, title='GST Upper SD', color=color.new(color.white, 70), linewidth=1)
+plot(showGST and useGSTInStrategy ? ShortV : na, title='GST Lower SD', color=color.new(color.white, 70), linewidth=1)
+
+// ===== АЛЕРТЫ =====
+alertcondition(enterMultiLong, title="Multi Enter LONG", message="Multi-indicator LONG signal at {{close}}")
+alertcondition(enterMultiShort, title="Multi Enter SHORT", message="Multi-indicator SHORT signal at {{close}}")
+alertcondition(exitMultiLong, title="Multi Exit LONG", message="Multi-indicator EXIT LONG signal at {{close}}")
+alertcondition(exitMultiShort, title="Multi Exit SHORT", message="Multi-indicator EXIT SHORT signal at {{close}}")
+
+View in Pine Editor・825 lines
+Use on chart
+1
+6
+653
+# ATR Trailing Stop Multi-Strategy v7 with Pivot & GST
+
+## Overview
+A comprehensive multi-indicator trading strategy that combines multiple technical analysis approaches with sophisticated risk management. The strategy uses a confirmation-based system where trades are executed only when multiple indicators agree on the direction.
+
+## Core Strategy Logic
+
+### Signal Confirmation System
+- **Entry Condition**: Requires at least 3 confirmation points from different indicators
+- **Weighted Indicators**:
+- Dow Theory (Weight: 2 points)
+- ATR Trailing Stop (Weight: 2 points)
+- Gaussian Smooth Trend (Weight: 1 point)
+- KAMA (Weight: 1 point)
+- VWMA (Weight: 1 point)
+- Alligator (Weight: 1 point)
+
+### Exit Conditions
+- **Profit Exit**: When opposite signals achieve 3+ confirmation points
+- **Stop Loss**: Fixed percentage stop loss (configurable)
+- **Filter-Based Exit**: Signals from individual indicators when filters are violated
+
+## Technical Indicators
+
+### 1. Dow Theory Filter
+- Analyzes volume and volatility conditions
+- Uses SMA 20/50 crossovers for trend direction
+- Volume must exceed MA by threshold (default: 1.5x)
+- NATR must exceed threshold (default: 1.0%)
+
+### 2. ATR Trailing Stop System
+- Three ATR-based trailing lines (Fast/Medium/Slow)
+- Fast: ATR(5) × 0.5 multiplier
+- Medium: ATR(10) × 1.5 multiplier
+- Slow: ATR(20) × 3.0 multiplier
+- State changes when medium line crosses slow line
+
+### 3. Gaussian Smooth Trend (GST)
+- Advanced smoothing using DEMA, Gaussian filter, and SMMA
+- Includes standard deviation bands for volatility filtering
+- Multiple color schemes available for visualization
+
+### 4. KAMA (Kaufman Adaptive Moving Average)
+- Two KAMA lines with different lengths (10, 24)
+- Adaptive smoothing based on market volatility
+- Signals generated on crossovers
+
+### 5. VWMA (Volume Weighted Moving Average)
+- Price weighted by volume
+- Signals on price crossing VWMA
+
+### 6. Alligator Indicator
+- Three SMMA lines (Jaw/Teeth/Lips)
+- Standard Williams Alligator settings
+- Signals based on line alignment and price position
+
+## Entry Block Filters
+
+### ADX Filter (Optional)
+- Filters trades based on trend strength
+- Configurable min/max values for long and short positions
+- Default: ADX between 15-60
+
+### RSI Filter (Optional)
+- Additional RSI-based filtering
+- Separate ranges for long and short positions
+- Default Long: RSI 20-70, Short: RSI 30-80
+
+### NATR Filter (Optional)
+- Filters based on normalized ATR
+- Ensures minimum volatility for valid signals
+- Default Long/Short: NATR 0.5-5.0%
+
+## Additional Filters
+
+### CCI Filter
+- Filters signals based on CCI momentum
+- Oversold condition for longs: CCI > -100 and rising
+- Overbought condition for shorts: CCI < 100 and falling
+
+### Volatility Filter
+- Minimum ATR percentage requirement
+- Default: 0.3% minimum ATR/price ratio
+
+### Distance Filter
+- Minimum distance from Alligator lips in pips
+- Ensures sufficient movement before entry
+- Default: 10 pips minimum
+
+## Pivot Points Support
+- Multiple pivot point calculation methods:
+- Traditional
+- Fibonacci
+- Woodie
+- Classic
+- DM
+- Camarilla
+- Multiple timeframe support (Daily, Weekly, Monthly, etc.)
+- Visual display of pivot levels and labels
+
+## Risk Management
+
+### Stop Loss
+- Configurable percentage-based stop loss
+- Default: 2.5%
+- Applied immediately on entry
+
+### Position Management
+- Single position only (no pyramiding)
+- Position tracking with P/L calculation
+- Visual exit lines for individual indicator signals
+
+## Visual Features
+
+### Signal Display
+- Colored arrows for each indicator signal
+- Entry/Exit labels with price information
+- Horizontal exit lines for visual confirmation
+- All indicators can be toggled on/off
+
+### Color Schemes
+- GST with multiple color modes
+- Customizable pivot point colors
+- Consistent color coding across indicators
+
+## Alerts
+- Entry alerts for both long and short positions
+- Exit alerts for both profit and stop loss exits
+- Individual indicator alerts available
+
+## Settings Overview
+
+### Strategy Settings
+- Dow Theory thresholds (Volume, NATR)
+- Stop loss percentage
+- ATR Trailing parameters
+- Indicator toggles and weights
+
+### Filter Settings
+- Entry block filters (ADX, RSI, NATR)
+- CCI parameters
+- Volatility and distance filters
+
+### Visual Settings
+- Show/hide indicators
+- Arrow and label display
+- Color scheme selection
+
+### Pivot Settings
+- Calculation method
+- Timeframe
+- Level colors and visibility
+
+## Usage Recommendations
+
+### Timeframes
+- Works on all timeframes
+- Pivot points automatically adjust to timeframe
+- Recommended: 15-minutes and above
+
+### Market Conditions
+- Best in trending markets
+- Multiple filters help avoid choppy conditions
+- Volume confirmation adds reliability
+
+### Customization
+- Adjust confirmation thresholds for more/less aggressive trading
+- Modify filters based on market volatility
+- Fine-tune stop loss based on risk tolerance
+
+## Performance Notes
+- Strategy uses close prices for order execution
+- Maximum 500 labels to prevent chart clutter
+- All calculations in real-time
+- Historical backtesting supported
+
+## Important Notes
+- Past performance doesn't guarantee future results
+- Test thoroughly before live trading
+- Adjust parameters for specific instruments
+- Consider commission and slippage in backtesting

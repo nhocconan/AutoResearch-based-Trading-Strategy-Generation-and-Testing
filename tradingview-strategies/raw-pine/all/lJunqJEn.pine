@@ -1,0 +1,52 @@
+//@version=6
+strategy("Keltner Alım Stratejisi v6 (10, 0.5)", 
+     overlay=true, 
+     margin_long=100, 
+     margin_short=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100)
+
+// 1. Parametreler
+length = input.int(10, "Keltner Uzunluğu", minval=1)
+multiplier = input.float(0.5, "ATR Çarpanı", step=0.1, minval=0.1)
+
+// 2. Keltner Kanalı Hesaplama
+typicalPrice = math.avg(high, low, close)
+basis = ta.ema(typicalPrice, length)
+atrValue = ta.atr(length)
+upperBand = basis + (multiplier * atrValue)
+
+// 3. Alım Koşulları
+breakoutCondition = close > upperBand and close > close[1]
+volumeFilter = volume > ta.sma(volume, 20)
+trendFilter = close > ta.sma(close, 200)
+
+// 4. Strateji Kuralları
+if (breakoutCondition and volumeFilter and trendFilter)
+    strategy.entry("Long", strategy.long)
+
+// 5. Çıkış Kuralları
+if (close < basis)
+    strategy.close("Long", comment="Basis Çıkış")
+else if (close < strategy.position_avg_price * 0.98)
+    strategy.close("Long", comment="%2 Stop")
+
+// 6. Görselleştirme
+plot(upperBand, "Üst Band", color=color.new(#0096FF, 0), linewidth=2)
+plot(basis, "Basis", color=color.new(#FFD700, 0))
+
+// Sinyal işaretleri
+plotshape(breakoutCondition and volumeFilter and trendFilter, 
+     title="Al Sinyali",
+     text="AL",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.new(#00FF00, 0),
+     textcolor=color.black,
+     size=size.small)
+
+View in Pine Editor・52 lines
+Use on chart
+5
+617
+sadece keltner kanal girdilerinin değiştirilmesiyle oluşturulmuş bir göstergedir

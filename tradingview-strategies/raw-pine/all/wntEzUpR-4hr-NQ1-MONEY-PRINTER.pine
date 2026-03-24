@@ -1,0 +1,61 @@
+//@version=6
+strategy("Valentini Ultra-Scalper V2", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+// --- Inputs ---
+range_lookback = input.int(40, "Momentum Lookback (Range Bars)")
+vol_threshold = input.float(2.0, "Volume Surge Multiplier", step=0.1)
+initial_sl_ticks = input.int(12, "Initial Stop Loss (Ticks)") // Fabio uses very tight stops
+tp_ticks = input.int(36, "Take Profit (Ticks)") // 3:1 Ratio
+scale_in_trigger = input.int(15, "Scale-In Trigger (Ticks)")
+
+// --- Volume Profile & Aggression Logic ---
+avg_vol = ta.sma(volume, 50)
+is_aggressive = volume > (avg_vol * vol_threshold)
+high_range = ta.highest(high, range_lookback)
+low_range = ta.lowest(low, range_lookback)
+
+// --- Entry Conditions (Buy/Sell Stops) ---
+long_condition = is_aggressive and high > high_range[1]
+short_condition = is_aggressive and low < low_range[1]
+
+// --- Execution Strategy ---
+// Fabio Fragmented Entry Logic
+if (long_condition and strategy.position_size == 0)
+    strategy.entry("Initial Long", strategy.long, comment="LVN Breakout")
+
+// Scale-in Logic: Adding position once price moves in favor
+if (strategy.position_size > 0 and strategy.opentrades.profit(0) > (scale_in_trigger * syminfo.mintick))
+    strategy.entry("Scale In", strategy.long, comment="Adding to Winner")
+
+// --- Risk Management: The "Risk-Free" Pivot ---
+if (strategy.position_size > 0)
+    // Calculate if we've moved far enough to go Break-Even
+    float entry_price = strategy.opentrades.entry_price(0)
+    if (close > entry_price + (scale_in_trigger * syminfo.mintick))
+        strategy.exit("Exit Long", "Initial Long", stop=entry_price, limit=entry_price + (tp_ticks * syminfo.mintick))
+        strategy.exit("Exit Scale", "Scale In", stop=entry_price, limit=entry_price + (tp_ticks * syminfo.mintick))
+    else
+        strategy.exit("SL", "Initial Long", stop=entry_price - (initial_sl_ticks * syminfo.mintick))
+
+// Short Side Logic
+if (short_condition and strategy.position_size == 0)
+    strategy.entry("Initial Short", strategy.short, comment="LVN Breakdown")
+
+if (strategy.position_size < 0)
+    float entry_price_s = strategy.opentrades.entry_price(0)
+    if (close < entry_price_s - (scale_in_trigger * syminfo.mintick))
+        strategy.exit("Exit Short", "Initial Short", stop=entry_price_s, limit=entry_price_s - (tp_ticks * syminfo.mintick))
+    else
+        strategy.exit("SL-S", "Initial Short", stop=entry_price_s + (initial_sl_ticks * syminfo.mintick))
+
+// --- Visuals ---
+plotshape(long_condition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plot(high_range, color=color.new(color.gray, 50), style=plot.style_stepline)
+
+View in Pine Editor・53 lines
+Use on chart
+1
+6
+1
+835
+check 4hr NQ1 results in strategy tester. Rinse and Repeat. AUTOMATE.

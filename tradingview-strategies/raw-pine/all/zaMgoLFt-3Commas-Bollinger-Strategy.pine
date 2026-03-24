@@ -1,0 +1,174 @@
+//@version=4
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © tedwardd
+
+// This strategy is intended to help users of the 3commas.io platform backtest bot performance based on a Bollinger Strategy.
+// It can also be used to signal a bot to open a deal by providing the Bot ID, email token and trading pair in the strategy settings screen.
+// As currently written, this strategy uses a basic Bollinger Band strategy, recommening a deal start when the closing price crosses under the lower band.
+// The thick red line plotted on the chart shows the average entry price of the current deal.
+
+strategy("3Commas Bollinger Strategy", overlay=true, default_qty_type=strategy.cash, default_qty_value=1000, initial_capital=5000, currency="USD", commission_value=0.1)
+
+
+// 3Commas Bot settinsg
+bot_type                = input(title="Simple bot", defval="composite", options=["simple", "composite"])
+bot_id                  = input(title="3Commas Bot ID", defval="")
+email_token             = input(title="Bot Email Token", defval="")
+base_order_size         = input(title="Base order size",minval=10, step=1, defval=500)
+safety_order_size       = input(title="Safety order size", minval=15, step=1, defval=1000)
+volume_scale            = input(title="Safety Order Vol Scale (%)", minval=0.00, step=0.01, defval=1.83)
+safety_step             = input(title="Safety Order Step Scale (%)", minval=0.00, step=0.1, defval=1.55)
+safety_max              = input(title="Max Number of Safety Orders", minval=0, step=1, defval=4)
+initial_deviation_input = input(title="Initial SO Deviation (%)", minval=0, step=0.01, defval=0.8) * 0.01
+stoploss_input          = input(title="Long Stop Loss (%)", minval=0, step=1, defval=15) * 0.01
+takeprofit_input        = input(title="Long Take Profit (%)", minval=0, step=1, defval=1.4) * 0.01
+
+// USER INPUTS
+sma_short_val           = input(title="Short MA Window", defval=20)
+sma_long_val            = input(title="Long MA Window", defval=100)
+ubOffset                = input(title="Upper Band Offset", defval=2.5, step=0.5)
+lbOffset                = input(title="Lower Band Offset", defval=2.5, step=0.5)
+cross                   = input(title="Entrry at Cross Over/Under Lower", defval="over", options=["over", "under"])
+
+
+// Backtesting Date Ranges
+startDate  = input(title="Start Date", defval=1, minval=1, maxval=31)
+startMonth = input(title="Start Month", defval=1, minval=1, maxval=12)
+startYear  = input(title="Start Year", defval=2016, minval=1800, maxval=2100)
+endDate    = input(title="End Date", defval=31, minval=1, maxval=31)
+endMonth   = input(title="End Month", defval=12, minval=1, maxval=12)
+endYear    = input(title="End Year", defval=2022, minval=1800, maxval=2100)
+
+// VARS
+short_sma        = sma(close, sma_short_val)
+long_sma         = sma(close, sma_long_val)
+stdDev           = stdev(close, sma_short_val)
+upperBand        = short_sma + (stdDev * ubOffset)
+lowerBand        = short_sma - (stdDev * lbOffset)
+stoploss_value   = strategy.position_avg_price * (1 - stoploss_input)
+takeprofit_value = strategy.position_avg_price * (1 + takeprofit_input)
+initial_dev_val  = strategy.position_avg_price * (1 - initial_deviation_input)
+inDateRange      = (time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0)) and (time < timestamp(syminfo.timezone, endYear, endMonth, endDate, 0, 0))
+
+
+initial_deviation = close < initial_dev_val
+
+// Market Conditions
+goodBuy    = cross=="over"?crossover(close, lowerBand):crossunder(close, lowerBand) // Buy when close crossing lower band
+safety     = initial_deviation and (1-(close/strategy.position_avg_price))/.01 > strategy.opentrades-1 * safety_step and strategy.opentrades <= safety_max // SO when price deviates below SO threshold %
+stoploss   = close <= stoploss_value // Stoploss condition - true if closing price for current bar drops below stoploss %
+takeprofit = close >= takeprofit_value // Take profit condition - true if closing price for current bar is >= take profit percentage
+
+// goodSell is currently unused for any practical purpose. If you wish to try it, switch these two values. 
+// Doing so will make sell suggestions at high crossover upper bollinger but it does not trigger the bot to sell as written but may affect backtest results
+//goodSell = crossover(high, upperBand)
+goodSell   = false
+
+// Plot some lines
+plot(short_sma, color=color.green)
+plot(upperBand)
+plot(lowerBand, color=color.yellow)
+plot(strategy.position_avg_price, color=color.red, linewidth=3)
+
+
+// Webhook message. Defaults to string. To signal 3c bot, fill in bot_id and email_token in user settings
+var enter_msg = "Enter Position"
+var exit_msg  = "Exit Position"
+var close_all = "Exit Position"
+if bot_id != "" and email_token != ""
+    if bot_type == "composite"
+        enter_msg := '{"message_type": "bot",  "bot_id": ' + bot_id + ',  "email_token": "' + email_token + '", "delay_seconds": 0, "pair": "' + syminfo.currency + "_" + syminfo.basecurrency + '"}'
+    else
+        enter_msg := '{"message_type": "bot",  "bot_id": ' + bot_id + ',  "email_token": "' + email_token + '", "delay_seconds": 0}'
+    exit_msg  := '{  "message_type": "bot",  "bot_id": ' + bot_id + ',  "email_token": ' + email_token + ',  "delay_seconds": 0,  "action": "close_at_market_price"}'
+    close_all := '{ "message_type": "bot", "bot_id": ' + bot_id + ', "email_token": ' + email_token + ', "delay_seconds": 0, "action": "close_at_market_price_all"}'
+
+actual_safety_size = float(safety_order_size) // Set safety order size to starting safety
+if strategy.opentrades > 2 // If we have more than two open trades we need to start scaling the safety size by the volume_scale
+    actual_safety_size := (strategy.position_size - base_order_size) * volume_scale // Remove base order from total position size and scale it for next safety order
+
+
+// Strategy Actions
+if inDateRange and goodBuy
+    strategy.entry("Good Buy", strategy.long, base_order_size, when = strategy.opentrades <= 0, alert_message=enter_msg)
+if inDateRange and safety
+    strategy.order("Good Buy", strategy.long, actual_safety_size, when = strategy.opentrades > 0, comment = "safety order")
+if inDateRange and goodSell
+    strategy.close_all(comment="Good sell point")
+if inDateRange and stoploss
+    strategy.close_all(comment="Stoploss")
+if inDateRange and takeprofit
+    strategy.close_all(comment="TP Target")
+
+View in Pine Editor・101 lines
+Use on chart
+9
+6
+2
+49
+22 207
+Mar 28, 2021
+This strategy is intended for use as a way of backtesting various parameters available on 3commas.io composite bot using a bollinger band type trading strategy. While it's primary intention is to provide users a way of backtesting bot parameters, it can also be used to trigger a deal start by either using the {{strategy.open.alert_message}} field in your alert and providing the bot details in the configuration screen for the strategy or by including the usual deal start message provided by 3commas. You can find more information about how to do this from help.3commas.io/en/articles/3108938-how-to-use-tradingview-custom-signals.
+
+
+
+
+
+The primary inputs for the strategy are:
+
+// USER INPUTS
+Short MA Window - The length of the Short moving average
+Long MA Window - The length of the Long moving average
+Upper Band Offset - The offset to use for the upper bollinger offset
+Lower Band Offset - The offset to use for the lower bollinger offset
+Long Stop Loss % - The stop loss percentage to test
+Long Take Profit % - The Take profit percentage to test
+Initial SO Deviation % - The price deviation percentage required to place to first safety order
+Safety Order Vol Step % - The volume scale to test
+3Commas Bot ID - (self explanatory)
+Bot Email Token - Found in the deal start message for your bot (see link in previous section for details)
+3Commas Bot Trading Pair - The pair to include for composite bot start deals (should match format of 3commas, not TradingView IE. USDT_BTC not BTCUSDT)
+
+Start Date, Month, Year and End Date, Month and Year all apply to the backtesting window. By default it will use as much data as it can given the current period select (there is less historical data available for periods below 1H) back as far as 2016 (there appears to be no historical data on Trading view much before this). If you would like to test a different period of time, just change these values accordingly.
+
+Known Issues
+Currently there are a couple of issues with this strategy that you should be aware of. I may fix them at some point in the future but they don't really bug me so this is more for informational purposes than a promise that they may one day be fixed.
+
+Does not test trailing take profit
+
+Number of safety orders and Safety Order Step Scale are currently not user configurable (must edit source code)
+
+Using the user configuration to generate deal start message assumes you are triggering a composite bot, not a simple bot.
+
+
+
+Mar 28, 2021
+Release Notes
+Remove some dead code, fix some comment typos, cleanup some formatting inconsistencies and remove a forgotten integer value used during some tests
+Mar 29, 2021
+Release Notes
+Increasing the strategy default_qty_value and initial_capital values to values that work on the regular stock market where whole shares must be purchased and cost more than $100USD. Previous version required manual editing for adaptation outside of crypto trading.
+
+Additionally, I must apologize and make a correction to the documentation. I had previously stated that you could use either {{strategy.order.alert_message}} OR the start message provided by 3commas. This is not correct. Alerts will be triggered for all strategy actions (take profit, stop loss, entry and safety orders). If you do not use {{strategy.order.alert_message}}, the message message in the alert will be incorrect and deals will be opened at incorrect times, specifically on a take profit trigger. You MUST use the strategy settings to configure the bot information and trading pair and use {{strategy.order.alert_message}} in the alert message field.
+Mar 30, 2021
+Release Notes
+Add toggle for triggering one crossing over as well as crossing under the lower band.
+Apr 1, 2021
+Release Notes
+* Allow customizing number of safety orders from user settings
+* Automatically detect trading pair to eliminate the need for the trading pair user setting (easier alert creation)
+
+I also received a question that I will answer here in case others have the same:
+
+Q: How can I make alerts with this strategy? Do I need to convert it to a study first?
+A: No! The alert message is generated automatically in the format needed to start a 3commas composite long bot! As long as you provide the bot ID and Email Token in the user settings for the strategy (click the gear next to the strategy on the chart), all you need to do is add an alert, select the strategy from the drop down in the alert box, and use (without quotes) "{{strategy.order.alert_message}}" as the message body text NOTHING ELSE.
+Apr 1, 2021
+Release Notes
+This update fixes the deal entry message. The previous update to automatically detect and use the currently selected currency pair in the alert message was improperly formatted. This issue should now be fixed.
+Apr 4, 2021
+Release Notes
+This release improves code readability as well as provides better estimates for safety order accuracy.
+
+* Group bot settings in code together more clearly
+* Allow user configurable safety step scale
+* More accurately calculate safety order volume (still work in progress but should be close now)

@@ -1,0 +1,7 @@
+//@version=5
+showAlgo=##input(defval='STVIXS/STVIXL',type='INPUT_STRING',##id='in_5')
+VIXUPMAX=##input(defval=50,type='INPUT_INTEGER',##id='in_10')
+##root(root_metainfo,rm_0,((showAlgo=='VIXUP/VIXDN')?VIXUPMAX:na),input__float)
+##root(root_metainfo,rm_1,((showAlgo=='VIXUP/VIXDN')?-20:na),input__float)
+##root(root_metainfo,rm_2,((showAlgo=='RC')?0.8:na),input__float)
+##root(root_metainfo,rm_3,((showAlgo=='VIX')?15:na),input__float)

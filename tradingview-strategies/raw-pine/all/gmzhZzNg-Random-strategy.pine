@@ -1,0 +1,52 @@
+//@version=3
+//@author=Tr0sT
+strategy(title = "Random strategy", shorttitle = "Random", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+a = 16
+c = 10
+m = 1000
+GetRandom(prev) =>
+    GetRandom = (a * prev + c) % m
+
+seed = input(200, minval = 2, maxval = m)
+stopLoss = input(30, title = "Stop loss percentage(0.1%)")
+takeProfit = input(30, title = "Take profit percentage(0.1%)")
+
+
+curRandom = na
+curRandom := nz(curRandom[1]) == 0 ? seed : GetRandom(curRandom[1])
+if (strategy.position_size == 0)
+    if (curRandom >= m / 2)
+        strategy.entry("Enter", strategy.long)
+    else
+        strategy.entry("Enter", strategy.short)
+        
+    strategy.exit("Exit", "Enter", loss = close * stopLoss / 1000 / syminfo.mintick, profit = close * takeProfit / 1000 / syminfo.mintick)            
+
+// === Backtesting Dates ===
+testPeriodSwitch = input(false, "Custom Backtesting Dates")
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(3, "Backtest Start Month")
+testStartDay = input(6, "Backtest Start Day")
+testStartHour = input(08, "Backtest Start Hour")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,testStartHour,0)
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(14, "Backtest Stop Day")
+testStopHour = input(14, "Backtest Stop Hour")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,testStopHour,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+isPeriod = testPeriodSwitch == true ? testPeriod() : true
+// === /END
+if not isPeriod
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・44 lines
+Use on chart
+7
+8
+1
+3 075
+Seems profitable, LOL ;)

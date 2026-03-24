@@ -1,0 +1,138 @@
+//@version=3
+strategy("My Keltner Channel Strategy-V2",shorttitle="MKCS V2", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 50, initial_capital=10000000, currency=currency.USD, commission_type = strategy.commission.percent,commission_value=0.15,calc_on_every_tick=true)
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 12, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 17, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2017, title = "From Year", minval = 2000)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2000)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+//17 - 7 - false - 38 - 38 XRP KRAKEN
+//17-4-22  1129/13 xbt kraken
+//18-3-18 1033/17 btc bitfinex
+
+
+source = close
+
+crypto=input(true)
+length = input(17, minval=1)
+mult = input(4)
+riskPercentage = input(0.02, title="Risk Percentage")
+activateMovPercentage = input(true, title=" Activate Max Mov Avg Percentage")
+mov1L = input(38)
+mov1T = input(2)
+mov2L = input(24)
+mov2T = input(2)
+maxMovPercentage = input(20, title="Max Mov Percentage")
+maxSLPercentage = input(22, title="Max SL Percentage")
+profitPercentage = input(22.0, minval=0,maxval = 100000000, title="Take Profit %")
+
+ma = sma(source, length)
+rangema = sma(tr, length)
+upper = ma + rangema * (mult/10)
+lower = ma - rangema * (mult/10)
+
+p1=plot(upper, title='Upper', color=green, linewidth=3)
+p2=plot(lower, title='Lower', color=green, linewidth=3)
+plot(ma, title='basis', color=red, linewidth=3)
+
+
+crossUpper = crossover(source, upper)
+crossLower = crossunder(source, lower)
+
+bprice = 0.0
+bprice := crossUpper ? high+syminfo.mintick : nz(bprice[1])
+
+sprice = 0.0
+sprice := crossLower ? low -syminfo.mintick : nz(sprice[1]) 
+
+crossBcond = false
+crossBcond := crossUpper ? true 
+ : na(crossBcond[1]) ? false : crossBcond[1]
+
+crossScond = false
+crossScond := crossLower ? true 
+ : na(crossScond[1]) ? false : crossScond[1]
+
+cancelBcond = crossBcond and (source < ma or high >= bprice )
+cancelScond = crossScond and (source > ma or low <= sprice )
+
+//Pos Size
+myQty = crypto ? strategy.equity/close : strategy.equity
+SLLongPercentage = (close/ma) - 1
+SLShortPercentage= (ma/close) -1
+RiskSize = myQty*riskPercentage
+PosSizeLong = RiskSize/SLLongPercentage
+PosSizeShort = RiskSize/SLShortPercentage
+PercentageLong = riskPercentage/SLLongPercentage
+PercentageShort = riskPercentage/SLShortPercentage
+// End Pos Size
+
+//Take Profit
+ep = 0.0
+longProfit=0.0
+shortProfit=0.0
+ep := na(ep[1]) ? na : ep[1]
+longProfit := na(longProfit[1]) ? na : longProfit[1]
+shortProfit := na(shortProfit[1]) ? na : shortProfit[1]
+// End Take Profit
+
+//Tilson T3 Mov Avg Prevent
+factor(factorT3) => factorT3/1
+gd(src, len, factor) => ema(src, len) * (1 + factor) - ema(ema(src, len), len) * factor 
+t3(src, len, factor) => gd(gd(gd(src, len, factor), len, factor), len, factor) 
+
+mov1 = t3(close,mov1L,mov1T)
+mov2 = t3(close,mov2L, mov2T)
+plot(mov1)
+plot(mov2)
+
+movCond = activateMovPercentage ? mov1>mov2 ? (mov1/mov2)-1 > maxMovPercentage/1000 ? true : false : (mov2/mov1)-1 > maxMovPercentage/1000 ? true: false: true
+bgcolor(not movCond ? red :black , transp=95)
+
+longCondition = window() and crossUpper and SLLongPercentage < (maxSLPercentage/1000) and movCond
+shortCondition = window() and crossLower and SLShortPercentage < (maxSLPercentage/1000) and movCond
+
+if(longCondition or shortCondition)
+    ep:=close
+    longProfit := (1+(profitPercentage/100))*ep
+    shortProfit := (1-(profitPercentage/100))*ep
+    
+if (cancelBcond and window())
+    strategy.cancel("long")
+
+if (longCondition)
+    strategy.entry("long", strategy.long,qty=PosSizeLong, stop=bprice, comment="")
+
+if (cancelScond and window())
+    strategy.cancel("short")
+
+if (shortCondition)
+    strategy.entry("short", strategy.short,qty=PosSizeShort, stop=sprice, comment="")
+    
+strategy.exit("Exit","long", stop = ma,limit= longProfit, comment=" ")
+strategy.exit("Exit","short", stop = ma,limit= shortProfit, comment=" ")
+
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・123 lines
+Use on chart
+1
+6
+5
+7 336
+Nov 13, 2018
+Trend Analysis with MA and ATR
+Nov 13, 2018
+Release Notes
+dfvdfv
+Nov 13, 2018
+Release Notes
+sdfsflblkfjlekjber

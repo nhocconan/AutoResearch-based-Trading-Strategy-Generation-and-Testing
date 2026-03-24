@@ -1,0 +1,198 @@
+//@version=5
+strategy("BTC Risk Metric DCA buy/sell", overlay=true, initial_capital=1000, default_qty_type=strategy.cash, process_orders_on_close=false, max_bars_back=5000)
+// This script is optimized to ONLY generate strategy order fills (buys/sells) 
+// for the TradingView alert system. All webhook details (UUID, Secret, Action) 
+// are now handled by the JSON message pasted in the alert configuration.
+
+// ── SETTINGS ─────────────────────────────────────────────────
+// Removed all webhook inputs (secretKey, botUUID, sendBuys/Sells) and backtestMode.
+
+freq = input.string("Day", "Signal Frequency", options=["Once per bar", "Hour", "Day", "Week", "Month"], group="Mode")
+newPeriod = switch freq
+    "Once per bar" => true
+    "Hour" => ta.change(time("60"))
+    "Day" => ta.change(time("D"))
+    "Week" => ta.change(time("W"))
+    "Month" => ta.change(time("M"))
+    => false
+
+tradingPair = input.string("BTC_USD", "3Commas Pair (For reference)", group="Strategy Info")
+
+// ── OPTIMIZED RISK METRIC (combined security calls with proper tuple destructuring) ──
+[d_close, d_sma1460, d_stdev1460, d_sma50] = request.security(syminfo.tickerid, "D", [close, ta.sma(close, 1460), ta.stdev(close, 1460), ta.sma(close, 50)], lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+
+[w_sma20, w_sma50] = request.security(syminfo.tickerid, "W", [ta.sma(close, 20), ta.sma(close, 50)], lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+
+riskOne = d_stdev1460 != 0 ? ((d_close - d_sma1460) / d_stdev1460) / (-38.12 * math.log(time) + 1078.5) : na
+riskTwo = w_sma20 != 0 ? (math.log(d_close / w_sma20) + (-3.719*math.log(time) + 105)) / (-6e-12*time + 10.93) : na
+riskThree = w_sma50 != 0 ? (d_sma50 / w_sma50) / (-12.55*math.log(time) + 355.15) : na
+
+riskMetric = nz((riskOne + riskTwo + riskThree) / 3, 1.0)
+riskStr = str.tostring(riskMetric, "0.00")
+
+// ── INPUTS ───────────────────────────────────────────────────
+buyL3_thresh = input.float(0.20, "Buy L3 Threshold", group="Buy Levels")
+buyL2_thresh = input.float(0.40, "Buy L2 Threshold", group="Buy Levels")
+buyL1_thresh = input.float(0.50, "Buy L1 Threshold", group="Buy Levels")
+buyL1_usd    = input.float(100, "Buy L1 $ Amount", group="Buy Amounts")
+buyL2_usd    = input.float(300, "Buy L2 $ Amount", group="Buy Amounts")
+buyL3_usd    = input.float(600, "Buy L3 $ Amount", group="Buy Amounts")
+
+sellL1_thresh = input.float(0.70, "Sell L1 Threshold", group="Sell Levels")
+sellL2_thresh = input.float(0.80, "Sell L2 Threshold", group="Sell Levels")
+sellL3_thresh = input.float(0.90, "Sell L3 Threshold", group="Sell Levels")
+sellL1_pct    = input.float(25, "Sell L1 %", group="Sell %")
+sellL2_pct    = input.float(35, "Sell L2 %", group="Sell %")
+
+// ── STATE ────────────────────────────────────────────────────
+var bool sellL1_done = false
+var bool sellL2_done = false
+var int  lastSignalBar = -1000
+
+// Reset sell flags on new entry
+if strategy.position_size > strategy.position_size[1]
+    sellL1_done := false
+    sellL2_done := false
+
+// ── BUY LOGIC ────────────────────────────────────────────────
+totalUsd = 0.0
+level    = ""
+if riskMetric <= buyL3_thresh
+    totalUsd := buyL1_usd + buyL2_usd + buyL3_usd
+    level    := "L3"
+else if riskMetric <= buyL2_thresh
+    totalUsd := buyL1_usd + buyL2_usd
+    level    := "L2"
+else if riskMetric <= buyL1_thresh
+    totalUsd := buyL1_usd
+    level    := "L1"
+
+// ── CONDITIONS ───────────────────────────────────────────────
+buyCond   = totalUsd > 0 and newPeriod and bar_index > lastSignalBar
+sell1Cond = strategy.position_size > 0 and newPeriod and bar_index > lastSignalBar and not sellL1_done and riskMetric >= sellL1_thresh
+sell2Cond = strategy.position_size > 0 and newPeriod and bar_index > lastSignalBar and sellL1_done and not sellL2_done and riskMetric >= sellL2_thresh
+sell3Cond = strategy.position_size > 0 and newPeriod and bar_index > lastSignalBar and sellL2_done and riskMetric >= sellL3_thresh
+
+// ── EXECUTION ────────────────────────────────────────────────
+
+if buyCond
+    // CRITICAL: Convert USD amount to contracts/shares quantity for strategy.entry
+    qtyContracts = totalUsd / close 
+    comment = "BUY_ENTRY_" + level + "_USD_" + str.tostring(totalUsd) 
+    strategy.entry("BUY_ENTRY", strategy.long, qty=qtyContracts, comment=comment)
+    lastSignalBar := bar_index
+
+if sell1Cond
+    comment = "SELL_L1_PCT_" + str.tostring(sellL1_pct)
+    strategy.close("BUY_ENTRY", qty_percent=sellL1_pct, comment=comment)
+    sellL1_done := true
+    lastSignalBar := bar_index
+
+if sell2Cond
+    comment = "SELL_L2_PCT_" + str.tostring(sellL2_pct)
+    strategy.close("BUY_ENTRY", qty_percent=sellL2_pct, comment=comment)
+    sellL2_done := true
+    lastSignalBar := bar_index
+
+if sell3Cond
+    comment = "SELL_L3_EXIT_100_PCT"
+    strategy.close_all(comment=comment)
+    lastSignalBar := bar_index
+
+// ── PLOTS & LABELS ───────────────────────────────────────────
+plotshape(buyCond,   location=location.belowbar, color=color.green,   style=shape.triangleup,   size=size.large)
+plotshape(sell1Cond, location=location.abovebar, color=color.red,     style=shape.triangledown, size=size.large)
+plotshape(sell2Cond, location=location.abovebar, color=color.orange,  style=shape.triangledown, size=size.large)
+plotshape(sell3Cond, location=location.abovebar, color=color.maroon,  style=shape.triangledown, size=size.large)
+
+// Note: Plotting uses the same logic as your original script
+if buyCond
+    label.new(bar_index, low * 0.984, "BUY " + level + "\nRisk: " + riskStr + "\n$" + str.tostring(totalUsd, "#,###"), style=label.style_label_up, color=color.green, textcolor=color.white, yloc=yloc.price)
+
+if sell1Cond
+    usd = strategy.position_size * close * (sellL1_pct / 100)
+    label.new(bar_index, high, "SELL L1\nRisk: " + riskStr + "\n~$" + str.tostring(usd, "#,###"), style=label.style_label_down, color=color.red, textcolor=color.white, yloc=yloc.abovebar)
+
+if sell2Cond
+    usd = strategy.position_size * close * (sellL2_pct / 100)
+    label.new(bar_index, high, "SELL L2\nRisk: " + riskStr + "\n~$" + str.tostring(usd, "#,###"), style=label.style_label_down, color=color.orange, textcolor=color.white, yloc=yloc.abovebar)
+
+if sell3Cond
+    usd = strategy.position_size * close
+    label.new(bar_index, high, "SELL L3 EXIT\nRisk: " + riskStr + "\n~$" + str.tostring(usd, "#,###"), style=label.style_label_down, color=color.maroon, textcolor=color.white, yloc=yloc.abovebar)
+
+// ── RISK PLOT ───────────────────────────────────────────────
+plot(riskMetric, "Risk Metric", color=color.blue, linewidth=2)
+hline(buyL3_thresh, "Buy L3", color=color.green)
+hline(buyL2_thresh, "Buy L2", color=color.lime)
+hline(buyL1_thresh, "Buy L1", color=color.yellow)
+hline(sellL1_thresh, "Sell L1", color=color.orange)
+hline(sellL2_thresh, "Sell L2", color=color.red)
+hline(sellL3_thresh, "Sell L3", color=color.maroon)
+
+View in Pine Editor・131 lines
+Use on chart
+3
+8
+1
+938
+Risk Metric DCA Adapter (3Commas Webhook Strategy) - WORK IN PROGRESS
+
+This Pine Script strategy, originally inspired by the Risk Metric Indicator, is fundamentally engineered as an Adapter to interface with external trading bots like 3Commas via Webhooks. It calculates a dynamic market risk score and translates that score into specific dollar-cost averaging (DCA) entry levels and tiered profit-taking exits.
+
+Key Features & Logic
+
+Risk Metric Calculation (Credit to The Trading Parrot):
+The strategy incorporates a complex, multi-timeframe Risk Metric calculation based on daily and weekly moving averages (SMA) and standard deviation (StDev). This metric aims to quantify the current market overextension or compression relative to long-term historical data. The resulting score dictates the level of conviction for a new trade.
+
+Tiered DCA Entry Sizing:
+The strategy defines three distinct Buy Levels (L1, L2, L3) corresponding to increasingly favorable (lower) Risk Metric scores.
+
+L1 (Base): Risk is moderate, initiating the minimum defined trade amount.
+
+L2 (Scaled): Risk is low, initiating L1 amount + L2 amount.
+
+L3 (Aggressive): Risk is very low, initiating L1 + L2 + L3 amounts.
+
+Tiered Profit-Taking Exits:
+The strategy implements a staggered, partial profit-taking approach based on the Risk Metric rising:
+
+Sell L1 & L2: Closes a percentage of the current position when the Risk Metric reaches defined high thresholds, locking in partial profits.
+
+Sell L3 (Full Exit): Closes the remaining position when the Risk Metric reaches the highest defined threshold.
+
+The Adapter Function (Webhook Integration)
+
+This script is unique because it uses the Pine Script strategy() function to trigger Order Fills, which are necessary to access powerful placeholders in the TradingView alert system.
+
+Trigger Type: The alert must be set to trigger on Any order fill.
+
+Dynamic Webhook Data: Instead of using fixed alert() commands, the strategy generates dynamic labels (e.g., BUY_ENTRY_L3_USD_1000 or SELL_L1_PCT_25) using the strategy.entry and strategy.close commands.
+
+Data Transfer: The alert message then uses the placeholder {{strategy.order.comment}} to pass these dynamic labels to the 3Commas bot, allowing the bot to execute the precise action (e.g., start_deal_with_volume_in_quote_currency or close_deal_at_market_percentage).
+
+Full Strategy Webhook payload
+{
+"secret": "YOUR_3COMMAS_SECRET_KEY",
+"max_lag": "300",
+"timestamp": "{{timenow}}",
+"trigger_price": "{{close}}",
+"tv_exchange": "{{exchange}}",
+"tv_instrument": "{{ticker}}",
+"action": "{{strategy.order.action}}",
+"bot_uuid": "YOUR_BOT_UUID",
+"strategy_info": {
+"market_position": "{{strategy.market_position}}",
+"market_position_size": "{{strategy.market_position_size}}",
+"prev_market_position": "{{strategy.prev_market_position}}",
+"prev_market_position_size": "{{strategy.prev_market_position_size}}"
+},
+"order": {
+"amount": "{{strategy.order.contracts}}",
+"currency_type": "base",
+"comment": "{{strategy.order.comment}}"
+}
+}
+
+
+Disclaimer: This script is an adapter tool and does not guarantee profit. Trading requires manual configuration of risk settings, bot parameters, and adherence to platform-specific setup instructions.

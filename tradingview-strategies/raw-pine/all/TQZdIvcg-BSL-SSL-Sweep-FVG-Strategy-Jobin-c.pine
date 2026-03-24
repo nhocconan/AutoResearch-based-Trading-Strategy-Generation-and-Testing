@@ -1,0 +1,267 @@
+//@version=5
+strategy("BSL/SSL Sweep + FVG Strategy (Fixed Entry Logic)", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUTS ===
+show_levels = input.bool(true, "Show BSL/SSL Levels", group="Display")
+show_fvg = input.bool(true, "Show FVG", group="Display")
+fvg_lookback = input.int(10, "FVG Detection Lookback", minval=3, maxval=50, group="FVG Settings")
+min_fvg_size = input.float(0.001, "Minimum FVG Size", minval=0.0001, group="FVG Settings")
+session_7_929 = input.session("0700-0929", "BSL/SSL Session (7:00-9:29 EST)", group="Time Settings")
+session_930_1030 = input.session("0930-1030", "Trading Window (9:30-10:30 EST)", group="Time Settings")
+est_timezone = input.string("America/New_York", "Timezone", group="Time Settings")
+
+// NEW: More flexible entry settings
+allow_wick_entries = input.bool(true, "Allow Wick-Based Entries", group="Entry Settings", tooltip="Allow entries when wick breaks FVG, not just closes")
+extend_trading_window = input.bool(true, "Extend Trading Window", group="Entry Settings", tooltip="Allow entries until 11:30 AM instead of 10:30 AM")
+
+// === STATE VARIABLES ===
+var float bsl = na
+var float ssl = na
+var bool levels_set = false
+var bool bsl_swept = false
+var bool ssl_swept = false
+var line bsl_line = na
+var line ssl_line = na
+var box[] fvg_boxes = array.new<box>()
+var float[] fvg_tops = array.new<float>()
+var float[] fvg_bottoms = array.new<float>()
+var bool[] fvg_is_bullish = array.new<bool>()
+var bool[] fvg_used_for_entry = array.new<bool>()
+var bool[] fvg_broken = array.new<bool>()
+var float entry_price = na
+var float stop_loss = na
+var bool in_trade = false
+var string trade_direction = ""
+var float post_sweep_low = na
+var float post_sweep_high = na
+var bool has_traded_today = false
+var int trades_today = 0
+var bool first_trade_was_loss = false
+
+// === TIME CONDITIONS ===
+in_bsl_ssl_session = time(timeframe.period, session_7_929, est_timezone)
+// Extended trading window option
+extended_session = extend_trading_window ? "0930-1130" : "0930-1030"
+in_trading_window = time(timeframe.period, extended_session, est_timezone)
+
+current_hour_est = hour(time, est_timezone)
+current_minute_est = minute(time, est_timezone)
+is_11am_cutoff = current_hour_est == 11 and current_minute_est == 0
+new_day = dayofweek != dayofweek[1]
+
+// EXPANDED FVG DETECTION WINDOW - Start from 7 AM to catch more FVGs
+start_time = timestamp(est_timezone, year, month, dayofmonth, 7, 0)
+end_time = timestamp(est_timezone, year, month, dayofmonth, 11, 30)
+in_fvg_window = time >= start_time and time <= end_time
+
+// === DAILY RESET ===
+if new_day
+    bsl := na
+    ssl := na
+    levels_set := false
+    bsl_swept := false
+    ssl_swept := false
+    post_sweep_low := na
+    post_sweep_high := na
+    in_trade := false
+    has_traded_today := false
+    trades_today := 0
+    first_trade_was_loss := false
+    trade_direction := ""
+    if not na(bsl_line)
+        line.delete(bsl_line)
+        bsl_line := na
+    if not na(ssl_line)
+        line.delete(ssl_line)
+        ssl_line := na
+    array.clear(fvg_boxes)
+    array.clear(fvg_tops)
+    array.clear(fvg_bottoms)
+    array.clear(fvg_is_bullish)
+    array.clear(fvg_used_for_entry)
+    array.clear(fvg_broken)
+
+// === CAPTURE BSL/SSL ===
+if in_bsl_ssl_session
+    if na(bsl) or high > bsl
+        bsl := high
+    if na(ssl) or low < ssl
+        ssl := low
+
+if not in_bsl_ssl_session and in_bsl_ssl_session[1] and not na(bsl) and not na(ssl) and not levels_set
+    levels_set := true
+    if show_levels
+        bsl_line := line.new(bar_index, bsl, bar_index + 200, bsl, color=color.red, width=2, extend=extend.right)
+        ssl_line := line.new(bar_index, ssl, bar_index + 200, ssl, color=color.blue, width=2, extend=extend.right)
+
+// Update line extensions
+if not na(bsl_line) and show_levels
+    line.set_x2(bsl_line, bar_index + 50)
+if not na(ssl_line) and show_levels
+    line.set_x2(ssl_line, bar_index + 50)
+
+// Don't delete lines at 11 AM - let them persist
+// if is_11am_cutoff
+//     if not na(bsl_line)
+//         line.delete(bsl_line)
+//     if not na(ssl_line)
+//         line.delete(ssl_line)
+
+// === FVG DETECTION ===
+bullish_fvg = in_fvg_window and low[2] > high and (low[2] - high) >= min_fvg_size
+bearish_fvg = in_fvg_window and high[2] < low and (low - high[2]) >= min_fvg_size
+fvg_top = bullish_fvg ? low[2] : bearish_fvg ? low : na
+fvg_bot = bullish_fvg ? high : bearish_fvg ? high[2] : na
+
+if (bullish_fvg or bearish_fvg) and show_fvg
+    fvg_color = bullish_fvg ? color.new(color.red, 85) : color.new(color.green, 85)
+    new_box = box.new(bar_index - 2, fvg_top, bar_index + 50, fvg_bot, bgcolor=fvg_color, border_color=color.new(color.black, 90))
+    array.push(fvg_boxes, new_box)
+    array.push(fvg_tops, fvg_top)
+    array.push(fvg_bottoms, fvg_bot)
+    array.push(fvg_is_bullish, bullish_fvg)
+    array.push(fvg_used_for_entry, false)
+    array.push(fvg_broken, false)
+
+if array.size(fvg_boxes) > fvg_lookback
+    box.delete(array.shift(fvg_boxes))
+    array.shift(fvg_tops)
+    array.shift(fvg_bottoms)
+    array.shift(fvg_is_bullish)
+    array.shift(fvg_used_for_entry)
+    array.shift(fvg_broken)
+
+// === SWEEP DETECTION ===
+if in_trading_window and levels_set
+    if high >= bsl and not bsl_swept
+        bsl_swept := true
+        post_sweep_high := high
+    if low <= ssl and not ssl_swept
+        ssl_swept := true
+        post_sweep_low := low
+
+if bsl_swept and high > post_sweep_high
+    post_sweep_high := high
+if ssl_swept and low < post_sweep_low
+    post_sweep_low := low
+
+// === MARK FVGs AS BROKEN ===
+if array.size(fvg_tops) > 0
+    for i = 0 to array.size(fvg_tops) - 1
+        current_broken = array.get(fvg_broken, i)
+        if not current_broken
+            top = array.get(fvg_tops, i)
+            bot = array.get(fvg_bottoms, i)
+            is_bullish = array.get(fvg_is_bullish, i)
+            
+            // Mark bearish FVG as broken when price closes above it
+            if not is_bullish and close > top
+                array.set(fvg_broken, i, true)
+                
+            // Mark bullish FVG as broken when price closes below it
+            if is_bullish and close < bot
+                array.set(fvg_broken, i, true)
+
+// === IMPROVED TRADE EXECUTION LOGIC ===
+can_enter_trade = trades_today == 0 or (first_trade_was_loss and trades_today < 2)
+
+if can_enter_trade and not in_trade and array.size(fvg_tops) > 0 and levels_set
+    for i = 0 to array.size(fvg_tops) - 1
+        top = array.get(fvg_tops, i)
+        bot = array.get(fvg_bottoms, i)
+        is_bullish = array.get(fvg_is_bullish, i)
+        already_used = array.get(fvg_used_for_entry, i)
+
+        // ONLY CONSIDER FVGs THAT HAVEN'T BEEN USED FOR ENTRY YET
+        if not already_used
+            // IMPROVED LONG SETUP: Bearish FVG broken after SSL sweep
+            if not is_bullish and ssl_swept and not na(post_sweep_low)
+                entry_condition = false
+                
+                if allow_wick_entries
+                    // Allow entry if high breaks above FVG top OR close is above FVG top
+                    entry_condition := high > top or close > top
+                else
+                    // Original logic - close must be above FVG top
+                    entry_condition := close > top
+                
+                if entry_condition
+                    strategy.entry("Long", strategy.long)
+                    stop_loss := post_sweep_low
+                    in_trade := true
+                    trade_direction := "Long"
+                    trades_today := trades_today + 1
+                    has_traded_today := true
+                    array.set(fvg_used_for_entry, i, true)
+                    break
+
+            // IMPROVED SHORT SETUP: Bullish FVG broken after BSL sweep
+            if is_bullish and bsl_swept and not na(post_sweep_high)
+                entry_condition = false
+                
+                if allow_wick_entries
+                    // Allow entry if low breaks below FVG bottom OR close is below FVG bottom
+                    entry_condition := low < bot or close < bot
+                else
+                    // Original logic - close must be below FVG bottom
+                    entry_condition := close < bot
+                
+                if entry_condition
+                    strategy.entry("Short", strategy.short)
+                    stop_loss := post_sweep_high
+                    in_trade := true
+                    trade_direction := "Short"
+                    trades_today := trades_today + 1
+                    has_traded_today := true
+                    array.set(fvg_used_for_entry, i, true)
+                    break
+
+// === TRACK TRADE OUTCOMES ===
+// Check if we hit stop loss (first trade loss)
+if in_trade and trades_today == 1
+    if trade_direction == "Long" and low <= stop_loss
+        first_trade_was_loss := true
+        in_trade := false
+    if trade_direction == "Short" and high >= stop_loss
+        first_trade_was_loss := true
+        in_trade := false
+
+// Check if we hit target (first trade win - no re-entry allowed)
+if in_trade and trades_today == 1
+    if trade_direction == "Long" and high >= bsl
+        in_trade := false
+        // first_trade_was_loss remains false, so no re-entry
+    if trade_direction == "Short" and low <= ssl
+        in_trade := false
+        // first_trade_was_loss remains false, so no re-entry
+
+// Reset in_trade for second trade outcomes
+if in_trade and trades_today == 2
+    if trade_direction == "Long" and (low <= stop_loss or high >= bsl)
+        in_trade := false
+    if trade_direction == "Short" and (high >= stop_loss or low <= ssl)
+        in_trade := false
+
+// === EXIT MANAGEMENT ===
+if in_trade
+    if trade_direction == "Long"
+        strategy.exit("Long Exit", from_entry="Long", stop=stop_loss, limit=bsl)
+    if trade_direction == "Short"
+        strategy.exit("Short Exit", from_entry="Short", stop=stop_loss, limit=ssl)
+
+// === DEBUG INFO (OPTIONAL) ===
+// Uncomment these to see what's happening:
+// plotchar(ssl_swept, "SSL Swept", "S", location.belowbar, color.blue, size=size.small)
+// plotchar(bsl_swept, "BSL Swept", "B", location.abovebar, color.red, size=size.small)
+// plotchar(in_trading_window, "Trading Window", "T", location.top, color.yellow, size=size.tiny)
+// plot(ssl, "SSL Level", color.blue, linewidth=1, display=display.all)
+// plot(bsl, "BSL Level", color.red, linewidth=1, display=display.all)
+
+View in Pine Editor・258 lines
+Use on chart
+5
+3
+4
+1
+9 083
+The New York ATM Model is a structured intraday strategy designed to capture algorithmic stop-hunts and reversals during the New York session open. It focuses on liquidity sweeps—either Buy-Side or Sell-Side—followed by a confirmation using Fair Value Gaps (FVGs).

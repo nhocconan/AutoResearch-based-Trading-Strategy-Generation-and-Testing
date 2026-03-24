@@ -1,0 +1,213 @@
+//@version=5
+strategy("Extremum Range MA Crossover Strategy", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.cash, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3, currency=currency.USD)
+
+// Author: Script_Algo
+// License: MIT
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// Input parameters
+lookbackPeriod = input.int(5, title="Lookback Period for High/Low")
+maLength = input.int(20, title="MA Length")
+
+// MA type selection
+maType = input.string("EMA", title="MA Type", options=["SMA", "EMA", "WMA", "VWMA", "HMA", "DEMA", "TEMA", "ZLEMA"])
+maSource = input.string("Close", title="MA Source", options=["Open", "High", "Low", "Close", "HL2", "HLC3", "OHLC4"])
+
+// Calculate source based on selection
+src = switch maSource
+    "Open" => open
+    "High" => high
+    "Low" => low
+    "Close" => close
+    "HL2" => (high + low) / 2
+    "HLC3" => (high + low + close) / 3
+    "OHLC4" => (open + high + low + close) / 4
+    => close
+
+// Calculate MA based on selected type
+ma = switch maType
+    "SMA" => ta.sma(src, maLength)
+    "EMA" => ta.ema(src, maLength)
+    "WMA" => ta.wma(src, maLength)
+    "VWMA" => ta.vwma(src, maLength)
+    "HMA" => ta.hma(src, maLength)
+    "DEMA" => 2 * ta.ema(src, maLength) - ta.ema(ta.ema(src, maLength), maLength)
+    "TEMA" => 3 * (ta.ema(src, maLength) - ta.ema(ta.ema(src, maLength), maLength)) + ta.ema(ta.ema(ta.ema(src, maLength), maLength), maLength)
+    "ZLEMA" => ta.ema(src + (src - src[math.max(1, maLength/2)]), maLength)
+    => ta.ema(src, maLength)
+
+// Calculate previous highs and lows
+prevHigh = ta.highest(high, lookbackPeriod)
+prevLow = ta.lowest(low, lookbackPeriod)
+
+// Entry conditions
+longCondition = ta.crossover(prevLow, ma)  // Previous low crosses above MA
+shortCondition = ta.crossunder(prevHigh, ma)  // Previous high crosses below MA
+
+// Exit conditions
+exitLongCondition = close < ta.lowest(low, lookbackPeriod)  // Close below previous low
+exitShortCondition = close > ta.highest(high, lookbackPeriod)  // Close above previous high
+
+// Check open positions
+isLongOpen = strategy.position_size > 0  // Long position is open
+isShortOpen = strategy.position_size < 0  // Short position is open
+
+// Close opposite position before entering new trade
+if (longCondition and isShortOpen)
+    strategy.close("Short")
+
+if (shortCondition and isLongOpen)
+    strategy.close("Long")
+
+// Enter trades with fixed USDT amount
+if (longCondition and not isLongOpen)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition and not isShortOpen)
+    strategy.entry("Short", strategy.short)
+
+// Exit trades
+if (exitLongCondition)
+    strategy.close("Long")
+
+if (exitShortCondition)
+    strategy.close("Short")
+
+// Visualization on chart
+plot(prevHigh, color=color.red, title="Previous High", linewidth=1)
+plot(prevLow, color=color.green, title="Previous Low", linewidth=1)
+plot(ma, color=color.blue, title="MA", linewidth=2)
+
+View in Pine Editor・85 lines
+Use on chart
+4
+8
+1 724
+1. Principle of Work & Strategy Logic ⚙️📈
+
+Main idea: The strategy tries to catch the moment of a breakout from a price consolidation range (flat) and the start of a new trend. It combines two key elements:
+
+Moving Average (MA) 📉: Acts as a dynamic support/resistance level and trend filter.
+
+Range Extremes (Range High/Low) 🔺🔻: Define the borders of the recent price channel or consolidation.
+
+The strategy does not attempt to catch absolute tops and bottoms. Instead, it enters an already formed move after the breakout, expecting continuation.
+
+Type: Trend-following, momentum-based.
+Timeframes: Works on different TFs (H1, H4, D), but best suited for H4 and higher, where breakouts are more meaningful.
+
+2. Justification of Indicators & Settings ⚙️
+A. Moving Average (MA) 📊
+
+Why used: Core of the strategy. It smooths price fluctuations and helps define the trend. The price (via extremes) must cross the MA → signals a potential trend shift or strengthening.
+
+Parameters:
+
+maLength = 20: Default length (≈ one trading month, 20-21 days). Good balance between sensitivity & smoothing.
+
+Lower TF → reduce (10–14).
+
+Higher TF → increase (50).
+
+maSource: Defines price source (default = Close). Alternatives (HL2, HLC3) → smoother, less noisy MA.
+
+maType: Default = EMA (Exponential MA).
+
+Why EMA? Faster reaction to recent price changes vs SMA → useful for breakout strategies.
+Other options:
+
+SMA 🟦 – classic, slowest.
+
+WMA 🟨 – weights recent data stronger.
+
+HMA 🟩 – near-zero lag, but “nervous,” more false signals.
+
+DEMA/TEMA 🟧 – even faster & more sensitive than EMA.
+
+VWMA 🔊 – volume-weighted.
+
+ZLEMA ⏱ – reduced lag.
+
+👉 Choice = tradeoff between speed of reaction & false signals.
+
+B. Range Extremes (Previous High/Low) 📏
+
+Why used: Define borders of recent trading range.
+
+prevHigh = local resistance.
+
+prevLow = local support.
+Break of these levels on close = trigger.
+
+Parameters:
+
+lookbackPeriod = 5: Searches for highest high / lowest low of last 5 candles. Very recent range.
+
+Higher value (10–20) → wider, stronger ranges but rarer signals.
+
+3. Entry & Exit Rules 🎯
+Long signals (BUY) 🟢📈
+
+Condition (longCondition): Previous Low crosses MA from below upwards.
+→ Price bounced from the bottom & strong enough to push range border above MA.
+
+Execution: Auto-close short (if any) → open long.
+
+Short signals (SELL) 🔴📉
+
+Condition (shortCondition): Previous High crosses MA from above downwards.
+→ Price rejected from the top, upper border failed above MA.
+
+Execution: Auto-close long (if any) → open short.
+
+Exit conditions 🚪
+
+Exit Long (exitLongCondition): Close below prevLow.
+→ Uptrend likely ended, range shifts down.
+
+Exit Short (exitShortCondition): Close above prevHigh.
+→ Downtrend likely ended, range shifts up.
+
+⚠️ Important: Exit = only on candle close beyond extremes (not just wick).
+
+4. Trading Settings ⚒️
+
+overlay = true → indicators shown on chart.
+
+initial_capital = 10000 💵.
+
+default_qty_type = strategy.cash, default_qty_value = 100 → trades fixed $100 per order (not lots). Can switch to % of equity.
+
+commission_type = strategy.commission.percent, commission_value = 0.1 → default broker fee = 0.1%. Adjust for your broker!
+
+slippage = 3 → slippage = 3 ticks. Adjust to asset liquidity.
+
+currency = USD.
+
+margin_long = 100, margin_short = 100 → no leverage (100% margin).
+
+5. Visualization on Chart 📊
+
+The strategy draws 3 lines:
+
+🔵 MA line (thickness 2).
+
+🔴 Previous High (last N candles).
+
+🟢 Previous Low (last N candles).
+
+Also: entry/exit arrows & equity curve shown in backtest.
+
+Disclaimer ⚠️📌
+
+Risk Warning: This description & code are for educational purposes only. Not financial advice. Trading (Forex, Stocks, Crypto) carries high risk and may lead to full capital loss. You trade at your own risk.
+
+Testing: Always backtest & demo test first. Past results ≠ future profits.
+
+Responsibility: Author of this strategy & description is not responsible for your trading decisions or losses.

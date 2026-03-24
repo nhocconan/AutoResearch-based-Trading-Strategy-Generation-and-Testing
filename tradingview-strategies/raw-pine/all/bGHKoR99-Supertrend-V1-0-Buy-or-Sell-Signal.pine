@@ -1,0 +1,77 @@
+//@version=2
+strategy("Supertrend V1.0 - Buy or Sell Signal",overlay=true,pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 20)
+Factor=input(3, minval=1,maxval = 100)
+Pd=input(7, minval=1,maxval = 100)
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 4, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 10, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2016, title = "From Year", minval = 2009)
+ToMonth   = input(defval = 9, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 10, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2020, title = "To Year", minval = 2017)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+//Calculating ATR
+Multiple = input(1.5, minval=0,step=0.01)
+ATR1 = atr(14)*Multiple
+ATR2 = atr(14)
+
+
+//VJ2 Supertrend
+
+Up=hl2-(Factor*atr(Pd))
+Dn=hl2+(Factor*atr(Pd))
+
+
+TrendUp=close[1]>TrendUp[1]? max(Up,TrendUp[1]) : Up
+TrendDown=close[1]<TrendDown[1]? min(Dn,TrendDown[1]) : Dn
+
+Trend = close > TrendDown[1] ? 1: close< TrendUp[1]? -1: nz(Trend[1],1)
+Tsl = Trend==1? TrendUp: TrendDown
+
+linecolor = Trend == 1 ? green : red
+
+plot(Tsl, color = linecolor , style = line , linewidth = 2,title = "SuperTrend")
+
+plotshape(cross(close,Tsl) and close>Tsl , "Up Arrow", shape.triangleup,location.belowbar,green,0,0)
+plotshape(cross(Tsl,close) and close<Tsl , "Down Arrow", shape.triangledown , location.abovebar, red,0,0)
+//plot(Trend==1 and Trend[1]==-1,color = linecolor, style = circles, linewidth = 3,title="Trend")
+
+plotarrow(Trend == 1 and Trend[1] == -1 ? Trend : na, title="Up Entry Arrow", colorup=lime, maxheight=60, minheight=50, transp=0)
+plotarrow(Trend == -1 and Trend[1] == 1 ? Trend : na, title="Down Entry Arrow", colordown=red, maxheight=60, minheight=50, transp=0)
+
+
+
+//Strategy
+algo_buy = Trend == 1 and Trend[1] == -1
+algo_sell= Trend == -1 and Trend[1] == 1
+
+
+//strategy.entry("Buy",strategy.long,when = algo_buy==1)
+//strategy.entry("Sell",strategy.short,when = algo_sell==1)
+
+
+strategy.entry("Long1", strategy.long, when= window() and algo_buy==1)
+strategy.exit("Exit long","Long1", profit = strategy.position_avg_price + ATR2, stop = strategy.position_avg_price - ATR1, when = window())
+
+strategy.entry("Short1", strategy.short, when=window() and algo_sell==1)
+strategy.exit("Exit Short","Short1", profit = strategy.position_avg_price - ATR2, stop = strategy.position_avg_price + ATR1, when = window())
+
+View in Pine Editor・63 lines
+Use on chart
+2
+7
+6
+3
+15 157
+Apr 11, 2019
+A test of the Supertrend Indicator. If I have made any mischaracterizations and mistakes, please let me know in the comments.
+Sep 12, 2020
+Release Notes
+update to script
+

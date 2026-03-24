@@ -1,0 +1,77 @@
+//@version=4
+strategy(shorttitle='Short In Downtrend',title='Short In Downtrend Below MA100', overlay=true, initial_capital = 1000, process_orders_on_close=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 10,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2019, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+//MA inputs and calculations
+inSignal=input(50, title='MASignal')
+
+MA= sma(close, inSignal)
+
+// RSI inputs and calculations
+lengthRSI = input(14, title = 'RSI period', minval=1)
+RSI = rsi(close, lengthRSI)
+
+
+//Entry 
+strategy.entry(id="short", long = false, when = close < MA and RSI > 30)
+
+//Exit
+shortStopPrice  = strategy.position_avg_price * (1 + 0.03)
+shortTakeProfit = strategy.position_avg_price * (1 - 0.02)
+
+strategy.close("short", when = close > shortStopPrice or close < shortTakeProfit and window())
+
+
+plot(MA, color=color.purple, linewidth=2)
+
+View in Pine Editor・41 lines
+Use on chart
+1
+7
+1
+3
+6 757
+This is a simple strategy to take advantage of downtrends. It's useful to run such a strategy as a hedge in times of market uncertainty.
+
+
+The Sell Condition - Entry
+
+The sell signal triggers when:
+
+
+the coin has MA (100) greater than the price in a timeframe of 15 minutes, meaning that the coin is in a short-term downtrend.
+
+the coin has an RSI greater than 30 in a timeframe of 15 minutes, indicating that it didn't reach oversold conditions yet, so there is still room for a further price drop.
+
+
+
+
+On Coinrule, you can launch the strategy on real market conditions, setting up multiple sequential sell orders. The strategy would keep selling while the price stays below the MA(100). In that case, it's advisable to set low amounts for the sell orders. the position will grow gradually while the downtrend intensifies. Set a minimum time interval between the sell orders will also help to have control over the overall position size.
+
+
+
+The Buy Condition - Exit
+
+The bot connects to each trade a stop loss and a take profit. The percentages are optimized for short term trades on mid-cap coins. You can adjust the percentages depending on the specific coin you are trading. A ratio of 1:1.5 between the stop loss and the take profit could work as the strategy trades in the same direction of the trend. 
+
+Stop loss at 3% from the entry price
+
+Take profit at 2% from the entry price
+
+
+A slightly larger stop loss allows tolerating more volatility to reduce the case of stops triggering when it shouldn't.
+
+

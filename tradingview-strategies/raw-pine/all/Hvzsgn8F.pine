@@ -1,0 +1,6 @@
+//@version=5
+ob_threshold=##input(defval=0,type='INPUT_INTEGER',##id='in_4')
+os_threshold=##input(defval=-175,type='INPUT_INTEGER',##id='in_5')
+##root(root_metainfo,rm_0,'Top',input__string,plotchar,location)
+##root(root_metainfo,rm_1,ob_threshold,input__float)
+##root(root_metainfo,rm_2,os_threshold,input__float)

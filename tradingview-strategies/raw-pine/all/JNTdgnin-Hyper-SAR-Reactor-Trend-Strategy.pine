@@ -1,0 +1,259 @@
+//@version=6
+strategy("HyperSAR Reactor ", shorttitle="HyperSAR ", overlay=true, pyramiding=0,
+     initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.05, slippage=5,
+     process_orders_on_close=false, calc_on_every_tick=false, calc_on_order_fills=false, margin_short = 0, margin_long = 0)
+
+// =============== GROUPS
+grp_engine = "Reactor Engine"
+grp_filters = "Trade Filters"
+grp_risk   = "Risk"
+grp_view   = "View"
+
+// =============== ENGINE INPUTS  (your defaults)
+start_af   = input.float(0.02, "Start AF",  minval=0.0, maxval=1.0, step=0.01, group=grp_engine)
+max_af     = input.float(1.00, "Max AF",    minval=0.0, maxval=1.0, step=0.01, group=grp_engine)
+base_step  = input.float(0.04, "Base step", minval=0.0, maxval=1.0, step=0.01, group=grp_engine)
+
+reg_len    = input.int  (18,   "Strength window", minval=5,  group=grp_engine)
+atr_len    = input.int  (16,   "ATR length",      minval=5,  group=grp_engine)
+alpha_gain = input.float(4.5,  "Strength gain",   minval=0.5, step=0.5, group=grp_engine)
+alpha_ctr  = input.float(0.45, "Strength center", minval=0.1, step=0.05, group=grp_engine)
+boost_k    = input.float(0.03, "Boost factor",    minval=0.0, step=0.01, group=grp_engine)
+
+af_smooth    = input.float(0.50, "AF smoothing",    minval=0.0, maxval=1.0, step=0.05, group=grp_engine)
+trail_smooth = input.float(0.35, "Trail smoothing", minval=0.0, maxval=1.0, step=0.05, group=grp_engine)
+
+allow_long   = input.bool(true,  "Allow Long",  group=grp_engine)
+allow_short  = input.bool(true,  "Allow Short", group=grp_engine)
+
+// =============== FILTERS  (your defaults)
+confirm_buf_atr = input.float(0.50, "Flip confirm buffer ATR", minval=0.0, step=0.05, group=grp_filters)
+cooldown_bars   = input.int  (0,    "Cooldown bars after entry", minval=0, group=grp_filters)
+vol_len         = input.int  (30,   "Vol gate length", minval=5, group=grp_filters)
+vol_thr         = input.float(1.00, "Vol gate ratio ATR over mean", minval=0.5, step=0.05, group=grp_filters)
+
+require_bear_regime = input.bool(true, "Gate shorts by bear regime", group=grp_filters)
+bias_len            = input.int (54,   "Bear bias window", minval=10, group=grp_filters)
+bias_ma_len         = input.int (91,   "Bias MA length",  minval=20, group=grp_filters)
+
+// =============== RISK  (your defaults)
+tp_long_atr  = input.float(1.0, "TP long ATR",  minval=0.0, step=0.25, group=grp_risk)
+tp_short_atr = input.float(0.0, "TP short ATR", minval=0.0, step=0.25, group=grp_risk)
+
+// =============== HELPERS
+sigmoid(x, g, c) => 1.0 / (1.0 + math.exp(-g * (x - c)))
+slope_per_bar(src, len) =>
+    corr = ta.correlation(src, float(bar_index), len)
+    sy   = ta.stdev(src, len)
+    sx   = ta.stdev(float(bar_index), len)
+    nz(corr, 0.0) * nz(sy, 0.0) / nz(sx, 1.0)
+
+atr = ta.atr(atr_len)
+drift = math.abs(slope_per_bar(close, reg_len)) / nz(atr, 1e-12)
+strength = sigmoid(drift, alpha_gain, alpha_ctr)
+step_dyn  = base_step + boost_k * strength
+
+vol_ok   = atr / ta.sma(atr, vol_len) >= vol_thr
+trend_ma = ta.ema(close, bias_ma_len)
+bias_dn  = close < trend_ma and slope_per_bar(close, bias_len) < 0
+
+// =============== ADAPTIVE PSAR WITH INERTIA
+var float psar      = na
+var float ep        = na
+var float af        = na
+var bool  up_trend  = false
+var int   next_ok   = na  // earliest bar allowed to enter again
+var float vis_psar  = na
+
+init_now = na(psar)
+if init_now
+    up_trend := close >= open
+    ep       := up_trend ? high : low
+    psar     := up_trend ? low  : high
+    af       := start_af
+    next_ok  := bar_index
+
+float next_psar = na
+bool flipped = false
+
+if up_trend
+    next_psar := psar + af * (ep - psar)
+    next_psar := math.min(next_psar, nz(low[1], low), nz(low[2], low))
+    if close < next_psar
+        up_trend := false
+        psar     := ep
+        ep       := low
+        af       := start_af
+        flipped  := true
+    else
+        // monotone trail with inertia
+        mid = psar + trail_smooth * (next_psar - psar)
+        psar := math.max(psar, mid)
+        if high > ep
+            ep := high
+            new_af = math.min(af + step_dyn, max_af)
+            af := af + af_smooth * (new_af - af)
+else
+    next_psar := psar + af * (ep - psar)
+    next_psar := math.max(next_psar, nz(high[1], high), nz(high[2], high))
+    if close > next_psar
+        up_trend := true
+        psar     := ep
+        ep       := high
+        af       := start_af
+        flipped  := true
+    else
+        mid = psar + trail_smooth * (next_psar - psar)
+        psar := math.min(psar, mid)
+        if low < ep
+            ep := low
+            new_af = math.min(af + step_dyn, max_af)
+            af := af + af_smooth * (new_af - af)
+
+// visual only
+vis_psar := na(vis_psar[1]) ? psar : vis_psar[1] + 0.35 * (psar - vis_psar[1])
+vis_psar := up_trend ? math.max(nz(vis_psar[1], vis_psar), vis_psar) : math.min(nz(vis_psar[1], vis_psar), vis_psar)
+
+// =============== ENTRY LOGIC WITH HYSTERESIS AND COOLDOWN
+long_flip  =  up_trend and flipped
+short_flip = not up_trend and flipped
+
+need_wait  = bar_index < nz(next_ok, bar_index)
+pass_long  = long_flip  and close > psar + confirm_buf_atr * atr and vol_ok and not need_wait
+pass_short = short_flip and close < psar - confirm_buf_atr * atr and vol_ok and not need_wait and (not require_bear_regime or bias_dn)
+
+// =============== ORDERS
+if allow_long and pass_long
+    strategy.entry("Long", strategy.long)
+    next_ok := bar_index + cooldown_bars
+
+if allow_short and pass_short
+    strategy.entry("Short", strategy.short)
+    next_ok := bar_index + cooldown_bars
+
+if allow_long
+    if pass_short
+        strategy.close("Long")
+
+if allow_short
+    if pass_long
+        strategy.close("Short")
+
+// if strategy.position_size > 0
+//     strategy.exit("Lx", from_entry="Long",  stop=psar, limit = tp_long_atr  > 0 ? strategy.opentrades.entry_price(0) + tp_long_atr  * atr : na)
+if strategy.position_size < 0
+    strategy.exit("Sx", from_entry="Short", stop=psar, limit = tp_short_atr > 0 ? strategy.opentrades.entry_price(0) - tp_short_atr * atr : na)
+
+View in Pine Editor・148 lines
+Use on chart
+9
+6
+2 776
+HyperSAR Reactor Adaptive PSAR Strategy
+
+Summary
+
+Adaptive Parabolic SAR strategy for liquid stocks, ETFs, futures, and crypto across intraday to daily timeframes. It acts only when an adaptive trail flips and confirmation gates agree. Originality comes from a logistic boost of the SAR acceleration using drift versus ATR, plus ATR hysteresis, inertia on the trail, and a bear-only gate for shorts. Add to a clean chart and run on bar close for conservative alerts.
+
+Scope and intent
+
+• Markets: large cap equities and ETFs, index futures, major FX, liquid crypto
+• Timeframes: one minute to daily
+• Default demo: BTC on 60 minute
+• Purpose: faster yet calmer PSAR that resists chop and improves short discipline
+• Limits: this is a strategy that places simulated orders on standard candles
+
+Originality and usefulness
+
+• Novel fusion: PSAR AF is boosted by a logistic function of normalized drift, trail is monotone with inertia, entries use ATR buffers and optional cooldown, shorts are allowed only in a bear bias
+• Addresses false flips in low volatility and weak downtrends
+• All controls are exposed in Inputs for testability
+• Yardstick: ATR normalizes drift so settings port across symbols
+• Open source. No links. No solicitation
+
+Method overview
+
+Components
+• Adaptive AF: base step plus boost factor times logistic strength
+• Trail inertia: one sided blend that keeps the SAR monotone
+• Flip hysteresis: price must clear SAR by a buffer times ATR
+• Volatility gate: ATR over its mean must exceed a ratio
+• Bear bias for shorts: price below EMA of length 91 with negative slope window 54
+• Cooldown bars optional after any entry
+• Visual SAR smoothing is cosmetic and does not drive orders
+
+Fusion rule
+Entry requires the internal flip plus all enabled gates. No weighted scores.
+
+Signal rule
+• Long when trend flips up and close is above SAR plus buffer times ATR and gates pass
+• Short when trend flips down and close is below SAR minus buffer times ATR and gates pass
+• Exit uses SAR as stop and optional ATR take profit per side
+
+
+Inputs with guidance
+
+Reactor Engine
+• Start AF 0.02. Lower slows new trends. Higher reacts quicker
+• Max AF 1. Typical 0.2 to 1. Caps acceleration
+• Base step 0.04. Typical 0.01 to 0.08. Raises speed in trends
+• Strength window 18. Typical 10 to 40. Drift estimation window
+• ATR length 16. Typical 10 to 30. Volatility unit
+• Strength gain 4.5. Typical 2 to 6. Steepness of logistic
+• Strength center 0.45. Typical 0.3 to 0.8. Midpoint of logistic
+• Boost factor 0.03. Typical 0.01 to 0.08. Adds to step when strength rises
+• AF smoothing 0.50. Typical 0.2 to 0.7. Adds inertia to AF growth
+• Trail smoothing 0.35. Typical 0.15 to 0.45. Adds inertia to the trail
+• Allow Long, Allow Short toggles
+
+Trade Filters
+• Flip confirm buffer ATR 0.50. Typical 0.2 to 0.8. Raise to cut flips
+• Cooldown bars after entry 0. Typical 0 to 8. Blocks re entry for N bars
+• Vol gate length 30 and Vol gate ratio 1. Raise ratio to trade only in active regimes
+• Gate shorts by bear regime ON. Bear bias window 54 and Bias MA length 91 tune strictness
+
+Risk
+• TP long ATR 1.0. Set to zero to disable
+• TP short ATR 0.0. Set to 0.8 to 1.2 for quicker shorts
+
+Usage recipes
+
+Intraday trend focus
+Confirm buffer 0.35 to 0.5. Cooldown 2 to 4. Vol gate ratio 1.1. Shorts gated by bear regime.
+
+Intraday mean reversion focus
+Confirm buffer 0.6 to 0.8. Cooldown 4 to 6. Lower boost factor. Leave shorts gated.
+
+Swing continuation
+Strength window 24 to 34. ATR length 20 to 30. Confirm buffer 0.4 to 0.6. Use daily or four hour charts.
+
+
+Properties visible in this publication
+
+Initial capital 10000. Base currency USD. Order size Percent of equity 3. Pyramiding 0. Commission 0.05 percent. Slippage 5 ticks. Process orders on close OFF. Bar magnifier OFF. Recalculate after order filled OFF. Calc on every tick OFF. No security calls.
+
+
+Realism and responsible publication
+
+No performance claims. Past results never guarantee future outcomes. Shapes can move while a bar forms and settle on close. Strategies execute only on standard candles.
+
+Honest limitations and failure modes
+
+High impact events and thin books can void assumptions. Gap heavy symbols may prefer longer ATR. Very quiet regimes can reduce contrast and invite false flips.
+
+Open source reuse and credits
+
+Public domain building blocks used: PSAR concept and ATR. Implementation and fusion are original. No borrowed code from other authors.
+
+
+Strategy notice
+Orders are simulated on standard candles. No lookahead.
+
+Entries and exits
+Long: flip up plus ATR buffer and all gates true
+Short: flip down plus ATR buffer and gates true with bear bias when enabled
+Exit: SAR stop per side, optional ATR take profit, optional cooldown after entry
+Tie handling: stop first if both stop and target could fill in one bar
+
+

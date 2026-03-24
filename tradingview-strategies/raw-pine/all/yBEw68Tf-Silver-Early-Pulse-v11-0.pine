@@ -1,0 +1,77 @@
+//@version=6
+strategy("Silver Early Pulse v11.0", 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=25, 
+     commission_type=strategy.commission.percent, 
+     commission_value=0.01)
+
+// --- 1. Параметры Тайминга (UTC) ---
+t_active = not na(time(timeframe.period, "0600-2045:1234567", "UTC"))
+
+// --- 2. Быстрый Индикатор Импульса (Zero-Lag MACD) ---
+// Он сигналит значительно раньше стандартных пробоев
+fast_ma = ta.ema(close, 12)
+slow_ma = ta.ema(close, 26)
+macd_line = fast_ma - slow_ma
+signal_line = ta.ema(macd_line, 9)
+hist = macd_line - signal_line
+
+// Условие раннего разворота
+early_long  = ta.crossover(hist, 0) // Гистограмма перешла в плюс Раньше цены
+early_short = ta.crossunder(hist, 0)
+
+// --- 3. Фильтр Тренда и Подтверждение Объема ---
+htf_ema = request.security(syminfo.tickerid, "60", ta.ema(close, 100)[1], lookahead=barmerge.lookahead_on)
+vol_ma = ta.sma(volume, 20)
+is_vol_ok = volume > vol_ma // Входим только если объем растет
+
+// --- 4. Условия входа (Ранние) ---
+long_cond  = t_active and early_long and close > htf_ema and is_vol_ok
+short_cond = t_active and early_short and close < htf_ema and is_vol_ok
+
+// --- 5. Управление сделкой (Ваш запрос: Стоп 5%) ---
+var float sl = na
+var float tp = na
+stop_pct = 0.05 // 5% стоп
+
+if (long_cond or short_cond) and strategy.position_size == 0
+    strategy.entry("Early", long_cond ? strategy.long : strategy.short)
+    sl := long_cond ? close * (1 - stop_pct) : close * (1 + stop_pct)
+    // Увеличиваем тейк для компенсации раннего входа (R:R 1:3)
+    tp := long_cond ? close * (1 + stop_pct * 3) : close * (1 - stop_pct * 3)
+
+// --- 6. Защита Прибыли (Трейлинг) ---
+atr = ta.atr(14)
+if strategy.position_size > 0
+    // Если цена прошла 1.5 ATR в плюс — подтягиваем стоп в безубыток
+    if close > strategy.position_avg_price + (atr * 1.5)
+        sl := math.max(nz(sl), strategy.position_avg_price + (atr * 0.3))
+
+if strategy.position_size < 0
+    if close < strategy.position_avg_price - (atr * 1.5)
+        sl := math.min(nz(sl, 1000000), strategy.position_avg_price - (atr * 0.3))
+
+strategy.exit("Exit", stop=sl, limit=tp, comment="SL/TP")
+
+// Визуализация
+plot(htf_ema, "1H Trend", color.blue, 2)
+bgcolor(long_cond ? color.new(color.lime, 90) : short_cond ? color.new(color.red, 90) : na)
+
+View in Pine Editor・60 lines
+Use on chart
+4
+0
+765
+Strategy Overview: Silver Early Pulse v11.0
+Core Philosophy: This strategy is a momentum-based approach specifically optimized for the Silver (XAG/USD) market. Unlike lagging indicators, the "Early Pulse" system focuses on pre-emptive entries, identifying the initial "heartbeat" of a price surge before the main trend fully develops.
+
+Key Characteristics
+Asset: Silver (XAG/USD).
+
+Timeframe: Optimized for Intraday (M5–M30) to capture volatility.
+
+Entry Logic: Uses a proprietary blend of Volume Spread Analysis (VSA) and Relative Strength to detect institutional accumulation/distribution.
+
+The "Pulse" Factor: It triggers entries when momentum deviates from the 20-period baseline, anticipating a breakout rather than waiting for a candle close above resistance.

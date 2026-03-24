@@ -1,0 +1,68 @@
+//@version=5
+strategy("MACD 趋势增强策略 (带保本与移动止损)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- 参数设置 ---
+// MACD 参数
+fast_length = input.int(12, "MACD 快线长度")
+slow_length = input.int(26, "MACD 慢线长度")
+signal_smoothing = input.int(9, "信号平滑")
+src = input.source(close, "数据源")
+
+// 风险管理参数
+stop_loss_perc = input.float(2.0, "初始止损 (%)", minval=0.1) / 100
+be_trigger_perc = input.float(1.5, "保本触发点 (盈利 %)", minval=0.1) / 100
+trail_offset_perc = input.float(1.0, "移动止损偏移 (距离最高点 %)", minval=0.1) / 100
+
+// --- 指标计算 ---
+[macdLine, signalLine, _] = ta.macd(src, fast_length, slow_length, signal_smoothing)
+gold_cross = ta.crossover(macdLine, signalLine)
+death_cross = ta.crossunder(macdLine, signalLine)
+
+// --- 交易逻辑变量 ---
+var float entry_price = 0.0
+var bool reached_be = false
+
+// --- 信号执行 ---
+if (gold_cross and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long)
+    entry_price := close
+    reached_be := false
+
+// --- 退出与保护逻辑 ---
+if (strategy.position_size > 0)
+    // 1. 初始止损 (防止大亏)
+    float initial_sl = entry_price * (1 - stop_loss_perc)
+    
+    // 2. 保本逻辑 (锁定利润，解决小赚即收)
+    if (high >= entry_price * (1 + be_trigger_perc))
+        reached_be := true
+    
+    // 如果达到保本点，止损位移至入场价
+    float current_sl = reached_be ? entry_price : initial_sl
+    
+    // 3. 移动止损 (让利润奔跑)
+    // 使用内置的 trailing stop 或手动跟踪最高价
+    float trailing_sl = ta.highest(high, 5) * (1 - trail_offset_perc)
+    
+    // 最终止损取三者中最高值（保护利润不回吐）
+    float final_sl = math.max(current_sl, trailing_sl)
+    
+    // 触发退出：止损或 MACD 死叉
+    if (low <= final_sl or death_cross)
+        strategy.close("Long", comment = low <= final_sl ? "止损离场" : "趋势反转")
+
+// --- 绘图 ---
+plotshape(gold_cross, title="金叉入场", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(death_cross, title="死叉离场", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+plot(strategy.position_size > 0 ? entry_price : na, "入场线", color=color.gray, style=plot.style_linebr)
+
+View in Pine Editor・57 lines
+Use on chart
+1
+5
+354
+MACD Trend Enhancement Strategy (with Capital Preservation and Trailing Stop Loss)
+MACD Trend Enhancement Strategy (with Capital Preservation and Trailing Stop Loss)
+MACD Trend Enhancement Strategy (with Capital Preservation and Trailing Stop Loss)
+MACD Trend Enhancement Strategy (with Capital Preservation and Trailing Stop Loss)
+

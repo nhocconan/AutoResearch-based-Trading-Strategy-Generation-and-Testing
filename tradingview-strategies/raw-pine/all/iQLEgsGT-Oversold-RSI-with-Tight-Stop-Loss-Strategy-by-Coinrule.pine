@@ -1,0 +1,65 @@
+//@version=4
+strategy(shorttitle='Oversold RSI with tight SL',title='Oversold RSI with tight SL Strategy (by Coinrule)', overlay=true, initial_capital = 1000, process_orders_on_close=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 50, commission_type=strategy.commission.percent, commission_value=0.1)
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 1,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2020, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+perc_change(lkb) =>
+    overall_change = ((close[0] - close[lkb]) / close[lkb]) * 100
+
+
+
+// RSI inputs and calculations
+lengthRSI = 14
+RSI = rsi(close, lengthRSI)
+oversold= input(30)
+
+
+//Entry 
+strategy.entry(id="long", long = true, when = RSI< oversold and window())
+
+//Exit
+Stop_loss= ((input (1))/100)
+Take_profit= ((input (7)/100))
+
+longStopPrice  = strategy.position_avg_price * (1 - Stop_loss)
+longTakeProfit = strategy.position_avg_price * (1 + Take_profit)
+
+strategy.close("long", when = close < longStopPrice or close > longTakeProfit and window())
+
+View in Pine Editor・41 lines
+Use on chart
+8
+3
+3 576
+LINKUSD
+
+
+This is one of the best strategies that can be used to get familiar with technical indicators
+ and start to include them in your rules on Coinrule
+.
+
+ENTRY
+
+1. This trading system uses the RSI (Relative Strength Index) to anticipate good points to enter positions. RSI is a technical indicator frequently used in trading. It works by measuring the speed and change of price movements to determine whether a coin is oversold (indicating a good entry point) or overbought (indicating a point of exit/entry for a short position). The RSI oscillates between 0 and 100 and is traditionally considered overbought when over 70 and oversold when below 30.
+
+2. To pick the right moment to buy, the strategy enters a trade when the RSI falls below 30 indicating the coin is oversold and primed for a trend reversal.
+
+EXIT
+
+The strategy then exits the position when the price appreciates 7% from the point of entry. The position also maintains a tight stop-loss and closes the position if the price depreciates 1% from the entry price. The idea behind this is to cut your losing trades fast and let your winners ride.
+
+The best time frame for this strategy based on our back testing data is the daily. Shorter time frames can also work well on certain coins, however in our experience, the daily works best. Feel free to experiment with this script and test it on a variety of your coins! With our back testing data a trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange by volume. In the example shown, this strategy made a handsome net profit of 52.6% on Chainlink with 66.67% of trades being profitable.
+
+You can execute this strategy on your favorite exchanges with Coinrule
+.

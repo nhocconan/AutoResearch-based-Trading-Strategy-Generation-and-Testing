@@ -1,0 +1,68 @@
+//@version=3
+strategy(title="EmaSpreadRSI", shorttitle="EmaSpreadRSI", max_bars_back=4000, overlay=true, precision=4, pyramiding=10, calc_on_order_fills=false, calc_on_every_tick=false,  default_qty_type=strategy.fixed, default_qty_value=100, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.075)
+
+buylevel = input(title="BUY_LEVEL", type=float, defval=0.5, minval=-100, maxval=100, step=0.1)
+rsibuy = input(title="RSI Buy Level", type=float, defval=30, minval=0, maxval=100, step=1)
+rsisell = input(title="RSI Sell Level", type=float, defval=70, minval=0, maxval=100, step=1)
+rsilenght = input(title="rsilenght", type=integer, defval=14, minval=0, maxval=100, step=1)
+candleback = input(title="Use N candles back BuylevelEMA", type=integer, defval=0)
+emalenght = input(title="emalenght", type=integer, defval=50, minval=1, maxval=1000, step=1)
+fastemalenght = input(title="fastemalenght", type=integer, defval=8, minval=1, maxval=1000, step=1)
+slowemalenght = input(title="slowemalenght", type=integer, defval=16, minval=1, maxval=1000, step=1)
+EMAx = input(title="EMAx", type=float, defval=0.5, minval=0.1, maxval=10, step=0.1)
+RSImethod = input(title="RSImethod", type=string, defval="cross", options=["oscillator", "cross"])
+ProfitProcent = input(title="ProfitProcent", type=float, defval=1, minval=0.1, maxval=100, step=0.1)
+
+totalema = ema(close,emalenght)
+fastema=ema(close,fastemalenght)
+slowema=ema(close,slowemalenght)
+spreadrsi = rsi(close,rsilenght)
+
+buylevelok = close<=totalema[candleback]-totalema[candleback]*buylevel/100 and close<=fastema[candleback]-fastema[candleback]*buylevel/100 and close<=slowema[candleback]-slowema[candleback]*buylevel/100
+
+rsibuyok = RSImethod=="oscillator" and spreadrsi < rsibuy? true : RSImethod=="cross" and spreadrsi[1] < rsibuy[1] and spreadrsi > rsibuy ? true : false
+rsisellok = RSImethod=="oscillator" and spreadrsi > rsisell? true : RSImethod=="cross" and spreadrsi[1] > rsisell[1] and spreadrsi < rsisell ? true : false
+
+emabuyok = fastema<slowema and (slowema-fastema)/fastema*100>=EMAx and slowema-fastema<slowema[1]-fastema[1]
+emasellok = fastema>slowema and (fastema-slowema)/slowema*100>=EMAx and fastema-slowema<fastema[1]-slowema[1]
+
+plot(fastema,color=white)
+plot(slowema,color=yellow)
+plot(totalema,color=red)
+
+
+
+
+
+
+
+
+bgsell = rsisellok and emasellok ? red : na
+bgbuy =  rsibuyok and emabuyok and buylevelok? green : na
+bgcolor(bgsell, transp = 70)
+bgcolor(bgbuy, transp=70)
+
+
+
+if n>1000
+
+    strategy.entry(id = "buyspread", long=true, when=rsibuyok and emabuyok and buylevelok)
+   
+
+//if n>1000
+    
+//    strategy.entry("sellspread", strategy.short, when=rsisellok and emasellok and strategy.position_size>0)
+   
+
+
+
+if n>1000
+    strategy.exit(id = 'buyspread', from_entry = "buyspread", profit = strategy.position_avg_price/syminfo.mintick*ProfitProcent/100)
+    strategy.exit(id = 'sellspread', from_entry = "sellspread", profit = strategy.position_avg_price/syminfo.mintick*ProfitProcent/100)
+
+View in Pine Editor・61 lines
+Use on chart
+3
+0
+1 261
+simple code for tuning gunbot10

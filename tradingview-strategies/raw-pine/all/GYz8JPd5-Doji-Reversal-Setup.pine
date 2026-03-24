@@ -1,0 +1,30 @@
+//@version=4
+strategy("Doji Reversal", overlay=true)
+
+smaPeriod = input(title="SMA Period", defval=10, minval=0)
+tolerance = input(title="Tolerance", defval=0.1, minval=0)
+
+lookbackEnd = input(title="End", defval=2, minval=0)
+
+avg = sma(close, smaPeriod)
+signal_long = bool(false)
+signal_short = bool(false)
+
+for i = 1 to lookbackEnd
+    is_doji = (abs(close[i] - open[i]) / (high[i] - low[i])) < tolerance
+    signal_long := signal_long or ( is_doji and (close[i-1] <= high[i] or i == 1) and close[i-1] > high[i] and high[i] < avg and close > open )
+    signal_short := signal_short or ( is_doji and (close[i-1] >= low[i] or i == 1) and close[i-1] < low[i] and low[i] > avg and close < open )
+
+plotshape(signal_long, "LONG", style=shape.triangleup, size=size.normal)
+plotshape(signal_short, "SHORT", style=shape.triangledown, size=size.normal)
+
+strategy.entry("LONG", strategy.long, when=signal_long)
+strategy.entry("SHORT", strategy.short, when=signal_short)
+
+View in Pine Editor・22 lines
+Use on chart
+9
+0
+1
+5 232
+The Doji reversal script from the PivotBoss text

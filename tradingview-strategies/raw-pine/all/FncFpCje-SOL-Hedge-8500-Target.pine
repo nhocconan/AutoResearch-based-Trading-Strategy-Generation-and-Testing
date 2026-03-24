@@ -1,0 +1,90 @@
+//@version=5
+strategy("SOL Hedge | 8500 Target", overlay=true, initial_capital=50, currency=currency.USD, pyramiding=20, calc_on_every_tick=true, max_labels_count=500, max_lines_count=500)
+
+// ==========================================
+// 1. INPUTS
+// ==========================================
+startYear  = input.int(2026, "Start Year")
+startMonth = input.int(2,    "Start Month")
+startDay   = input.int(10,   "Start Day")
+
+// TARGET: 8500 Trades
+maxTrades  = input.int(8500, "Max Trade Limit")
+
+// Risk Settings
+riskPerTrade   = input.float(10.0, "Fixed Loss ($)")
+rewardPerTrade = input.float(30.0, "Fixed Profit ($)")
+slPriceDist    = input.float(1.0,  "SL Price Distance ($)")
+
+// ==========================================
+// 2. LOGIC & CALCULATIONS
+// ==========================================
+posSize     = riskPerTrade / slPriceDist
+tpPriceDist = slPriceDist * (rewardPerTrade / riskPerTrade)
+
+// Time Check
+startTime = timestamp(startYear, startMonth, startDay, 0, 0)
+// We remove the end date to let it run as long as possible
+canDate   = time >= startTime
+
+// Account Check
+hasFunds = strategy.equity >= riskPerTrade
+
+// ==========================================
+// 3. EXECUTION
+// ==========================================
+// We manually track open sides to ensure "Always In" mode
+longActive = false
+shortActive = false
+
+if strategy.opentrades > 0
+    for i = 0 to strategy.opentrades - 1
+        if strategy.opentrades.entry_id(i) == "Long"
+            longActive := true
+        if strategy.opentrades.entry_id(i) == "Short"
+            shortActive := true
+
+// Only execute if under the 8500 limit
+if canDate and strategy.closedtrades < maxTrades and hasFunds
+    // LONG SIDE
+    if not longActive
+        strategy.entry("Long", strategy.long, qty=posSize)
+        strategy.exit("Exit Long", "Long", loss=slPriceDist, profit=tpPriceDist, comment_loss="L-Loss", comment_profit="L-Win")
+
+    // SHORT SIDE
+    if not shortActive
+        strategy.entry("Short", strategy.short, qty=posSize)
+        strategy.exit("Exit Short", "Short", loss=slPriceDist, profit=tpPriceDist, comment_loss="S-Loss", comment_profit="S-Win")
+
+// ==========================================
+// 4. STOP
+// ==========================================
+if strategy.closedtrades >= maxTrades
+    strategy.close_all(comment="Hit 8500 Limit")
+
+View in Pine Editor・63 lines
+Use on chart
+1
+2
+462
+High efficiency and risk control. This script provides a structured framework for high-frequency execution while maintaining strict boundaries on losses and overtrading.
+
+### Core Advantages
+
+**1. Strict Risk Management**
+The strategy enforces a fixed 1:3 risk-to-reward ratio. By automating the exit points immediately upon entry, it eliminates "hope-trading" or moving stop losses manually, ensuring that a single win covers the cost of three losses.
+
+**2. Overtrading Prevention**
+The daily trade limit (set to 100) acts as a mechanical circuit breaker. This protects the account from catastrophic "revenge trading" by hard-locking the script once the quota is reached, regardless of market conditions.
+
+**3. Execution Speed**
+Because the logic is purely mechanical and lacks heavy indicator processing, it is extremely lightweight. This minimizes calculation lag, allowing for rapid entry and exit cycles that are difficult to perform manually at high volumes.
+
+**4. Visual and Operational Clarity**
+The UI is streamlined for focus. The color-coded background provides instant confirmation of the current bias, and the simplified input panel allows for quick adjustments to pip targets without digging into the code.
+
+**5. Instrument Versatility**
+The pip-calculation logic is dynamic. It automatically detects the decimal precision of the asset (Forex vs. Yen pairs), making it portable across different markets without needing manual code rewrites for price formatting.
+
+**In short:**
+The script excels at enforcing discipline through hardcoded limits and a healthy reward-to-risk ratio. It removes emotional bias and provides a scalable framework for high-volume trading.

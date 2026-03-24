@@ -1,0 +1,41 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+
+cond1 = ((year==2019) and (month==6) and (dayofmonth==12))
+
+// these price levels are derived from our A.I. driven quant models;
+// long-entries should have an 8-point trailing stop, 
+//and short entries a 6-point trailing stop - still learning this TradingView environment to code this in
+longCondition1 = crossover(sma(close, 1), 2892.00)
+longCondition2 = crossover(sma(close, 1), 2875.00)
+
+if (cond1 and (longCondition1 or longCondition2))
+    strategy.exit("ShortExit123","Short123")
+    strategy.entry("Long123", strategy.long)
+
+shortCondition1 = crossunder(sma(close, 1), 2887)
+shortCondition2 = crossunder(sma(close, 1), 2878)
+if(cond1 and (shortCondition1 or shortCondition2))
+    strategy.exit("LongExit123","Long123")
+    strategy.entry("Short123", strategy.short)
+
+View in Pine Editor・20 lines
+Use on chart
+1
+5
+3
+2
+5 763
+The entry and exit levels here are NOT derived from any specific indicator but are coming from our A.I. driven proprietary models.
+
+This is an attempt at exploring the trading community here at TradingView and sharing our daily trading plans published at our site with the community here in the form a Pine Script - just starting and learning this platform. Please help point out any obvious errors or gotchas committed in the scripts. Thanks and have a great trading day!
+
+**** The Trading Plan Published for today ****
+
+>>>> Medium-Frequency Models: <<<<< For today, Wednesday 06/12, our medium-frequency models indicate using the 2895 as a pivot point - opening a long on a break above 2895, and opening a short on a break below 2895 (wait for a close on at least a five minute chart to determine the break), both sides with a 9-point trailing stop.     
+
+Note: For the trades to trigger, the breaks should occur during the regular session hours starting at 9:30am ET. By design, these models do NOT open any new positions after 3:45pm. Only one open position at any given time.
+
+>>>>> Aggressive Intraday Models: <<<<< For today, Wednesday 06/12, our aggressive intraday models indicate going long on a break above 2892 or 2875 with an 6-point trailing stop, and going short on a break below 2887 or 2878 with an 8-point trailing stop.   
+
+Note: For the trades to trigger, the breaks should occur during regular session hours starting at 9:30am ET. Due to the intraday nature of these aggressive models, they indicate closing any open trades at 3:55pm and remaining flat into the session close. No opening of new positions after 3:45pm. Only one open position at any given time.

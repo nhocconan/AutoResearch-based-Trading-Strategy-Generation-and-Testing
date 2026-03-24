@@ -1,0 +1,380 @@
+//@version=6
+strategy("阳光电源 | Regime Guard + Turtle Breakout + MFE 2-Stage Trail | Long-only | v6 (Offline-Tuned)",
+     overlay=true,
+     pyramiding=2,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.03,
+     slippage=1,
+     process_orders_on_close=true)
+
+lotShares = input.int(100, "A-share lot shares (每手股数)", minval=1)
+roundToLot(shares) =>
+    s = math.floor(shares)
+    math.floor(s / lotShares) * lotShares
+
+useChiNextDynamicLimit = input.bool(true, "ChiNext dynamic limit (10% before 2020-08-24, 20% after)")
+fixedLimitPct = input.float(0.20, "Fixed limit (%) if not using dynamic", minval=0.05, maxval=0.30, step=0.01)
+chiNextStartMs = 1598227200000  // 2020-08-24 00:00:00 UTC
+limitPct = useChiNextDynamicLimit ? (time < chiNextStartMs ? 0.10 : 0.20) : fixedLimitPct
+
+blockEntryOnLimitUp  = input.bool(true,  "Block entry on limit-up (涨停不追)")
+blockExitOnLimitDown = input.bool(false, "Conservative: block exits on limit-down (跌停可能卖不出)")
+isLimitUp   = not na(close[1]) and close >= close[1] * (1 + limitPct - 0.001)
+isLimitDown = not na(close[1]) and close <= close[1] * (1 - limitPct + 0.001)
+canEnterBar = not (blockEntryOnLimitUp and isLimitUp)
+canExitBar  = not (blockExitOnLimitDown and isLimitDown)
+
+atr = ta.atr(14)
+atrPct = atr / close * 100.0
+ema200 = ta.ema(close, 200)
+
+// slope
+slopeBars    = input.int(67, "EMA slope lookback", minval=5, maxval=120)
+requireSlope = input.bool(false, "Require EMA slope up")
+emaUp        = ema200 > ema200[slopeBars]
+
+// ADX (dmi)
+diLen = input.int(14, "DMI length", minval=5, maxval=50)
+adxSmooth = input.int(14, "ADX smoothing", minval=5, maxval=50)
+[pdi, mdi, adx] = ta.dmi(diLen, adxSmooth)
+useAdxFilter = input.bool(false, "Use ADX filter")
+adxMin       = input.float(18.24, "ADX min", minval=5, step=0.5)
+
+// guards
+useAtrGuard = input.bool(true, "ATR% guard")
+atrPctGuard = input.float(13.49, "Block entry/add if ATR% > x", minval=3.0, step=0.1)
+atrOk = (not useAtrGuard) or (atrPct <= atrPctGuard)
+
+bullRegime = close > ema200 and (not requireSlope or emaUp) and (not useAdxFilter or adx >= adxMin)
+
+// DD scaling + vol targeting
+var float peakEq = na
+peakEq := na(peakEq) ? strategy.equity : math.max(peakEq, strategy.equity)
+ddPct = peakEq > 0 ? (peakEq - strategy.equity) / peakEq * 100.0 : 0.0
+
+ddStart = input.float(4.38, "DD scale start %", minval=0.5, step=0.5)
+ddEnd   = input.float(12.04, "DD scale end %", minval=1.0, step=0.5)
+ddMinScale = input.float(0.56, "Min scale", minval=0.1, maxval=1.0, step=0.01)
+scaleDD = ddPct <= ddStart ? 1.0 : ddPct >= ddEnd ? ddMinScale : (1.0 - (ddPct - ddStart)/(ddEnd - ddStart) * (1.0 - ddMinScale))
+
+useVolTarget = input.bool(true, "Volatility targeting")
+volTargetPct = input.float(5.68, "Target ATR%", minval=0.5, step=0.1)
+volMinLev = input.float(0.81, "Min lev", minval=0.1, maxval=3.0, step=0.01)
+volMaxLev = input.float(1.26, "Max lev", minval=0.5, maxval=5.0, step=0.01)
+lev = (useVolTarget and atrPct > 0) ? math.min(volMaxLev, math.max(volMinLev, volTargetPct / atrPct)) : 1.0
+scale = scaleDD * lev
+
+maxExposurePct = input.float(75.1, "Max exposure cap (% equity)", minval=10, maxval=120, step=1)
+entryPct       = input.float(53.1, "Entry exposure (% equity)", minval=1, maxval=120, step=1)
+addPct         = input.float(79.3, "Add exposure (% equity)", minval=0, maxval=120, step=1)
+
+useRiskCap = input.bool(true, "Risk cap sizing")
+riskCapPct = input.float(3.00, "Max loss at stop (% equity)", minval=0.1, step=0.1)
+
+qtyFromPct(pct) =>
+    desiredValue  = strategy.equity * (pct / 100.0)
+    desiredShares = desiredValue / close
+    capValue      = strategy.equity * (maxExposurePct / 100.0)
+    capShares     = capValue / close
+    curShares     = math.max(strategy.position_size, 0)
+    remainShares  = math.max(0.0, capShares - curShares)
+    roundToLot(math.min(desiredShares, remainShares))
+
+riskCapShares(stopDist) =>
+    raw = (useRiskCap and stopDist > 0) ? (strategy.equity * (riskCapPct/100.0) / stopDist) : 1e18
+    roundToLot(raw)
+
+// anti-chop
+breakBufPct  = input.float(0.13, "Breakout buffer %", minval=0.0, step=0.05)
+cooldownBars = input.int(3, "Cooldown bars after exit", minval=0, maxval=200)
+minHoldBars  = input.int(4, "Min hold bars before Donchian exit", minval=0, maxval=100)
+
+var int lastExitBar = na
+exitPos = (strategy.position_size==0) and (strategy.position_size[1]>0)
+if exitPos
+    lastExitBar := bar_index
+coolOk = cooldownBars==0 ? true : (na(lastExitBar) or (bar_index-lastExitBar>=cooldownBars))
+
+// donchian
+entryLen = input.int(73, "Entry breakout len", minval=10, maxval=200)
+exitLen  = input.int(24,  "Exit breakout len", minval=5, maxval=120)
+addLen   = input.int(12,   "Add breakout len", minval=5, maxval=120)
+
+hiEntry = ta.highest(high, entryLen)[1]
+loExit  = ta.lowest(low,  exitLen)[1]
+hiAdd   = ta.highest(high, addLen)[1]
+
+breakLevel = not na(hiEntry) ? hiEntry * (1 + breakBufPct/100.0) : na
+addLevel   = not na(hiAdd)   ? hiAdd   * (1 + breakBufPct/100.0) : na
+
+entrySignal = bullRegime and atrOk and coolOk and canEnterBar and not na(breakLevel) and ta.crossover(close, breakLevel)
+exitSignal  = not na(loExit) and ta.crossunder(close, loExit)
+addSignal   = bullRegime and atrOk and canEnterBar and not na(addLevel) and ta.crossover(close, addLevel)
+
+// stops
+initStopATR = input.float(2.43, "Init stop ATR mult", minval=0.5, step=0.1)
+trailBase   = input.float(4.16, "Trail ATR mult (base)", minval=1.0, step=0.1)
+trailTight  = input.float(3.00, "Trail ATR mult (tight)", minval=1.0, step=0.1)
+tightenAtR  = input.float(3.79, "Tighten after MFE >= R", minval=0.5, step=0.1)
+
+useBE = input.bool(true, "Breakeven after +R")
+beR   = input.float(1.28, "BE trigger (R)", minval=0.2, step=0.1)
+
+useRegimeExit = input.bool(true, "Regime exit (close < EMA200)")
+
+// adds
+maxAdds     = input.int(1, "Max adds", minval=0, maxval=5)
+addCooldown = input.int(2, "Add cooldown (bars)", minval=0, maxval=200)
+addAfterR   = input.float(0.83, "Add after profit >= R", minval=0.0, step=0.05)
+
+// state
+inPos = strategy.position_size > 0
+avg   = strategy.position_avg_price
+
+var float entryStopDist = na
+var float hhSince = na
+var float trailMono = na
+var int addCount = 0
+var int lastAddBar = na
+var int entryBar = na
+var float effStopPlot = na
+
+newPos = (strategy.position_size>0) and (strategy.position_size[1]<=0)
+if newPos
+    entryBar := bar_index
+    hhSince := high
+    trailMono := na
+    addCount := 0
+    lastAddBar := na
+
+if not inPos
+    entryStopDist := na
+    hhSince := na
+    trailMono := na
+    addCount := 0
+    lastAddBar := na
+    entryBar := na
+    effStopPlot := na
+
+// entry
+if (not inPos) and entrySignal
+    stopDistNow = initStopATR * atr
+    entryStopDist := stopDistNow
+    q = math.min(qtyFromPct(entryPct * scale), riskCapShares(stopDistNow))
+    if q >= lotShares
+        strategy.entry("L", strategy.long, qty=q)
+
+// adds
+profitR_now = (inPos and not na(entryStopDist) and entryStopDist>0) ? ((close-avg)/entryStopDist) : 0.0
+addCoolOk = addCooldown==0 ? true : (na(lastAddBar) or (bar_index-lastAddBar>=addCooldown))
+canAdd = inPos and addSignal and (close>avg) and addCoolOk and (addCount<maxAdds) and (profitR_now>=addAfterR)
+
+if canAdd
+    stopDistNow = initStopATR * atr
+    qA = math.min(qtyFromPct(addPct * scale), riskCapShares(stopDistNow))
+    if qA >= lotShares
+        strategy.entry("L", strategy.long, qty=qA)
+        addCount += 1
+        lastAddBar := bar_index
+
+// exits
+if inPos and not na(entryStopDist)
+    hhSince := na(hhSince) ? high : math.max(hhSince, high)
+    profitR_mfe = (hhSince - avg) / entryStopDist
+    tMult = (profitR_mfe >= tightenAtR) ? trailTight : trailBase
+    trailRaw = hhSince - tMult * atr
+    trailMono := na(trailMono[1]) ? trailRaw : math.max(trailMono[1], trailRaw)
+
+    initStop = avg - entryStopDist
+    effStop  = math.max(initStop, trailMono)
+    if useBE and (close-avg >= beR * entryStopDist)
+        effStop := math.max(effStop, avg)
+
+    effStopPlot := effStop
+    if canExitBar
+        strategy.exit("STOP", from_entry="L", stop=effStop)
+
+    holdOk = (minHoldBars==0) ? true : (not na(entryBar) and (bar_index-entryBar>=minHoldBars))
+    if canExitBar and holdOk and exitSignal
+        strategy.close("L", comment="DonchianExit")
+    if canExitBar and useRegimeExit and close < ema200
+        strategy.close("L", comment="RegimeExit")
+else
+    effStopPlot := na
+
+plot(ema200, "EMA200", linewidth=2)
+plot(effStopPlot, "Stop", style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・207 lines
+Use on chart
+6
+423
+中文（CN）｜Strategy 说明
+概览
+
+SZSE:300274（阳光电源）| Long-only 趋势突破策略
+核心结构：Regime Guard（趋势过滤） + Turtle/Donchian Breakout（突破入场） + MFE 2-Stage ATR Trail（两段追踪止损） + Breakeven（保本） + 动态仓位与回撤控制。
+目标：在趋势行情尽量抓住主升段，同时控制回撤。
+
+策略逻辑（核心）
+1) Regime Guard（趋势环境）
+
+以 EMA200（可调）作为大趋势基准
+
+仅在强势环境允许开仓/加仓（可选：EMA 斜率向上、ADX 强度过滤）
+
+2) Turtle Breakout（唐奇安通道突破）
+
+入场：突破 Donchian High（entryLen）
+
+退出：跌破 Donchian Low（exitLen）
+
+可选：突破缓冲 buffer% + 冷却期 cooldown 来降低假突破频率
+
+3) 风控（策略的关键）
+
+初始止损：InitStopATR × ATR 定义初始风险单位 R
+
+MFE 两段追踪止损：
+
+追踪线 = HH - ATR × trailMult（HH 为入场后最高点）
+
+当 MFE ≥ tightenAtR × R，追踪从 宽切换为 紧，减少回吐
+
+保本（BE）：当盈利 ≥ beR × R，止损上移到开仓价附近，降低深回撤概率
+
+4) 仓位与回撤控制
+
+Risk Cap：单笔最大风险不超过权益的某个百分比
+
+Volatility Targeting：波动大则降仓，波动小则升仓（上下限约束）
+
+Drawdown Scaling：进入回撤区间后自动降低新开仓/加仓暴露
+
+A股/创业板交易规则处理（重要）
+
+整手下单：默认 100 股为一手（自动取整）
+
+涨停不追：涨停日默认不进场（可关闭）
+
+跌停出场：可选“保守模式：跌停不出”（现实可能卖不出）
+
+创业板涨跌幅切换：2020-08-24 起常见 20%，此前常见 10%（脚本按时间切换处理）
+
+参数使用建议（Inputs）
+
+你可以把参数分三类理解：
+
+A) 趋势/突破（决定“做多长、多慢”）
+
+entryLen / exitLen：越大越长线、交易更少；越小越敏感、交易更多
+
+breakBufPct：越大越不容易假突破，但会更晚进场
+
+B) 风控（决定回撤与回吐）
+
+initStopATR：初始止损宽度（R 定义）
+
+trailBase / trailTight / tightenAtR：两段追踪的宽松与收紧时点
+
+beR：保本触发点（越早越保守）
+
+C) 反震荡组件（减少无效交易）
+
+atrPctGuard：极端波动时禁止进场/加仓
+
+cooldownBars / minHoldBars：减少频繁“进出打脸”
+
+实务建议：不要同时大范围调很多参数。
+最好的方式是：锁定主结构，只在小范围调节 breakBufPct / atrPctGuard / cooldown 这类“过滤器”。
+
+适用/不适用市场
+
+✅ 适用：能形成明确趋势（阶段主升浪）的标的与周期（推荐日线）
+⚠️ 不适用：长时间高频震荡、假突破密集的结构（会降低 PF）
+
+回测与实盘差异提示
+
+佣金、滑点、涨跌停成交约束会显著影响结果
+
+本策略在回测中使用了“跌停可能无法成交”的保守选项（可开关）
+
+历史回测不代表未来表现
+
+免责声明
+
+本策略仅供研究与教育用途，不构成投资建议。使用者需自行承担风险。
+
+English (EN)｜Strategy Description
+Overview
+
+SZSE:300274 (Sungrow) | Long-only Trend Breakout Strategy
+Core stack: Regime Guard + Turtle/Donchian Breakout + MFE 2-Stage ATR Trailing + Breakeven + Dynamic Risk/Exposure Controls.
+Designed to capture major uptrend legs while keeping drawdowns controlled.
+
+How it works
+1) Regime Guard (trend filter)
+
+Uses EMA200 (adjustable) as the regime baseline
+
+Entries/adds are allowed only in bullish conditions (optional EMA slope / ADX strength filters)
+
+2) Turtle Breakout (Donchian channel)
+
+Entry: breakout above Donchian High (entryLen)
+
+Exit: breakdown below Donchian Low (exitLen)
+
+Optional buffer% + cooldown to reduce whipsaws
+
+3) Risk engine (key)
+
+Initial stop: InitStopATR × ATR defines risk unit R
+
+MFE 2-stage trailing stop:
+
+Trailing = HH - ATR × trailMult (HH = highest high since entry)
+
+Switches from loose to tight trail after MFE ≥ tightenAtR × R to reduce profit giveback
+
+Breakeven:
+
+Moves stop toward entry after profit ≥ beR × R
+
+4) Position sizing & drawdown controls
+
+Risk Cap: caps per-trade loss as % of equity
+
+Volatility targeting: scales exposure with ATR% (bounded)
+
+Drawdown scaling: reduces new exposure during drawdowns
+
+China A-share / ChiNext practical rules
+
+Board-lot rounding (default 100 shares)
+
+Block entries on limit-up (optional)
+
+Optional conservative limit-down exit handling
+
+ChiNext limit change (commonly 20% from 2020-08-24, 10% before) handled via date switch
+
+Inputs (tuning guide)
+
+Trend/Breakout: entryLen/exitLen, breakBufPct
+
+Risk: initStopATR, trailBase/trailTight/tightenAtR, beR
+
+Anti-chop: atrPctGuard, cooldownBars, minHoldBars
+
+Best practice: keep the core structure fixed and only adjust filters/risk thresholds in small ranges to avoid overfitting.
+
+When to use
+
+✅ Trending regimes (Daily recommended)
+⚠️ Choppy/range-bound regimes can reduce performance due to false breakouts
+
+Disclaimer
+
+For research/education only. Not financial advice. Backtests do not guarantee future results. Use at your own risk.

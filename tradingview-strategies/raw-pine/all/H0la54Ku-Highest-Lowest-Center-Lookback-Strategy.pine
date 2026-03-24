@@ -1,0 +1,54 @@
+//@version=4
+strategy("Highest/Lowest Center Lookback Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+lookback_length = input(200, type=input.integer, minval=1, title="Lookback Length")
+smoother_length = input(5, type=input.integer, minval=1, title="Smoother Length")
+atr_length = input(10, type=input.integer, minval=1, title="ATR Length")
+atr_multiplier = input(1.5, type=input.float, minval=0.5, title="ATR Multiplier")
+
+vola = atr(atr_length) * atr_multiplier
+price = sma(close, 3)
+
+l = ema(lowest(low, lookback_length), smoother_length)
+h = ema(highest(high, lookback_length), smoother_length)
+center = (h + l) * 0.5
+upper = center + vola
+lower = center - vola
+trend = price > upper ? true : (price < lower ? false : na)
+
+bull_cross = crossover(price, upper)
+bear_cross = crossunder(price, lower)
+
+strategy.entry("Buy", strategy.long, when=bull_cross)
+strategy.close("Buy", when=bear_cross)
+
+ph = plot(h, title="High", color=color.green, transp=75, linewidth=2)
+pl1 = plot(l, title="Low", color=color.red, transp=75, linewidth=2)
+
+pc = plot(center, title="Center", color=color.black, transp=85, linewidth=2)
+pu = plot(upper, title="Upper", color=color.black, transp=75, linewidth=2)
+pl = plot(lower, title="Lower", color=color.black, transp=75, linewidth=2)
+
+fill(pu, ph, color=color.green, transp=90)
+fill(pu, pc, color=color.green, transp=95)
+fill(pl, pc, color=color.red, transp=95)
+fill(pl1, pl, color=color.red, transp=90)
+
+bgcolor(trend == true ? color.green : (trend == false ? color.red : na), transp=95)
+
+View in Pine Editor・37 lines
+Use on chart
+1
+2
+0
+1
+4 897
+Nov 21, 2019
+Basicaly long when price above middle of highest and lowest price in lookback period.
+Nov 22, 2019
+Release Notes
+Added missing strategy init params.
+Updated gfx.
+Nov 22, 2019
+Release Notes
+Cleaner gfx

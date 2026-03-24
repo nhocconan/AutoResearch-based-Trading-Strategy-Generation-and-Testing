@@ -1,0 +1,123 @@
+//@version=6
+strategy("ChopFlow ATR Scalp Strategy (OBV EMA)", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+atrLength     = input.int(14, title="ATR Length", minval=1)
+atrMult       = input.float(1.5, title="ATR Multiplier", minval=0.1)
+chopLength    = input.int(14, title="Choppiness Length", minval=1)
+chopThresh    = input.float(60.0, title="Choppiness Threshold")
+obvEmaLength  = input.int(10, title="OBV EMA Length", minval=1)
+sessionInput  = input.session("1700-1600:1234567", title="Trade Session")
+
+// === ATR ===
+atr = ta.rma(ta.tr(true), atrLength)
+
+// === Choppiness Index ===
+tr     = ta.tr(true)
+sumTR  = math.sum(tr, chopLength)
+range_ = ta.highest(high, chopLength) - ta.lowest(low, chopLength)
+chop   = 100 * math.log(sumTR / range_) / math.log(chopLength)
+
+// === On-Balance Volume with EMA ===
+obv    = ta.cum(math.sign(ta.change(close)) * volume)
+obvEma = ta.ema(obv, obvEmaLength)
+
+// === Session Filter ===
+inSession = not na(time(timeframe.period, sessionInput))
+
+// === Entry Conditions ===
+longCond  = inSession and chop < chopThresh and obv > obvEma
+shortCond = inSession and chop < chopThresh and obv < obvEma
+
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Visual: Vertical bars and horizontal lines on entries ===
+// Highlight bar background when entries occur
+bgcolor(longCond  ? color.new(color.green,  85) : na)
+bgcolor(shortCond ? color.new(color.red,    85) : na)
+
+// Draw a horizontal line at entry price
+if longCond
+    line.new(bar_index, close, bar_index + 5, close, extend=extend.none, color=color.green, width=1)
+if shortCond
+    line.new(bar_index, close, bar_index + 5, close, extend=extend.none, color=color.red,   width=1)
+
+// === ATR-Based Exit ===
+strategy.exit("Exit Long",  from_entry="Long",  stop=close - atr * atrMult, profit=atr * atrMult)
+strategy.exit("Exit Short", from_entry="Short", stop=close + atr * atrMult, profit=atr * atrMult)
+
+// === (Optional) Debug Plots ===
+//plot(chop,     title="Choppiness", color=color.green)
+//hline(chopThresh, "Chop Threshold", color=color.yellow)
+//plot(obv,      title="OBV",         color=color.blue)
+//plot(obvEma,   title="OBV EMA",     color=color.orange)
+
+View in Pine Editor・56 lines
+Use on chart
+1
+6
+2
+4 295
+Apr 30, 2025
+A lean, high-velocity scalp framework for NQ and other futures that blends trend clarity, volume confirmation, and adaptive exits to give you precise, actionable signals—no cluttered bands or lagging indicators.
+
+⸻
+
+🔍 Overview
+
+This strategy locks onto rapid intraday moves by:
+• Filtering for directional momentum with the Choppiness Index (CI)
+• Confirming conviction via On-Balance Volume (OBV) against its moving average
+• Automatically sizing stops and targets with a multiple of the Average True Range (ATR)
+
+It’s designed for scalp traders who need clean, timely entries without wading through choppy noise.
+
+⸻
+
+⚙️ Key Features & Inputs
+1. ATR Length & Multiplier
+• Controls exit distances based on current volatility.
+2. Choppiness Length & Threshold
+• Measures trend strength; only fires when the market isn’t “stuck in the mud.”
+3. OBV SMA Length
+• Smoothes volume flow to confirm genuine buying or selling pressure.
+4. Custom Session Hours
+• Avoid overnight gaps or low-liquidity periods.
+
+All inputs are exposed for rapid tuning to your preferred scalp cadence.
+
+🚀 How It Works
+1. Long Entry triggers when:
+• CI < threshold (strong trend)
+• OBV > its SMA (positive volume flow)
+• You’re within the defined session
+2. Short Entry mirrors the above (CI < threshold, OBV < SMA)
+3. Exit uses ATR × multiplier for both stop-loss and take-profit
+
+⸻
+
+🎯 Usage Tips
+• Start with defaults (ATR 14, multiplier 1.5; CI 14, threshold 60; OBV SMA 10).
+• Monitor signal frequency, then tighten/loosen CI or OBV look-back as needed.
+• Pair with a fast MA crossover or price-action trigger if you want even sharper timing.
+• Backtest across different sessions (early open vs. power hours) to find your edge.
+
+⸻
+
+⚠️ Disclaimer
+
+This script is provided “as-is” for educational and research purposes. Always paper-trade any new setup extensively before deploying live capital, and adjust risk parameters to your personal tolerance.
+
+⸻
+
+Elevate your scalp game with ChopFlow ATR—where trend, volume, and volatility converge for clear, confident entries. Happy scalping!
+May 6, 2025
+Release Notes
+Adds EMA and default settings to trading one contract
+May 7, 2025
+Release Notes
+• Added visual background shading on entry bars (green for longs, red for shorts).
+• Plotted horizontal entry lines spanning 5 bars at the entry price.

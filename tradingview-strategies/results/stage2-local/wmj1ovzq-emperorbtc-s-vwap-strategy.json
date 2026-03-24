@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-03-23T04:53:11.345110+00:00",
+  "queue_rank": 3092,
+  "page": 129,
+  "name": "EmperorBTC's VWAP Strategy",
+  "slug": "wmj1ovzq-emperorbtc-s-vwap-strategy",
+  "chart_url": "https://www.tradingview.com/script/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy/",
+  "pine_file": "raw-pine/bulk/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy.pine",
+  "symbol_name": "BINANCE:BTCUSDT",
+  "repo_timeframe_hint": "5m",
+  "status": "unsupported",
+  "classification": "unsupported",
+  "timeframe": "5m",
+  "reason": "uses higher-timeframe lookahead_on",
+  "adaptations": [],
+  "attempts_used": 0,
+  "attempt_log": [],
+  "conversion_notes": [],
+  "python_file": null,
+  "failed_python_files": [],
+  "validation": null,
+  "last_error": null
+}

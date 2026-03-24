@@ -1,0 +1,88 @@
+//@version=5
+strategy("ETH Vol Breakout - NO ERROR VERSION", overlay=true, initial_capital=100000)
+
+// --- INPUTS ---
+// Try changing this to "DERIBIT:ETHDVOL" if it doesn't show trades
+vol_ticker  = input.symbol("DERIBIT:ETHDVOL", "Volatility Symbol") 
+vol_support = input.float(60.0, "Vol Support")
+trail_perc  = input.float(10.0, "Trail %") / 100
+
+// --- DATA WITH ERROR PROTECTION ---
+// 'ignore_invalid_symbol=true' prevents the "Caution" crash
+vol_data = request.security(vol_ticker, "D", close, ignore_invalid_symbol=true)
+
+// Fallback: If vol_data is missing, we use a dummy value so the script keeps running
+valid_vol = nz(vol_data, 100) 
+in_compression = valid_vol <= vol_support
+
+// --- LOGIC ---
+hh = ta.highest(high[1], 3)
+ll = ta.lowest(low[1], 3)
+trail_ticks = (close * trail_perc) / syminfo.mintick
+
+if in_compression and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, stop=hh)
+    strategy.entry("Short", strategy.short, stop=ll)
+
+if strategy.position_size != 0
+    strategy.exit("Exit", trail_points=trail_ticks, trail_offset=trail_ticks)
+
+// --- DEBUG PLOT ---
+// If this line stays at 100, your Vol Ticker is still wrong!
+plot(valid_vol, "Volatility Status", color=color.yellow, display=display.pane)
+
+View in Pine Editor・32 lines
+Use on chart
+3
+478
+This strategy examines the impact of Eth.d Vol on Ethereum price. Looking at ETHDVOL -60 (Support) and 78 (Resistance)—tell a very specific story - analyzing a High Volatility Regime.
+
+The support level around 60 and resistance 78, tend to only occurs during Bull Runs or Market Crashes.
+
+In the "Quiet Years", ETHDVOL rarely touched 60, let alone 78.
+
+Trying to develop a strategy that is perfectly tuned for a Bull Market or a Crisis,
+
+1. The "60 Floor" (Support)
+Context: In a high-volatility regime, when ETHDVOL drops to 60, it indicates the market has "cooled off" just enough to reload leverage.
+
+Historical Behavior (2021-2022 Context):
+
+July 2021: After the May crash, ETHDVOL compressed down and found support at ~65.
+
+Result: This marked the local bottom before the massive run-up to the November All-Time Highs ($4,800).
+
+Outcome: Strong Buy Signal (Trend Continuation).
+
+January 2022: ETHDVOL dropped to ~58-60 while price was hovering around $3,000.
+
+Result: The floor broke, volatility spiked to 80+, and price crashed to $2,200.
+
+Outcome: Trap / Warning Signal.
+
+The Pattern: When Volatility hits 60 (Support), price is usually Coiling.
+
+If Price is trending UP: This is a "dip buy" opportunity. The coil resolves upwards.
+
+If Price is trending DOWN: This is the "calm before the flush." The coil resolves downwards.
+
+2. The "78 Ceiling" (Resistance)
+Context: 78 is an extreme reading. It represents panic (bottom) or euphoria (blow-off top).
+
+Historical Behavior:
+
+May 2021 (The Crash): ETHDVOL smashed through 78, peaking at 100+.
+
+Price Action: Price collapsed from $4,000 to $1,700.
+
+Signal: If Vol > 78, you are in a capitulation event. Buying spot here is usually profitable within 3-6 months (buying the blood).
+
+November 2022 (FTX Collapse): ETHDVOL spiked to ~75-80.
+
+Price Action: ETH hit $1,100 (Cycle Lows).
+
+Signal: Hitting 78 marked the Absolute Bottom.
+
+November 2021 (The Top): Interestingly, at the $4,800 price peak, Volatility was NOT at 78. It was lower (~60-70).
+
+Insight: Bull market tops often happen on lower volatility than bear market bottoms.

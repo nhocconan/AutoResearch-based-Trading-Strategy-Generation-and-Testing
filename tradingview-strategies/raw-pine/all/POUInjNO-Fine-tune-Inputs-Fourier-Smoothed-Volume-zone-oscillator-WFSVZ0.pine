@@ -1,0 +1,9 @@
+//@version=5
+nice_chart=##input(defval=true,type='INPUT_BOOL',##id='in_7')
+##root(root_metainfo,rm_0,(nice_chart?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_1,((not nice_chart)?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_2,((not nice_chart)?display.pane:display.none),cb__input__plot_display__integer,plot,display)
+##root(root_metainfo,rm_3,'Absolute',input__string,plotchar,location)
+##root(root_metainfo,rm_4,'tiny',const__string,plotchar,size)
+##root(root_metainfo,rm_5,'Absolute',input__string,plotchar,location)
+##root(root_metainfo,rm_6,'tiny',const__string,plotchar,size)

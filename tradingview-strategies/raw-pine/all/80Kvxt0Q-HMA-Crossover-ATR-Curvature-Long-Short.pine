@@ -1,0 +1,91 @@
+//@version=6
+strategy("HMA Crossover + ATR + Curvature (Long & Short)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === Inputs ===
+fastLength  = input.int(15, title="Fast HMA Period")
+slowLength  = input.int(34, title="Slow HMA Period")
+atrLength   = input.int(14, title="ATR Period")
+riskPercent = input.float(1.0, minval=0.1, maxval=10, title="Risk per Trade (%)")
+atrMult     = input.float(1.5, title="Stop Loss ATR Multiplier")
+trailMult   = input.float(1.0, title="Trailing Stop ATR Multiplier")
+curvThresh  = input.float(0.0, step=0.01, title="Curvature Threshold (Min Acceleration)")
+
+// === Calculations ===
+fastHMA = ta.hma(close, fastLength)
+slowHMA = ta.hma(close, slowLength)
+atr     = ta.atr(atrLength)
+
+// Curvature: approximate second derivative (acceleration)
+curv = ta.change(ta.change(fastHMA))
+
+// Entry Conditions
+bullish = ta.crossover(fastHMA, slowHMA) and curv > curvThresh
+bearish = ta.crossunder(fastHMA, slowHMA) and curv < -curvThresh
+
+// Risk Management
+stopLoss = atr * atrMult
+trailStop = atr * trailMult
+capital = strategy.equity
+riskCapital = capital * (riskPercent / 100)
+qty = riskCapital / stopLoss
+
+// === Strategy Logic ===
+if (bullish)
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Trail Stop", from_entry="Long", trail_points=trailStop, trail_offset=trailStop)
+
+if (bearish)
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Trail Stop", from_entry="Short", trail_points=trailStop, trail_offset=trailStop)
+
+plotshape(bullish, title="Buy", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(bearish, title="Sell", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+View in Pine Editor・42 lines
+Use on chart
+2
+0
+1
+9
+3 457
+📏 Hull Moving Averages (Trend Filters)
+- fastHMA = ta.hma(close, fastLength)
+- slowHMA = ta.hma(close, slowLength)
+These two HMAs act as dynamic trend indicators:
+- A bullish crossover of fast over slow HMA signals a potential long setup.
+- A bearish crossunder triggers short interest.
+
+⚡️ Curvature (Acceleration Filter)
+- curv = ta.change(ta.change(fastHMA))
+This calculates the second-order change (akin to the second derivative) of the fast HMA — effectively the acceleration of the trend. It serves as a filter:
+- For long entries: curv > curvThresh (positive acceleration)
+- For short entries: curv < -curvThresh (negative acceleration)
+It helps eliminate weak or stagnating moves by requiring momentum behind the crossover.
+
+📈 Volatility-Based Risk Management (ATR)
+- atr = ta.atr(atrLength)
+- stopLoss = atr * atrMult
+- trailStop = atr * trailMult
+These define your:
+- Initial stop loss: scaled to recent volatility using ATR and atrMult.
+- Trailing stop: also ATR-scaled, to lock in gains dynamically as price moves favorably.
+
+💰 Position Sizing via Risk Percent
+- capital = strategy.equity
+- riskCapital = capital * (riskPercent / 100)
+- qty = riskCapital / stopLoss
+This dynamically calculates the position size (qty) such that if the stop loss is hit, the loss does not exceed the predefined percentage of account equity. It’s a volatility-adjusted position sizing method, keeping your risk consistent regardless of market conditions.
+
+📌 Execution Logic
+- Long Entry: on bullish HMA crossover with rising curvature.
+- Short Entry: on bearish crossover with falling curvature.
+- Exits: use ATR-based trailing stops.
+- Position is closed when trend conditions reverse (e.g., bearish crossover exits the long).
+
+This framework gives you:
+- Trend-following logic (via HMAs)
+- Momentum confirmation (via curvature)
+- Volatility-aware execution and exits (via ATR)
+- Risk-controlled dynamic sizing
+Want to get surgical and test what happens if we use curvature on the difference between HMAs instead? That might give some cool insights into trend strength transitions.
+

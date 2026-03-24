@@ -1,0 +1,123 @@
+//@version=5
+strategy('Price Based Z-Trend - strategy [presentTrading]',shorttitle = 'Price Based Z-Trend - strategy [presentTrading]', overlay=false, precision=3, 
+         commission_value=0.1, commission_type=strategy.commission.percent, slippage=1, 
+         currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000)
+
+// User-definable parameters for the Z-score calculation and bar coloring
+tradeDirection = input.string("Both", "Trading Direction", options=["Long", "Short", "Both"]) // User selects trading direction
+
+priceDeviationLength = input.int(100, "Standard Deviation Length", step=1) // Length for standard deviation calculation
+priceAverageLength = input.int(100, "Average Length", step=1) // Length for moving average calculation
+Threshold = input.float(1, "Threshold", step=0.1) // Number of standard deviations for Z-score threshold
+priceBar = input(title='Bar Color', defval=true) // Toggle for coloring price bars based on Z-score
+
+
+// Z-score calculation based on user input for the price source (typically the closing price)
+priceSource = input(close, title="Source")
+priceZScore = (priceSource - ta.ema(priceSource, priceAverageLength)) / ta.stdev(priceSource, priceDeviationLength) // Z-score calculation
+
+// Conditions for entering and exiting trades based on Z-score crossovers
+priceLongCondition = ta.crossover(priceZScore, Threshold) // Condition to enter long positions
+priceExitLongCondition = ta.crossunder(priceZScore, -Threshold) // Condition to exit long positions
+
+longEntryCondition = ta.crossover(priceZScore, Threshold)
+longExitCondition = ta.crossunder(priceZScore, -Threshold)
+shortEntryCondition = ta.crossunder(priceZScore, -Threshold)
+shortExitCondition = ta.crossover(priceZScore, Threshold)
+
+
+// Strategy conditions and execution based on Z-score crossovers and trading direction
+if (tradeDirection == "Long" or tradeDirection == "Both") and longEntryCondition
+    strategy.entry("Long", strategy.long) // Enter a long position
+
+if (tradeDirection == "Long" or tradeDirection == "Both") and longExitCondition
+    strategy.close("Long") // Close the long position
+
+if (tradeDirection == "Short" or tradeDirection == "Both") and shortEntryCondition
+    strategy.entry("Short", strategy.short) // Enter a short position
+
+if (tradeDirection == "Short" or tradeDirection == "Both") and shortExitCondition
+    strategy.close("Short") // Close the short position
+
+
+// Dynamic Thresholds Visualization using 'plot'
+plot(Threshold, "Dynamic Entry Threshold", color=color.new(color.green, 50))
+plot(-Threshold, "Dynamic Short Entry Threshold", color=color.new(color.red, 50))
+
+
+// Color-coding Z-Score
+priceZScoreColor = priceZScore > Threshold ? color.green : 
+              priceZScore < -Threshold ? color.red : color.blue
+plot(priceZScore, "Z-Score", color=priceZScoreColor)
+
+// Lines
+hline(0, color=color.rgb(255, 255, 255, 50), linestyle=hline.style_dotted)
+
+// Bar Color
+priceBarColor = priceZScore > Threshold ? color.green :
+           priceZScore > 0 ? color.lime :
+           priceZScore < Threshold ? color.maroon :
+           priceZScore < 0 ? color.red : color.black
+barcolor(priceBar ? priceBarColor : na)
+
+View in Pine Editor・67 lines
+Use on chart
+4
+0
+6
+2
+9 326
+█ Introduction and How it is Different
+
+Z-score: a statistical measurement of a score's relationship to the mean in a group of scores.
+Simple but effective approach.
+
+The "Price Based Z-Trend - Strategy [presentTrading]" leverages the Z-score, a statistical measure that gauges the deviation of a price from its moving average, normalized against its standard deviation. This strategy stands out due to its simplicity and effectiveness, particularly in markets where price movements often revert to a mean. Unlike more complex systems that might rely on a multitude of indicators, the Z-Trend strategy focuses on clear, statistically significant price movements, making it ideal for traders who prefer a streamlined, data-driven approach.
+
+BTCUSD 6h LS Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+🔶 Calculation of the Z-score
+
+"Z-score is a statistical measurement that describes a value's relationship to the mean of a group of values. Z-score is measured in terms of standard deviations from the mean. If a Z-score is 0, it indicates that the data point's score is identical to the mean score. A Z-score of 1.0 would indicate a value that is one standard deviation from the mean. Z-scores may be positive or negative, with a positive value indicating the score is above the mean and a negative score indicating it is below the mean."
+
+The Z-score is central to this strategy. It is calculated by taking the difference between the current price and the Exponential Moving Average (EMA) of the price over a user-defined length, then dividing this by the standard deviation of the price over the same length:
+z = (x - μ) /σ
+
+Local
+
+
+
+🔶 Trading Signals
+
+Trading signals are generated based on the Z-score crossing predefined thresholds:
+
+- Long Entry: When the Z-score crosses above the positive threshold.
+- Long Exit: When the Z-score falls below the negative threshold.
+- Short Entry: When the Z-score falls below the negative threshold.
+- Short Exit: When the Z-score rises above the positive threshold.
+
+█ Trade Direction
+
+The strategy allows users to select their preferred trading direction through an input option.
+
+█ Usage
+
+To use this strategy effectively, traders should first configure the Z-score thresholds according to their risk tolerance and market volatility. It's also crucial to adjust the length for the EMA and standard deviation calculations based on historical performance and the expected "noise" in price data.
+
+The strategy is designed to be flexible, allowing traders to refine settings to better capture profitable opportunities in specific market conditions.
+
+█ Default Settings
+
+- Trade Direction: Both
+- Standard Deviation Length: 100
+- Average Length: 100
+- Threshold for Z-score: 1.0
+- Bar Color Indicator: Enabled
+
+These settings offer a balanced starting point but can be customized to suit various trading styles and market environments. The strategy's parameters are designed to be adjusted as traders gain experience and refine their approach based on ongoing market analysis.
+
+Z-score is a must-learn approach for every algorithmic trader.

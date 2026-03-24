@@ -1,0 +1,50 @@
+//@version=6
+strategy("RSI-MACD-day", overlay=true)
+
+// 입력 파라미터
+rsiLength = input.int(14, "RSI Length", minval=1)
+rsiMALength = input.int(30, "RSI MA Length", minval=1)
+macdFastLength = input.int(12, "MACD Fast Length", minval=1)
+macdSlowLength = input.int(26, "MACD Slow Length", minval=1)
+macdSignalLength = input.int(9, "MACD Signal Length", minval=1)
+
+// 지표 계산
+rsi = ta.rsi(close, rsiLength)                        // RSI
+rsiMA = ta.ema(rsi, rsiMALength)                      // RSI의 MA선
+[macdLine, signalLine, _] = ta.macd(close, macdFastLength, macdSlowLength, macdSignalLength)  // MACD
+
+// 매수 조건
+buyCondition1 = rsi >= 50                             // RSI 52 이상
+buyCondition2 = rsiMA >= 44                           // RSI MA 48 이상
+buyCondition3 = macdLine >= -1                         // MACD 1 이상
+
+// 최종 매수 조건
+buySignal = buyCondition1 and buyCondition2 and buyCondition3
+
+// 매도 조건
+sellCondition1 = rsi <= 42                            // RSI 42 이하
+sellCondition2 = macdLine <= 0                       // MACD -0.5 이하
+
+// 최종 매도 조건
+sellSignal = sellCondition1 and sellCondition2
+
+// 매수/매도 실행
+if buySignal
+    strategy.entry("Buy", strategy.long)
+
+if sellSignal
+    strategy.close("Buy", comment="Sell")  // 여기서 "Sell"로 변경
+
+// 시각화
+plot(rsi, "RSI", color=color.purple, display=display.none)
+plot(rsiMA, "RSI MA", color=color.orange, display=display.none)
+plot(macdLine, "MACD", color=color.teal, display=display.none)
+plot(signalLine, "MACD Signal", color=color.gray, display=display.none)
+
+View in Pine Editor・42 lines
+Use on chart
+2
+2
+995
+"Strategic trading strategy using RSI and MASCD
+Highest returns when applied to weekly charts"

@@ -1,0 +1,24 @@
+//@version=4
+strategy("dEMA w/ VWAP filter", overlay=true, default_qty_type=strategy.cash, initial_capital=500)
+
+len = input(34, "EMA Length")
+ma = ema(close, len)
+
+longCondition = change(ma) > 0 and ma < vwap
+if (longCondition)
+    strategy.entry("Buy", true, 1)
+
+shortCondition = (change(ma) < 0 and close > vwap) or (crossunder(ma, vwap) and change(ma) > 0)
+if (shortCondition)
+    strategy.close("Buy")
+
+plot (vwap, color=color.fuchsia)
+plot (ma)
+
+View in Pine Editor・19 lines
+Use on chart
+9
+5
+3 553
+Buy when EMA is below VWAP and starts sloping up
+Sell when EMA is above VWAP and starts sloping down

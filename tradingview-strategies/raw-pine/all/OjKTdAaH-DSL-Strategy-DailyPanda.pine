@@ -1,0 +1,368 @@
+//@version=5
+strategy("DSL Strategy [DailyPanda]",
+     initial_capital = 2000,
+     commission_value=0.00,
+     slippage=3,
+     overlay = true)
+
+//--------------------------------------------------------------------------------------------------------------------
+// USER INPUTS
+//--------------------------------------------------------------------------------------------------------------------
+
+// DSL Indicator Inputs CP
+int   len         = input.int(34, "Length", group="CP")      // Length for calculating DSL
+int   offset      = input.int(30, "Offset", group="CP")      // Offset for threshold levels
+float width       = input.float(1, "Bands Width", step = 0.1, maxval = 2, minval = 0.5, group="CP") // Width for ATR-based bands
+float risk_reward = input.float(1.5, "Risk Reward", group="Risk Mgmt") // Risk Reward ratio
+
+// Colors for upper and lower trends
+color upper_col = input.color(color.lime, "+", inline = "col")
+color lower_col = input.color(color.orange, "-", inline = "col")
+
+// DSL-BELUGA
+len_beluga  = input.int(10, "Beluga Length", group="BELUGA")
+dsl_mode_inp = input.string("Fast", "DSL Lines Mode", options=["Fast", "Slow"], group="BELUGA")
+dsl_mode    = dsl_mode_inp == "Fast" ? 2 : 1
+
+// Colors for DSL-BELUGA
+color color_up = #8BD8BD
+color color_dn = #436cd3
+
+i_lossPct = input.int(defval=100, title="% max day DD", minval=1, maxval=100, step=1, group="Risk Management")
+i_goal = input.bool(title="Enable Daily Goal", defval=false, group="Risk Management")
+i_goalPct = input.int(defval=4, title="% Daily Goal", minval=1, step=1, group="Risk Management")
+
+
+//############################## RISK MANAGEMENT ##############################
+// Set maximum intraday loss to our lossPct input
+strategy.risk.max_intraday_loss(i_lossPct, strategy.percent_of_equity)
+//strategy.risk.max_intraday_loss(value=1200, type=strategy.cash)
+
+// Store equity value from the beginning of the day
+eqFromDayStart = ta.valuewhen(ta.change(dayofweek) > 0, strategy.equity, 0)
+// Calculate change of the current equity from the beginning of the current day
+eqChgPct = 100 * ((strategy.equity - eqFromDayStart - strategy.openprofit) / (strategy.equity-strategy.openprofit))
+f_stopGain = eqChgPct >= i_goalPct and i_goal ? true : false
+
+
+//--------------------------------------------------------------------------------------------------------------------
+// INDICATOR CALCULATIONS
+//--------------------------------------------------------------------------------------------------------------------
+
+// Function to calculate DSL lines based on price
+dsl_price(float price, int len) =>
+    // Initialize DSL lines
+    float dsl_up = na
+    float dsl_dn = na
+    float sma    = ta.sma(price, len)
+
+    // Dynamic upper and lower thresholds calculated with offset
+    float threshold_up = ta.highest(len)[offset] 
+    float threshold_dn = ta.lowest(len)[offset] 
+
+    // Calculate the DSL upper and lower lines based on price compared to the thresholds
+    dsl_up := price > threshold_up ? sma : nz(dsl_up[1]) 
+    dsl_dn := price < threshold_dn ? sma : nz(dsl_dn[1])
+
+    // Return both DSL lines
+    [dsl_up, dsl_dn]
+
+// Function to calculate DSL bands based on ATR and width multiplier
+dsl_bands(float dsl_up, float dsl_dn) =>
+    float atr = ta.atr(200) * width // ATR-based calculation for bands
+    float upper = dsl_up - atr       // Upper DSL band
+    float lower = dsl_dn + atr       // Lower DSL band
+
+    [upper, lower]
+
+// Get DSL values based on the closing price
+[dsl_up, dsl_dn] = dsl_price(close, len)
+
+// Calculate the bands around the DSL lines
+[dsl_up1, dsl_dn1] = dsl_bands(dsl_up, dsl_dn)
+
+
+//--------------------------------------------------------------------------------------------------------------------
+// DSL-BELUGA INDICATOR CALCULATIONS
+//--------------------------------------------------------------------------------------------------------------------
+
+// Calculate RSI with a period of 10
+float RSI = ta.rsi(close, 10)
+
+// Zero-Lag Exponential Moving Average function
+zlema(src, length) =>
+    int   lag      = math.floor((length - 1) / 2)
+    float ema_data = 2 * src - src[lag]
+    float ema2     = ta.ema(ema_data, length)
+    ema2
+
+// Discontinued Signal Lines function
+dsl_lines(src, length)=>
+    float up  = 0.
+    float dn  = 0.
+    up := (src > ta.sma(src, length)) ? nz(up[1]) + dsl_mode / length * (src - nz(up[1])) : nz(up[1])  
+    dn := (src < ta.sma(src, length)) ? nz(dn[1]) + dsl_mode / length * (src - nz(dn[1])) : nz(dn[1])
+    [up, dn]
+
+// Calculate DSL lines for RSI
+[lvlu, lvld] = dsl_lines(RSI, len_beluga)
+
+// Calculate DSL oscillator using ZLEMA of the average of upper and lower DSL Lines
+float dsl_osc = zlema((lvlu + lvld) / 2, 10)
+
+// Calculate DSL Lines for the oscillator
+[level_up, level_dn] = dsl_lines(dsl_osc, 10)
+
+// Detect crossovers for signal generation
+bool up_signal = ta.crossover(dsl_osc, level_dn) and dsl_osc < 55
+bool dn_signal = ta.crossunder(dsl_osc, level_up) and dsl_osc > 50
+
+//--------------------------------------------------------------------------------------------------------------------
+// VISUALIZATION
+//--------------------------------------------------------------------------------------------------------------------
+
+// Plot the DSL lines on the chart
+plot_dsl_up = plot(dsl_up, color=color.new(upper_col, 80), linewidth=1, title="DSL Up")
+plot_dsl_dn = plot(dsl_dn, color=color.new(lower_col, 80), linewidth=1, title="DSL Down")
+
+// Plot the DSL bands
+plot_dsl_up1 = plot(dsl_up1, color=color.new(upper_col, 80), linewidth=1, title="DSL Upper Band")
+plot_dsl_dn1 = plot(dsl_dn1, color=color.new(lower_col, 80), linewidth=1, title="DSL Lower Band")
+
+// Fill the space between the DSL lines and bands with color
+fill(plot_dsl_up, plot_dsl_up1, color=color.new(upper_col, 80))
+fill(plot_dsl_dn, plot_dsl_dn1, color=color.new(lower_col, 80))
+
+// Plot signals on the chart
+plotshape(up_signal, title="Buy Signal", style=shape.triangleup, location=location.belowbar, size=size.tiny, text="Enter", textcolor=chart.fg_color)
+plotshape(dn_signal, title="Sell Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="Exit", textcolor=chart.fg_color)
+
+// Color the background on signal occurrences
+bgcolor(up_signal ? color.new(color_up, 90) : na, title="Up Signal Background", editable = false)
+bgcolor(dn_signal ? color.new(color_dn, 90) : na, title="Down Signal Background", editable = false)
+
+//--------------------------------------------------------------------------------------------------------------------
+// STRATEGY CONDITIONS AND EXECUTION
+//--------------------------------------------------------------------------------------------------------------------
+
+// Variables to hold stop loss and take profit prices
+var float long_stop_loss_price  = na
+var float long_take_profit_price = na
+var float short_stop_loss_price = na
+var float short_take_profit_price = na
+float pos_size = math.abs(strategy.position_size)
+
+// Long Entry Conditions
+bool long_condition1 = not na(dsl_up1) and not na(dsl_dn) and dsl_up1 > dsl_dn
+bool long_condition2 = open > dsl_up and close > dsl_up and open[1] > dsl_up and close[1] > dsl_up and open[2] > dsl_up and close[2] > dsl_up
+bool long_condition3 = up_signal and pos_size == 0
+bool long_condition  = long_condition1 and long_condition2 and long_condition3 and (not f_stopGain)
+
+// Short Entry Conditions
+bool short_condition1 = not na(dsl_dn1) and not na(dsl_up) and dsl_dn < dsl_up1
+bool short_condition2 = open < dsl_dn1 and close < dsl_dn1 and open[1] < dsl_dn1 and close[1] < dsl_dn1 and open[2] < dsl_dn1 and close[2] < dsl_dn1
+bool short_condition3 = dn_signal and pos_size == 0
+bool short_condition  = short_condition1 and short_condition2 and short_condition3 and (not f_stopGain)
+
+// Long Trade Execution
+if (long_condition and not na(dsl_up1))
+    long_stop_loss_price := dsl_up1
+    float risk = close - long_stop_loss_price
+    if (risk > 0)
+        long_take_profit_price := close + risk * risk_reward
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", from_entry="Long", stop=long_stop_loss_price, limit=long_take_profit_price)
+else if (strategy.position_size <= 0)
+    // Reset when not in a long position
+    long_stop_loss_price  := na
+    long_take_profit_price := na
+
+// Short Trade Execution
+if (short_condition and not na(dsl_dn1))
+    short_stop_loss_price := dsl_dn1
+    float risk = short_stop_loss_price - close
+    if (risk > 0)
+        short_take_profit_price := close - risk * risk_reward
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", from_entry="Short", stop=short_stop_loss_price, limit=short_take_profit_price)
+else if (strategy.position_size >= 0)
+    // Reset when not in a short position
+    short_stop_loss_price := na
+    short_take_profit_price := na
+
+//--------------------------------------------------------------------------------------------------------------------
+// PLOTTING STOP LOSS AND TAKE PROFIT LEVELS
+//--------------------------------------------------------------------------------------------------------------------
+
+// Plot the stop loss and take profit levels only when in a position
+float plot_long_stop_loss   = strategy.position_size > 0 ? long_stop_loss_price : na
+float plot_long_take_profit = strategy.position_size > 0 ? long_take_profit_price : na
+
+float plot_short_stop_loss   = strategy.position_size < 0 ? short_stop_loss_price : na
+float plot_short_take_profit = strategy.position_size < 0 ? short_take_profit_price : na
+
+plot(plot_long_stop_loss, title="Long Stop Loss", color=color.red, linewidth=2, style=plot.style_linebr, editable=false)
+plot(plot_long_take_profit, title="Long Take Profit", color=color.green, linewidth=2, style=plot.style_linebr, editable=false)
+
+plot(plot_short_stop_loss, title="Short Stop Loss", color=color.red, linewidth=2, style=plot.style_linebr, editable=false)
+plot(plot_short_take_profit, title="Short Take Profit", color=color.green, linewidth=2, style=plot.style_linebr, editable=false)
+
+View in Pine Editor・211 lines
+Use on chart
+1
+0
+1
+4 288
+
+Overview
+
+The DSL Strategy by DailyPanda is a trading strategy that synergistically combines the idea from indicators to create a more robust and reliable trading tool. By integrating these indicators, the strategy enhances signal accuracy and provides traders with a comprehensive view of market trends and momentum shifts. This combination allows for better entry and exit points, improved risk management, and adaptability to various market conditions.
+
+Combining ideas from indicators adds value by:
+
+
+Enhancing Signal Confirmation: The strategy requires alignment between trend and momentum before generating trade signals, reducing false entries.
+
+
+Improving Accuracy: By integrating price action with momentum analysis, the strategy captures more reliable trading opportunities.
+
+
+Providing Comprehensive Market Insight: The combination offers a better perspective on the market, considering both the direction (trend) and the strength (momentum) of price movements.
+
+
+How the Components Work Together
+
+1. Trend Identification with DSL Indicator
+
+
+Dynamic Signal Lines: Calculates upper and lower DSL lines based on a moving average (SMA) and dynamic thresholds derived from recent highs and lows with a specified offset. These lines adapt to market conditions, providing real-time trend insights.
+
+
+ATR-Based Bands: Adds bands around the DSL lines using the Average True Range (ATR) multiplied by a width factor. These bands account for market volatility and help identify potential stop-loss levels.
+
+
+Trend Confirmation: The relationship between the price, DSL lines, and bands determines the current trend. For example, if the price consistently stays above the upper DSL line, it indicates a bullish trend.
+
+
+2. Momentum Analysis
+
+
+RSI Calculation: Computes the RSI over a specified period to measure the speed and change of price movements.
+
+
+Zero-Lag EMA (ZLEMA): Applies a ZLEMA to the RSI to minimize lag and produce a more responsive oscillator.
+
+
+DSL Application on Oscillator: Implements the DSL concept on the oscillator by calculating dynamic upper and lower levels. This helps identify overbought or oversold conditions more accurately.
+
+
+Signal Generation: Detects crossovers between the oscillator and its DSL lines. A crossover above the lower DSL line signals potential bullish momentum, while a crossover below the upper DSL line signals potential bearish momentum.
+
+
+3. Integrated Signal Filtering
+
+
+Confluence Requirement: A trade signal is generated only when both the DSL indicator and oscillator agree. For instance, a long entry requires both an uptrend confirmation from the DSL indicator and a bullish momentum signal from the oscillator.
+
+
+Risk Management Integration: The strategy uses the DSL indicator's bands for setting stop-loss levels and calculates take-profit levels based on a user-defined risk-reward ratio. This ensures that every trade has a predefined risk management plan.
+
+--------------------------------------------------------------------------------------------
+
+Originality and Value Added to the Community
+
+
+Unique Synergy: While both indicators are available individually, this strategy is original in how it combines them to enhance their strengths and mitigate their weaknesses, offering a novel approach not present in existing scripts.
+
+Enhanced Reliability: By requiring confirmation from both trend and momentum indicators, the strategy reduces false signals and increases the likelihood of successful trades.
+
+Versatility: The customizable parameters allow traders to adapt the strategy to different instruments, timeframes, and trading styles, making it a valuable tool for a wide range of trading scenarios.
+
+Educational Contribution: The script demonstrates an effective method of combining indicators for improved trading performance, providing insights that other traders can learn from and apply to their own strategies.
+
+
+--------------------------------------------------------------------------------------------
+
+How to Use the Strategy
+
+Adding the Strategy to Your Chart
+
+Apply the DSL Strategy [DailyPanda] to your desired trading instrument and timeframe on TradingView.
+--------------------------------------------------------------------------------------------
+Configuring Parameters
+
+DSL Indicator Settings:
+
+
+Length (len): Adjusts the sensitivity of the DSL lines (default is 34).
+
+Offset: Determines the look-back period for threshold calculations (default is 30).
+
+Bands Width (width): Changes the distance of the ATR-based bands from the DSL lines (default is 1).
+
+DSL-BELUGA Oscillator Settings:
+
+Beluga Length (len_beluga): Sets the period for the RSI calculation in the oscillator (default is 10).
+
+DSL Lines Mode (dsl_mode): Chooses between "Fast" (more responsive) and "Slow" (smoother) modes for the oscillator's DSL lines.
+
+Risk Management:
+
+Risk Reward (risk_reward): Defines your desired risk-reward ratio for calculating take-profit levels (default is 1.5).
+
+
+
+--------------------------------------------------------------------------------------------
+Interpreting Signals
+
+Long Entry Conditions:
+
+
+Trend Confirmation: Price is above the upper DSL line and the upper DSL band (dsl_up1 > dsl_dn).
+
+Price Behavior: The last three candles have both their opens and closes above the upper DSL line.
+
+Momentum Signal: The DSL-BELUGA oscillator crosses above its lower DSL line (up_signal), indicating bullish momentum.
+
+
+
+
+Short Entry Conditions:
+
+
+Trend Confirmation: Price is below the lower DSL line and the lower DSL band (dsl_dn < dsl_up1).
+
+Price Behavior: The last three candles have both their opens and closes below the lower DSL band.
+
+Momentum Signal: The DSL-BELUGA oscillator crosses below its upper DSL line (dn_signal), indicating bearish momentum.
+
+
+
+
+Exit Conditions:
+
+
+Stop-Loss: Automatically set at the DSL indicator's band level (upper band for longs, lower band for shorts).
+
+Take-Profit: Calculated based on the risk-reward ratio and the initial risk determined by the stop-loss distance.
+
+
+
+
+Visual Aids
+
+
+Signal Arrows: Upward green arrows for long entries and downward blue arrows for short entries appear on the chart when conditions are met.
+
+Stop-Loss and Take-Profit Lines: Red and green lines display the calculated stop-loss and take-profit levels for active trades.
+
+Background Highlighting: The chart background subtly changes color to indicate when a signal has been generated.
+
+
+Backtesting and Optimization
+
+Use TradingView's strategy tester to backtest the strategy over historical data.
+
+Adjust parameters to optimize performance for different instruments or market conditions.
+
+Regularly review backtesting results to ensure the strategy remains effective.

@@ -1,0 +1,49 @@
+//@version=6
+strategy("SPY VWAP + Squeeze Breakout", overlay=true)
+
+// --- Inputs ---
+length   = input.int(20, "BB Length") // Add this line
+mult     = input.float(2.0, "BB StdDev")
+lengthKC = input.int(20, "KC Length")
+multKC   = input.float(1.5, "KC Multiplier")
+
+// Bollinger Bands
+[basis, upper, lower] = ta.bb(close, length, mult)
+
+// Keltner Channels
+ma = ta.sma(close, lengthKC)
+rangeKC = ta.tr(true) // Added parentheses
+rangema = ta.sma(rangeKC, lengthKC)
+upperKC = ma + (rangema * multKC)
+lowerKC = ma - (rangema * multKC)
+
+// VWAP Definition (Assuming standard VWAP)
+vwapVal = ta.vwap(close)
+
+// --- Squeeze Condition ---
+// Changed 'basis - dev' to 'lower' and 'basis + dev' to 'upper'
+sqzOn = lower > lowerKC and upper < upperKC
+sqzOff = lower < lowerKC or upper > upperKC
+sqzFired = sqzOff and (sqzOn[1] == true)
+
+// --- Strategy Execution ---
+longCondition = close > vwapVal and sqzFired and close > open
+if (longCondition)
+    strategy.entry("Long Squeeze", strategy.long)
+
+shortCondition = close < vwapVal and sqzFired and close < open
+if (shortCondition)
+    strategy.entry("Short Squeeze", strategy.short)
+
+// --- Exit Logic ---
+if (strategy.position_size > 0 and close < vwapVal)
+    strategy.close("Long Squeeze")
+
+if (strategy.position_size < 0 and close > vwapVal)
+    strategy.close("Short Squeeze")
+
+View in Pine Editor・44 lines
+Use on chart
+0
+291
+This Pine Script® v6 strategy, titled SPY VWAP + Squeeze Breakout, is designed to capture momentum shifts in the SPY ETF by combining volatility filters with volume-weighted price action. The core logic utilizes Bollinger Bands and Keltner Channels to identify "squeeze" periods, which occur when volatility contracts and the Bollinger Bands move inside the Keltner Channels. A long entry is triggered when the squeeze "fires" while the price is trading above the VWAP and the current bar closes higher than its open. Conversely, a short position is initiated when the squeeze releases while the price is below the VWAP and the bar closes bearish. The strategy incorporates standard inputs for Bollinger Band length and standard deviation, as well as Keltner Channel length and multipliers for precise volatility tuning. Risk management is handled through dynamic exit logic that closes positions when the price crosses back over the VWAP line, signaling a potential trend reversal. By using ta.tr(true) for range calculations, the script ensures accurate volatility measurements even during sessions with significant price gaps. This trend-following approach aims to filter out market noise and focus on high-probability breakouts confirmed by both price location and momentum. Overall, the script provides a robust framework for backtesting SPY intraday volatility strategies directly on the TradingView platform.

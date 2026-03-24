@@ -1,0 +1,403 @@
+//@version=5
+strategy("Master ORB (Custom TZ, TF 5m/15m/30m/60m)", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 1) SESSIONS — LuxAlgo-style time logic
+//---------------------------------------------------------------------------------------------------------------------
+
+// ORB length and session choice
+orb_len_choice = input.string("15", "ORB Length (minutes)", options=["5","15","30","60"], group="Sessions")
+session_choice = input.string("London", "Session", options=["Frankfurt","London","New York","NY PM"], group="Sessions")
+
+// Session string based on choice
+sess_str = session_choice == "Frankfurt" ?    (orb_len_choice == "5" ? "0200-0205" :     orb_len_choice == "15" ? "0200-0215" :     orb_len_choice == "30" ? "0200-0230" : "0200-0300") :    session_choice == "London" ?    (orb_len_choice == "5" ? "0300-0305" :     orb_len_choice == "15" ? "0300-0315" :     orb_len_choice == "30" ? "0300-0330" : "0300-0400") :  session_choice == "New York" ? (orb_len_choice == "5"  ? "0930-0935" : orb_len_choice == "15" ? "0930-0945" :  orb_len_choice == "30" ? "0930-1000" : "0930-1030") : (orb_len_choice == "5"  ? "1400-1405" : orb_len_choice == "15" ? "1400-1415" :  orb_len_choice == "30" ? "1400-1430" : "1400-1500")
+
+// Use Custom Range (Lux logic) OR "period from session open"
+crTog = input.bool(true, title="Use Custom Session", group="Sessions")
+orTF  = input.timeframe("15", title="Time Period (fallback when Custom OFF)", group="Sessions")
+
+// Timezone list (Lux-style)
+tz = input.string("UTC-4", title="Timezone", group="Sessions", options=["UTC-10","UTC-8","UTC-7","UTC-6","UTC-5","UTC-4","UTC-3","UTC+0","UTC+1","UTC+2","UTC+3","UTC+3:30","UTC+4","UTC+5","UTC+5:30","UTC+5:45","UTC+6","UTC+6:30","UTC+7","UTC+8","UTC+9","UTC+9:30","UTC+10","UTC+11","UTC+12","UTC+12:45","UTC+13"])
+
+// Visuals/Performance
+show_hist_input       = input.bool(true,  title="Show Historical ORB Lines/Labels", group="Visuals")
+show_session_bg_input = input.bool(true,  title="Highlight ORB Session",            group="Visuals")
+show_orb_overlay      = input.bool(true,  title="Show ORH/ORL Lines",               group="Visuals")
+show_orb_price_tags   = input.bool(true,  title="Show ORH/ORL Price Tags (right)",  group="Visuals")
+
+show_signals          = input.bool(true,  title="Show Buy/Sell Signal Markers",     group="Signals")
+signal_up_color       = input.color(color.new(color.green, 0), "Buy Marker Color",  group="Signals")
+signal_dn_color       = input.color(color.new(color.red,   0), "Sell Marker Color", group="Signals")
+
+light_backtest = input.bool(true, "Limit drawings for Deep Backtesting", group="Performance",
+   tooltip="Turns off heavy visuals & reuses objects to avoid Pine drawing limits in long history.")
+
+_show_hist       = light_backtest ? false : show_hist_input
+_show_session_bg = light_backtest ? false : show_session_bg_input
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 1.5) DAY-OF-WEEK FILTER
+//---------------------------------------------------------------------------------------------------------------------
+
+trade_monday    = input.bool(true, "Trade on Monday",    group="Day Filter")
+trade_tuesday   = input.bool(true, "Trade on Tuesday",   group="Day Filter")
+trade_wednesday = input.bool(true, "Trade on Wednesday", group="Day Filter")
+trade_thursday  = input.bool(true, "Trade on Thursday",  group="Day Filter")
+trade_friday    = input.bool(true, "Trade on Friday",    group="Day Filter")
+
+current_day = dayofweek(time)
+day_allowed = (current_day == dayofweek.monday    and trade_monday)    or 
+              (current_day == dayofweek.tuesday   and trade_tuesday)   or 
+              (current_day == dayofweek.wednesday and trade_wednesday) or 
+              (current_day == dayofweek.thursday  and trade_thursday)  or 
+              (current_day == dayofweek.friday    and trade_friday)
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 2) RISK & BREAKOUT SETTINGS
+//---------------------------------------------------------------------------------------------------------------------
+
+contract_qty    = input.int(1, "Contract Quantity", minval=1, group="Risk", tooltip="Number of contracts to trade")
+sl_percent      = input.string("100%", "ORB SL Size %", options=["100%","75%","50%","25%"], group="Risk")
+buffer_points   = input.float(2, "Stop Buffer (pts)", minval=0, group="Risk")
+rr_multiplier   = input.float(2, "Reward:Risk Multiplier", minval=1, group="Risk")
+move_sl_to_be   = input.bool(false, "Move SL to Break-Even at 1R", group="Risk")
+
+entry_buffer    = input.float(2, "Entry Buffer Points", minval=0, group="Breakout")
+enable_alerts   = input.bool(true, "Enable Breakout Alerts", group="Breakout")
+
+// First-hour timing (relative to session open)
+restrict_first_hour = input.bool(false, "Restrict entries to first hour after session open", group="Trade Timing")
+first_hour_minutes  = input.int(60, "First-hour window (minutes)", minval=1, maxval=180, group="Trade Timing")
+block_entries_during_orb = input.bool(true, "Block entries during ORB window", group="Trade Timing")
+
+// Style
+or_color_london = input.color(color.new(color.teal,   0), title="London ORH/ORL Color",   group="Style")
+or_fill_color   = input.color(color.new(color.gray,  60), title="ORB Highlight Color",    group="Style")
+sl_color        = input.color(color.red,               title="Stop-Loss Line Color",       group="Style")
+tp_color        = input.color(color.green,             title="Take-Profit Line Color",     group="Style")
+text_size_opt   = input.string("Small", title="Text Size", options=["Tiny","Small","Normal","Large","Huge"], group="Style")
+
+show_sl_tp_lines         = input.bool(true,  title="Show TP / SL Lines",               group="Style")
+show_tp_sl_overlay_input = input.bool(true,  title="Shade TP / SL bands over candles", group="Style")
+band_thickness_pts       = input.float(1.0,  title="Band Thickness (points)", minval=0.1, step=0.1, group="Style")
+band_transparency        = input.int(75,     title="Band Transparency (0=solid, 100=invisible)", minval=0, maxval=100, group="Style")
+
+_show_sl_tp_lines = show_sl_tp_lines
+_show_overlay     = show_tp_sl_overlay_input
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 3) UTILITY
+//---------------------------------------------------------------------------------------------------------------------
+
+f_size(_val) =>
+    _s = size.normal
+    if _val == "Tiny"
+        _s := size.tiny
+    else if _val == "Small"
+        _s := size.small
+    else if _val == "Large"
+        _s := size.large
+    else if _val == "Huge"
+        _s := size.huge
+    _s
+
+price_fmt(_v) => str.tostring(_v, "#.####")
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 4) STATE — London only
+//---------------------------------------------------------------------------------------------------------------------
+
+var float L_or_high = na
+var float L_or_low  = na
+var float L_or_range = na
+var float L_entry_up = na
+var float L_entry_dn = na
+var line  L_or_high_line = na
+var line  L_or_low_line  = na
+var label L_range_label  = na
+var box   L_box          = na
+var bool  L_breakout_triggered = false
+var int   L_start_ts = na
+var int   L_deadline_ts = na
+var label L_orh_tag = na
+var label L_orl_tag = na
+
+// Session flags (Lux-style)
+var bool or_sesh  = false
+var bool or_token = false
+
+// Shared trade visuals / BE
+var float sl_price = na
+var float tp_price = na
+var line  sl_line  = na
+var line  tp_line  = na
+var label calc_label = na
+
+var float entry_px_on_fill = na
+var float init_sl_on_fill  = na
+var bool  moved_to_be      = false
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 5) SESSION DETECTION (LuxAlgo logic)
+//---------------------------------------------------------------------------------------------------------------------
+
+new_tf = timeframe.change(orTF)
+if crTog
+    or_sesh := not na(time(timeframe.period, sess_str, tz))
+else
+    if session.isfirstbar
+        or_sesh := true
+    else if not session.isfirstbar and new_tf
+        or_sesh := false
+
+or_start = or_sesh and not or_sesh[1]
+or_end   = or_sesh[1] and not or_sesh
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 6) BUILD & LOCK RANGE + ORB OVERLAY
+//---------------------------------------------------------------------------------------------------------------------
+
+if or_start
+    L_or_high := high
+    L_or_low  := low
+    L_breakout_triggered := false
+    or_token := false
+    L_start_ts := time
+    L_deadline_ts := time + first_hour_minutes * 60 * 1000
+
+    if not _show_hist
+        if not na(L_or_high_line)
+            line.delete(L_or_high_line)
+        if not na(L_or_low_line)
+            line.delete(L_or_low_line)
+        if not na(L_range_label)
+            label.delete(L_range_label)
+        if not na(L_orh_tag)
+            label.delete(L_orh_tag)
+        if not na(L_orl_tag)
+            label.delete(L_orl_tag)
+        L_or_high_line := na, L_or_low_line := na
+        L_range_label  := na, L_orh_tag := na, L_orl_tag := na
+        if not na(L_box)
+            box.delete(L_box)
+            L_box := na
+
+    if _show_session_bg
+        L_box := box.new(bar_index, high, bar_index, low, bgcolor=or_fill_color, border_width=0)
+
+    if show_orb_overlay
+        L_or_high_line := line.new(bar_index, L_or_high, bar_index+1, L_or_high, extend=extend.right, color=or_color_london, style=line.style_dotted, width=2)
+        L_or_low_line  := line.new(bar_index, L_or_low,  bar_index+1, L_or_low,  extend=extend.right, color=or_color_london, style=line.style_dotted, width=2)
+    if show_orb_price_tags
+        session_name = session_choice == "Frankfurt" ? "FRA" : session_choice == "London" ? "LDN" : session_choice == "New York"  ? "NY"  : "NYPM"
+        L_orh_tag := label.new(bar_index+1, L_or_high, text=session_name + " ORH\n"+price_fmt(L_or_high), style=label.style_label_right, textcolor=or_color_london, color=color.new(color.gray, 85), size=f_size(text_size_opt))
+        L_orl_tag := label.new(bar_index+1, L_or_low,  text=session_name + " ORL\n"+price_fmt(L_or_low),  style=label.style_label_right, textcolor=or_color_london, color=color.new(color.gray, 85), size=f_size(text_size_opt))
+
+    L_entry_up := na
+    L_entry_dn := na
+
+if or_sesh
+    L_or_high := math.max(L_or_high, high)
+    L_or_low  := math.min(L_or_low,  low)
+    if L_or_high != L_or_low
+        or_token := true
+    if not na(L_box)
+        box.set_top(L_box, L_or_high), box.set_bottom(L_box, L_or_low), box.set_right(L_box, bar_index)
+
+    if show_orb_overlay and not na(L_or_high_line) and not na(L_or_low_line)
+        line.set_y1(L_or_high_line, L_or_high), line.set_y2(L_or_high_line, L_or_high)
+        line.set_y1(L_or_low_line,  L_or_low),  line.set_y2(L_or_low_line,  L_or_low)
+    if show_orb_price_tags
+        session_name = session_choice == "Frankfurt" ? "FRA" : session_choice == "London" ? "LDN" : session_choice == "New York"  ? "NY"  : "NYPM"
+        if not na(L_orh_tag)
+            label.set_xy(L_orh_tag, bar_index+1, L_or_high), label.set_text(L_orh_tag, session_name + " ORH\n"+price_fmt(L_or_high))
+        if not na(L_orl_tag)
+            label.set_xy(L_orl_tag, bar_index+1, L_or_low),  label.set_text(L_orl_tag, session_name + " ORL\n"+price_fmt(L_or_low))
+
+if or_end and or_token
+    L_or_range := L_or_high - L_or_low
+    // Always show ORB range label regardless of backtest setting
+    session_name = session_choice == "Frankfurt" ? "FRA" : session_choice == "London" ? "LDN" : session_choice == "New York"  ? "NY"  : "NYPM"
+    L_range_label := label.new(bar_index, L_or_high, text=session_name + " ORB: " + str.tostring(L_or_range, "#.#") + " pts", style=label.style_label_down, color=color.new(color.gray, 80), textcolor=or_color_london, size=f_size(text_size_opt))
+    L_entry_up := L_or_high + entry_buffer
+    L_entry_dn := L_or_low  - entry_buffer
+    if show_orb_overlay and not na(L_or_high_line)
+        line.set_style(L_or_high_line, line.style_solid), line.set_width(L_or_high_line, 2)
+    if show_orb_overlay and not na(L_or_low_line)
+        line.set_style(L_or_low_line,  line.style_solid), line.set_width(L_or_low_line,  2)
+    if not _show_hist and not na(L_box)
+        box.delete(L_box), L_box := na
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 8) TRADE LOGIC — SL anchored within ORB from opposite boundary + Day Filter
+//---------------------------------------------------------------------------------------------------------------------
+
+sl_factor  = sl_percent == "100%" ? 1.0 : sl_percent == "75%" ? 0.75 : sl_percent == "50%" ? 0.5 : 0.25
+pos_active = strategy.position_size != 0
+
+L_within_1h = not restrict_first_hour or (not na(L_deadline_ts) and time <= L_deadline_ts)
+can_enter_L = block_entries_during_orb ? not or_sesh : true
+
+L_long_trig  = day_allowed and can_enter_L and not pos_active and not L_breakout_triggered and L_within_1h and not na(L_entry_up) and ta.crossover(close, L_entry_up)
+L_short_trig = day_allowed and can_enter_L and not pos_active and not L_breakout_triggered and L_within_1h and not na(L_entry_dn) and ta.crossunder(close, L_entry_dn)
+
+// Long: anchor = ORL + (1 - %)*range; SL = anchor - buffer (safe side)
+// Short: anchor = ORH - (1 - %)*range; SL = anchor + buffer (safe side)
+if L_long_trig
+    L_breakout_triggered := true
+    trigger_px = L_entry_up
+    range_pts  = nz(L_or_range)
+    anchor_long = L_or_low + (1.0 - sl_factor) * range_pts
+    sl_price := anchor_long - buffer_points
+    sl_price := math.min(sl_price, trigger_px - syminfo.mintick)
+    risk_pts   = math.abs(trigger_px - sl_price)
+    tp_price   := trigger_px + risk_pts * rr_multiplier
+    strategy.entry("Long LDN", strategy.long, qty=contract_qty)
+    if enable_alerts
+        alert("London ORB Breakout: LONG @ " + str.tostring(trigger_px, "#.#"), alert.freq_once_per_bar)
+    if _show_hist
+        calc_label := label.new(bar_index, close, text="LDN SL: " + str.tostring(risk_pts, "#.#") + " | TP: " + str.tostring(risk_pts*rr_multiplier, "#.#"), style=label.style_label_down, color=color.new(color.gray, 80), textcolor=or_color_london, size=f_size(text_size_opt))
+    if _show_sl_tp_lines
+        if na(sl_line)
+            sl_line := line.new(bar_index, sl_price, bar_index+1, sl_price, color=sl_color, extend=extend.right)
+        if na(tp_line)
+            tp_line := line.new(bar_index, tp_price, bar_index+1, tp_price, color=tp_color, extend=extend.right)
+
+if L_short_trig
+    L_breakout_triggered := true
+    trigger_px = L_entry_dn
+    range_pts  = nz(L_or_range)
+    anchor_short = L_or_high - (1.0 - sl_factor) * range_pts
+    sl_price := anchor_short + buffer_points
+    sl_price := math.max(sl_price, trigger_px + syminfo.mintick)
+    risk_pts   = math.abs(trigger_px - sl_price)
+    tp_price   := trigger_px - risk_pts * rr_multiplier
+    strategy.entry("Short LDN", strategy.short, qty=contract_qty)
+    if enable_alerts
+        alert("London ORB Breakout: SHORT @ " + str.tostring(trigger_px, "#.#"), alert.freq_once_per_bar)
+    if _show_hist
+        calc_label := label.new(bar_index, close, text="LDN SL: " + str.tostring(risk_pts, "#.#") + " | TP: " + str.tostring(risk_pts*rr_multiplier, "#.#"), style=label.style_label_up, color=color.new(color.gray, 80), textcolor=or_color_london, size=f_size(text_size_opt))
+    if _show_sl_tp_lines
+        if na(sl_line)
+            sl_line := line.new(bar_index, sl_price, bar_index+1, sl_price, color=sl_color, extend=extend.right)
+        if na(tp_line)
+            tp_line := line.new(bar_index, tp_price, bar_index+1, tp_price, color=tp_color, extend=extend.right)
+
+// Position state / BE capture
+pos_open_now   = strategy.position_size != 0 and strategy.position_size[1] == 0
+pos_closed_now = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if pos_open_now
+    entry_px_on_fill := strategy.position_avg_price
+    init_sl_on_fill  := sl_price
+    moved_to_be      := false
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 9) MAINTENANCE (incl. BE move)
+//---------------------------------------------------------------------------------------------------------------------
+
+if move_sl_to_be and strategy.position_size != 0 and not moved_to_be and not na(entry_px_on_fill) and not na(init_sl_on_fill)
+    risk_pts = math.abs(entry_px_on_fill - init_sl_on_fill)
+    if strategy.position_size > 0
+        if high >= entry_px_on_fill + risk_pts
+            sl_price  := math.max(sl_price, entry_px_on_fill)
+            moved_to_be := true
+    else
+        if low <= entry_px_on_fill - risk_pts
+            sl_price  := math.min(sl_price, entry_px_on_fill)
+            moved_to_be := true
+
+if strategy.position_size != 0 and _show_sl_tp_lines and not na(sl_line) and not na(tp_line)
+    line.set_xy1(sl_line, bar_index,   sl_price)
+    line.set_xy2(sl_line, bar_index+1, sl_price)
+    line.set_xy1(tp_line, bar_index,   tp_price)
+    line.set_xy2(tp_line, bar_index+1, tp_price)
+
+if pos_closed_now
+    if not na(sl_line)
+        line.delete(sl_line), sl_line := na
+    if not na(tp_line)
+        line.delete(tp_line), tp_line := na
+    if not _show_hist and not na(calc_label)
+        label.delete(calc_label), calc_label := na
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 10) EXITS
+//---------------------------------------------------------------------------------------------------------------------
+
+strategy.exit("Exit LDN Long",  from_entry="Long LDN",  stop=sl_price, limit=tp_price)
+strategy.exit("Exit LDN Short", from_entry="Short LDN", stop=sl_price, limit=tp_price)
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 11) SIGNAL MARKERS
+//---------------------------------------------------------------------------------------------------------------------
+
+buy_signal  = show_signals and L_long_trig
+sell_signal = show_signals and L_short_trig
+
+plotshape(buy_signal,  title="Buy Signal",  style=shape.triangleup,   location=location.belowbar, color=signal_up_color, size=size.small, text="BUY")
+plotshape(sell_signal, title="Sell Signal", style=shape.triangledown, location=location.abovebar, color=signal_dn_color, size=size.small, text="SELL")
+
+//---------------------------------------------------------------------------------------------------------------------
+// ✦ 12) VISUAL SHADING + BAR COLOR
+//---------------------------------------------------------------------------------------------------------------------
+
+tp_upper = (strategy.position_size != 0 and _show_overlay) ? tp_price + band_thickness_pts * 0.5 : na
+tp_lower = (strategy.position_size != 0 and _show_overlay) ? tp_price - band_thickness_pts * 0.5 : na
+sl_upper = (strategy.position_size != 0 and _show_overlay) ? sl_price + band_thickness_pts * 0.5 : na
+sl_lower = (strategy.position_size != 0 and _show_overlay) ? sl_price - band_thickness_pts * 0.5 : na
+
+var tp_up_plot = plot(tp_upper, title="TP band upper", color=color.new(tp_color, 0))
+var tp_dn_plot = plot(tp_lower, title="TP band lower", color=color.new(tp_color, 0))
+var sl_up_plot = plot(sl_upper, title="SL band upper", color=color.new(sl_color, 0))
+var sl_dn_plot = plot(sl_lower, title="SL band lower", color=color.new(sl_color, 0))
+
+fill(tp_up_plot, tp_dn_plot, color=color.new(tp_color, band_transparency))
+fill(sl_up_plot, sl_dn_plot, color=color.new(sl_color, band_transparency))
+
+barcolor(or_sesh ? color.new(or_color_london, 70) : na)
+
+View in Pine Editor・358 lines
+Use on chart
+3
+4
+856
+Master ORB (Custom TZ, TF 5m / 15m / 30m / 60m) is a precision Opening Range Breakout indicator built for traders who want clean, rule-based structure across global market sessions.
+
+The indicator automatically defines the Opening Range based on your selected timeframe (5, 15, 30, or 60 minutes) and session, with full custom time zone support. Once the opening range is formed, the high and low are clearly plotted on the chart, creating objective breakout levels for the rest of the session.
+
+Master ORB is designed to remove discretion and noise by:
+
+Locking in the opening range once it completes
+
+Maintaining fixed, non-repainting levels
+
+Visually separating range formation from breakout phase
+
+This allows traders to focus on execution, confirmation, and risk management, rather than constantly adjusting levels.
+
+The indicator works across major sessions including London, New York, Frankfurt, and NY PM, making it suitable for index futures, forex, and liquid equities. It integrates seamlessly with momentum tools, trend filters, and higher-timeframe bias.
+
+Best used for:
+
+Opening range breakout and breakdown trades
+
+Session-based trading plans
+
+Bias confirmation and invalidation levels
+
+Structured entries with defined risk
+
+Key features:
+
+Selectable ORB length: 5m, 15m, 30m, or 60m
+
+Custom time zone alignment
+
+Fixed, non-repainting range levels
+
+Multi-session support
+
+Clean visual structure with minimal chart clutter
+
+Master ORB is a framework indicator, not a signal generator. It provides the structure needed to trade with discipline, consistency, and clarity across sessions and markets.

@@ -1,0 +1,9 @@
+//@version=5
+##root(root_metainfo,rm_0,plot.style_circles,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,plot.style_circles,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_5,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_6,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_7,'tiny',const__string,plotshape,size)

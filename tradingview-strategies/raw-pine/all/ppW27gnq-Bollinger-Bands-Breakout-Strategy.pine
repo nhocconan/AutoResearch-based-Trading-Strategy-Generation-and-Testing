@@ -1,0 +1,115 @@
+//@version=6
+strategy("Bollinger Bands Breakout Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+length = input.int(20, minval=1, title="BB Length")
+maType = input.string("SMA", "Basis MA Type", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"])
+src = input(close, title="Source")
+mult = input.float(1.0, minval=0.001, maxval=50, title="StdDev")
+offset = input.int(0, "Offset", minval = -500, maxval = 500, display = display.data_window)
+
+// Trend filter
+trendLength = input.int(50, title="Trend SMA Length")
+trendSMA = ta.sma(close, trendLength)
+
+// MA function
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+// Bollinger Bands
+basis = ma(src, length, maType)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+
+// Plot BB
+plot(basis, "Basis", color=#2962FF, offset = offset)
+p1 = plot(upper, "Upper", color=#F23645, offset = offset)
+p2 = plot(lower, "Lower", color=#089981, offset = offset)
+fill(p1, p2, title = "Background", color=color.rgb(33, 150, 243, 95))
+
+// Persistent flags
+var bool inLongTrade = false
+var bool inShortTrade = false
+
+// Entry Conditions
+longCond = close > upper and close > trendSMA and not inLongTrade
+shortCond = close < lower and close < trendSMA and not inShortTrade
+
+// Strategy Execution
+if (longCond)
+    strategy.entry("Long", strategy.long)
+    inLongTrade := true
+    inShortTrade := false  // reset opposite flag
+
+if (shortCond)
+    strategy.entry("Short", strategy.short)
+    inShortTrade := true
+    inLongTrade := false  // reset opposite flag
+
+// Reset flags when price returns inside bands
+if (close < upper and inLongTrade)
+    inLongTrade := false
+
+if (close > lower and inShortTrade)
+    inShortTrade := false
+
+
+// Optional Exit Logic
+tpPerc = input.float(8.0, title="Take Profit %", minval=0.1)
+slPerc = input.float(1.0, title="Stop Loss %", minval=0.1)
+
+// Bar counters
+var int barsSinceLong = na
+var int barsSinceShort = na
+
+// Reset counters on entry
+if (strategy.opentrades > 0)
+    if (strategy.opentrades.entry_id(0) == "Long")
+        barsSinceLong := nz(barsSinceLong) + 1
+        barsSinceShort := na
+    else if (strategy.opentrades.entry_id(0) == "Short")
+        barsSinceShort := nz(barsSinceShort) + 1
+        barsSinceLong := na
+else
+    barsSinceLong := na
+    barsSinceShort := na
+
+// Minimum bar delay before exit
+minBars = input.int(2, title="Min Bars Before Exit")
+
+// Conditional exits
+if (barsSinceLong >= minBars)
+    strategy.exit("TP/SL Long", from_entry="Long", profit=tpPerc, loss=slPerc)
+
+if (barsSinceShort >= minBars)
+    strategy.exit("TP/SL Short", from_entry="Short", profit=tpPerc, loss=slPerc)
+
+
+plot(trendSMA, title="Trend SMA", color=color.orange, linewidth=2)
+
+View in Pine Editor・93 lines
+Use on chart
+3
+9
+1 524
+Hey guys check out this strategy script.
+
+Chart plotting:
+I use a classic plot of Bollinger Bands to define a consolidation zone, I also use a separate Trend Filter (SMA).
+
+Logic:
+When the price is above the SMA and above the Bollinger Upper Band the strategy goes Long. When the price is below the SMA and below the Bollinger Lower Band the strategy goes Short. Simple.
+
+Exits:
+TP and SL are a percentage of the price.
+
+Notes: This simple strategy can be used at any timeframe (I prefer the 15min for day trading). It avoids consolidation, when the price is inside the Bollinger Bands, and has a good success rate. Adjust the Length of the BB to suit your style of trading (Lower numbers=more volatile, Higher numbers=more restrictive). Also you can adjust the Trend Filter SMA, I presonally chose the 50 SMA. Finally the SL/TP can be also adjusted from the input menu.
+
+Test it for yourself!
+
+Have great trades!

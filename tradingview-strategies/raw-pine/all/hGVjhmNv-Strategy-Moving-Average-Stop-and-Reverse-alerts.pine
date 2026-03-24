@@ -1,0 +1,73 @@
+//@version=3
+strategy(title="Strategy Moving Average Stop and Reverse alerts", shorttitle="snasrz",overlay=true, calc_on_order_fills=true, default_qty_type=strategy.percent_of_equity, default_qty_value=50, overlay=false)
+
+int1=input(1)
+int2=input(69)
+interval_to_len =interval*(isdaily ? 1440 : isweekly ? 1440*7 : ismonthly ? 1440*30 : 1)
+
+
+ep_interval     = 60*input(10, minval=1, title="Extreme Point Interval (hours)")
+len             = isintraday and interval >= int1 ? int2/interval * 7 : isintraday and interval < 60 ? 60/interval * 24 * 7 : 7
+MA_type         = input("Smoothed", title="Moving Average Type", options=["Simple", "Exponential", "Smoothed"])
+src             = close
+
+ep_len          = ceil(ep_interval/interval_to_len)
+_highest        = highest(high, ep_len)
+_lowest         = lowest(low, ep_len)
+MA              = if MA_type=="Simple"
+    sma(src,len)
+else
+    if MA_type=="Smoothed"
+        rma(src, len)
+    else
+        ema(src,len)
+SR              = src
+trend           = sign(nz(src[1])-nz(SR[1]))
+SR              := nz(SR[1], SR) + trend*abs(nz(MA, src)-nz(MA[1], MA))
+SR              := src<SR and trend>0 ? _highest : src>SR and trend<0 ? _lowest : SR
+trend           := sign(src-SR)
+
+x =nz(SR[1], SR) + trend*abs(nz(MA, src)-nz(MA[1], MA))
+z = src<SR and trend>0 ? _highest : src>SR and trend<0 ? _lowest : SR
+plot(SR, color=trend!=trend[1] ? na : trend>0 ? #65D25BFF : #FE6B69FF, title="Moving Average Stop and Reverse")
+
+TP = input(0) * 10
+SL = input(0) * 10
+TS = input(1) * 10
+TO = input(10) * 10
+CQ = 100
+
+TPP = (TP > 0) ? TP : na
+SLP = (SL > 0) ? SL : na
+TSP = (TS > 0) ? TS : na
+TOP = (TO > 0) ? TO : na
+
+longCondition = crossover(x,z)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+
+shortCondition = crossunder(x,z)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+strategy.exit("Close Short", "Short", qty_percent=CQ, profit=TPP, loss=SLP, trail_points=TSP, trail_offset=TOP)
+strategy.exit("Close Long", "Long", qty_percent=CQ, profit=TPP, loss=SLP, trail_points=TSP, trail_offset=TOP)
+
+View in Pine Editor・55 lines
+Use on chart
+1
+5
+3
+6
+4 538
+So this is for strategy for the Moving Average Stop and Reverse alerts
+its seems to be nice , I did not play so much with the TF but one can change settings as he wish
+my indicator with alerts is
+
+
+
+I think the results is more due to the condition of the test rather to the model? on the other hand the original model in version 2 (not mine) had similar results . also TV put the signals one bar forward where in reality the signal will beep correctly at the right bar as shown in graph
+the model is attempt to make SAR better
+
+

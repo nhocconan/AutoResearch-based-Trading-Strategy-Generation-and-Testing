@@ -1,0 +1,123 @@
+//@version=6
+strategy("[SHORT ONLY] 10 Bar Low Pullback", overlay = true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true, fill_orders_on_standard_ohlc = true)
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group = "Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group = "Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// Strategy Settings
+// ============================================
+lowLookback = input.int(10, "Lowest Low Period")
+ibsThreshold = input.float(0.85, "IBS Threshold", step=0.1, minval=0, maxval=1)
+
+// ============================================
+// EMA Filter Settings
+// ============================================
+useEmaFilter = input.bool(true, "Use EMA Filter", group = "Trend Filter")
+emaPeriodInput = input.int(200, "EMA Period", minval = 1, group = "Trend Filter")
+//#endregion
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Calculate IBS and Lowest Low of X Bars 
+// ============================================
+lowestLow = ta.lowest(lowLookback)[1]
+plot(lowestLow, color=color.white)
+
+ibs = (close-low)/(high-low)
+
+// ============================================
+// Trend Filter
+// ============================================
+ma200 = ta.ema(close, emaPeriodInput)
+plot(ma200, color=color.red, force_overlay=true)
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================
+shortCondition = low < lowestLow and ibs > ibsThreshold and isWithinTradingWindow
+exitCondition = close<low[1]
+
+// Apply EMA Filter if enabled
+if useEmaFilter
+    shortCondition := shortCondition and close < ma200
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if shortCondition
+    strategy.entry('short', strategy.short)
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+View in Pine Editor・60 lines
+Use on chart
+8
+5
+2 406
+█ STRATEGY DESCRIPTION
+The "10 Bar Low Pullback" strategy is a contrarian short trading system designed to capture pullbacks after a new 10‐bar low is made. it identifies a potential short opportunity when the current bar’s low breaks below the lowest low of the previous 10 bars, provided that the bar exhibits strong internal momentum as measured by its IBS value. An optional trend filter further refines entries by requiring that the close is below a 200-period EMA.
+
+█ WHAT IS INTERNAL BAR STRENGTH (IBS)?
+Internal Bar Strength (IBS) measures where the closing price falls within the high-low range of a bar. It is calculated as:
+
+Pine Script®
+ibs = (close - low) / (high - low)
+
+
+- Low IBS (≤ 0.2): Indicates the close is near the bar's low, suggesting oversold conditions.
+- High IBS (≥ 0.8): Indicates the close is near the bar's high, suggesting overbought conditions.
+
+█ SIGNAL GENERATION
+1. SHORT ENTRY
+A Short Signal is triggered when:
+
+The current bar’s low is below the lowest low of the past X bars (default: 10).
+
+The bar’s IBS is greater than the specified threshold (default: 0.85).
+
+The signal occurs within the defined trading window (between Start Time and End Time).
+
+If the EMA Filter is enabled, the close must be below the 200-period EMA.
+
+
+
+2. EXIT CONDITION
+
+An exit Signal is generated when the current close falls below the previous bar’s low (close < low[1]), indicating a potential bearish reversal and prompting the strategy to close its short position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Lookback Period: Defines the number of bars (default is 10) over which the lowest low is calculated.
+
+IBS Threshold: Sets the minimum required IBS value (default is 0.85) to qualify as a pullback.
+
+Trading Window: Trades are only executed between the user-defined Start Time and End Time.
+
+EMA Filter (Optional): When enabled, short entries are only considered if the current close is below the 200-period EMA, with the EMA period being adjustable (default is 200).
+
+
+
+█ PERFORMANCE OVERVIEW
+
+Designed for shorting opportunities, this strategy aims to capture pullbacks following an aggressive 10-bar low break.
+
+It leverages a combination of a lookback low and IBS measurement to identify overextended bullish moves that may revert.
+
+The optional EMA filter helps confirm a bearish market environment by ensuring the price remains under the trend line.
+
+Suitable for use on various assets, including stocks and ETFs, on daily or similar timeframes.
+
+Backtesting and parameter optimization are recommended to tailor the strategy to specific market conditions.
+

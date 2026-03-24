@@ -1,0 +1,274 @@
+//@version=6
+strategy("Feroce Fikingo CSI", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// =====================
+// INPUTS (configurabili)
+// =====================
+//// ADX
+adxLen        = input.int(14, "ADX Length", minval=3)
+slopeLen      = input.int(3, "Slope lookback (bars)", minval=1)
+minADX        = input.float(20.0, "Min ADX (strength)", step=0.1)
+adxSlopeThr   = input.float(0.0, "ADX slope threshold", step=0.01)
+
+//// CSM (Cycle Swing Momentum)
+csmRsiLen     = input.int(14, "CSM: RSI length", minval=3)
+csmFastEma    = input.int(3, "CSM: fast EMA (on RSI)")
+csmSlowEma    = input.int(9, "CSM: slow EMA (on RSI)")
+
+//// Filters
+useEMA        = input.bool(true, "Use EMA trend filter?")
+emaLen        = input.int(200, "EMA length")
+
+useMACD       = input.bool(true, "Use MACD confirmation?")
+macdFast      = input.int(12, "MACD fast")
+macdSlow      = input.int(26, "MACD slow")
+macdSig       = input.int(9,  "MACD signal")
+
+useVolFilter  = input.bool(true, "Use volatility filter (ATR/price)?")
+volAtrLen     = input.int(14, "Volatility ATR length")
+volMinRatio   = input.float(0.002, "Min volatility (ATR/price)", step=0.0001)
+
+//// Money management - ATR based
+useStopLoss   = input.bool(true, "Use Stop Loss (ATR based)?")
+stopATRmult   = input.float(1.0, "Stop = ATR ×", step=0.1)
+
+usePartial    = input.bool(true, "Use Partial Take Profit?")
+partialPct    = input.float(50.0, "Partial %", minval=1, maxval=100, step=1) // percent of position to close
+partialRR     = input.float(1.0, "Partial TP R:R", step=0.1)
+
+finalRR       = input.float(2.0, "Final TP R:R", step=0.1)
+useTrailing   = input.bool(true, "Use Trailing Stop?")
+trailATRmult  = input.float(1.5, "Trailing ATR multiplier", step=0.1)
+
+//// Visual
+showSignals   = input.bool(true, "Show entry/exit signals?")
+showTPSLlines = input.bool(true, "Show TP/SL lines while trade active?")
+showBGZone    = input.bool(true, "Show background trend zone?")
+
+// =====================
+// MANUAL ADX (Wilder RMA) - compatible
+// =====================
+upMove   = math.max(high - high[1], 0.0)
+downMove = math.max(low[1] - low, 0.0)
+plusDM_raw  = (upMove > downMove) ? upMove : 0.0
+minusDM_raw = (downMove > upMove) ? downMove : 0.0
+
+tr = ta.tr(true)
+trRma = ta.rma(tr, adxLen)
+plusDMrma = ta.rma(plusDM_raw, adxLen)
+minusDMrma = ta.rma(minusDM_raw, adxLen)
+
+plusDI = (trRma != 0.0) ? (100.0 * plusDMrma / trRma) : 0.0
+minusDI = (trRma != 0.0) ? (100.0 * minusDMrma / trRma) : 0.0
+dx = (plusDI + minusDI != 0.0) ? (100.0 * math.abs(plusDI - minusDI) / (plusDI + minusDI)) : 0.0
+adx = ta.rma(dx, adxLen)
+
+// slope (manual)
+adxSlope = (adx - adx[slopeLen]) / math.max(slopeLen, 1)
+
+// =====================
+// Cycle Swing Momentum (RSI -> fast/slow EMA -> diff)
+// =====================
+csm_rsi = ta.rsi(close, csmRsiLen)
+csm_fast = ta.ema(csm_rsi, csmFastEma)
+csm_slow = ta.ema(csm_rsi, csmSlowEma)
+csm = csm_fast - csm_slow
+csmSlope = (csm - csm[slopeLen]) / math.max(slopeLen, 1)
+
+// =====================
+// EMA filter
+// =====================
+emaTrend = ta.ema(close, emaLen)
+trendLongOK = not useEMA or (close > emaTrend)
+trendShortOK = not useEMA or (close < emaTrend)
+
+// =====================
+// MACD (optional)
+// =====================
+macdLine = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+macdSignalLine = ta.ema(macdLine, macdSig)
+macdOK_long = not useMACD or (macdLine > macdSignalLine)
+macdOK_short = not useMACD or (macdLine < macdSignalLine)
+
+// =====================
+// Volatility
+// =====================
+atrVol = ta.atr(volAtrLen)
+volatilityRatio = atrVol / close
+volOK = not useVolFilter or (volatilityRatio > volMinRatio)
+
+// =====================
+// ENTRY / EXIT LOGIC
+// =====================
+// ADX rising = slope above threshold
+adxUp = adxSlope > adxSlopeThr
+adxDown = adxSlope < -adxSlopeThr  // require significant negative slope to exit; adjust threshold via input
+
+// require ADX magnitude too
+adxStrong = adx > minADX
+
+csmUp = csmSlope > 0
+csmDown = csmSlope < 0
+
+longSignal = adxStrong and adxUp and csmUp and trendLongOK and macdOK_long and volOK
+shortSignal = adxStrong and adxUp and csmDown and trendShortOK and macdOK_short and volOK
+
+// exit when ADX turns down (slope negative beyond threshold)
+exitByAdx_long = adxDown and strategy.position_size > 0
+exitByAdx_short = adxDown and strategy.position_size < 0
+
+// =====================
+// EXECUTION
+// =====================
+// entries
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+
+// exits by ADX weakening
+if (exitByAdx_long)
+    strategy.close("Long", comment="Chiudi secondo ADX")
+if (exitByAdx_short)
+    strategy.close("Short", comment="Chiudi secondo adx")
+
+// =====================
+// POSITION MANAGEMENT: SL / Partial / Final / Trailing (ATR-based)
+// =====================
+var line longSLLine = na
+var line longTPLine = na
+var line shortSLLine = na
+var line shortTPLine = na
+
+prevPos = nz(strategy.position_size[1], 0)
+
+// When a new long opens (position switched from <=0 to >0), create lines (if enabled)
+if (strategy.position_size > 0 and prevPos <= 0)
+    entryP = strategy.position_avg_price
+    slP = entryP - atrVol * stopATRmult
+    // partial & final TP calculated from R:R relative to stop distance
+    riskDist = entryP - slP
+    tpPartialP = entryP + riskDist * partialRR
+    tpFinalP = entryP + riskDist * finalRR
+
+    // create lines only if flag true
+    if showTPSLlines
+        longSLLine := line.new(bar_index, slP, bar_index + 1, slP, xloc=xloc.bar_index, extend=extend.right, color=color.new(#ff4d4d, 0), style=line.style_dashed, width=1)
+        longTPLine := line.new(bar_index, tpFinalP, bar_index + 1, tpFinalP, xloc=xloc.bar_index, extend=extend.right, color=color.new(#33cc33, 0), style=line.style_solid, width=1)
+
+// When a new short opens
+if (strategy.position_size < 0 and prevPos >= 0)
+    entryP = strategy.position_avg_price
+    slP = entryP + atrVol * stopATRmult
+    riskDist = slP - entryP
+    tpPartialP = entryP - riskDist * partialRR
+    tpFinalP = entryP - riskDist * finalRR
+
+    if showTPSLlines
+        shortSLLine := line.new(bar_index, slP, bar_index + 1, slP, xloc=xloc.bar_index, extend=extend.right, color=color.new(#ff4d4d, 0), style=line.style_dashed, width=1)
+        shortTPLine := line.new(bar_index, tpFinalP, bar_index + 1, tpFinalP, xloc=xloc.bar_index, extend=extend.right, color=color.new(#33cc33, 0), style=line.style_solid, width=1)
+
+// Update TP/SL lines coordinates each bar while position active
+if strategy.position_size > 0 and showTPSLlines
+    entryP = strategy.position_avg_price
+    slP = entryP - atrVol * stopATRmult
+    riskDist = entryP - slP
+    tpFinalP = entryP + riskDist * finalRR
+    // update lines
+    if not na(longSLLine)
+        line.set_xy1(longSLLine, bar_index, slP)
+        line.set_xy2(longSLLine, bar_index + 1, slP)
+    if not na(longTPLine)
+        line.set_xy1(longTPLine, bar_index, tpFinalP)
+        line.set_xy2(longTPLine, bar_index + 1, tpFinalP)
+
+if strategy.position_size < 0 and showTPSLlines
+    entryP = strategy.position_avg_price
+    slP = entryP + atrVol * stopATRmult
+    riskDist = slP - entryP
+    tpFinalP = entryP - riskDist * finalRR
+    if not na(shortSLLine)
+        line.set_xy1(shortSLLine, bar_index, slP)
+        line.set_xy2(shortSLLine, bar_index + 1, slP)
+    if not na(shortTPLine)
+        line.set_xy1(shortTPLine, bar_index, tpFinalP)
+        line.set_xy2(shortTPLine, bar_index + 1, tpFinalP)
+
+// Remove lines when position closes
+if strategy.position_size == 0 and prevPos != 0
+    if not na(longSLLine)
+        line.delete(longSLLine)
+        longSLLine := na
+    if not na(longTPLine)
+        line.delete(longTPLine)
+        longTPLine := na
+    if not na(shortSLLine)
+        line.delete(shortSLLine)
+        shortSLLine := na
+    if not na(shortTPLine)
+        line.delete(shortTPLine)
+        shortTPLine := na
+
+// Place exits (strategy.exit) for SL, partial, final, trailing — idempotent; safe to call each bar
+if strategy.position_size > 0
+    entryP = strategy.position_avg_price
+    stopP = entryP - atrVol * stopATRmult
+    riskDist = entryP - stopP
+    if useStopLoss
+        strategy.exit("SL Long", from_entry="Long", stop=stopP)
+    if usePartial
+        // partial percent closes at partialTP (qty_percent)
+        strategy.exit("Partial Long", from_entry="Long", limit = entryP + riskDist * partialRR, qty_percent = math.round(partialPct))
+    // final TP closes remaining
+    strategy.exit("Final Long", from_entry="Long", limit = entryP + riskDist * finalRR)
+    if useTrailing
+        strategy.exit("Trail Long", from_entry="Long", trail_points = atrVol * trailATRmult, trail_offset = atrVol * trailATRmult)
+
+if strategy.position_size < 0
+    entryP = strategy.position_avg_price
+    stopP = entryP + atrVol * stopATRmult
+    riskDist = stopP - entryP
+    if useStopLoss
+        strategy.exit("SL Short", from_entry="Short", stop=stopP)
+    if usePartial
+        strategy.exit("Partial Short", from_entry="Short", limit = entryP - riskDist * partialRR, qty_percent = math.round(partialPct))
+    strategy.exit("Final Short", from_entry="Short", limit = entryP - riskDist * finalRR)
+    if useTrailing
+        strategy.exit("Trail Short", from_entry="Short", trail_points = atrVol * trailATRmult, trail_offset = atrVol * trailATRmult)
+
+// =====================
+// VISUALS: signals, background zone (bgcolor called at global scope)
+// =====================
+bullZone = adxStrong and adxUp and csmUp
+bearZone = adxStrong and adxUp and csmDown
+
+// background color computed and applied at global scope
+bgColor = showBGZone ? (bullZone ? color.new(#1b8a1b, 90) : bearZone ? color.new(#8a1b1b, 90) : na) : na
+bgcolor(bgColor)
+
+if showSignals and longSignal
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.new(#1b8a1b, 0), textcolor=color.white)
+if showSignals and shortSignal
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.new(#8a1b1b, 0), textcolor=color.white)
+
+plotshape(showSignals and longSignal, title="Long", location=location.belowbar, color=color.new(#00aa00, 0), style=shape.triangleup, size=size.small)
+plotshape(showSignals and shortSignal, title="Short", location=location.abovebar, color=color.new(#ff3333, 0), style=shape.triangledown, size=size.small)
+
+// helpful plots (hidden by default)
+plot(emaTrend, title="EMA Trend", color=color.new(#00cccc, 0))
+plot(adx, title="ADX (manual)", color=color.new(#ffa500, 0), display=display.none)
+plot(csm, title="CSM", color=color.new(#7a3fb7, 0), display=display.none)
+
+// volatility percent (hidden)
+plot(volatilityRatio * 100, title="Volatility % (ATR/price)", display=display.none)
+hline(volMinRatio * 100, "Vol threshold %", color=color.new(#ff3333, 0), linestyle=hline.style_dotted)
+
+View in Pine Editor・268 lines
+Use on chart
+1
+6
+527
+Feroce Fikingo CSI
+Strategia basata su cicli
+Bitcoin grafico a 4h

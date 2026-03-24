@@ -1,0 +1,62 @@
+//@version=5
+strategy("New Paradigm: Master Scalper (Optimized)", overlay=true, initial_capital=50000, currency=currency.USD)
+
+// --- 1. INITIAL INPUTS ---
+asset_type       = input.string("Gold", "Asset Class", options=["NQ", "ES", "Gold"])
+vol_multiplier   = input.float(1.0, "Global Vol Multiplier", step=0.1)
+
+// --- OPTIMIZATION SETTINGS ---
+// GC Minimum tick is 0.1. So 100 ticks = 10 full points.
+tp_ticks         = input.int(100, "Take Profit (Ticks)", step=10)
+sl_ticks         = input.int(100, "Stop Loss (Ticks)", step=10)
+use_trend_filter = input.bool(true, "Use 200 EMA Trend Filter")
+use_session      = input.bool(true, "Restrict to NY Session (08:00-15:00 EST)")
+
+// --- 2. CORE SESSION MATH ---
+// Set NY session time for high-liquidity entries (Corrected format)
+in_session = use_session ? time(timeframe.period, "0800-1500", "America/New_York") != na : true
+
+// Adjusted IV values to be realistic for 5m scalping
+// Reduced Gold from 15.0 to 5.0 (Band will be 10 points from VWAP instead of 30)
+base_iv = asset_type == "NQ" ? 9.0 : asset_type == "ES" ? 7.5 : 5.0 
+final_iv = base_iv * vol_multiplier
+
+// --- 3. EXECUTION LOGIC ---
+vwap_val     = ta.vwap
+lower_target = vwap_val - (final_iv * 2)
+upper_target = vwap_val + (final_iv * 2)
+
+is_vol_spike = volume > ta.sma(volume, 20) * 1.5
+ema200       = ta.ema(close, 200)
+
+// Trend Filter Logic: Don't fade shorts in a strong uptrend, etc.
+trend_long  = use_trend_filter ? close > ema200 : true
+trend_short = use_trend_filter ? close < ema200 : true
+
+bull_fade = (low <= lower_target * 1.001) and (close > open) and is_vol_spike and trend_long and in_session
+bear_fade = (high >= upper_target * 0.999) and (close < open) and is_vol_spike and trend_short and in_session
+
+if (bull_fade)
+    strategy.entry("Long", strategy.long, comment="Fade L")
+    alert("BUY: Green Wall touched on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if (bear_fade)
+    strategy.entry("Short", strategy.short, comment="Fade S")
+    alert("SELL: Red Wall touched on " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+// --- 4. FIXED EXITS ---
+// Safely using ticks for both profit and loss parameters to avoid mintick math errors
+strategy.exit("Exit L", "Long", profit=tp_ticks, loss=sl_ticks)
+strategy.exit("Exit S", "Short", profit=tp_ticks, loss=sl_ticks)
+
+// --- 5. VISUALS ---
+plot(vwap_val, "VWAP", color=color.gray)
+plot(lower_target, "Green Wall", color=color.green, linewidth=2)
+plot(upper_target, "Red Wall", color=color.red, linewidth=2)
+plot(use_trend_filter ? ema200 : na, "200 EMA Trend", color=color.blue)
+
+View in Pine Editor・56 lines
+Use on chart
+6
+355
+Daily expetcted move indicator.The green and red line and minumum expoected and maximum expected move for buy and sell

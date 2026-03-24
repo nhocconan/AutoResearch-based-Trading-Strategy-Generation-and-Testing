@@ -1,0 +1,161 @@
+//@version=6
+// Copyright (c) 2021-present, Alex Orekhov (everget)
+
+strategy('HalfTrend', overlay = true)
+
+//回測時間
+
+backtest_year = input(title = 'backtest_year', defval = 2023)
+backtest_month = input(title = 'backtest_month', defval = 1)
+backtest_date = input(title = 'backtest_date', defval = 1)
+
+backtest_start_time = timestamp(backtest_year, backtest_month, backtest_date, 0, 0, 0)
+
+amplitude = input(title = 'Amplitude', defval = 2)
+channelDeviation = input(title = 'Channel Deviation', defval = 2)
+showArrows = input(title = 'Show Arrows', defval = true)
+showChannels = input(title = 'Show Channels', defval = true)
+
+var int trend = 0
+var int nextTrend = 0
+var float maxLowPrice = nz(low[1], low)
+var float minHighPrice = nz(high[1], high)
+
+var float up = 0.0
+var float down = 0.0
+float atrHigh = 0.0
+float atrLow = 0.0
+float arrowUp = na
+float arrowDown = na
+
+atr2 = ta.atr(100) / 2
+dev = channelDeviation * atr2
+
+highPrice = high[math.abs(ta.highestbars(amplitude))]
+lowPrice = low[math.abs(ta.lowestbars(amplitude))]
+highma = ta.sma(high, amplitude)
+lowma = ta.sma(low, amplitude)
+
+if nextTrend == 1
+    maxLowPrice := math.max(lowPrice, maxLowPrice)
+
+    if highma < maxLowPrice and close < nz(low[1], low)
+        trend := 1
+        nextTrend := 0
+        minHighPrice := highPrice
+        minHighPrice
+else
+    minHighPrice := math.min(highPrice, minHighPrice)
+
+    if lowma > minHighPrice and close > nz(high[1], high)
+        trend := 0
+        nextTrend := 1
+        maxLowPrice := lowPrice
+        maxLowPrice
+
+if trend == 0
+    if not na(trend[1]) and trend[1] != 0
+        up := na(down[1]) ? down : down[1]
+        arrowUp := up - atr2
+        arrowUp
+    else
+        up := na(up[1]) ? maxLowPrice : math.max(maxLowPrice, up[1])
+        up
+    atrHigh := up + dev
+    atrLow := up - dev
+    atrLow
+else
+    if not na(trend[1]) and trend[1] != 1
+        down := na(up[1]) ? up : up[1]
+        arrowDown := down + atr2
+        arrowDown
+    else
+        down := na(down[1]) ? minHighPrice : math.min(minHighPrice, down[1])
+        down
+    atrHigh := down + dev
+    atrLow := down - dev
+    atrLow
+
+ht = trend == 0 ? up : down
+
+var color buyColor = color.blue
+var color sellColor = color.red
+
+htColor = trend == 0 ? buyColor : sellColor
+htPlot = plot(ht, title = 'HalfTrend', linewidth = 2, color = htColor)
+
+
+buySignal = not na(arrowUp) and trend == 0 and trend[1] == 1
+sellSignal = not na(arrowDown) and trend == 1 and trend[1] == 0
+
+plotshape(showArrows and buySignal ? atrLow : na, title = 'Arrow Up', style = shape.triangleup, location = location.absolute, size = size.tiny, color = color.new(buyColor, 0))
+plotshape(showArrows and sellSignal ? atrHigh : na, title = 'Arrow Down', style = shape.triangledown, location = location.absolute, size = size.tiny, color = color.new(sellColor, 0))
+
+longcondition = buySignal
+shortcondition = sellSignal
+
+//多單進場 NASDAQ 日K
+//strategy.entry("open long" ,true, qty = 1,comment = "藍色多頭建倉",when = longcondition)
+//strategy.exit("close long" ,"open long",limit= 1.11*strategy.position_avg_price,stop = 0.94 *strategy.position_avg_price,comment = "多盈11% 損6%")
+//trategy.close("open long",when =shortcondition ,comment = "紅色訊號平倉" )
+
+//空單進場 NASDAQ 日k
+//strategy.entry("open short" ,false, qty = 1,comment = "紅色空頭建倉",when = shortcondition)
+//strategy.exit("close short" ,"open short",limit= 0.88*strategy.position_avg_price,stop = 1.03*strategy.position_avg_price,comment = "空盈12% 損3%")
+//strategy.close("open short",when =longcondition ,comment = "藍色訊號平倉" )
+
+if time >= backtest_start_time
+    //多單進場 NASDAQ 5K
+    if longcondition
+        strategy.entry('open long', strategy.long, qty = 1, comment = '藍色多頭建倉')
+    //strategy.exit("close long" ,"open long",limit= 1.013*strategy.position_avg_price,comment = "多盈1.3% ")
+    strategy.exit('close long', 'open long', profit = 500, loss = 200, comment = '多頭利500T')
+    strategy.exit('close long', 'open long', stop = 0.94 * strategy.position_avg_price, comment = '損6%')
+    if shortcondition
+        strategy.close('open long', comment = '紅色訊號平倉')
+
+//空單進場 NASDAQ 5k
+//strategy.entry("open short" ,false, qty = 1,comment = "紅色空頭建倉",when = shortcondition)
+//strategy.exit("close short" ,"open short",limit= 0.98*strategy.position_avg_price,stop = 1.01*strategy.position_avg_price,comment = "空盈2% 損1%")
+//strategy.exit("close short" ,"open short",limit= 0.9*strategy.position_avg_price,loss = 400, comment = "空盈2% ")
+//strategy.close("open short",when =longcondition ,comment = "藍色訊號平倉" )
+
+
+//多單進場 sp500
+//strategy.entry("open long" ,true, qty = 1,comment = "藍色多頭建倉",when = longcondition)
+//strategy.exit("close long" ,"open long",limit= 1.10*strategy.position_avg_price,stop = 0.95 *strategy.position_avg_price,comment = "多盈10% 損5%")
+//strategy.exit("close long" ,"open long",profit = 600, comment = "多頭利500T")
+//strategy.exit("close long" ,"open long",profit = 500,loss = 200 ,comment = "多頭利500T 停200T")
+//strategy.close("open long",when =shortcondition ,comment = "紅色訊號平倉" )
+
+//空單進場 SP500
+//strategy.entry("open short" ,false, qty = 1,comment = "紅色空頭建倉",when = shortcondition)
+//strategy.exit("close short" ,"open short",limit= 0.90*strategy.position_avg_price,stop = 1.03*strategy.position_avg_price,comment = "空盈10% 損3%")
+//strategy.exit("close short" ,"open short",profit =600, comment = "空頭利600T ")
+//strategy.exit("close short" ,"open short",profit = 500,loss = 200 ,comment = "空頭利500T 停200T")
+//strategy.close("open short",when =longcondition ,comment = "藍色訊號平倉" )
+
+View in Pine Editor・136 lines
+Use on chart
+2
+7
+861
+Description (描述):
+
+HalfTrend is a trend-following technical analysis tool designed to identify market direction, entry/exit signals, and trend strength. It utilizes color-coded lines—Blue for Bullish and Red for Bearish—combined with slope analysis and arrows to visualize opportunities.
+
+Core Features:
+
+Trend Identification: Blue lines indicate bullish trends; Red lines indicate bearish trends.
+
+Buy/Sell Signals: Arrows appear at trend reversals (Up for Long, Down for Short).
+
+Customizable Sensitivity: Adjust "Amplitude" and "Channel Deviation" to suit various market volatilities.
+
+Best Practices:
+
+Designed for trend-following strategies.
+
+Recommended to use alongside RSI or MACD to filter noise.
+
+Works across Stocks, Crypto, and Forex on all timeframes.

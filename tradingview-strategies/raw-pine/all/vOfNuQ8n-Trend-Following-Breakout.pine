@@ -1,0 +1,138 @@
+//@version=4
+strategy("Trend Surfers - Breakout + Alerts", calc_on_every_tick =false, overlay=true, initial_capital=2000,commission_value=.1,default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+
+/////////////// INPUT ENTRY EXIT
+entry= input(100, "ENTRY H/L")
+exit= input(50, "EXIT H/L")
+
+/////////////// Backtest Input
+FromYear = input(2015, "Backtest Start Year")
+FromMonth = input(1, "Backtest Start Month")
+FromDay = input(1, "Backtest Start Day")
+ToYear = input(2999, "Backtest End Year")
+ToMonth = input(1, "Backtest End Month")
+ToDay = input(1, "Backtest End Day")
+
+/////////////// Backtest Setting
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)       
+window()  => time >= start and time <= finish ? true : false 
+
+/////////////// BUY OPEN PLOT
+highestpricelong = highest(high,entry)[1]
+plot(highestpricelong, color=color.green, linewidth=2)
+
+/////////////// BUY CLOSE PLOT
+lowestpricelong = lowest(high,exit)[1]
+plot(lowestpricelong, color=color.green, linewidth=2)
+
+/////////////// SHORT OPEN PLOT
+lowestpriceshort = lowest(low,entry)[1]
+plot(lowestpriceshort, color=color.red, linewidth=2)
+
+/////////////// SHORT CLOSE PLOT
+highestpriceshort = highest(low,exit)[1]
+plot(highestpriceshort, color=color.red, linewidth=2)
+
+///////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// CONDITION LONG SHORT //////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+
+/////////////// SHORT 
+
+entryshort= crossunder(close, lowestpriceshort)
+exitshort= crossover(close,highestpriceshort)
+
+/////////////// LONG 
+
+exitlong= crossover(close, lowestpricelong)
+entrylong= crossover(close,highestpricelong)
+
+///////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// LONG and SHORT ORDER //////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+
+///////////// Alert Message
+pair = syminfo.basecurrency + syminfo.currency
+
+entry_long_message = '\nGo Long for ' + pair + 'NOW!' +
+                     '\nClose any short position that are open!' +
+                     '\n\nFind Trend Surfers on Google' +
+                     '\nFor automated premium signals (FREE)'
+
+entry_short_message ='\nGo Short for ' + pair + 'NOW!' +
+                     '\nClose any long position that are open!' +
+                     '\n\nFind Trend Surfers on Google' +
+                     '\nFor automated premium signals (FREE)'
+
+exit_long_message ='\nExit Long for ' + pair + 'NOW!' +
+                     '\n\nFind Trend Surfers on Google' +
+                     '\nFor automated premium signals (FREE)'
+
+exit_short_message ='\nExit Short for ' + pair + 'NOW!' +
+                     '\n\nFind Trend Surfers on Google' +
+                     '\nFor automated premium signals (FREE)'
+
+/////////////// LONG 
+
+if (entrylong)
+    strategy.entry("LongEntry", strategy.long, alert_message = entry_long_message, when = window())
+if (exitlong or entryshort)
+    strategy.close("LongEntry", alert_message = exit_long_message, when=window())
+
+/////////////// SHORT 
+
+if (entryshort)
+    strategy.entry("short", strategy.short, alert_message = entry_short_message, when = window())
+if (exitshort or entrylong)
+    strategy.close("short", alert_message = exit_short_message, when=window())
+
+View in Pine Editor・92 lines
+Use on chart
+8
+5
+1
+7
+25 603
+Feb 16, 2020
+Easy Trend Following Strategy using Highs and Lows breakout of the last X candles to enter and exit trades.
+
+You can easily change the ENTRY and EXIT value in order to find the best settings.
+
+This strategy seems to be working well for 
+BTC
+ and 
+ETH
+ on the 4H and 1D.
+
+I didn't play with it too much as I am testing script to trade on the 15 minutes chart with margin. This script can't do this successfully but I hope it can be helpful for what you want to achieve.
+
+Feb 2, 2021
+Release Notes
+Added alert messages. You can now get customized Alerts when you should go Long or Short and when to exit your position.
+
+Here's what you have to do:
+
+Create an alert
+Select the script as condition
+Select Email to SMS option
+write: {{strategy.order.alert_message}} inside the message section
+Go in your setting to add your email in the EMAIL to SMS section
+
+Once setup, you will receive an email every time you need to be long and short.
+
+Find Trend Surfers on Google to get free automated signals.
+
+Feb 24, 2021
+Release Notes
+Removed Calc_on_order_fills = true
+
+This code was creating a warning of inaccurate results by Tradingview.
+
+The results are the same without it. The strategy does work.
+Feb 24, 2021
+Release Notes
+A simple update to use 4H instead of 15min. To display better results.
+
+The strategy works great on 3H also. Do some testing, I am sure you will get some good results

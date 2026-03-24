@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-03-23T04:49:30.202695+00:00",
+  "queue_rank": 3443,
+  "page": 144,
+  "name": " BTC 15 min",
+  "slug": "xgk5k4de-btc-15-min",
+  "chart_url": "https://www.tradingview.com/script/xGk5K4DE-BTC-15-min/",
+  "pine_file": "raw-pine/bulk/xGk5K4DE-BTC-15-min.pine",
+  "symbol_name": "BINANCE:BTCUSDT.P",
+  "repo_timeframe_hint": "15m",
+  "status": "unsupported",
+  "classification": "unsupported",
+  "timeframe": "15m",
+  "reason": "Uses security() to request lower timeframe (1m) data on 15m chart; relies on strategy.equity for sizing.",
+  "adaptations": [
+    "Remove lower-timeframe security request",
+    "Replace dynamic equity sizing with fixed fraction",
+    "Convert strategy.exit stops to signal logic"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [],
+  "python_file": null,
+  "failed_python_files": [],
+  "validation": null,
+  "last_error": null
+}

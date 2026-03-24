@@ -1,0 +1,33 @@
+//@version=2
+strategy("4H CCI Strategy 1.4", overlay=true)
+length = input( 11 )
+overSold = input( -100 )
+overBought = input( +100 )
+price1 = high
+price2 = low
+ucci = cci(price1, length)
+dcci = cci(price2, length)
+tp = input(title='Take profit in ticks:', type=float, defval=3000.0)
+sl = input(title='Stop loss in ticks:', type=float, defval=1000.0)
+trade_size = input(title='Trade Size:', type=float, defval=500000)
+strategy.entry("CCILE", strategy.long, comment="CCILE",qty=trade_size, when=crossover(dcci, overSold))
+strategy.exit(id="CCILE", profit = tp, loss = sl)
+strategy.entry("CCISE", strategy.short, comment="CCISE",qty=trade_size,when=crossunder(ucci, overBought))
+strategy.exit(id="CCISE", profit = tp, loss = sl)
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・17 lines
+Use on chart
+1
+4
+0
+10
+5 226
+Here's the last version...quick hack job.
+I'm sure it can be improved, but this is a rough sketch, code wise.
+The strategy works in range bound enviroments, so cointegrated pairs like AUDCAD will shine with it.
+
+Cheers,
+
+Ivan Labrie
+Time at Mode FX

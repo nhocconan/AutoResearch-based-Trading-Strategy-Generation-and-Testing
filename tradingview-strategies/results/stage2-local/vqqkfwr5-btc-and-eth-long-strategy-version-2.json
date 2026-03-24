@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-03-23T06:45:44.059282+00:00",
+  "queue_rank": 3458,
+  "page": 145,
+  "name": "BTC and ETH Long strategy - version 2",
+  "slug": "vqqkfwr5-btc-and-eth-long-strategy-version-2",
+  "chart_url": "https://www.tradingview.com/script/VQqkfWR5-BTC-and-ETH-Long-strategy-version-2/",
+  "pine_file": "raw-pine/bulk/VQqkfWR5-BTC-and-ETH-Long-strategy-version-2.pine",
+  "symbol_name": "KRAKEN:ETHUSD",
+  "repo_timeframe_hint": "4h",
+  "status": "error",
+  "classification": null,
+  "timeframe": "4h",
+  "reason": "classify_attempt_3: LLM call timed out after 60s",
+  "adaptations": [],
+  "attempts_used": 3,
+  "attempt_log": [
+    "classify_attempt_1: LLM call timed out after 60s",
+    "classify_attempt_2: LLM call timed out after 60s",
+    "classify_attempt_3: LLM call timed out after 60s"
+  ],
+  "conversion_notes": [],
+  "python_file": null,
+  "failed_python_files": [],
+  "validation": null,
+  "last_error": "classify_attempt_3: LLM call timed out after 60s"
+}

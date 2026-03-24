@@ -1,0 +1,427 @@
+//@version=5
+strategy("NYSE Open VWAP Reclaim + Pullback Hold (5/8/13 Curl) — Long & Short + Cross Filters",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+tz              = input.string("America/New_York", "Time Zone")
+
+rthSession      = input.session("0930-1600", "RTH Session (NYSE Open VWAP Anchor)")
+tradeSession    = input.session("0945-1100", "Trade Window (execute trades only in this window)")
+
+sess18to16      = input.session("1800-1600", "18:00→16:00 Anchored VWAP Session")
+show1800VWAP    = input.bool(true, "Show 18:00→16:00 Anchored VWAP")
+
+showHoldMarkers = input.bool(true, "Show Hold Markers (dots)")
+
+emaFastLen      = input.int(5,  "EMA Fast", minval=1)
+emaMidLen       = input.int(8,  "EMA Mid", minval=1)
+emaSlowLen      = input.int(13, "EMA Slow", minval=1)
+
+touchBufferTicks = input.int(2,  "VWAP Touch Buffer (ticks)", minval=0)
+useVolConfirm    = input.bool(true, "Require Rising Volume on Hold Candle")
+volLookback      = 1  // original script baseline fixed at 1
+
+reclaimMode      = input.string("1-close+hold", "Reclaim Definition", options=["2-closes", "1-close+hold"])
+
+stopBufferTicks  = input.int(2,   "Stop Buffer Beyond Setup Extreme (ticks)", minval=0)
+maxStopTicks     = input.int(40,  "Max Stop (ticks) — cancel if larger", minval=1)
+takeProfitTicks  = input.int(40,  "Take Profit (ticks)", minval=1)
+
+// NYSE Open VWAP cross markers (price vs NYSE Open VWAP)
+showVWAPCrosses  = input.bool(true, "Show NYSE Open VWAP Crosses (price)")
+crossBy          = input.string("Close", "Cross Detection", options=["Close", "Wick"])
+
+// VWAP-to-VWAP cross markers (NYSE Open VWAP vs 18:00 VWAP)
+showVWAPtoVWAPCrosses = input.bool(true, "Show Crosses: NYSE Open VWAP vs 18:00 VWAP")
+
+// 5 EMA / 13 EMA cross markers
+showEMA513Crosses = input.bool(true, "Show 5/13 EMA Crosses")
+
+maxVWAPCrosses   = input.int(4, "Max NYSE Open VWAP Crosses (no new trades after)", minval=0)
+
+// Combined market panel
+showMarketPanel      = input.bool(true, "Show NQ / YM VWAP Status Panel")
+nqSymbol             = input.symbol("CME_MINI:NQ1!", "NQ Symbol for Status Panel")
+ymSymbol             = input.symbol("CBOT_MINI:YM1!", "YM Symbol for Status Panel")
+panelTextSizeOpt     = input.string("Small", "Panel Text Size", options=["Tiny", "Small", "Normal"])
+showPanelNYVWAP      = input.bool(true, "Panel: Show vs NY VWAP")
+showPanel1800VWAP    = input.bool(true, "Panel: Show vs 18:00 VWAP")
+showPanelNQ          = input.bool(true, "Panel: Show NQ")
+showPanelYM          = input.bool(true, "Panel: Show YM")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Session filters
+//──────────────────────────────────────────────────────────────────────────────
+inRTH   = not na(time(timeframe.period, rthSession, tz))
+inTrade = not na(time(timeframe.period, tradeSession, tz))
+
+isNewRTH = inRTH and not inRTH[1]
+
+in18to16     = not na(time(timeframe.period, sess18to16, tz))
+isNew18to16  = in18to16 and not in18to16[1]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Core constants
+//──────────────────────────────────────────────────────────────────────────────
+tick = syminfo.mintick
+buf  = touchBufferTicks * tick
+tp   = hlc3
+
+panelTextSize = panelTextSizeOpt == "Tiny" ? size.tiny : panelTextSizeOpt == "Small" ? size.small : size.normal
+
+//──────────────────────────────────────────────────────────────────────────────
+// NYSE Open VWAP (Anchored 09:30 ET, resets daily)
+//──────────────────────────────────────────────────────────────────────────────
+var float cumPV = na
+var float cumV  = na
+
+if isNewRTH
+    cumPV := tp * volume
+    cumV  := volume
+else if inRTH
+    cumPV += tp * volume
+    cumV  += volume
+
+openVWAP = (cumV > 0) ? (cumPV / cumV) : na
+
+//──────────────────────────────────────────────────────────────────────────────
+// 18:00→16:00 Anchored VWAP (resets at 18:00 ET)
+//──────────────────────────────────────────────────────────────────────────────
+var float cumPV_18 = na
+var float cumV_18  = na
+
+if isNew18to16
+    cumPV_18 := tp * volume
+    cumV_18  := volume
+else if in18to16
+    cumPV_18 += tp * volume
+    cumV_18  += volume
+
+vwap18to16 = (cumV_18 > 0) ? (cumPV_18 / cumV_18) : na
+
+//──────────────────────────────────────────────────────────────────────────────
+// NQ data for panel
+//──────────────────────────────────────────────────────────────────────────────
+nqClose = request.security(nqSymbol, timeframe.period, close,  barmerge.gaps_off, barmerge.lookahead_off)
+nqHlc3  = request.security(nqSymbol, timeframe.period, hlc3,   barmerge.gaps_off, barmerge.lookahead_off)
+nqVol   = request.security(nqSymbol, timeframe.period, volume, barmerge.gaps_off, barmerge.lookahead_off)
+
+var float nqCumPV = na
+var float nqCumV  = na
+
+if isNewRTH
+    nqCumPV := nqHlc3 * nqVol
+    nqCumV  := nqVol
+else if inRTH
+    nqCumPV += nqHlc3 * nqVol
+    nqCumV  += nqVol
+
+nqOpenVWAP = (nqCumV > 0) ? (nqCumPV / nqCumV) : na
+
+var float nqCumPV_18 = na
+var float nqCumV_18  = na
+
+if isNew18to16
+    nqCumPV_18 := nqHlc3 * nqVol
+    nqCumV_18  := nqVol
+else if in18to16
+    nqCumPV_18 += nqHlc3 * nqVol
+    nqCumV_18  += nqVol
+
+nqVWAP18to16 = (nqCumV_18 > 0) ? (nqCumPV_18 / nqCumV_18) : na
+
+nqVsOpenText = na(nqClose) or na(nqOpenVWAP) ? "N/A" : nqClose > nqOpenVWAP ? "ABOVE" : nqClose < nqOpenVWAP ? "BELOW" : "AT"
+nqVs18Text   = na(nqClose) or na(nqVWAP18to16) ? "N/A" : nqClose > nqVWAP18to16 ? "ABOVE" : nqClose < nqVWAP18to16 ? "BELOW" : "AT"
+
+nqVsOpenColor = nqVsOpenText == "ABOVE" ? color.new(color.lime, 0) : nqVsOpenText == "BELOW" ? color.new(color.red, 0) : color.new(color.gray, 0)
+nqVs18Color   = nqVs18Text   == "ABOVE" ? color.new(color.lime, 0) : nqVs18Text   == "BELOW" ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// YM data for panel
+//──────────────────────────────────────────────────────────────────────────────
+ymClose = request.security(ymSymbol, timeframe.period, close,  barmerge.gaps_off, barmerge.lookahead_off)
+ymHlc3  = request.security(ymSymbol, timeframe.period, hlc3,   barmerge.gaps_off, barmerge.lookahead_off)
+ymVol   = request.security(ymSymbol, timeframe.period, volume, barmerge.gaps_off, barmerge.lookahead_off)
+
+var float ymCumPV = na
+var float ymCumV  = na
+
+if isNewRTH
+    ymCumPV := ymHlc3 * ymVol
+    ymCumV  := ymVol
+else if inRTH
+    ymCumPV += ymHlc3 * ymVol
+    ymCumV  += ymVol
+
+ymOpenVWAP = (ymCumV > 0) ? (ymCumPV / ymCumV) : na
+
+var float ymCumPV_18 = na
+var float ymCumV_18  = na
+
+if isNew18to16
+    ymCumPV_18 := ymHlc3 * ymVol
+    ymCumV_18  := ymVol
+else if in18to16
+    ymCumPV_18 += ymHlc3 * ymVol
+    ymCumV_18  += ymVol
+
+ymVWAP18to16 = (ymCumV_18 > 0) ? (ymCumPV_18 / ymCumV_18) : na
+
+ymVsOpenText = na(ymClose) or na(ymOpenVWAP) ? "N/A" : ymClose > ymOpenVWAP ? "ABOVE" : ymClose < ymOpenVWAP ? "BELOW" : "AT"
+ymVs18Text   = na(ymClose) or na(ymVWAP18to16) ? "N/A" : ymClose > ymVWAP18to16 ? "ABOVE" : ymClose < ymVWAP18to16 ? "BELOW" : "AT"
+
+ymVsOpenColor = ymVsOpenText == "ABOVE" ? color.new(color.lime, 0) : ymVsOpenText == "BELOW" ? color.new(color.red, 0) : color.new(color.gray, 0)
+ymVs18Color   = ymVs18Text   == "ABOVE" ? color.new(color.lime, 0) : ymVs18Text   == "BELOW" ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+//──────────────────────────────────────────────────────────────────────────────
+// EMAs
+//──────────────────────────────────────────────────────────────────────────────
+ema5  = ta.ema(close, emaFastLen)
+ema8  = ta.ema(close, emaMidLen)
+ema13 = ta.ema(close, emaSlowLen)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Gate ALL MARKERS to only show during RTH (09:30–16:00)
+//──────────────────────────────────────────────────────────────────────────────
+showMarkersRTH = inRTH
+
+// 5/13 EMA cross markup (RTH only)
+emaCrossUp   = showMarkersRTH and ta.crossover(ema5, ema13)
+emaCrossDown = showMarkersRTH and ta.crossunder(ema5, ema13)
+
+plotshape(showEMA513Crosses and emaCrossUp, title="EMA5 crosses ABOVE EMA13",
+     style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+
+plotshape(showEMA513Crosses and emaCrossDown, title="EMA5 crosses BELOW EMA13",
+     style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+
+//──────────────────────────────────────────────────────────────────────────────
+// NYSE Open VWAP Cross Detection (price vs NYSE Open VWAP) — RTH only + exclude first RTH bar
+//──────────────────────────────────────────────────────────────────────────────
+crossUpClose   = showMarkersRTH and not na(openVWAP) and not isNewRTH and ta.crossover(close, openVWAP)
+crossDownClose = showMarkersRTH and not na(openVWAP) and not isNewRTH and ta.crossunder(close, openVWAP)
+
+// Wick-based (noisier); also RTH only + exclude first bar
+prevAbove = close[1] > openVWAP[1]
+prevBelow = close[1] < openVWAP[1]
+spansVWAP = low <= openVWAP and high >= openVWAP
+
+crossUpWick   = showMarkersRTH and not na(openVWAP) and not isNewRTH and spansVWAP and prevBelow and close > openVWAP
+crossDownWick = showMarkersRTH and not na(openVWAP) and not isNewRTH and spansVWAP and prevAbove and close < openVWAP
+
+crossUp   = crossBy == "Close" ? crossUpClose : crossUpWick
+crossDown = crossBy == "Close" ? crossDownClose : crossDownWick
+
+plotshape(showVWAPCrosses and crossUp, title="NYSE Open VWAP Cross Up (price)", style=shape.triangleup,
+     location=location.belowbar, size=size.tiny, color=color.new(color.lime, 0))
+
+plotshape(showVWAPCrosses and crossDown, title="NYSE Open VWAP Cross Down (price)", style=shape.triangledown,
+     location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+
+// VWAP-to-VWAP crosses (NYSE Open VWAP vs 18:00 VWAP) — RTH only + exclude first bar
+vwap2vwapReady = showMarkersRTH and not isNewRTH and not na(openVWAP) and not na(vwap18to16)
+
+vwapCrossUp   = vwap2vwapReady and ta.crossover(openVWAP, vwap18to16)
+vwapCrossDown = vwap2vwapReady and ta.crossunder(openVWAP, vwap18to16)
+
+plotshape(showVWAPtoVWAPCrosses and vwapCrossUp, title="OpenVWAP crosses ABOVE 18:00 VWAP",
+     style=shape.diamond, location=location.belowbar, size=size.tiny, color=color.new(color.aqua, 0))
+
+plotshape(showVWAPtoVWAPCrosses and vwapCrossDown, title="OpenVWAP crosses BELOW 18:00 VWAP",
+     style=shape.diamond, location=location.abovebar, size=size.tiny, color=color.new(color.fuchsia, 0))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Cross counter (counts NYSE Open VWAP crosses vs PRICE only) + trade block after N
+//──────────────────────────────────────────────────────────────────────────────
+var int vwapCrossCount = 0
+if isNewRTH
+    vwapCrossCount := 0
+else if (crossUp or crossDown)
+    vwapCrossCount += 1
+
+allowNewTrades = vwapCrossCount < maxVWAPCrosses
+cancelBecauseChop = not allowNewTrades
+
+//──────────────────────────────────────────────────────────────────────────────
+// Curl confluence
+//──────────────────────────────────────────────────────────────────────────────
+emaLongOK  = (ema5 > ema8 and ema8 > ema13) and (ema5 > ema5[1] and ema8 > ema8[1] and ema13 > ema13[1])
+emaShortOK = (ema5 < ema8 and ema8 < ema13) and (ema5 < ema5[1] and ema8 < ema8[1] and ema13 < ema13[1])
+
+//──────────────────────────────────────────────────────────────────────────────
+// Reclaim + acceptance logic (against NYSE Open VWAP)
+//──────────────────────────────────────────────────────────────────────────────
+closeAboveVWAP = inRTH and not na(openVWAP) and close > openVWAP
+closeBelowVWAP = inRTH and not na(openVWAP) and close < openVWAP
+
+var int belowCount = 0
+var int aboveCount = 0
+
+belowCount := closeBelowVWAP ? (belowCount + 1) : 0
+aboveCount := closeAboveVWAP ? (aboveCount + 1) : 0
+
+acceptBelowVWAP = belowCount >= 2
+acceptAboveVWAP = aboveCount >= 2
+
+reclaimLong_2closes = closeAboveVWAP and closeAboveVWAP[1]
+reclaimLong_cross   = closeAboveVWAP and (close[1] <= openVWAP[1])
+reclaimLong         = reclaimMode == "2-closes" ? reclaimLong_2closes : (closeAboveVWAP and (closeAboveVWAP[1] or reclaimLong_cross))
+
+reclaimShort_2closes = closeBelowVWAP and closeBelowVWAP[1]
+reclaimShort_cross   = closeBelowVWAP and (close[1] >= openVWAP[1])
+reclaimShort         = reclaimMode == "2-closes" ? reclaimShort_2closes : (closeBelowVWAP and (closeBelowVWAP[1] or reclaimShort_cross))
+
+volOK = not useVolConfirm or (volume > ta.highest(volume[1], volLookback))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Hold candle detection (setup)
+//──────────────────────────────────────────────────────────────────────────────
+var bool reclaimedLong = false
+if isNewRTH
+    reclaimedLong := false
+else if acceptBelowVWAP
+    reclaimedLong := false
+else if reclaimLong
+    reclaimedLong := true
+
+var bool reclaimedShort = false
+if isNewRTH
+    reclaimedShort := false
+else if acceptAboveVWAP
+    reclaimedShort := false
+else if reclaimShort
+    reclaimedShort := true
+
+touchedVWAP_Long  = inRTH and not na(openVWAP) and (low  <= openVWAP + buf)
+touchedVWAP_Short = inRTH and not na(openVWAP) and (high >= openVWAP - buf)
+
+holdCandleLong  = allowNewTrades and inTrade and reclaimedLong  and emaLongOK  and touchedVWAP_Long  and close > openVWAP and volOK
+holdCandleShort = allowNewTrades and inTrade and reclaimedShort and emaShortOK and touchedVWAP_Short and close < openVWAP and volOK
+
+plotshape(showHoldMarkers and showMarkersRTH and holdCandleLong,  title="Hold Candle Long",  style=shape.circle, size=size.tiny,
+          color=color.new(color.lime, 0), location=location.belowbar)
+
+plotshape(showHoldMarkers and showMarkersRTH and holdCandleShort, title="Hold Candle Short", style=shape.circle, size=size.tiny,
+          color=color.new(color.red, 0), location=location.abovebar)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pending setup + orders
+//──────────────────────────────────────────────────────────────────────────────
+var bool  pendingLong = false
+var float longSetupHigh = na
+var float longSetupLow  = na
+
+var bool  pendingShort = false
+var float shortSetupHigh = na
+var float shortSetupLow  = na
+
+if isNewRTH
+    pendingLong := false
+    pendingShort := false
+    longSetupHigh := na
+    longSetupLow  := na
+    shortSetupHigh := na
+    shortSetupLow  := na
+
+if holdCandleLong
+    pendingLong := true
+    longSetupHigh := high
+    longSetupLow  := low
+
+if holdCandleShort
+    pendingShort := true
+    shortSetupHigh := high
+    shortSetupLow  := low
+
+if pendingLong and (acceptBelowVWAP or not emaLongOK or not reclaimedLong or not inTrade or cancelBecauseChop)
+    pendingLong := false
+    longSetupHigh := na
+    longSetupLow  := na
+
+if pendingShort and (acceptAboveVWAP or not emaShortOK or not reclaimedShort or not inTrade or cancelBecauseChop)
+    pendingShort := false
+    shortSetupHigh := na
+    shortSetupLow  := na
+
+stopBuf = stopBufferTicks * tick
+
+longEntryStop = longSetupHigh + tick
+longStopPrice = longSetupLow - stopBuf
+longRiskTicks = pendingLong and not na(longStopPrice) ? math.round((longEntryStop - longStopPrice) / tick) : na
+longRiskOK    = pendingLong and (longRiskTicks <= maxStopTicks) and (longEntryStop > longStopPrice)
+
+shortEntryStop = shortSetupLow - tick
+shortStopPrice = shortSetupHigh + stopBuf
+shortRiskTicks = pendingShort and not na(shortStopPrice) ? math.round((shortStopPrice - shortEntryStop) / tick) : na
+shortRiskOK    = pendingShort and (shortRiskTicks <= maxStopTicks) and (shortStopPrice > shortEntryStop)
+
+if strategy.position_size == 0 and allowNewTrades and inTrade
+    if pendingLong and longRiskOK
+        strategy.entry("L", strategy.long, stop=longEntryStop)
+    if pendingShort and shortRiskOK
+        strategy.entry("S", strategy.short, stop=shortEntryStop)
+
+if strategy.position_size > 0
+    tpL = strategy.position_avg_price + (takeProfitTicks * tick)
+    strategy.exit("L-exit", "L", stop=longStopPrice, limit=tpL)
+
+if strategy.position_size < 0
+    tpS = strategy.position_avg_price - (takeProfitTicks * tick)
+    strategy.exit("S-exit", "S", stop=shortStopPrice, limit=tpS)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Plots
+//──────────────────────────────────────────────────────────────────────────────
+plot(openVWAP, "NYSE Open VWAP (09:30 ET)", color=color.white, linewidth=2)
+plot(show1800VWAP ? vwap18to16 : na, "18:00→16:00 Anchored VWAP", color=color.new(color.orange, 0), linewidth=2)
+
+plot(ema5,  "EMA 5",  color=color.new(color.green,  0))
+plot(ema8,  "EMA 8",  color=color.new(color.teal,   0))
+plot(ema13, "EMA 13", color=color.new(color.blue,   0))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Combined NQ / YM status panel
+//──────────────────────────────────────────────────────────────────────────────
+var table marketPanel = table.new(position.bottom_right, 4, 3, border_width=1)
+
+headerBg = color.new(color.black, 0)
+rowBg    = color.new(color.black, 65)
+blankBg  = color.new(color.black, 100)
+
+if barstate.islast
+    if showMarketPanel
+        // Header row
+        table.cell(marketPanel, 0, 0, "MARKET", text_color=color.white, bgcolor=headerBg, text_size=panelTextSize)
+        table.cell(marketPanel, 1, 0, "PRICE",  text_color=color.white, bgcolor=headerBg, text_size=panelTextSize)
+        table.cell(marketPanel, 2, 0, showPanelNYVWAP ? "NY VWAP" : "", text_color=color.white, bgcolor=showPanelNYVWAP ? headerBg : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 3, 0, showPanel1800VWAP ? "18:00 VWAP" : "", text_color=color.white, bgcolor=showPanel1800VWAP ? headerBg : blankBg, text_size=panelTextSize)
+
+        // NQ row
+        table.cell(marketPanel, 0, 1, showPanelNQ ? "NQ" : "", text_color=color.white, bgcolor=showPanelNQ ? rowBg : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 1, 1, showPanelNQ ? (na(nqClose) ? "N/A" : str.tostring(nqClose, format.mintick)) : "", text_color=color.white, bgcolor=showPanelNQ ? rowBg : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 2, 1, showPanelNQ and showPanelNYVWAP ? nqVsOpenText : "", text_color=color.white, bgcolor=showPanelNQ and showPanelNYVWAP ? nqVsOpenColor : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 3, 1, showPanelNQ and showPanel1800VWAP ? nqVs18Text : "", text_color=color.white, bgcolor=showPanelNQ and showPanel1800VWAP ? nqVs18Color : blankBg, text_size=panelTextSize)
+
+        // YM row
+        table.cell(marketPanel, 0, 2, showPanelYM ? "YM" : "", text_color=color.white, bgcolor=showPanelYM ? rowBg : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 1, 2, showPanelYM ? (na(ymClose) ? "N/A" : str.tostring(ymClose, format.mintick)) : "", text_color=color.white, bgcolor=showPanelYM ? rowBg : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 2, 2, showPanelYM and showPanelNYVWAP ? ymVsOpenText : "", text_color=color.white, bgcolor=showPanelYM and showPanelNYVWAP ? ymVsOpenColor : blankBg, text_size=panelTextSize)
+        table.cell(marketPanel, 3, 2, showPanelYM and showPanel1800VWAP ? ymVs18Text : "", text_color=color.white, bgcolor=showPanelYM and showPanel1800VWAP ? ymVs18Color : blankBg, text_size=panelTextSize)
+    else
+        table.clear(marketPanel, 0, 0, 3, 2)
+
+View in Pine Editor・420 lines
+Use on chart
+3
+4
+650
+This strategy is designed for intraday futures trading around the NYSE open VWAP. It identifies long and short opportunities when price reclaims the New York VWAP, pulls back to hold it, and aligns with 5/8/13 EMA trend confirmation. The script also includes an 18:00–16:00 anchored VWAP for added context, VWAP cross tracking to help filter out choppy conditions, and configurable hold markers, cross markers, stop limits, and profit targets.
+
+In addition, the strategy includes a compact market-status panel that lets the trader monitor whether NQ and YM are trading above or below their own NY VWAP and 18:00 VWAP in real time. This can help provide intermarket context while trading ES and improve confidence in directional bias and market participation.
+

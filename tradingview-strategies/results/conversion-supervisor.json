@@ -1,0 +1,77 @@
+{
+  "updated_at": "2026-03-22T08:34:01.371087+00:00",
+  "status": "running",
+  "canonical_summary": {
+    "queue_supported_timeframes": 2409,
+    "extracted_ok": 50,
+    "extracted_error": 10,
+    "classified": 45,
+    "unsupported": 6,
+    "converted_import_ok": 39,
+    "backtested_strategy_files": 36,
+    "backtest_result_rows": 72,
+    "last_updated_at": "2026-03-22T08:32:44.495039+00:00"
+  },
+  "workers": {
+    "w0": {
+      "pid": 70259,
+      "state": {
+        "queue_supported_timeframes": 602,
+        "extracted_ok": 2,
+        "extracted_error": 3,
+        "classified": 45,
+        "unsupported": 6,
+        "converted_import_ok": 39,
+        "backtested_strategy_files": 5,
+        "backtest_result_rows": 10,
+        "last_updated_at": "2026-03-22T08:32:44.484197+00:00"
+      },
+      "process_state": "running"
+    },
+    "w1": {
+      "pid": 70260,
+      "state": {
+        "queue_supported_timeframes": 603,
+        "extracted_ok": 6,
+        "extracted_error": 11,
+        "classified": 45,
+        "unsupported": 6,
+        "converted_import_ok": 39,
+        "backtested_strategy_files": 8,
+        "backtest_result_rows": 16,
+        "last_updated_at": "2026-03-22T08:32:01.596750+00:00"
+      },
+      "process_state": "running"
+    },
+    "w2": {
+      "pid": 70261,
+      "state": {
+        "queue_supported_timeframes": 602,
+        "extracted_ok": 3,
+        "extracted_error": 3,
+        "classified": 44,
+        "unsupported": 6,
+        "converted_import_ok": 38,
+        "backtested_strategy_files": 4,
+        "backtest_result_rows": 8,
+        "last_updated_at": "2026-03-22T08:31:05.259090+00:00"
+      },
+      "process_state": "running"
+    },
+    "w3": {
+      "pid": 70262,
+      "state": {
+        "queue_supported_timeframes": 602,
+        "extracted_ok": 4,
+        "extracted_error": 1,
+        "classified": 45,
+        "unsupported": 6,
+        "converted_import_ok": 39,
+        "backtested_strategy_files": 4,
+        "backtest_result_rows": 8,
+        "last_updated_at": "2026-03-22T08:32:26.081821+00:00"
+      },
+      "process_state": "running"
+    }
+  }
+}

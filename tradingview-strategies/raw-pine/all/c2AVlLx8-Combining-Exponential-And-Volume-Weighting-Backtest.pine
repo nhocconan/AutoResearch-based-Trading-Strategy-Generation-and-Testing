@@ -1,0 +1,46 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 12/01/2018
+// The related article is copyrighted material from Stocks & Commodities 2009 Oct 
+//
+// You can change long to short in the Input Settings
+// WARNING:
+// - For purpose educate only
+// - This script to change bars colors.
+////////////////////////////////////////////////////////////
+strategy(title="Combining Exponential And Volume Weighting")
+Long_period = input(26, minval=1)
+Short_period = input(12, minval=1)
+Smoothing_period = input(9, minval=1)
+reverse = input(false, title="Trade reverse")
+xLongMAVolPrice = ema(volume * close, Long_period) 
+xLongMAVol = ema(volume, Long_period) 
+xResLong = (xLongMAVolPrice * Long_period) / (xLongMAVol * Long_period)
+xShortMAVolPrice = ema(volume * close, Short_period) 
+xShortMAVol = ema(volume, Short_period) 
+xResShort = (xShortMAVolPrice * Short_period) / (xShortMAVol * Short_period)
+xVMACD = xResShort - xResLong
+xVMACDSignal = ema(xVMACD, Smoothing_period)
+nRes = xVMACD - xVMACDSignal
+pos = iff(nRes > 0, 1,
+       iff(nRes < 0, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue ) 
+plot(nRes, color=blue, style = histogram )
+
+View in Pine Editor・34 lines
+Use on chart
+3
+9
+1 977
+The related article is copyrighted material from Stocks & Commodities 2009 Oct
+
+You can change long to short in the Input Settings
+WARNING:
+- For purpose educate only
+- This script to change bars colors.

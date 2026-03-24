@@ -1,0 +1,24 @@
+//@version=4
+strategy("Outside Reversal", overlay=true)
+
+barMultiplier = input(1.25)
+barsBack = input(50)
+
+myCandleSize = high-low
+averageCandle = rma(myCandleSize, barsBack)
+
+longSignal = low < low[1] and close > high[1] and (myCandleSize >= averageCandle*barMultiplier)
+shortSignal = high > high[1] and close < low[1] and (myCandleSize >= averageCandle*barMultiplier)
+
+plotshape(longSignal, title="LONG", style=shape.triangleup)
+plotshape(shortSignal, title="SHORT", style=shape.triangledown)
+
+strategy.entry("LONG", strategy.long, when=longSignal)
+strategy.entry("SHORT", strategy.short, when=shortSignal)
+
+View in Pine Editor・17 lines
+Use on chart
+6
+2
+2 336
+The PivotBoss outside reversal strategy

@@ -1,0 +1,733 @@
+//@version=6
+strategy("SMC + VP Pro Strategy [MR.M]", 
+     overlay=true, 
+     max_boxes_count=500, 
+     max_lines_count=500, 
+     max_labels_count=500,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=2,
+     commission_type=strategy.commission.percent,
+     commission_value=0.07,
+     slippage=2,
+     pyramiding=0)
+
+// ═══════════════════════════════════════════════════════════════
+// STRATEGY INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+stratGroup = "⚙️ Strategy Settings"
+tradeDirection = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group=stratGroup)
+useFixedRisk   = input.bool(true, "Use Fixed % Risk per Trade", group=stratGroup)
+riskPct        = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=10, step=0.1, group=stratGroup)
+
+// ── Date Filter ──
+dateGroup = "📅 Date Filter"
+fromDate = input.time(timestamp("2023-01-01"), "From Date", group=dateGroup)
+toDate   = input.time(timestamp("2025-12-31"), "To Date",   group=dateGroup)
+inDateRange = time >= fromDate and time <= toDate
+
+// ── Volume Profile ──
+volProfileGroup = "📊 Volume Profile Settings"
+vpRows     = input.int(24,  "VP Rows",            minval=10, maxval=50,  group=volProfileGroup)
+vpLookback = input.int(100, "VP Lookback Period",  minval=20,            group=volProfileGroup)
+vpThreshold = input.float(1.5, "High Volume Threshold", minval=1.0, step=0.1, group=volProfileGroup)
+showVP     = input.bool(true, "Show Volume Profile", group=volProfileGroup)
+
+// ── Value Area ──
+vaGroup          = "📈 Value Area Settings"
+valueAreaPercent = input.int(70, "Value Area Volume %", minval=50, maxval=90, step=5, group=vaGroup)
+showVAH          = input.bool(true, "Show VAH", group=vaGroup)
+showVAL          = input.bool(true, "Show VAL", group=vaGroup)
+showValueAreaBox = input.bool(true, "Show Value Area Box", group=vaGroup)
+vahColor         = input.color(color.new(color.aqua, 0), "VAH Color", group=vaGroup)
+valColor         = input.color(color.new(color.aqua, 0), "VAL Color", group=vaGroup)
+valueAreaBoxColor = input.color(color.new(color.blue, 90), "Value Area Box Color", group=vaGroup)
+
+// ── RSI ──
+rsiGroup      = "📉 RSI Settings"
+showRSI       = input.bool(true,  "Show RSI Overlay",        group=rsiGroup)
+rsiPeriod     = input.int(14,     "RSI Period",               group=rsiGroup)
+rsiOverbought = input.float(70,   "Overbought Level",         group=rsiGroup)
+rsiOversold   = input.float(30,   "Oversold Level",           group=rsiGroup)
+showRegularDiv = input.bool(true, "Show Regular Divergence",  group=rsiGroup)
+showHiddenDiv  = input.bool(true, "Show Hidden Divergence",   group=rsiGroup)
+divLookback   = input.int(5,      "Divergence Lookback Bars", group=rsiGroup)
+rsiLineColor  = input.color(color.new(color.purple, 0), "RSI Line Color", group=rsiGroup)
+
+// ── FVG ──
+fvgGroup      = "📦 FVG Settings"
+showFVG       = input.bool(true,    "Show FVG",      group=fvgGroup)
+fvgMinSize    = input.float(0.0001, "Min FVG Size",  group=fvgGroup)
+fvgExtendBars = input.int(20,       "FVG Extension", group=fvgGroup)
+showOTE       = input.bool(true,    "Show OTE",      group=fvgGroup)
+
+// ── BOS ──
+bosGroup    = "📈 BOS Settings"
+showBOS     = input.bool(true, "Show BOS",   group=bosGroup)
+swingLength = input.int(5,     "Swing Length", group=bosGroup)
+
+// ── Liquidity ──
+liqGroup     = "💧 Liquidity"
+showLiquidity = input.bool(true, "Show Liquidity", group=liqGroup)
+showLiqSweep  = input.bool(true, "Show Sweeps",    group=liqGroup)
+
+// ── HTF ──
+htfGroup     = "⏰ HTF"
+htfTimeframe = input.timeframe("D", "HTF Timeframe", group=htfGroup)
+showHTFPOI   = input.bool(true, "Show HTF POI",     group=htfGroup)
+
+// ── Signal Mode ──
+signalGroup  = "🎯 Signal Settings"
+showSignals  = input.bool(true, "Show Signals", group=signalGroup)
+signalMode   = input.string("Conservative", "Signal Mode",
+     options=["Aggressive","Balanced","Conservative"], group=signalGroup)
+showEntryLine = input.bool(true, "Show Entry Line", group=signalGroup)
+showSL        = input.bool(true, "Show SL",         group=signalGroup)
+showTP        = input.bool(true, "Show TP",         group=signalGroup)
+
+// ── Risk Management ──
+riskGroup    = "💰 Risk Management"
+slMultiplier = input.float(1.0, "SL Multiplier",  minval=0.5, step=0.1, group=riskGroup)
+tp1RR        = input.float(1.5, "TP1 R:R",        minval=0.5, step=0.5, group=riskGroup)
+tp2RR        = input.float(2.5, "TP2 R:R",        minval=1.0, step=0.5, group=riskGroup)
+tp3RR        = input.float(4.0, "TP3 R:R",        minval=2.0, step=0.5, group=riskGroup)
+exitMode     = input.string("TP2", "Primary Exit", options=["TP1","TP2","TP3"], group=riskGroup,
+     tooltip="TP level ที่ใช้ปิดทั้งหมด (TP1=Quick, TP2=Default, TP3=Extended)")
+
+// ── Colors ──
+colorGroup    = "🎨 Colors"
+bullFVGColor  = input.color(color.new(color.green, 85), "Bull FVG",  group=colorGroup)
+bearFVGColor  = input.color(color.new(color.red,   85), "Bear FVG",  group=colorGroup)
+realZoneColor = input.color(color.new(color.blue,  80), "Real Zone", group=colorGroup)
+fakeZoneColor = input.color(color.new(color.orange,90), "Fake Zone", group=colorGroup)
+oteColor      = input.color(color.new(color.purple,70), "OTE Zone",  group=colorGroup)
+buyColor      = input.color(color.new(color.green,  0), "BUY",       group=colorGroup)
+sellColor     = input.color(color.new(color.red,    0), "SELL",      group=colorGroup)
+
+// ═══════════════════════════════════════════════════════════════
+// RSI & DIVERGENCE
+// ═══════════════════════════════════════════════════════════════
+
+rsiValue    = ta.rsi(close, rsiPeriod)
+pivotHigh   = ta.pivothigh(high,     divLookback, divLookback)
+pivotLow    = ta.pivotlow(low,       divLookback, divLookback)
+rsiPivotHigh = ta.pivothigh(rsiValue, divLookback, divLookback)
+rsiPivotLow  = ta.pivotlow(rsiValue,  divLookback, divLookback)
+
+var float lastPricePivotHigh = na
+var float lastPricePivotLow  = na
+var float lastRSIPivotHigh   = na
+var float lastRSIPivotLow    = na
+
+if not na(pivotHigh)
+    lastPricePivotHigh := high[divLookback]
+if not na(pivotLow)
+    lastPricePivotLow := low[divLookback]
+if not na(rsiPivotHigh)
+    lastRSIPivotHigh := rsiValue[divLookback]
+if not na(rsiPivotLow)
+    lastRSIPivotLow := rsiValue[divLookback]
+
+var bool bullishRegularDiv = false
+var bool bearishRegularDiv = false
+var bool bullishHiddenDiv  = false
+var bool bearishHiddenDiv  = false
+
+bullishRegularDiv := false
+bearishRegularDiv := false
+bullishHiddenDiv  := false
+bearishHiddenDiv  := false
+
+if not na(pivotLow) and not na(lastPricePivotLow)
+    curPL = low[divLookback]
+    curRL = rsiValue[divLookback]
+    if curPL < lastPricePivotLow and curRL > lastRSIPivotLow
+        bullishRegularDiv := true
+        if showRegularDiv
+            label.new(bar_index - divLookback, low[divLookback], "🔼 Bull Div",
+                style=label.style_label_up, color=color.new(color.green,30),
+                textcolor=color.white, size=size.small)
+    else if curPL > lastPricePivotLow and curRL < lastRSIPivotLow
+        bullishHiddenDiv := true
+        if showHiddenDiv
+            label.new(bar_index - divLookback, low[divLookback], "⬆ H.Bull",
+                style=label.style_label_up, color=color.new(color.lime,50),
+                textcolor=color.white, size=size.tiny)
+
+if not na(pivotHigh) and not na(lastPricePivotHigh)
+    curPH = high[divLookback]
+    curRH = rsiValue[divLookback]
+    if curPH > lastPricePivotHigh and curRH < lastRSIPivotHigh
+        bearishRegularDiv := true
+        if showRegularDiv
+            label.new(bar_index - divLookback, high[divLookback], "🔽 Bear Div",
+                style=label.style_label_down, color=color.new(color.red,30),
+                textcolor=color.white, size=size.small)
+    else if curPH < lastPricePivotHigh and curRH > lastRSIPivotHigh
+        bearishHiddenDiv := true
+        if showHiddenDiv
+            label.new(bar_index - divLookback, high[divLookback], "⬇ H.Bear",
+                style=label.style_label_down, color=color.new(color.maroon,50),
+                textcolor=color.white, size=size.tiny)
+
+var string currentDivergence = "None"
+currentDivergence := bullishRegularDiv ? "Bullish Regular" : bearishRegularDiv ? "Bearish Regular" : bullishHiddenDiv ? "Bullish Hidden" : bearishHiddenDiv ? "Bearish Hidden" : "None"
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME PROFILE (last bar only for display)
+// ═══════════════════════════════════════════════════════════════
+
+var volumeProfile = array.new<float>()
+var priceProfile  = array.new<float>()
+var vpBoxes       = array.new<box>()
+var vpLabels      = array.new<label>()
+var line pocLine  = na
+var label pocLabel = na
+var line vahLine  = na
+var line valLine  = na
+var label vahLabel = na
+var label valLabel = na
+var box valueAreaBox = na
+var float pocPriceStored    = na
+var bool  isPOCRealZoneStored = false
+var float vahPriceStored    = na
+var float valPriceStored    = na
+
+// Running POC approximation (every bar, for signal logic)
+// Use simple highest-volume price level from lookback
+var float pocPrice    = na
+var bool  isPOCRealZone = false
+
+// Calculate running VP each bar (simplified for signal logic)
+_highestPrice = ta.highest(high, vpLookback)
+_lowestPrice  = ta.lowest(low,  vpLookback)
+_priceRange   = _highestPrice - _lowestPrice
+
+// Estimate POC as VWAP-based approximation for real-time signals
+// (Full VP only runs on last bar for display)
+vwapVal = ta.vwap(close)
+pocPrice    := vwapVal  // Proxy: VWAP ≈ highest-volume zone
+isPOCRealZone := math.abs(close - vwapVal) < (close * 0.005)
+
+// Full VP calculation on last bar for display only
+if showVP and barstate.islast
+    if not na(pocLine)
+        line.delete(pocLine)
+    if not na(pocLabel)
+        label.delete(pocLabel)
+    if not na(vahLine)
+        line.delete(vahLine)
+    if not na(valLine)
+        line.delete(valLine)
+    if not na(vahLabel)
+        label.delete(vahLabel)
+    if not na(valLabel)
+        label.delete(valLabel)
+    if not na(valueAreaBox)
+        box.delete(valueAreaBox)
+    if array.size(vpBoxes) > 0
+        for i = array.size(vpBoxes) - 1 to 0
+            box.delete(array.get(vpBoxes, i))
+        array.clear(vpBoxes)
+    if array.size(vpLabels) > 0
+        for i = array.size(vpLabels) - 1 to 0
+            label.delete(array.get(vpLabels, i))
+        array.clear(vpLabels)
+
+    hiP = high[0]
+    loP = low[0]
+    for i = 0 to math.min(vpLookback - 1, bar_index)
+        hiP := math.max(hiP, high[i])
+        loP := math.min(loP, low[i])
+
+    pRange = hiP - loP
+    if pRange > 0
+        rowH = pRange / vpRows
+        array.clear(volumeProfile)
+        array.clear(priceProfile)
+        for i = 0 to vpRows - 1
+            array.push(volumeProfile, 0.0)
+            array.push(priceProfile, 0.0)
+        for i = 0 to math.min(vpLookback - 1, bar_index)
+            bH = high[i], bL = low[i], bV = volume[i]
+            for row = 0 to vpRows - 1
+                rL = loP + row * rowH
+                rHi = rL + rowH
+                if not (bH < rL or bL > rHi)
+                    ov = math.min(bH, rHi) - math.max(bL, rL)
+                    bR = bH - bL
+                    vc = bR > 0 ? (ov / bR) * bV : 0.0
+                    array.set(volumeProfile, row, array.get(volumeProfile, row) + vc)
+                    array.set(priceProfile,  row, (rL + rHi) / 2)
+
+        maxVol = array.max(volumeProfile)
+        avgVol = array.avg(volumeProfile)
+        maxIdx = 0
+        for i = 0 to array.size(volumeProfile) - 1
+            if array.get(volumeProfile, i) == maxVol
+                maxIdx := i
+
+        vpPOC     = array.get(priceProfile, maxIdx)
+        vpIsReal  = maxVol > avgVol * vpThreshold
+        pocPriceStored    := vpPOC
+        isPOCRealZoneStored := vpIsReal
+
+        // Value Area
+        totalVol    = array.sum(volumeProfile)
+        targetVol   = totalVol * (valueAreaPercent / 100.0)
+        volAcc      = array.get(volumeProfile, maxIdx)
+        upIdx = maxIdx, dnIdx = maxIdx
+        vahPrice = vpPOC, valPrice = vpPOC
+        while volAcc < targetVol and (upIdx < array.size(volumeProfile) - 1 or dnIdx > 0)
+            upV = upIdx < array.size(volumeProfile) - 1 ? array.get(volumeProfile, upIdx + 1) : 0.0
+            dnV = dnIdx > 0 ? array.get(volumeProfile, dnIdx - 1) : 0.0
+            if upV >= dnV and upIdx < array.size(volumeProfile) - 1
+                upIdx += 1
+                volAcc   += upV
+                vahPrice := array.get(priceProfile, upIdx)
+            else if dnIdx > 0
+                dnIdx -= 1
+                volAcc   += dnV
+                valPrice := array.get(priceProfile, dnIdx)
+            else
+                break
+        vahPriceStored := vahPrice
+        valPriceStored := valPrice
+
+        // Draw VP bars
+        maxW = 50
+        if maxVol > 0
+            for row = 0 to math.min(vpRows - 1, array.size(volumeProfile) - 1)
+                vol   = array.get(volumeProfile, row)
+                price = array.get(priceProfile,  row)
+                rL    = loP + row * rowH
+                rHi   = rL + rowH
+                if vol > 0
+                    w = int((vol / maxVol) * maxW)
+                    isReal = vol > avgVol * vpThreshold
+                    bCol   = isReal ? realZoneColor : fakeZoneColor
+                    vpBox  = box.new(bar_index + 2, rHi, bar_index + 2 + w, rL,
+                        bgcolor=bCol, border_color=color.new(bCol,50), border_width=1)
+                    array.push(vpBoxes, vpBox)
+                    if isReal
+                        vpLbl = label.new(bar_index + 2 + w, price, "REAL",
+                            style=label.style_label_left, color=color.new(color.blue,70),
+                            textcolor=color.white, size=size.tiny)
+                        array.push(vpLabels, vpLbl)
+
+        // Draw POC / VAH / VAL
+        pocLine  := line.new(bar_index-50, vpPOC, bar_index+20, vpPOC,
+            color=color.new(color.yellow,0), width=2)
+        pocLabel := label.new(bar_index+20, vpPOC,
+            "POC: " + str.tostring(vpPOC, format.mintick),
+            style=label.style_label_left, color=color.new(color.yellow,20),
+            textcolor=color.white, size=size.small)
+        if showVAH
+            vahLine  := line.new(bar_index-50, vahPrice, bar_index+20, vahPrice,
+                color=vahColor, width=2)
+            vahLabel := label.new(bar_index+20, vahPrice,
+                "VAH: " + str.tostring(vahPrice, format.mintick),
+                style=label.style_label_left, color=color.new(color.aqua,20),
+                textcolor=color.white, size=size.small)
+        if showVAL
+            valLine  := line.new(bar_index-50, valPrice, bar_index+20, valPrice,
+                color=valColor, width=2)
+            valLabel := label.new(bar_index+20, valPrice,
+                "VAL: " + str.tostring(valPrice, format.mintick),
+                style=label.style_label_left, color=color.new(color.aqua,20),
+                textcolor=color.white, size=size.small)
+        if showValueAreaBox
+            valueAreaBox := box.new(bar_index-50, vahPrice, bar_index+20, valPrice,
+                bgcolor=valueAreaBoxColor, border_color=color.new(color.blue,50),
+                border_width=1)
+
+// ═══════════════════════════════════════════════════════════════
+// FVG DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+var fvgBoxes = array.new<box>()
+var fvgLines = array.new<line>()
+
+bullishFVG    = low > high[2] and close[1] > high[2]
+bullFVGTop    = low
+bullFVGBottom = high[2]
+bullFVGSize   = bullFVGTop - bullFVGBottom
+
+bearishFVG    = high < low[2] and close[1] < low[2]
+bearFVGTop    = low[2]
+bearFVGBottom = high
+bearFVGSize   = bearFVGTop - bearFVGBottom
+
+var float activeBullFVGTop    = na
+var float activeBullFVGBottom = na
+var float activeBullOTE62     = na
+var float activeBullOTE79     = na
+var float activeBearFVGTop    = na
+var float activeBearFVGBottom = na
+var float activeBearOTE62     = na
+var float activeBearOTE79     = na
+
+if showFVG
+    if bullishFVG and bullFVGSize >= fvgMinSize
+        activeBullFVGTop    := bullFVGTop
+        activeBullFVGBottom := bullFVGBottom
+        activeBullOTE62     := bullFVGBottom + bullFVGSize * 0.62
+        activeBullOTE79     := bullFVGBottom + bullFVGSize * 0.79
+
+        fvgBox = box.new(bar_index-1, bullFVGTop, bar_index+fvgExtendBars, bullFVGBottom,
+            bgcolor=bullFVGColor, border_color=color.new(color.green,50), border_width=1,
+            text="FVG ↑", text_color=color.green, text_size=size.small)
+        array.push(fvgBoxes, fvgBox)
+
+        if showOTE
+            o62 = bullFVGBottom + bullFVGSize * 0.62
+            o79 = bullFVGBottom + bullFVGSize * 0.79
+            o50 = bullFVGBottom + bullFVGSize * 0.50
+            oteBox = box.new(bar_index-1, o79, bar_index+fvgExtendBars, o62,
+                bgcolor=oteColor, border_color=color.new(color.purple,30),
+                border_width=2)
+            array.push(fvgBoxes, oteBox)
+            l1 = line.new(bar_index-1, o62, bar_index+fvgExtendBars, o62,
+                color=color.new(color.purple,30), width=1, style=line.style_dotted)
+            l2 = line.new(bar_index-1, o79, bar_index+fvgExtendBars, o79,
+                color=color.new(color.purple,30), width=1, style=line.style_dotted)
+            l3 = line.new(bar_index-1, o50, bar_index+fvgExtendBars, o50,
+                color=color.new(color.gray,50), width=1, style=line.style_dotted)
+            array.push(fvgLines, l1)
+            array.push(fvgLines, l2)
+            array.push(fvgLines, l3)
+
+    if bearishFVG and bearFVGSize >= fvgMinSize
+        activeBearFVGTop    := bearFVGTop
+        activeBearFVGBottom := bearFVGBottom
+        activeBearOTE62     := bearFVGTop - bearFVGSize * 0.62
+        activeBearOTE79     := bearFVGTop - bearFVGSize * 0.79
+
+        fvgBox = box.new(bar_index-1, bearFVGTop, bar_index+fvgExtendBars, bearFVGBottom,
+            bgcolor=bearFVGColor, border_color=color.new(color.red,50), border_width=1,
+            text="FVG ↓", text_color=color.red, text_size=size.small)
+        array.push(fvgBoxes, fvgBox)
+
+        if showOTE
+            o62 = bearFVGTop - bearFVGSize * 0.62
+            o79 = bearFVGTop - bearFVGSize * 0.79
+            o50 = bearFVGTop - bearFVGSize * 0.50
+            oteBox = box.new(bar_index-1, o62, bar_index+fvgExtendBars, o79,
+                bgcolor=oteColor, border_color=color.new(color.purple,30),
+                border_width=2)
+            array.push(fvgBoxes, oteBox)
+            l1 = line.new(bar_index-1, o62, bar_index+fvgExtendBars, o62,
+                color=color.new(color.purple,30), width=1, style=line.style_dotted)
+            l2 = line.new(bar_index-1, o79, bar_index+fvgExtendBars, o79,
+                color=color.new(color.purple,30), width=1, style=line.style_dotted)
+            l3 = line.new(bar_index-1, o50, bar_index+fvgExtendBars, o50,
+                color=color.new(color.gray,50), width=1, style=line.style_dotted)
+            array.push(fvgLines, l1)
+            array.push(fvgLines, l2)
+            array.push(fvgLines, l3)
+
+if array.size(fvgBoxes) > 50
+    box.delete(array.shift(fvgBoxes))
+if array.size(fvgLines) > 150
+    line.delete(array.shift(fvgLines))
+
+// ═══════════════════════════════════════════════════════════════
+// SWING HIGH/LOW & BOS
+// ═══════════════════════════════════════════════════════════════
+
+isSwingHigh = ta.pivothigh(high, swingLength, swingLength)
+isSwingLow  = ta.pivotlow(low,  swingLength, swingLength)
+
+var float lastSwingHigh    = na
+var float lastSwingLow    = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar = na
+var bool  bullishBOS       = false
+var bool  bearishBOS       = false
+
+var bosLabels = array.new<label>()
+
+if not na(isSwingHigh)
+    lastSwingHigh    := high[swingLength]
+    lastSwingHighBar := bar_index - swingLength
+    if showLiquidity
+        lbl = label.new(lastSwingHighBar, lastSwingHigh, "💧",
+            style=label.style_label_down, color=color.new(color.red,100),
+            textcolor=color.red, size=size.normal, tooltip="Sell-Side Liquidity")
+        array.push(bosLabels, lbl)
+
+if not na(isSwingLow)
+    lastSwingLow    := low[swingLength]
+    lastSwingLowBar := bar_index - swingLength
+    if showLiquidity
+        lbl = label.new(lastSwingLowBar, lastSwingLow, "💧",
+            style=label.style_label_up, color=color.new(color.green,100),
+            textcolor=color.green, size=size.normal, tooltip="Buy-Side Liquidity")
+        array.push(bosLabels, lbl)
+
+bullishBOS := false
+bearishBOS := false
+
+if showBOS
+    if not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+        bullishBOS := true
+        lbl = label.new(bar_index, high, "BOS ↑",
+            style=label.style_label_down, color=color.new(color.green,20),
+            textcolor=color.white, size=size.small)
+        array.push(bosLabels, lbl)
+    if not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+        bearishBOS := true
+        lbl = label.new(bar_index, low, "BOS ↓",
+            style=label.style_label_up, color=color.new(color.red,20),
+            textcolor=color.white, size=size.small)
+        array.push(bosLabels, lbl)
+
+if array.size(bosLabels) > 100
+    label.delete(array.shift(bosLabels))
+
+// ═══════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEP
+// ═══════════════════════════════════════════════════════════════
+
+var sweepLabels = array.new<label>()
+var bool bullishSweep = false
+var bool bearishSweep = false
+
+bullishSweep := false
+bearishSweep := false
+
+if showLiqSweep
+    if not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+        bearishSweep := true
+        lbl = label.new(bar_index, high, "TRAP",
+            style=label.style_xcross, color=color.new(color.red,0),
+            textcolor=color.white, size=size.small)
+        array.push(sweepLabels, lbl)
+    if not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+        bullishSweep := true
+        lbl = label.new(bar_index, low, "TRAP",
+            style=label.style_xcross, color=color.new(color.green,0),
+            textcolor=color.white, size=size.small)
+        array.push(sweepLabels, lbl)
+
+if array.size(sweepLabels) > 50
+    label.delete(array.shift(sweepLabels))
+
+// ═══════════════════════════════════════════════════════════════
+// HTF POI
+// ═══════════════════════════════════════════════════════════════
+
+[htfHigh, htfLow, htfClose] = request.security(syminfo.tickerid, htfTimeframe,
+     [high, low, close], lookahead=barmerge.lookahead_off)
+
+var htfLines  = array.new<line>()
+var htfLabels = array.new<label>()
+
+if showHTFPOI and barstate.islast
+    if array.size(htfLines) > 0
+        for i = array.size(htfLines) - 1 to 0
+            line.delete(array.get(htfLines, i))
+        array.clear(htfLines)
+    if array.size(htfLabels) > 0
+        for i = array.size(htfLabels) - 1 to 0
+            label.delete(array.get(htfLabels, i))
+        array.clear(htfLabels)
+
+    l1 = line.new(bar_index-50, htfHigh, bar_index+20, htfHigh,
+        color=color.new(color.red,30), width=2)
+    l2 = line.new(bar_index-50, htfLow,  bar_index+20, htfLow,
+        color=color.new(color.green,30), width=2)
+    array.push(htfLines, l1)
+    array.push(htfLines, l2)
+    lb1 = label.new(bar_index+20, htfHigh, "HTF HIGH",
+        style=label.style_label_left, color=color.new(color.red,30),
+        textcolor=color.white, size=size.small)
+    lb2 = label.new(bar_index+20, htfLow,  "HTF LOW",
+        style=label.style_label_left, color=color.new(color.green,30),
+        textcolor=color.white, size=size.small)
+    array.push(htfLabels, lb1)
+    array.push(htfLabels, lb2)
+
+// ═══════════════════════════════════════════════════════════════
+// SIGNAL LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+nearRealZone = not na(pocPrice) and isPOCRealZone and math.abs(close - pocPrice) < close * 0.005
+
+inBullOTE = not na(activeBullOTE62) and not na(activeBullOTE79) and close >= activeBullOTE62 and close <= activeBullOTE79
+inBearOTE = not na(activeBearOTE62) and not na(activeBearOTE79) and close <= activeBearOTE62 and close >= activeBearOTE79
+
+var bool buySignal  = false
+var bool sellSignal = false
+
+buySignal  := false
+sellSignal := false
+
+if signalMode == "Conservative"
+    buySignal  := bullishSweep and (inBullOTE or nearRealZone or not na(activeBullFVGBottom))
+    sellSignal := bearishSweep and (inBearOTE  or nearRealZone or not na(activeBearFVGTop))
+else if signalMode == "Balanced"
+    buySignal  := bullishSweep or (bullishBOS and not na(activeBullFVGBottom)) or (inBullOTE and bullishBOS)
+    sellSignal := bearishSweep or (bearishBOS and not na(activeBearFVGTop))   or (inBearOTE and bearishBOS)
+else  // Aggressive
+    buySignal  := bullishSweep or bullishBOS or inBullOTE or (not na(activeBullFVGBottom) and nearRealZone)
+    sellSignal := bearishSweep or bearishBOS or inBearOTE or (not na(activeBearFVGTop)    and nearRealZone)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY / EXIT (Strategy Orders)
+// ═══════════════════════════════════════════════════════════════
+
+// Only trade when in date range and no open position
+noPosition = strategy.position_size == 0
+
+// ── BUY ──
+if buySignal and noPosition and inDateRange and (tradeDirection == "Long Only" or tradeDirection == "Both")
+    entryP = close
+
+    // SL distance
+    slDistVal = ta.atr(14) * slMultiplier
+    if not na(activeBullFVGBottom) and activeBullFVGBottom < entryP
+        slDistVal := entryP - activeBullFVGBottom
+    else if not na(lastSwingLow) and lastSwingLow < entryP
+        slDistVal := entryP - lastSwingLow
+    slPrice = entryP - slDistVal * slMultiplier
+    risk    = math.abs(entryP - slPrice)
+
+    tp1Price = risk > 0 ? entryP + risk * tp1RR : entryP * 1.01
+    tp2Price = risk > 0 ? entryP + risk * tp2RR : entryP * 1.02
+    tp3Price = risk > 0 ? entryP + risk * tp3RR : entryP * 1.03
+    exitTP   = exitMode == "TP1" ? tp1Price : exitMode == "TP3" ? tp3Price : tp2Price
+    qtyShares = useFixedRisk and risk > 0 ? (strategy.equity * riskPct / 100) / risk : na
+
+    strategy.entry("BUY", strategy.long, qty=qtyShares, comment="BUY | " + signalMode)
+    strategy.exit("BUY_EXIT", from_entry="BUY", stop=slPrice, limit=exitTP, comment_loss="SL Hit", comment_profit="TP Hit")
+
+    if showSignals
+        buyTip = "Entry: " + str.tostring(entryP) + " | SL: " + str.tostring(slPrice) + " | TP1: " + str.tostring(tp1Price) + " | TP2: " + str.tostring(tp2Price) + " | TP3: " + str.tostring(tp3Price)
+        lbl = label.new(bar_index, low, "BUY " + str.tostring(entryP, format.mintick), style=label.style_label_up, color=buyColor, textcolor=color.white, size=size.normal, tooltip=buyTip)
+
+// ── SELL ──
+if sellSignal and noPosition and inDateRange and (tradeDirection == "Short Only" or tradeDirection == "Both")
+    entryP = close
+
+    slDistVal2 = ta.atr(14) * slMultiplier
+    if not na(activeBearFVGTop) and activeBearFVGTop > entryP
+        slDistVal2 := activeBearFVGTop - entryP
+    else if not na(lastSwingHigh) and lastSwingHigh > entryP
+        slDistVal2 := lastSwingHigh - entryP
+    slPrice = entryP + slDistVal2 * slMultiplier
+    risk    = math.abs(slPrice - entryP)
+
+    tp1Price = risk > 0 ? entryP - risk * tp1RR : entryP * 0.99
+    tp2Price = risk > 0 ? entryP - risk * tp2RR : entryP * 0.98
+    tp3Price = risk > 0 ? entryP - risk * tp3RR : entryP * 0.97
+    exitTP   = exitMode == "TP1" ? tp1Price : exitMode == "TP3" ? tp3Price : tp2Price
+    qtyShares = useFixedRisk and risk > 0 ? (strategy.equity * riskPct / 100) / risk : na
+
+    strategy.entry("SELL", strategy.short, qty=qtyShares, comment="SELL | " + signalMode)
+    strategy.exit("SELL_EXIT", from_entry="SELL", stop=slPrice, limit=exitTP, comment_loss="SL Hit", comment_profit="TP Hit")
+
+    if showSignals
+        sellTip = "Entry: " + str.tostring(entryP) + " | SL: " + str.tostring(slPrice) + " | TP1: " + str.tostring(tp1Price) + " | TP2: " + str.tostring(tp2Price) + " | TP3: " + str.tostring(tp3Price)
+        lbl = label.new(bar_index, high, "SELL " + str.tostring(entryP, format.mintick), style=label.style_label_down, color=sellColor, textcolor=color.white, size=size.normal, tooltip=sellTip)
+
+// ═══════════════════════════════════════════════════════════════
+// RSI OVERLAY PLOT
+// ═══════════════════════════════════════════════════════════════
+
+rsiLookback   = 100
+rsiHighestP   = ta.highest(high, rsiLookback)
+rsiLowestP    = ta.lowest(low,  rsiLookback)
+rsiPriceRange = rsiHighestP - rsiLowestP
+rsiPriceLine  = rsiLowestP + (rsiValue / 100.0) * rsiPriceRange
+obLevel       = rsiLowestP + (rsiOverbought / 100.0) * rsiPriceRange
+osLevel       = rsiLowestP + (rsiOversold   / 100.0) * rsiPriceRange
+
+plot(showRSI ? rsiPriceLine : na, "RSI Price Line",       color=rsiLineColor,              linewidth=2)
+plot(showRSI ? obLevel      : na, "RSI Overbought Level", color=color.new(color.red,  70), style=plot.style_circles)
+plot(showRSI ? osLevel      : na, "RSI Oversold Level",   color=color.new(color.green,70), style=plot.style_circles)
+
+// ═══════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 12,
+     bgcolor=color.new(color.black,85),
+     frame_color=color.new(color.gray,50), frame_width=1,
+     border_color=color.new(color.gray,50), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "SMC + VP Pro Strategy",
+        text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue,70))
+    table.merge_cells(infoTable, 0, 0, 1, 0)
+
+    table.cell(infoTable, 0, 1, "Signal Mode",  text_color=color.gray, text_size=size.small)
+    modeCol = signalMode == "Conservative" ? color.orange : signalMode == "Balanced" ? color.yellow : color.lime
+    table.cell(infoTable, 1, 1, signalMode,     text_color=modeCol,    text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "Direction",    text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, tradeDirection, text_color=color.aqua, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Risk/Trade",   text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(riskPct) + "%",
+        text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Exit Mode",    text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4, exitMode,       text_color=color.lime, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Net Profit",   text_color=color.gray, text_size=size.small)
+    netPnl    = strategy.netprofit
+    pnlColor  = netPnl >= 0 ? color.green : color.red
+    table.cell(infoTable, 1, 5, str.tostring(netPnl, "#.##"),
+        text_color=pnlColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Win Rate",     text_color=color.gray, text_size=size.small)
+    totalTrades = strategy.closedtrades
+    winTrades   = strategy.wintrades
+    winRate     = totalTrades > 0 ? (winTrades / totalTrades) * 100 : 0
+    wrColor     = winRate >= 50 ? color.green : color.red
+    table.cell(infoTable, 1, 6, str.tostring(winRate, "#.#") + "%",
+        text_color=wrColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "Total Trades", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 7, str.tostring(totalTrades),
+        text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 8, "RSI (" + str.tostring(rsiPeriod) + ")",
+        text_color=color.gray, text_size=size.small)
+    rsiCol = rsiValue >= rsiOverbought ? color.red : rsiValue <= rsiOversold ? color.green : color.gray
+    table.cell(infoTable, 1, 8, str.tostring(rsiValue, "#.##"),
+        text_color=rsiCol, text_size=size.small)
+
+    table.cell(infoTable, 0, 9, "RSI Divergence", text_color=color.gray, text_size=size.small)
+    divCol = currentDivergence == "None" ? color.gray : str.contains(currentDivergence, "Bullish") ? color.green : color.red
+    table.cell(infoTable, 1, 9, currentDivergence,
+        text_color=divCol, text_size=size.small)
+
+    table.cell(infoTable, 0, 10, "POC Price",   text_color=color.gray, text_size=size.small)
+    pocDisp = not na(pocPriceStored) ? str.tostring(pocPriceStored, format.mintick) : "N/A"
+    table.cell(infoTable, 1, 10, pocDisp,
+        text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoTable, 0, 11, "Max Drawdown", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 11, str.tostring(strategy.max_drawdown, "#.##"),
+        text_color=color.red, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+alertcondition(buySignal,  "BUY Signal",  "🔥 BUY SIGNAL!")
+alertcondition(sellSignal, "SELL Signal", "🔥 SELL SIGNAL!")
+alertcondition(bullishSweep, "Bullish Sweep", "Bullish Liquidity Sweep!")
+alertcondition(bearishSweep, "Bearish Sweep", "Bearish Liquidity Sweep!")
+alertcondition(bullishRegularDiv, "RSI Bull Div", "🔼 RSI Bullish Divergence!")
+alertcondition(bearishRegularDiv, "RSI Bear Div", "🔽 RSI Bearish Divergence!")
+
+View in Pine Editor・726 lines
+Use on chart
+3
+9
+952
+Strategy Strategy Strategy Strategy Strategy Strategy Strategy Strategy Strategy Strategy Strategy

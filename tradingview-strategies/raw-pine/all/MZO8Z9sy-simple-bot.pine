@@ -1,0 +1,33 @@
+//@version=2
+// AI =
+//| value of close of candle < value of close of candle previous by[1] = sell | close > close [1] = buy   | closeorder on SL |  closeorder on Profit | closeorder on signal reverse (if in not in profit) |
+//                                                                                                                                                                                                           SeaSide420 woz here
+strategy("simple bot", shorttitle="sb", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=420, default_qty_value=50, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+a=input(title="INPUT_NAME_HERE",type=float,defval=0.0019, step=0.0001)
+b = input(defval=-420, title="Stop Loss in $", type=float, step=10)
+closelong = strategy.openprofit<b or strategy.openprofit>strategy.equity/1000 or close<close[1]-a and strategy.openprofit<strategy.equity/500
+if (closelong)
+    strategy.close("Long")
+closeshort = strategy.openprofit<b or strategy.openprofit>strategy.equity/1000 or close>close[1]+a and strategy.openprofit<strategy.equity/500
+if (closeshort)
+    strategy.close("Short")
+longCondition = close>close[1]+a and strategy.opentrades<1
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+shortCondition = close<close[1]-a and strategy.opentrades<1
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・19 lines
+Use on chart
+4
+3
+3
+8
+10 095
+the AI=
+value of close of candle < value of close of candle previous by 1 = sell
+close > close1 = buy
+closeorder on SL
+closeorder on AutoProfit
+closeorder on signal reverse (if openorder not in profit)

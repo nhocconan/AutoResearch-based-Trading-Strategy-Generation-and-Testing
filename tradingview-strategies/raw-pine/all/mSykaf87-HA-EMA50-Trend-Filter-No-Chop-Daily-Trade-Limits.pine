@@ -1,0 +1,227 @@
+//@version=6
+strategy("HA + EMA50 (All Forex) • No Consolidation • Max Trades + Stop After Losses",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     process_orders_on_close=false)
+
+//────────────────────────────────────────────────────────────────────
+// Inputs
+//────────────────────────────────────────────────────────────────────
+groupCore = "Core"
+emaPeriod  = input.int(50, "EMA Period", group=groupCore, minval=1)
+useSession = input.bool(true, "Use Session Filter", group=groupCore)
+sess       = input.session("0800-1100", "Session (Exchange Time)", group=groupCore)
+
+groupRisk = "Daily Limits"
+useMaxTradesPerDay    = input.bool(true, "Use Max Trades Per Day", group=groupRisk)
+maxTradesPerDay       = input.int(5, "Max Trades Per Day (per pair)", group=groupRisk, minval=1)
+useMaxLosingTrades    = input.bool(true, "Stop After Losing Trades", group=groupRisk)
+maxLosingTradesPerDay = input.int(2, "Max Losing Trades Per Day (per pair)", group=groupRisk, minval=1)
+
+groupStops = "Stops / Exits"
+stopMode    = input.string("Structure", "Stop Loss Mode", group=groupStops, options=["Structure", "Fixed"])
+lookbackOpp = input.int(25, "Structure Lookback Bars", group=groupStops, minval=2)
+bufferPips  = input.float(2.0, "Structure Buffer (pips)", group=groupStops, minval=0.0)
+fixedSLPips = input.float(20.0, "Fixed SL (pips)", group=groupStops, minval=0.1)
+
+useTP  = input.bool(false, "Use Take Profit", group=groupStops)
+tpPips = input.float(50.0, "Take Profit (pips)", group=groupStops, minval=0.1)
+
+exitOnFlip = input.bool(true, "Exit On Heikin-Ashi Color Flip", group=groupStops)
+
+groupBE = "Break Even"
+useBE      = input.bool(true, "Use Break Even", group=groupBE)
+beTriggerP = input.float(12.0, "BE Trigger (pips)", group=groupBE, minval=0.1)
+beOffsetP  = input.float(1.0, "BE Offset (pips)", group=groupBE, minval=0.0)
+
+groupNoChop = "No Consolidation Filters (ATR-normalized)"
+atrPeriod         = input.int(14, "ATR Period", group=groupNoChop, minval=1)
+minATRmult        = input.float(0.80, "ATR Health Multiplier", group=groupNoChop, minval=0.10, step=0.05)
+
+useBoxRangeFilter = input.bool(true, "Use Box Range Filter", group=groupNoChop)
+boxBars           = input.int(15, "Box Bars", group=groupNoChop, minval=2)
+minBoxATRmult     = input.float(2.0, "Min Box Range = ATR ×", group=groupNoChop, minval=0.5, step=0.1)
+
+useSlopeFilter    = input.bool(true, "Use EMA Slope Filter", group=groupNoChop)
+slopeLookback     = input.int(5, "Slope Lookback Bars", group=groupNoChop, minval=1)
+minSlopeATRmult   = input.float(0.30, "Min Slope = ATR ×", group=groupNoChop, minval=0.05, step=0.05)
+
+useCrossChopFilter = input.bool(true, "Use EMA Cross-Chop Filter", group=groupNoChop)
+crossLookback      = input.int(12, "Cross Lookback Bars", group=groupNoChop, minval=3)
+maxCrossesAllowed  = input.int(2, "Max EMA Crosses Allowed", group=groupNoChop, minval=0)
+
+//────────────────────────────────────────────────────────────────────
+// Pip helper (good general-purpose forex heuristic)
+//────────────────────────────────────────────────────────────────────
+pip = syminfo.mintick * (syminfo.mintick < 0.0001 ? 10.0 : 1.0)
+
+//────────────────────────────────────────────────────────────────────
+// Heikin-Ashi (computed)
+//────────────────────────────────────────────────────────────────────
+haClose = (open + high + low + close) / 4.0
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+
+haColor = haClose >= haOpen ? 1 : -1
+twoGreen = haColor[1] == 1 and haColor[2] == 1
+twoRed   = haColor[1] == -1 and haColor[2] == -1
+
+//────────────────────────────────────────────────────────────────────
+// EMA / ATR + Session
+//────────────────────────────────────────────────────────────────────
+ema = ta.ema(close, emaPeriod)
+atr = ta.atr(atrPeriod)
+
+inSession = not useSession ? true : not na(time(timeframe.period, sess))
+
+//────────────────────────────────────────────────────────────────────
+// Universal "No Consolidation" filters (based on CLOSED context)
+//────────────────────────────────────────────────────────────────────
+atrNow = atr[1]
+atrAvg = ta.sma(atr, 20)[1]
+passATR = atrAvg > 0 ? (atrNow >= atrAvg * minATRmult) : false
+
+boxHi = ta.highest(high, boxBars)[1]
+boxLo = ta.lowest(low, boxBars)[1]
+boxRange = boxHi - boxLo
+passBox = not useBoxRangeFilter ? true : (atrNow > 0 and boxRange >= atrNow * minBoxATRmult)
+
+// EMA slope vs ATR (closed)
+emaNow  = ema[1]
+emaPast = ema[1 + slopeLookback]
+slopeAbs = math.abs(emaNow - emaPast)
+passSlopeBuy  = not useSlopeFilter ? true : (atrNow > 0 and slopeAbs >= atrNow * minSlopeATRmult and emaNow > emaPast)
+passSlopeSell = not useSlopeFilter ? true : (atrNow > 0 and slopeAbs >= atrNow * minSlopeATRmult and emaNow < emaPast)
+
+// EMA cross-chop (SAFE: no ta.sum). Sum ≈ SMA * length.
+aboveEMA   = close > ema
+crossEvent = (aboveEMA != aboveEMA[1]) ? 1.0 : 0.0
+crosses    = (ta.sma(crossEvent, crossLookback)[1]) * crossLookback
+passCrossChop = not useCrossChopFilter ? true : (crosses <= maxCrossesAllowed)
+
+noConsolBuy  = passATR and passBox and passCrossChop and passSlopeBuy
+noConsolSell = passATR and passBox and passCrossChop and passSlopeSell
+
+//────────────────────────────────────────────────────────────────────
+// Daily limits: max trades + stop after losses (per chart symbol)
+//────────────────────────────────────────────────────────────────────
+newDay = ta.change(time("D")) != 0
+
+var int tradesToday = 0
+var int lossesToday = 0
+var int lastClosedCount = 0
+
+if newDay
+    tradesToday := 0
+    lossesToday := 0
+    lastClosedCount := strategy.closedtrades
+
+// increment loss counter when a trade closes (no loops)
+if (strategy.closedtrades > lastClosedCount)
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if (lastProfit < 0)
+        lossesToday += 1
+    lastClosedCount := strategy.closedtrades
+
+enteredThisBar = (strategy.position_size != 0) and (strategy.position_size[1] == 0)
+if enteredThisBar
+    tradesToday += 1
+
+allowTrades = true
+allowTrades := useMaxTradesPerDay ? (allowTrades and (tradesToday < maxTradesPerDay)) : allowTrades
+allowTrades := useMaxLosingTrades ? (allowTrades and (lossesToday < maxLosingTradesPerDay)) : allowTrades
+
+//────────────────────────────────────────────────────────────────────
+// Entry signals (EMA filter uses close[1])
+// Orders execute next bar open because process_orders_on_close=false
+//────────────────────────────────────────────────────────────────────
+buySignal  = twoGreen and (close[1] > ema[1]) and inSession and allowTrades and noConsolBuy
+sellSignal = twoRed   and (close[1] < ema[1]) and inSession and allowTrades and noConsolSell
+
+//────────────────────────────────────────────────────────────────────
+// Structure SL finder — CALLED EVERY BAR (fixes warnings)
+//────────────────────────────────────────────────────────────────────
+f_structSL(_isBuy) =>
+    float sl = na
+    for k = 1 to lookbackOpp
+        if _isBuy and (haColor[k] == -1)
+            sl := low[k] - bufferPips * pip
+            break
+        if (not _isBuy) and (haColor[k] == 1)
+            sl := high[k] + bufferPips * pip
+            break
+    sl
+
+slStructBuy  = f_structSL(true)
+slStructSell = f_structSL(false)
+
+// Active protective orders
+var float activeSL = na
+var float activeTP = na
+
+if (strategy.position_size == 0)
+    activeSL := na
+    activeTP := na
+
+//────────────────────────────────────────────────────────────────────
+// Entries
+//────────────────────────────────────────────────────────────────────
+if (strategy.position_size == 0)
+    if buySignal
+        sl = stopMode == "Structure" ? slStructBuy : (close - fixedSLPips * pip)
+        tp = useTP ? (close + tpPips * pip) : na
+        activeSL := sl
+        activeTP := tp
+        strategy.entry("BUY", strategy.long)
+
+    if sellSignal
+        sl = stopMode == "Structure" ? slStructSell : (close + fixedSLPips * pip)
+        tp = useTP ? (close - tpPips * pip) : na
+        activeSL := sl
+        activeTP := tp
+        strategy.entry("SELL", strategy.short)
+
+//────────────────────────────────────────────────────────────────────
+// Break-even (tighten SL only)
+//────────────────────────────────────────────────────────────────────
+if useBE and (strategy.position_size != 0)
+    entryPrice = strategy.position_avg_price
+
+    if (strategy.position_size > 0)
+        movePips = (close - entryPrice) / pip
+        if (movePips >= beTriggerP)
+            beSL = entryPrice + beOffsetP * pip
+            activeSL := na(activeSL) ? beSL : math.max(activeSL, beSL)
+
+    if (strategy.position_size < 0)
+        movePips = (entryPrice - close) / pip
+        if (movePips >= beTriggerP)
+            beSL = entryPrice - beOffsetP * pip
+            activeSL := na(activeSL) ? beSL : math.min(activeSL, beSL)
+
+//────────────────────────────────────────────────────────────────────
+// Exit on HA flip
+//────────────────────────────────────────────────────────────────────
+if exitOnFlip and (strategy.position_size != 0)
+    if (strategy.position_size > 0) and (haColor == -1)
+        strategy.close("BUY", comment="HA Flip Exit")
+    if (strategy.position_size < 0) and (haColor == 1)
+        strategy.close("SELL", comment="HA Flip Exit")
+
+// Protective exits (SL/TP)
+if (strategy.position_size > 0)
+    strategy.exit("BUY-EXIT", "BUY", stop=activeSL, limit=activeTP)
+if (strategy.position_size < 0)
+    strategy.exit("SELL-EXIT", "SELL", stop=activeSL, limit=activeTP)
+
+// Visual
+plot(ema, "EMA 50", linewidth=2)
+
+View in Pine Editor・221 lines
+Use on chart
+4
+680
+This strategy trades strong directional moves using Heikin-Ashi candle confirmation and a 50-period EMA trend filter, while aggressively avoiding consolidation. Entries occur only after two consecutive Heikin-Ashi candles close in the same direction with price on the correct side of the EMA, and are further filtered using ATR-normalized volatility, range, EMA slope, and EMA cross-chop conditions to ensure the market is actively trending. Trades are executed at the open of the next candle, managed with structure-based or fixed stop losses, an optional break-even rule, and exited on Heikin-Ashi color reversal or protective stops. To protect capital and reduce overtrading, the strategy enforces strict daily limits, allowing a maximum of five trades per symbol and automatically stopping trading after two losing trades in a single day. Designed for forex markets during active sessions, this system prioritizes clean trends and capital preservation over frequent entries.

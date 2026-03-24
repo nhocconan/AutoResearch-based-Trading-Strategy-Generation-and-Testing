@@ -1,0 +1,525 @@
+//@version=5
+strategy('The Best Strategy Template [LuciTech]',
+ overlay=true,
+ max_bars_back=500,
+ max_lines_count=500,
+ max_boxes_count=500,
+ initial_capital=100000,
+ default_qty_type=strategy.percent_of_equity,
+ default_qty_value=100)
+
+
+//---Strategy Settings---
+//ToolTips
+sltip = 'Defines the stop-loss length based on candles. 0 means 1 candle, 1 means 2 candles, and so on.'
+betip = 'Enter the R multiple at which the stop loss moves to breakeven. 0 means breakeven is disabled.'
+rrtip = 'The risk-reward ratio determines the relationship between potential reward and risk. For example, 3 means risking 1 unit to gain 3 units.'
+risk_percent_tip = 'The percentage of your equity that you are willing to risk per trade.'
+sl_type_tip = 'Choose the stop-loss calculation type: ATR-based, Candle-based, or FVG-based (uses FVG boundaries).'
+ATRlength_tip = 'The number of periods used to calculate the Average True Range (ATR).'
+smoothing_tip = 'Choose the smoothing method for ATR: RMA, SMA, EMA, or WMA.'
+ATRlines_tip = 'Enable or disable plotting of ATR-based stop-loss lines.'
+fillcolour_tip = 'Select the background color to visually indicate the active time filter range on the chart.'
+time_filter_tip = 'Enable or disable the time filter. When disabled, trades can occur at any time.'
+day_filter_tip = 'Enable or disable the day filter. When enabled, trades only occur on selected days of the week.'
+
+
+//Time filter inputs
+use_time_filter = input.bool(false, title="Use Time Filter", group = 'Time Filter', tooltip=time_filter_tip)
+start_hour = input.int(defval=0, title='Start Hour (24h)', minval=0, maxval=23, group = 'Time Filter')
+start_minute = input.int(defval=59, title='Start Minute', minval=0, maxval=59, group = 'Time Filter')
+end_hour = input.int(defval=23, title='End Hour (24h)', minval=0, maxval=23, group = 'Time Filter')
+end_minute = input.int(defval=59, title='End Minute', minval=0, maxval=59, group = 'Time Filter')
+showFill = input.bool(defval=false, title="Fill Background", inline = 'colour1', group = 'Time Filter')
+fillColor = input.color(color.rgb(192, 192, 192, 90), title='', inline = 'colour1', group = 'Time Filter')
+
+//Day Filter Inputs
+use_day_filter = input.bool(false, title="Use Day Filter", group = 'Day Filter', tooltip=day_filter_tip)
+monday = input.bool(true, title="Monday", inline="days1", group = 'Day Filter')
+tuesday = input.bool(true, title="Tuesday", inline="days1", group = 'Day Filter')
+wednesday = input.bool(true, title="Wednesday", inline="days1", group = 'Day Filter')
+thursday = input.bool(true, title="Thursday", inline="days2", group = 'Day Filter')
+friday = input.bool(true, title="Friday", inline="days2", group = 'Day Filter')
+saturday = input.bool(false, title="Saturday", inline="days3", group = 'Day Filter')
+sunday = input.bool(false, title="Sunday", inline="days3", group = 'Day Filter')
+
+//Monthly Filter Inputs
+use_month_filter = input.bool(false, title="Use Month Filter", group = 'Month Filter', tooltip="Enable to restrict trading to specific months")
+january = input.bool(true, title="January", inline="months1", group = 'Month Filter')
+february = input.bool(true, title="February", inline="months1", group = 'Month Filter')
+march = input.bool(true, title="March", inline="months1", group = 'Month Filter')
+april = input.bool(true, title="April", inline="months2", group = 'Month Filter')
+may = input.bool(true, title="May", inline="months2", group = 'Month Filter')
+june = input.bool(true, title="June", inline="months2", group = 'Month Filter')
+july = input.bool(true, title="July", inline="months3", group = 'Month Filter')
+august = input.bool(true, title="August", inline="months3", group = 'Month Filter')
+september = input.bool(true, title="September", inline="months3", group = 'Month Filter')
+october = input.bool(true, title="October", inline="months4", group = 'Month Filter')
+november = input.bool(true, title="November", inline="months4", group = 'Month Filter')
+december = input.bool(true, title="December", inline="months4", group = 'Month Filter')
+
+//Position Type Filter Inputs
+use_position_filter = input.bool(false, title="Use Position Type Filter", group = 'Position Type', tooltip="Enable to restrict trading to specific position types")
+allow_long = input.bool(true, title="Allow Long", inline="positions", group = 'Position Type')
+allow_short = input.bool(true, title="Allow Short", inline="positions", group = 'Position Type')
+
+//Risk Management Inputs
+risk_percent = input.float(2, title="Risk %", minval=0.1, maxval=100, group = 'Risk Management', tooltip=risk_percent_tip) / 100
+Risk_reward = input.float(defval=2, title='Risk:Reward', minval=1, maxval=10, step=0.1, group = 'Risk Management', tooltip=rrtip)
+breakeven = input.float(0, title="Breakeven at R", minval=0.0, step=0.1, group = 'Risk Management', tooltip=betip)
+// Modified stop loss type options to include second FVG
+sl_type = input.string("ATR", title="Stop Loss Type", options=["ATR", "Candle"], group = 'Risk Management', tooltip=sl_type_tip)
+SL_length = input(0, title='Candle Length', group = 'Risk Management', tooltip=sltip)
+ATRlength = input.int(title='ATR length', defval=14, minval=1, group = 'Risk Management', tooltip=ATRlength_tip)
+smoothing = input.string(title='ATR Smoothing/ATR Lines', defval='SMA', options=['RMA', 'SMA', 'EMA', 'WMA'], group = 'Risk Management', tooltip=smoothing_tip)
+ATRlines = input(false, 'Show ATR Lines', group = 'Risk Management', tooltip=ATRlines_tip)
+ATRmulti = input.float(0, title='ATRMulti', group = 'Risk Management', tooltip=sltip, step=0.1)
+
+
+//Position Colour Inputs
+entrypricecolour = input.color(color.rgb(244, 244, 244, 75), title = 'Entry/SL/TP', group = 'Style', inline = 'peb')
+stoplosscolour = input.color(color.rgb(255, 0, 0, 75), title = '',group = 'Style' ,inline = 'peb')
+takeprofitcolour = input.color(color.rgb(0, 255, 0, 75), title = '',group = 'Style' ,inline = 'peb')
+
+
+// Alert Settings Group
+group_alert = "Alert Settings"
+use_webhook_alerts = input.bool(true, "Use Webhook Alerts", group = group_alert, tooltip="Enable to send webhook alerts with trade information in JSON format")
+webhook_format = input.string("Concise Telegram", title="Webhook Format", options=["Standard", "Telegram", "Concise Telegram"], group=group_alert, tooltip="Select the format for webhook alerts")
+telegram_chat_id = input.string("tele chatid", title="Telegram Chat ID", group=group_alert, tooltip="Chat ID for Telegram alerts")
+
+
+// --- ATR Values ---
+
+
+//ATR SL
+ma_function(source, ATRlength) =>
+    if smoothing == 'RMA'
+        ta.rma(source, ATRlength)
+    else
+        if smoothing == 'SMA'
+            ta.sma(source, ATRlength)
+        else
+            if smoothing == 'EMA'
+                ta.ema(source, ATRlength)
+            else
+                ta.wma(source, ATRlength)
+
+
+a = ma_function(ta.tr(true), ATRlength) * (ATRmulti)
+x = ma_function(ta.tr(true), ATRlength) * (ATRmulti) + high
+x2 = low - ma_function(ta.tr(true), ATRlength) * (ATRmulti)
+p1 = plot(ATRlines ? x : na, title='ATR Short Stop Loss', color=stoplosscolour, trackprice=ATRlines)
+p2 = plot(ATRlines ? x2 : na, title='ATR Long Stop Loss', color=takeprofitcolour, trackprice=ATRlines)
+
+
+
+// Standard time filter function
+is_within_time_window() =>
+    current_time = time('1', 'America/New_York')
+    start_time = timestamp(year(current_time), month(current_time), dayofmonth(current_time), start_hour, start_minute, 0)
+    end_time = timestamp(year(current_time), month(current_time), dayofmonth(current_time), end_hour, end_minute, 0)
+    current_time >= start_time and current_time <= end_time
+
+
+// Day filter function
+is_valid_trading_day() =>
+    current_day = dayofweek(time)
+    day_allowed = false
+    
+    // dayofweek() returns: 1=Sunday, 2=Monday, 3=Tuesday, 4=Wednesday, 5=Thursday, 6=Friday, 7=Saturday
+    if current_day == 2 and monday
+        day_allowed := true
+    else if current_day == 3 and tuesday
+        day_allowed := true
+    else if current_day == 4 and wednesday
+        day_allowed := true
+    else if current_day == 5 and thursday
+        day_allowed := true
+    else if current_day == 6 and friday
+        day_allowed := true
+    else if current_day == 7 and saturday
+        day_allowed := true
+    else if current_day == 1 and sunday
+        day_allowed := true
+    
+    day_allowed
+
+// Month filter function
+is_valid_trading_month() =>
+    current_month = month(time)
+    month_allowed = false
+    
+    // month() returns: 1=January, 2=February, ..., 12=December
+    if current_month == 1 and january
+        month_allowed := true
+    else if current_month == 2 and february
+        month_allowed := true
+    else if current_month == 3 and march
+        month_allowed := true
+    else if current_month == 4 and april
+        month_allowed := true
+    else if current_month == 5 and may
+        month_allowed := true
+    else if current_month == 6 and june
+        month_allowed := true
+    else if current_month == 7 and july
+        month_allowed := true
+    else if current_month == 8 and august
+        month_allowed := true
+    else if current_month == 9 and september
+        month_allowed := true
+    else if current_month == 10 and october
+        month_allowed := true
+    else if current_month == 11 and november
+        month_allowed := true
+    else if current_month == 12 and december
+        month_allowed := true
+    
+    month_allowed
+
+// Position type filter function
+is_valid_position_type(direction) =>
+    position_allowed = false
+    
+    if direction == "LONG" and allow_long
+        position_allowed := true
+    else if direction == "SHORT" and allow_short
+        position_allowed := true
+    
+    position_allowed
+
+// Combine time, day, month, and position type filters
+in_standard_time_range = not use_time_filter or is_within_time_window()
+in_valid_day = not use_day_filter or is_valid_trading_day()
+in_valid_month = not use_month_filter or is_valid_trading_month()
+in_valid_position_long = not use_position_filter or is_valid_position_type("LONG")
+in_valid_position_short = not use_position_filter or is_valid_position_type("SHORT")
+inTimeRange = in_standard_time_range and in_valid_day and in_valid_month
+
+
+
+
+// Background color for time filter
+var color bgColor = na
+bgColor := showFill and use_time_filter and is_within_time_window() ? fillColor : na
+bgcolor(bgColor)
+
+
+
+//Strategy Logic Example:
+
+
+ma1 = ta.ema(close, 15) 
+bull_cross = ta.crossover(close, ma1)
+bear_cross = ta.crossunder(close, ma1)
+
+
+// --- Strategy Signal Integration ---
+longCondition = inTimeRange and bull_cross and in_valid_position_long
+shortCondition = inTimeRange and bear_cross and in_valid_position_short
+
+
+
+// --- Strategy Position Management ---
+var float stop_level = na
+var float target_level = na
+var float entry_price = na
+var float initial_stop = na
+var bool moved_to_breakeven = false
+var box current_bull_box = na
+var box current_bear_box = na
+var box current_second_bull_box = na
+var box current_second_bear_box = na
+
+
+calculate_position_size(stop_distance) =>
+    if stop_distance > 0
+        risk_amount = strategy.equity * risk_percent
+        position_size = risk_amount / stop_distance
+        math.floor(position_size / syminfo.mintick) * syminfo.mintick  // Ensure valid position size
+    else
+        na
+
+
+// Function to create standard JSON alert message
+create_alert_message(direction, sl_price, tp_price) =>
+    // Format the JSON message with proper escaping
+    message = '{"type":"' + direction + '","instrument":"' + syminfo.ticker + '","sl":' + str.tostring(sl_price, "#.#####") + ',"tp":' + str.tostring(tp_price, "#.#####") + '}'
+    message
+
+
+// Function to create Telegram JSON alert message
+create_telegram_alert_message(direction, sl_price, tp_price) =>
+    // Format the header based on direction
+    header = direction == "BUY" ? "🟢BUY SIGNAL" : "🔴SELL SIGNAL"
+    
+    // Format date and time components
+    y = str.tostring(year)
+    m = str.tostring(month)
+    d = str.tostring(dayofmonth)
+    h = str.tostring(hour)
+    min = str.tostring(minute)
+    
+    // Add leading zeros to single-digit values
+    m := str.length(m) == 1 ? "0" + m : m
+    d := str.length(d) == 1 ? "0" + d : d
+    h := str.length(h) == 1 ? "0" + h : h
+    min := str.length(min) == 1 ? "0" + min : min
+    
+    // Format the date time string
+    datetime_str = y + "-" + m + "-" + d + " " + h + ":" + min
+    
+    // Format the JSON message for Telegram with proper escaping
+    message = '{"chat_id": "' + telegram_chat_id + '", "text": "' + header + '\\n\\n{[' + syminfo.prefix + ']:[' + syminfo.ticker + '], price = [' + str.tostring(close, "#.#####") + ']}\\nDateTime = [' + datetime_str + ']\\nSL: ' + str.tostring(sl_price, "#.#####") + '\\nTP: ' + str.tostring(tp_price, "#.#####") + '"}'
+    message
+
+
+// Function to create concise Telegram JSON alert message
+create_concise_telegram_alert_message(direction, sl_price, tp_price) =>
+    // Format the header based on direction with emoji
+    header = direction == "BUY" ? "🟢BUY " : "🔴SELL "
+    
+    // Format the JSON message for Telegram with proper escaping and concise format
+    message = '{"chat_id": "' + telegram_chat_id + '", "text": "' + header + syminfo.ticker + '\\nPRICE = ' + str.tostring(close, "#.#####") + '\\nSL: ' + str.tostring(sl_price, "#.#####") + '\\nTP: ' + str.tostring(tp_price, "#.#####") + '"}'
+    message
+
+
+if strategy.position_size == 0
+    // Reset breakeven flag when entering new trades
+    moved_to_breakeven := false
+
+
+    // Long entry logic
+    if longCondition
+        // Calculate stop loss level based on selected type (ATR, Candle, FVG, or Second FVG)
+        stop_level := switch sl_type
+            "ATR" => x2
+            "Candle" => low[SL_length]
+            => low[SL_length]  // Default to candle-based if unknown type
+            
+        initial_stop := stop_level  // Store initial stop level for breakeven calculations
+        // Calculate distance between entry and stop for position sizing
+        stop_distance = close - stop_level
+        // Calculate take profit level based on risk:reward ratio
+        target_level := close + (Risk_reward * stop_distance)
+        // Calculate position size based on risk parameters
+        position_size = calculate_position_size(stop_distance)
+        
+        // Send webhook alert if enabled
+        if use_webhook_alerts
+            // Choose alert format based on user selection
+            alert_message = switch webhook_format
+                "Telegram" => create_telegram_alert_message("BUY", stop_level, target_level)
+                "Concise Telegram" => create_concise_telegram_alert_message("BUY", stop_level, target_level)
+                => create_alert_message("BUY", stop_level, target_level)  // Default to standard format
+            alert(alert_message, alert.freq_once_per_bar)
+        
+        // Enter long position if position size is valid
+        if not na(position_size) and position_size > 0
+            strategy.entry("Long", strategy.long, qty=position_size)
+            // Place stop loss and take profit orders
+            strategy.exit("Exit Long", "Long", stop=stop_level, limit=target_level)
+            entry_price := close  // Store entry price for breakeven calculations
+            
+    
+    // Short entry logic
+    if shortCondition
+        // Calculate stop loss level based on selected type (ATR, Candle, FVG, or Second FVG)
+        stop_level := switch sl_type
+            "ATR" => x
+            "Candle" => high[SL_length]
+            => high[SL_length]  // Default to candle-based if unknown type
+            
+        initial_stop := stop_level  // Store initial stop level for breakeven calculations
+        // Calculate distance between entry and stop for position sizing
+        stop_distance = stop_level - close
+        // Calculate take profit level based on risk:reward ratio
+        target_level := close - (Risk_reward * stop_distance)
+        // Calculate position size based on risk parameters
+        position_size = calculate_position_size(stop_distance)
+        
+        // Send webhook alert if enabled
+        if use_webhook_alerts
+            // Choose alert format based on user selection
+            alert_message = switch webhook_format
+                "Telegram" => create_telegram_alert_message("SELL", stop_level, target_level)
+                "Concise Telegram" => create_concise_telegram_alert_message("SELL", stop_level, target_level)
+                => create_alert_message("SELL", stop_level, target_level)  // Default to standard format
+            alert(alert_message, alert.freq_once_per_bar)
+        
+        // Enter short position if position size is valid
+        if not na(position_size) and position_size > 0
+            strategy.entry("Short", strategy.short, qty=position_size)
+            // Place stop loss and take profit orders
+            strategy.exit("Exit Short", "Short", stop=stop_level, limit=target_level)
+            entry_price := close  // Store entry price for breakeven calculations
+            
+
+
+
+// Breakeven logic - moves stop loss to entry price when profit threshold is reached
+if breakeven > 0 and strategy.position_size != 0
+    // Calculate initial risk in points/pips
+    initial_risk = math.abs(entry_price - initial_stop)
+
+
+    // Long position breakeven logic
+    if strategy.position_size > 0  // Long position
+        // Calculate current unrealized profit
+        current_profit = high - entry_price
+        // Check if profit threshold reached and breakeven not already moved
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Long")  // Cancel existing exit order
+            stop_level := entry_price     // Set new stop at entry price
+            // Place new exit order with breakeven stop
+            strategy.exit("Exit Long", "Long", stop=entry_price, limit=target_level)
+    
+    // Short position breakeven logic
+    if strategy.position_size < 0  // Short position
+        // Calculate current unrealized profit
+        current_profit = entry_price - low
+        // Check if profit threshold reached and breakeven not already moved
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Short")  // Cancel existing exit order
+            stop_level := entry_price     // Set new stop at entry price
+            // Place new exit order with breakeven stop
+            strategy.exit("Exit Short", "Short", stop=entry_price, limit=target_level)
+
+
+// Plotting Entry, SL, and TP lines
+plot(strategy.position_size != 0 ? entry_price : na, title="Entry Price", color=entrypricecolour, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? stop_level : na, title="Stop Loss", color=stoplosscolour, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? target_level : na, title="Take Profit", color=takeprofitcolour, style=plot.style_linebr)
+
+
+// Determine fill extension based on user setting
+extend_fill_by_bar = false
+var int fill_extension = extend_fill_by_bar ? 1 : 0
+
+
+// Fill between Entry and SL
+plot_entry = plot(strategy.position_size != 0 ? entry_price : na, "Entry for SL Fill", display=display.none, offset=fill_extension)
+plot_sl = plot(strategy.position_size != 0 ? stop_level : na, "SL for Fill", display=display.none)
+fill(plot_entry, plot_sl, color = strategy.position_size != 0 ? stoplosscolour : na)
+
+
+// Fill between Entry and TP
+plot_entry_tp = plot(strategy.position_size != 0 ? entry_price : na, "Entry for TP Fill", display=display.none, offset=fill_extension)
+plot_tp = plot(strategy.position_size != 0 ? target_level : na, "TP for Fill", display=display.none)
+fill(plot_entry_tp, plot_tp, color = strategy.position_size != 0 ? takeprofitcolour : na)
+
+View in Pine Editor・412 lines
+Use on chart
+2
+8
+7
+2
+5 613
+Sep 20, 2025
+Hello Traders,
+
+This is a powerful and flexible strategy template designed to help you create, backtest, and deploy your own custom trading strategies. This template is not a ready-to-use strategy but a framework that simplifies the development process by providing a wide range of pre-built features and functionalities.
+
+What It Does
+
+The LuciTech Strategy Template provides a robust foundation for building your own automated trading strategies. It includes a comprehensive set of features that are essential for any serious trading strategy, allowing you to focus on your unique trading logic without having to code everything from scratch.
+
+Key Features
+
+The LuciTech Strategy Template integrates several powerful features to enhance your strategy development:
+
+•
+Advanced Risk Management: This includes robust controls for defining your Risk Percentage per Trade, setting a precise Risk-to-Reward Ratio, and implementing an intelligent Breakeven Stop-Loss mechanism that automatically adjusts your stop to the entry price once a specified profit threshold is reached. These elements are crucial for capital preservation and consistent profitability.
+
+•
+Flexible Stop-Loss Options: The template offers adaptable stop-loss calculation methods, allowing you to choose between ATR-Based Stop-Loss, which dynamically adjusts to market volatility, and Candle-Based Stop-Loss, which uses structural price points from previous candles. This flexibility ensures the stop-loss strategy aligns with diverse trading styles.
+
+•
+Time-Based Filtering: Optimize your strategy's performance by restricting trading activity to specific hours of the day. This feature allows you to avoid unfavorable market conditions or focus on periods of higher liquidity and volatility relevant to your strategy.
+
+•
+Customizable Webhook Alerts: Stay informed with advanced notification capabilities. The template supports sending detailed webhook alerts in various JSON formats (Standard, Telegram, Concise Telegram) to external platforms, facilitating real-time monitoring and potential integration with automated trading systems.
+
+•
+Comprehensive Visual Customization: Enhance your analytical clarity with extensive visual options. You can customize the colors of entry, stop-loss, and take-profit lines, and effectively visualize market inefficiencies by displaying and customizing Fair Value Gap (FVG) boxes directly on your chart.
+
+How It Does It
+
+The LuciTech Strategy Template is meticulously crafted using Pine Script, TradingView's powerful and expressive programming language. The underlying architecture is designed for clarity and modularity, allowing for straightforward integration of your unique trading signals. At its core, the template operates by taking user-defined entry and exit conditions and then applying a sophisticated layer of risk management, position sizing, and trade execution logic.
+
+For instance, when a longCondition or shortCondition is met, the template dynamically calculates the appropriate position size. This calculation is based on your specified risk_percent of equity and the stop_distance (the distance between your entry price and the calculated stop-loss level). This ensures that each trade adheres to your predefined risk parameters, a critical component of disciplined trading.
+
+The flexibility in stop-loss calculation is achieved through a switch statement that evaluates the sl_type input. Whether you choose an ATR-based stop, which adapts to market volatility, or a candle-based stop, which uses structural price points, the template seamlessly integrates these methods. The ATR calculation itself is further refined by allowing various smoothing methods (RMA, SMA, EMA, WMA), providing granular control over how volatility is measured.
+
+Time-based filtering is implemented by comparing the current bar's time with user-defined start_hour, start_minute, end_hour, and end_minute inputs. This allows the strategy to activate or deactivate trading during specific market sessions or periods of the day, a valuable tool for optimizing performance and avoiding unfavorable conditions.
+
+Furthermore, the template incorporates advanced webhook alert functionality. When a trade is executed, a customizable JSON message is formatted based on your webhook_format selection (Standard, Telegram, or Concise Telegram) and sent via alert function. This enables seamless integration with external services for real-time notifications or even automated trade execution through third-party platforms.
+
+Visual feedback is paramount for understanding strategy behavior. The template utilizes plot and fill functions to clearly display entry prices, stop-loss levels, and take-profit targets directly on the chart. Customizable colors for these elements, along with dedicated options for Fair Value Gap (FVG) boxes, enhance the visual analysis during backtesting and live trading, making it easier to interpret the strategy's actions.
+
+How It's Original
+
+The LuciTech Strategy Template distinguishes itself in the crowded landscape of TradingView scripts through its unique combination of integrated, advanced risk management features, highly flexible stop-loss methodologies, and sophisticated alerting capabilities, all within a user-friendly and modular framework. While many templates offer basic entry/exit signal integration, LuciTech goes several steps further by providing a robust, ready-to-use infrastructure for managing the entire trade lifecycle once a signal is generated.
+
+Unlike templates that might require users to piece together various risk management components or code complex stop-loss logic from scratch, LuciTech offers these critical functionalities out-of-the-box. The inclusion of dynamic position sizing based on a user-defined risk percentage, a configurable risk-to-reward ratio, and an intelligent breakeven mechanism significantly elevates its utility. This comprehensive approach to capital preservation and profit targeting is a cornerstone of professional trading and is often overlooked or simplified in generic templates.
+
+Furthermore, the template's provision for multiple stop-loss calculation types—ATR-based for volatility adaptation, and candle-based for structural support/resistance—demonstrates a deep understanding of diverse trading strategies. The underlying code for these calculations is already implemented, saving developers considerable time and effort. The subtle yet powerful inclusion of FVG (Fair Value Gap) related inputs also hints at advanced price action concepts, offering a sophisticated layer of analysis and execution that is not commonly found in general-purpose templates.
+
+The advanced webhook alerting system, with its support for various JSON formats tailored for platforms like Telegram, showcases an originality in catering to the needs of modern, automated trading setups. This moves beyond simple TradingView pop-up alerts, enabling seamless integration with external systems for real-time trade monitoring and execution. This level of external connectivity and customizable data output is a significant differentiator.
+
+In essence, the LuciTech Strategy Template is original not just in its individual features, but in how these features are cohesively integrated to form a powerful, opinionated, yet highly adaptable system. It empowers traders to focus their creative energy on developing their core entry/exit signals, confident that the underlying framework will handle the complexities of risk management, trade execution, and external communication with precision and flexibility. It's a comprehensive solution designed to accelerate the development of robust and professional trading strategies.
+
+How to Modify the Logic to Apply Your Strategy
+
+The LuciTech Strategy Template is designed with modularity in mind, making it exceptionally straightforward to integrate your unique trading strategy logic. The template provides a clear separation between the core strategy management (risk, position sizing, exits) and the entry signal generation. This allows you to easily plug in your own buy and sell conditions without altering the robust underlying framework.
+
+Here’s a step-by-step guide on how to adapt the template to your specific trading strategy:
+
+1.
+Locate the Strategy Logic Section:
+Open the Pine Script editor in TradingView and navigate to the section clearly marked with the comment //Strategy Logic Example:. This is where the template’s placeholder entry conditions (a simple moving average crossover) are defined.
+
+2.
+Define Your Custom Entry Conditions:
+Within this section, you will find variables such as longCondition and shortCondition. These are boolean variables that determine when a long or short trade should be initiated. Replace the existing example logic with your own custom buy and sell conditions. Your conditions can be based on any combination of indicators, price action patterns, candlestick formations, or other market analysis techniques. For example, if your strategy involves a combination of RSI and MACD, you would define longCondition as (rsi > 50 and macd_line > signal_line) and shortCondition as (rsi < 50 and macd_line < signal_line).
+
+3.
+Leverage the Template’s Built-in Features:
+Once your longCondition and shortCondition are defined, the rest of the template automatically takes over. The integrated risk management module will calculate the appropriate position size based on your Risk % input and the chosen Stop Loss Type. The Risk:Reward ratio will determine your take-profit levels, and the Breakeven at R feature will manage your stop-loss dynamically. The time filter (Use Time Filter) will ensure your trades only occur within your specified hours, and the webhook alerts will notify you of trade executions.
+Dec 10, 2025
+Release Notes
+Day Filter Added:
+-New Feature: Day-of-week filtering to control which days your strategy can trade.
+
+What's Added:
+-Day Filter Toggle: Enable/disable day-based filtering in settings
+-7 Day Checkboxes: Select any combination of Monday through Sunday
+-Smart Integration: Works alongside the existing time filter (both must pass for trades)
+-Default Setup: Mon-Fri enabled, Sat-Sun disabled by default
+
+
+Dec 10, 2025
+Release Notes
+Monthly Filter Added:
+-New Feature: Month-of-year filtering to control which months your strategy can trade.
+
+What's Added:
+-Monthly Filter Toggle: Enable/disable month-based filtering in settings
+-12 Month Checkboxes: Select any combination of January through December
+-Smart Integration: Works alongside existing time and day filters (all must pass for trades)
+-Default Setup: All months enabled by default
+
+
+Dec 10, 2025
+Release Notes
+Direction Filter Added:
+-New Feature: Long/Short filtering to control which direction your strategy can trade.
+
+What's Added:
+-Direction Filter Toggle: Enable/disable month-based filtering in settings
+-2 Checkboxes: Select any combination of Long / Short
+-Smart Integration: Works alongside existing time, day and month filters (all must pass for trades)
+-Default Setup: All Long and short allowed by default

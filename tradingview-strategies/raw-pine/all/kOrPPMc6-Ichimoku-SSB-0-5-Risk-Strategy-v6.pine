@@ -1,0 +1,137 @@
+//@version=6
+strategy(
+    title = "Ichimoku SSB Option B 1% Risk Strategy v6",
+    overlay = true,
+    pyramiding = 4,
+    calc_on_every_tick = false
+)
+
+// ======================
+// Hard-lock 30m
+// ======================
+if timeframe.period != "30"
+    runtime.error("Strategy locked to 30-minute timeframe.")
+
+// ======================
+// Inputs
+// ======================
+riskPercent = input.float(1.0, "Risk per Trade (%)", step=0.1) / 100
+
+tenkanLen = input.int(9)
+kijunLen  = input.int(26)
+ssbLen    = input.int(52)
+
+// ======================
+// Ichimoku Calculation
+// ======================
+tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+kijun  = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+ssa    = (tenkan + kijun) / 2
+ssb    = (ta.highest(high, ssbLen) + ta.lowest(low, ssbLen)) / 2
+
+aboveCloud = close > math.max(ssa, ssb)
+belowCloud = close < math.min(ssa, ssb)
+
+// ======================
+// SSB Step (Option B)
+// ======================
+ssbStep = ssb != ssb[1]
+
+// ======================
+// Entry Conditions
+// ======================
+longEntry  = ssbStep and close > ssb and aboveCloud
+shortEntry = ssbStep and close < ssb and belowCloud
+
+// ======================
+// State Variables
+// ======================
+var float initialRisk = na
+var float trailStop   = na
+
+// ======================
+// Position sizing
+// ======================
+riskDollars = strategy.equity * riskPercent
+
+// ======================
+// Long Split Entries
+// ======================
+if longEntry and strategy.position_size == 0
+    stopPrice = kijun
+    riskPerUnit = close - stopPrice
+    if riskPerUnit > 0
+        qtyTotal = riskDollars / riskPerUnit
+        initialRisk := riskPerUnit
+
+        strategy.entry("L_TP1", strategy.long, qty = qtyTotal * 0.40)
+        strategy.entry("L_TP2", strategy.long, qty = qtyTotal * 0.25)
+        strategy.entry("L_TP3", strategy.long, qty = qtyTotal * 0.15)
+        strategy.entry("L_RUN", strategy.long, qty = qtyTotal * 0.20)
+
+// ======================
+// Short Split Entries
+// ======================
+if shortEntry and strategy.position_size == 0
+    stopPrice = kijun
+    riskPerUnit = stopPrice - close
+    if riskPerUnit > 0
+        qtyTotal = riskDollars / riskPerUnit
+        initialRisk := riskPerUnit
+
+        strategy.entry("S_TP1", strategy.short, qty = qtyTotal * 0.40)
+        strategy.entry("S_TP2", strategy.short, qty = qtyTotal * 0.25)
+        strategy.entry("S_TP3", strategy.short, qty = qtyTotal * 0.15)
+        strategy.entry("S_RUN", strategy.short, qty = qtyTotal * 0.20)
+
+// ======================
+// Trailing Stop
+// ======================
+if strategy.position_size != 0
+    trailStop := na(trailStop) ? kijun : (strategy.position_size > 0 ? math.max(trailStop, kijun) : math.min(trailStop, kijun))
+
+// Stop for all sub-positions
+strategy.exit("SL_L1", "L_TP1", stop = trailStop)
+strategy.exit("SL_L2", "L_TP2", stop = trailStop)
+strategy.exit("SL_L3", "L_TP3", stop = trailStop)
+strategy.exit("SL_LR", "L_RUN", stop = trailStop)
+
+strategy.exit("SL_S1", "S_TP1", stop = trailStop)
+strategy.exit("SL_S2", "S_TP2", stop = trailStop)
+strategy.exit("SL_S3", "S_TP3", stop = trailStop)
+strategy.exit("SL_SR", "S_RUN", stop = trailStop)
+
+// ======================
+// Partial Take Profits
+// ======================
+if not na(initialRisk)
+    // Long
+    strategy.exit("TP1_L", "L_TP1", limit = strategy.position_avg_price + initialRisk * 3)
+    strategy.exit("TP2_L", "L_TP2", limit = strategy.position_avg_price + initialRisk * 5)
+    strategy.exit("TP3_L", "L_TP3", limit = strategy.position_avg_price + initialRisk * 7)
+    // Short
+    strategy.exit("TP1_S", "S_TP1", limit = strategy.position_avg_price - initialRisk * 3)
+    strategy.exit("TP2_S", "S_TP2", limit = strategy.position_avg_price - initialRisk * 5)
+    strategy.exit("TP3_S", "S_TP3", limit = strategy.position_avg_price - initialRisk * 7)
+
+// ======================
+// Reset when flat
+// ======================
+if strategy.position_size == 0
+    trailStop := na
+    initialRisk := na
+
+// ======================
+// Plots
+// ======================
+plot(kijun, "Kijun", color=color.blue)
+plot(ssb, "Senkou Span B", color=color.orange)
+
+View in Pine Editor・128 lines
+Use on chart
+1
+9
+521
+basic strategy Ichimoku, follow trades only risking 0.5% per trade via SL.
+
+Pure for 30min timeframe on SUI (Crypto)

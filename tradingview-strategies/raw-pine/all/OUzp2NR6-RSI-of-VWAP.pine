@@ -1,0 +1,94 @@
+//@version=4
+strategy(title="RSI of VWAP", overlay=true, pyramiding=1,     default_qty_type=strategy.percent_of_equity,  default_qty_value=20, initial_capital=10000, currency=currency.USD)  //default_qty_value=10, default_qty_type=strategy.fixed,
+
+rsiLength=input(14,title="RSI Length", minval=1, maxval=50)
+buyLine=input(70,title="RSI Buy Line", minval=30, maxval=100)
+exitLine=input(90,title="RSI Exit Line", minval=0, maxval=100)
+riskCapital = input(title="Risk % of capital", defval=10, minval=1)
+stopLoss=input(5,title="Stop Loss",minval=1)
+partialExit=input(true,title="Allow Partial exit / take profits")
+
+myVwap=vwap
+vwapRsi=rsi(vwap,rsiLength)
+ema200=ema(close,200)
+
+
+
+plot(ema200, title="EMA 200", color=color.orange,  transp=25)
+plot(myVwap, title="VWAP", color=color.purple,  transp=25)
+
+//plot(close)
+
+//Entry--
+//Echeck how many units can be purchased based on risk manage ment and stop loss
+qty1 = (strategy.equity  * riskCapital / 100 ) /  (close*stopLoss/100)  
+
+//check if cash is sufficient  to buy qty1  , if capital not available use the available capital only
+qty1:= (qty1 * close >= strategy.equity ) ? (strategy.equity / close) : qty1
+
+
+//more than 80%
+strategy.entry(id="LE", comment="Entry", long=true, qty=qty1, when=crossover(vwapRsi,buyLine) and close>ema200 )
+
+
+//stoploss
+stopLossVal=  strategy.position_size>=1 ?  (strategy.position_avg_price * (1-(stopLoss*0.01) )) : 0.00
+
+//draw initil stop loss
+plot(strategy.position_size>=1 ? stopLossVal : na, color = color.purple , style=plot.style_linebr,  linewidth = 2, title = "stop loss")
+
+bgcolor(strategy.position_size>=1?color.blue:na, transp=80)
+
+
+
+if(partialExit==true)
+    strategy.close(id="LE",comment="TP points="+tostring(close - strategy.position_avg_price, "####.##"),qty=strategy.position_size/3, when=crossover(vwapRsi,99) )  //and close>ema200
+    
+strategy.close_all(comment="Exit All points="+tostring(close - strategy.position_avg_price, "####.##"), when=crossunder(vwapRsi,exitLine) )  //and close>ema200
+
+//close all on stop loss
+strategy.close_all(comment="Exit points="+tostring(close - strategy.position_avg_price, "####.##"), when=close<stopLossVal )  //and close>ema200
+
+View in Pine Editor・53 lines
+Use on chart
+8
+9
+6
+27
+16 565
+Nov 3, 2020
+This strategy inputs the vwap as source to RSI indicator.
+
+ENTRY
+When RSIofVwap crossover 70 and price is above ema200
+
+partial exits
+when RSIofVwap reaches 90 level take a portion of profit
+
+Exit
+When RSIofVwap crossdown 30
+
+stoploss
+defaulated to 5%
+
+Risk Level
+Defaulted to 10%. Based on this startegy calcuclates hiw many units can be purchased adhering to stoploss value
+
+
+Note: code doesnt draw the RSI (vwap) indicator to the chart. if you want to see how these signals are generated , you can select RSI and VWAP of 14 period length.
+
+warning
+For educational purposes only
+
+
+Nov 4, 2020
+Release Notes
+
+1. I have noticed selling on RSiofVWAP 90 level reading produces more winning trades. Earlier version had sell level 30 , that has been changed / defaulted to 90
+
+2. Take Partial profits parameter added
+
+3. Profit / Loss points added in comments section
+
+Note : RSI 14 (source vwap) is not added / drawn to the chart. If you want to see how the signals are generated add vwap and RSI 14, then change the RSI source to vwap.
+

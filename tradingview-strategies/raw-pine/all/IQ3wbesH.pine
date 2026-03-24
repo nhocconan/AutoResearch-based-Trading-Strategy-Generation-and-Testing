@@ -1,0 +1,126 @@
+//@version=4
+strategy("Ezieh Str.v2", shorttitle="Ezieh Str.v2", overlay=true, pyramiding=10, currency=currency.USD, slippage=3, commission_type=strategy.commission.cash_per_order, commission_value=0.04, initial_capital=1000)
+
+
+
+UseDateFilter  = input(title="Enable Date Filter"         ,type=input.bool    ,defval=false                               ,group="Date & Time" ,tooltip="Turns on/off date filter")
+StartDate      = input(title="Start Date Filter"          ,type=input.time    ,defval=timestamp("1 Jan 2000 00:00 +0000") ,group="Date & Time" ,tooltip="Date & time to start excluding trades")
+EndDate        = input(title="End Date Filter"            ,type=input.time    ,defval=timestamp("1 Jan 2100 00:00 +0000") ,group="Date & Time" ,tooltip="Date & time to stop excluding trades")
+UseTimeFilter  = input(title="Enable Time Session Filter" ,type=input.bool    ,defval=false                               ,group="Date & Time" ,tooltip="Turns on/off time session filter")
+TradingSession = input(title="Trading Session"            ,type=input.session ,defval="1000-2200:1234567"                 ,group="Date & Time" ,tooltip="No trades will be taken outside of this range")
+
+In(t)      => na(time(timeframe.period, t)) == false
+TimeFilter = (UseTimeFilter and not In(TradingSession)) or not UseTimeFilter
+DateFilter = time >= StartDate and time <= EndDate
+
+DateTime = (UseDateFilter ? not DateFilter : true) and (UseTimeFilter ? In(TradingSession) : true) 
+
+///////////// RSI
+L_RSI_Length     = input(7  , title="L_Length")
+L_RSI_OverSold   = input(45 , title="L_OverSold")
+S_RSI_Length     = input(14 , title="S_Length")
+S_RSI_OverBought = input(65 , title="S_OverBought")
+
+price = close
+Lvrsi = rsi(price, L_RSI_Length)
+Svrsi = rsi(price, S_RSI_Length)
+
+///////////// Bollinger Bands
+BBlength = input(title="Bollinger Period Length", type=input.integer, defval=100, minval=2)
+BBmult = 2.1 // input(2.0, minval=0.001, maxval=50,title="Bollinger Bands Standard Deviation")
+BBbasis = sma(price, BBlength)
+BBdev = BBmult * stdev(price, BBlength)
+BBupper = BBbasis + BBdev
+BBlower = BBbasis - BBdev
+source = close
+plot(BBbasis, color=color.aqua,title="Bollinger Bands SMA Basis Line")
+p1 = plot(BBupper, color=color.silver,title="Bollinger Bands Upper Line")
+p2 = plot(BBlower, color=color.silver,title="Bollinger Bands Lower Line")
+fill(p1, p2)
+
+
+///////////// Colors
+switch1=input(true, title="Enable Bar Color?")
+switch2=input(true, title="Enable Background Color?")
+
+
+
+///////////// Condition
+LongCondition  = crossover(Lvrsi, L_RSI_OverSold)    and crossover(close  ,BBlower)
+ShortCondition = crossunder(Svrsi, S_RSI_OverBought) and crossunder(close,BBupper)
+Longexcon      = crossunder(low, BBupper)
+Shortexcon     = crossover(low, BBlower)
+
+qt = round(strategy.equity/price, 3)
+
+///////////// RSI + Bollinger Bands Strategy
+if (not na(Lvrsi))
+
+    if LongCondition and DateTime
+        strategy.entry("RSI_BB_L", strategy.long, qty=qt, oca_type=strategy.oca.cancel, comment="Long")
+    else
+        strategy.cancel(id="RSI_BB_L")
+        
+    if Longexcon
+        strategy.close("RSI_BB_L", qty_percent = 100, comment = "L_exit")
+    
+    if ShortCondition and DateTime
+        strategy.entry("RSI_BB_S", strategy.short, qty=qt, oca_type=strategy.oca.cancel, comment="Short")
+    else
+        strategy.cancel(id="RSI_BB_S")
+        
+    if Shortexcon
+        strategy.close("RSI_BB_S", qty_percent = 100, comment = "S_exit")
+    
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・75 lines
+Use on chart
+3
+3
+6
+11
+9 795
+I'm Korean, and it may not be enough to explain this script in English. I feel sorry for the users of TradingView for this lack of English skills. If you are Korean, please return it to the translator using Papago. It will be a useful manual for you.
+
+This script referenced Chartart's Double Strategy. But there are some changes in his script.
+
+0. Basically, when you break through the top or bottom of the 100th period balliser band and come back into the band, you track the overbuying and overselling of the RSI to determine your position entry. The order is triggered only when both conditions are satisfied at the same time. However, only one condition applies to clearing the position. This is because it is most effective in reducing risk and increasing assets in terms of profit and loss.
+
+1. This script is optimized for 15 minutes of bitcoin futures chart and API via webbook alert. By default, 10x leverage usage and 10 pyramids are applied.
+
+2. Setting a chart period other than 15 minutes will not guarantee sufficient effectiveness. It can also be applied to Ethereum , but it is not recommended to apply to other symbols.
+
+3. I added Enable Date Filter because Chartart's script could not apply the strategy to the user's desired period. This feature allows you to set a period of time when you do not want to use the strategy. You can also uncheck it if you don't want to fully use this feature. Please remember that it is an exclusion period, not a usage period. With this feature, we can see the effectiveness of the strategy from a point in time, not from the entire period. You can also clearly differentiate the effectiveness of the strategy from the point you use it.
+
+4. You can also stop using strategies at certain times of the day when you don't want to apply them. This works similarly to the Enalbe Date Filter described above. This allows you to sleep comfortably even if you don't fully trust this strategy.
+
+5. The period, overbuying, and overselling figures of RSI can be set individually. For example, when you take a long position, you can set the RSI to a period of 7, and at the same time, the RSI entering the short position can be set to a period of 14. You can also set the base figures for overbuying and overselling to levels that you think are reasonable. This figure works in conjunction with the Bollinger Band and affects position entry when it is crossed or returned.
+
+6. Based on API futures trading, basic Sleepy and commission are applied. This is geared towards market price transactions. This makes your revenue look more reasonable.
+
+
+Thank you very much, Chartart. You are a genius.
+
+-
+
+저는 한국인이고, 영어로 이 스크립트를 설명하는 것이 어렵기 때문에 설명이 부족할 수 있습니다. 이런 영어 능력 부족에 대해서 TradingView 사용자들에게 미안하게 생각합니다. 만약 당신이 한국인이라면 파파고를 사용하여 번역기에 돌려주십시오. 당신에게 유익한 설명서가 될 것입니다.
+
+이 스크립트는 Chart art의 Double Strategy를 참조했습니다. 그러나 그의 스크립트에서 달라진 점이 몇 가지 있습니다.
+
+0. 기본적으로 100기간의 볼린져밴드의 상단 또는 하단을 돌파한 뒤 다시 밴드 안으로 들어올 때 RSI의 과매수, 과매도를 추적하여 포지션 진입을 결정합니다. 두 가지 조건이 동시에 만족되어야만 주문이 트리거 됩니다. 그러나 포지션을 청산하는 것에는 볼린져밴드 하나의 조건만 적용합니다. 여러가지 테스트를 거친 결과 이것이 손익 면에서 가장 효과적으로 리스크를 줄이고 자산을 늘리는 것에 효율적이기 때문입니다.
+
+1. 이 스크립트는 15분의 비트코인 선물 차트와 webhook alert을 통한 API에 최적화되어 있습니다. 기본적으로 10배의 레버리지 사용과 10개의 피라미딩이 적용되어 있습니다.
+
+2. 15분 외에 다른 차트 기간을 설정한다면 충분한 효과를 보장할 수 없습니다. 또한 이더리움에도 적용할 수 있지만, 그 외에 다른 심볼에는 적용하지 않는 것을 권장합니다.
+
+3. Chart art의 스크립트는 전략을 사용자가 원하는 기간에 적용할 수 없었기 때문에, 저는 Enable Date Filter를 추가하였습니다. 이 기능을 통해 전략 사용을 원하지 않는 기간을 설정할 수 있습니다. 또한 이 기능을 완전히 사용하고싶지 않다면 체크를 해제할 수 있습니다. 사용 기간이 아닌 제외 기간인 점을 상기하시길 바랍니다. 이 기능을 통해 우리는 전체 기간이 아닌 가까운 특정 시점부터의 전략 적용 효과를 확인할 수 있습니다. 또한 사용자가 전략을 사용한 시점부터의 효과를 명백히 구분할 수 있습니다.
+
+4. 또한 사용자가 적용을 원하지 않는 하루 중의 특정 시간대에 전략 사용을 멈출 수도 있습니다. 이는 위에 설명한 Enalbe Date Filter와 유사하게 작동합니다. 이를 통해 당신이 온전히 이 전략을 신뢰하지 못하여도 당신은 마음 편하게 잠에 들 수 있습니다.
+
+5. RSI의 기간 및 과매수, 과매도 수치를 개별적으로 설정할 수 있습니다. 예를 들어 당신이 롱 포지션을 취할 때에는 RSI를 7의 기간으로 설정할 수 있고, 동시에 숏 포지션을 진입하는 RSI는 14의 기간으로 설정될 수 있습니다. 또한 과매수 및 과매도의 기준 수치를 당신이 합리적이라고 생각하는 수준으로 설정할 수 있습니다. 이 수치는 볼린져밴드와 함께 작동하여 그것을 넘어서거나 다시 되돌아올 때 포지션 진입에 영향을 미칩니다.
+
+6. API 선물거래를 기준으로 하여 기본적인 슬리피지와 커미션이 적용되어있습니다. 이는 시장가 거래에 맞춰져 있습니다. 이는 당신의 수익을 좀 더 합리적인 수치로 보일 수 있게 합니다.
+
+
+Chartart에게 특별히 감사합니다. 당신은 천재입니다.

@@ -1,0 +1,73 @@
+//@version=3
+strategy("Volatile Stocks", overlay=true)
+
+//Trading Strategy for Highly Volitile Stocks//
+// by @ShanghaiCrypto //
+
+////EMA////
+fastLength = input(12)
+slowLength = input(26)
+baseLength = input(100)
+price = close
+
+emafast = ema(price, fastLength)
+emaslow = ema(price, slowLength)
+emabase = ema(price, baseLength)
+
+///MACD////
+MACDLength = input(9)
+MACDfast = input(12)
+MACDslow = input(26)
+MACD = ema(close, MACDfast) - ema(close, MACDslow)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+////PUMP////
+OneCandleIncrease = input(8, title='Gain %')
+pump = OneCandleIncrease/100
+
+////Profit Capture and Stop Loss//////
+stop = input(5.0, title='Stop Loss %', type=float)/100
+profit = input(40.0, title='Profit %', type=float)/100
+stop_level = strategy.position_avg_price * (1 - stop)
+take_level = strategy.position_avg_price * (1 + profit)
+
+////Entries/////
+if crossover(emafast, emaslow)
+    strategy.entry("Cross", strategy.long, comment="BUY")
+
+if (crossover(delta, 0))
+    strategy.entry("MACD", strategy.long, comment="BUY")
+    
+if close > (open + open*pump)
+    strategy.entry("Pump", strategy.long, comment="BUY")
+
+/////Exits/////
+strategy.exit("SELL","Cross", stop=stop_level, limit=take_level)
+strategy.exit("SELL","MACD", stop=stop_level, limit=take_level)
+strategy.exit("SELL","Pump", stop=stop_level, limit=take_level)
+
+////Plots////
+plot(emafast, color=green)
+plot(emaslow, color=red)
+plot(emabase, color=yellow)
+plot(take_level, color=blue)
+plot(stop_level, color=orange)
+
+View in Pine Editor・55 lines
+Use on chart
+9
+3
+3 837
+This strategy is based off of a script I wrote for another highly volatile asset, cryptocurrencies. It prints BUY and SELL signals based off of inputs that you can specify. I used this script as a time saver. If there is no signal on the chart, I'm less interested in analyzing it.
+
+BUY SIGNALS
+Bullish EMA Cross
+Positive MACD Cross
+Single-candle gains
+
+SELL SIGNALS
+Profit %
+Stop Loss %
+
+Naturally, I don't trade based off of the BUY and SELL signals alone, but it does help me identify the most important charts to look at.

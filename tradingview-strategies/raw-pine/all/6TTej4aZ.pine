@@ -1,0 +1,4 @@
+//@version=5
+showFill=##input(defval=false,type='INPUT_BOOL',##id='in_8')
+##root(root_metainfo,rm_0,(showFill?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)
+##root(root_metainfo,rm_1,(showFill?display.all:display.none),cb__input__plot_simple_display__bool,fill,display)

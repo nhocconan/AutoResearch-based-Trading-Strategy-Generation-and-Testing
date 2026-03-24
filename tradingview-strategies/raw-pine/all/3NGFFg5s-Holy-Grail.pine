@@ -1,0 +1,196 @@
+//@version=6
+strategy("Holy Grail", 
+  overlay=true, 
+  fill_orders_on_standard_ohlc = true, 
+  pyramiding = 100, 
+  max_labels_count = 500,
+  default_qty_type = strategy.percent_of_equity,
+  default_qty_value = 1, 
+  commission_type = strategy.commission.percent, 
+  commission_value = 0.1)
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+var const string version = "1.0"
+
+//#region ========Consts & Enums========
+var string GROUP_GENERAL = "General"
+var string GROUP_DEBUG = "Debug"
+//#endregion
+
+//#region ========Inputs========
+var string ver = input.string(defval = version, title = "Version", options = [version], tooltip = "Ignore It", group = GROUP_GENERAL)
+var int initEntryPercentageInput = input.int(defval = 50, title = "Init Entry %", tooltip = "The percentage of your account to deploy on the first candle", group = GROUP_GENERAL) 
+var float exitPercentageInput = input.float(defval = 3, title = "Exit %", tooltip = "The percentage of your position to exit on each exit signal", group = GROUP_GENERAL) 
+var int maLengthInput = input.int(defval = 50, title = "MA Length", tooltip = "Length of SMA",  group = GROUP_GENERAL) 
+
+var bool usePeriodStartDateInput = input.bool(defval = false, title = "Use Period Start Date", group = GROUP_DEBUG)
+var int periodStartDateInput = input.time(defval = 0, title = "Period Start Date", tooltip = "This for historic period investigations", group = GROUP_DEBUG)
+var bool usePeriodEndDateInput = input.bool(defval = false, title = "Use Period End Date", group = GROUP_DEBUG)
+var int periodEndDateInput = input.time(defval = 0, title = "Period End Date", tooltip = "This for historic period investigations", group = GROUP_DEBUG)
+var bool showStatsTableInput = input.bool(defval = false, title = "Show stats table", group = GROUP_DEBUG)
+//#endregion
+
+//#region ========Long Term Vars========
+var bool isInitialised = false
+var bool lookingForExit = false
+var bool lookingForEntry = false
+var float ath = high
+var int totalEntries = 0
+var int totalExits = 0
+var bool isBuySection = true
+var int buySections = 0
+var int sellSections = 0
+var float buySectionLow = 0
+//#endregion
+
+//#region ========Short Term Vars========
+bool isInDateRange = (usePeriodStartDateInput == false or time >= periodStartDateInput) and (usePeriodEndDateInput == false or time <= periodEndDateInput)
+float ma = ta.sma(close, maLengthInput)
+bool isGreen = close > open
+bool isRed = close < open
+bool isCrossUnderMa = ta.crossunder(close, ma)
+bool isPeriodEndDateCrossed = (usePeriodEndDateInput == true and time[1] < periodEndDateInput and time >= periodEndDateInput)
+bool isLastBar = isPeriodEndDateCrossed or barstate.islastconfirmedhistory 
+//#endregion
+
+//#region ========Init========
+if (isInitialised == false and isInDateRange)
+    float initQty = (strategy.initial_capital * initEntryPercentageInput / 100) / high
+    strategy.entry("LongId", strategy.long, qty = initQty)
+    ath := high
+    isInitialised := true
+    buySections += 1
+    buySectionLow := low
+//#endregion
+
+//#region ========Actual Logic========
+if (high > ath)
+    ath := high
+    lookingForExit := true
+
+if (isBuySection == false and isCrossUnderMa)
+    buySectionLow := low
+    lookingForEntry := true
+
+if (isBuySection and low < buySectionLow)
+    buySectionLow := low
+    lookingForEntry := true 
+
+if (isInDateRange)
+    bool entryCondition = isGreen and close < ma and lookingForEntry
+    if (entryCondition)
+        strategy.entry("LongId", strategy.long)
+        lookingForEntry := false
+        totalEntries += 1
+        if (isBuySection == false)
+            isBuySection := true
+            buySections += 1
+            buySectionLow := low
+
+    bool exitCondition = isRed and close > ma and lookingForExit
+    if (exitCondition)
+        strategy.close("LongId", qty_percent = exitPercentageInput)
+        lookingForExit := false
+        totalExits += 1
+        if (isBuySection == true)
+            isBuySection := false
+            sellSections += 1
+//#endregion
+
+//#region ========Visuals========
+plot(ma, "MA", color = color.red)
+
+if (usePeriodStartDateInput == true and time[1] < periodStartDateInput and time >= periodStartDateInput)
+    line.new(bar_index, close, bar_index, close + 1, xloc.bar_index, extend.both, color.green)
+
+if isPeriodEndDateCrossed
+    line.new(bar_index, close, bar_index, close + 1, xloc.bar_index, extend.both, color.red)
+//#endregion
+
+//#region ========Stats========
+if (isLastBar and showStatsTableInput)
+    //strategy.close("LongId", qty_percent = 100)
+
+    table infoTable = table.new(position.top_right, 5, 15, frame_width = 1, frame_color = color.black, border_color = color.black, border_width = 1)
+    int infoTableRow = 0
+    string curDate = str.format_time(timenow, "dd/MM/yyyy")
+    table.cell(infoTable, 0, infoTableRow, text = curDate, text_halign = text.align_center)
+    table.cell(infoTable, 1, infoTableRow, text = "Buy", text_halign = text.align_right)
+    table.cell(infoTable, 2, infoTableRow, text = "Sell", text_halign = text.align_right)
+    infoTableRow += 1
+    table.cell(infoTable, 0, infoTableRow, text = "Total", text_halign = text.align_left)
+    table.cell(infoTable, 1, infoTableRow, text = str.tostring(totalEntries), text_halign = text.align_right)
+    table.cell(infoTable, 2, infoTableRow, text = str.tostring(totalExits), text_halign = text.align_right)
+    infoTableRow += 1
+    table.cell(infoTable, 0, infoTableRow, text = "Section", text_halign = text.align_left)
+    table.cell(infoTable, 1, infoTableRow, text = str.tostring(buySections), text_halign = text.align_right)
+    table.cell(infoTable, 2, infoTableRow, text = str.tostring(sellSections), text_halign = text.align_right)
+    infoTableRow += 1
+//#endregion
+
+View in Pine Editor・132 lines
+Use on chart
+1
+1
+9
+2 792
+This is a long-only educational strategy that simulates what happens if you keep adding to a position during pullbacks and only exit when the asset hits a new All-Time High (ATH). It is intended for learning purposes only — not for live trading.
+
+🧠 How it works:
+
+The strategy identifies pullbacks using a simple moving average (MA).
+
+When price dips below the MA, it begins monitoring for the first green candle (close > open).
+
+That green candle signals a potential bottom, so it adds to the position.
+
+If price goes lower, it waits for the next green candle and adds again.
+
+The exit happens after ATH — it sells on each red candle (close < open) once a new ATH is reached.
+
+
+You can adjust:
+
+MA length (defines what’s considered a pullback)
+
+Initial buy % (how much to pre-fill before signals start)
+
+Buy % per signal (after pullback green candle)
+
+Exit % per red candle after ATH
+
+
+📊 Intended assets & timeframes:
+This strategy is designed for broad market indices and long-term appreciating assets, such as:
+
+SPY, NASDAQ, DAX, FTSE
+
+
+Use it only on 1D or higher timeframes — it’s not meant for scalping or short-term trading.
+
+⚠️ Important Limitations:
+
+Long-only: The script does not short. It assumes the asset will eventually recover to a new ATH.
+
+Not for all assets: It won't work on assets that may never recover (e.g., single stocks or speculative tokens).
+
+Slow capital deployment: Entries happen gradually and may take a long time to close.
+
+Not optimized for returns: Buy & hold can outperform this strategy.
+
+No slippage, fees, or funding costs included.
+
+
+This is not a performance strategy. It’s a teaching tool to show that:
+
+High win rate ≠ high profitability
+
+Patience can be deceiving
+
+Many signals = long capital lock-in
+
+
+🎓 Why it exists:
+The purpose of this strategy is to demonstrate market psychology and risk overconfidence. Traders often chase strategies with high win rates without considering holding time, drawdowns, or opportunity cost.
+
+This script helps visualize that phenomenon.

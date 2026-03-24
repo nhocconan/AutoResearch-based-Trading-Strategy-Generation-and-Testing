@@ -1,0 +1,235 @@
+//@version=5
+//exlux99
+
+strategy('Financial Ratios', overlay=true,initial_capital = 1000000, default_qty_type= strategy.percent_of_equity, default_qty_value = 100, calc_on_order_fills=false, slippage=0,commission_type=strategy.commission.percent,commission_value=0.1)
+
+
+//Current ratio: Current Assets / Current Liabilities
+TOTAL_CURRENT_ASSETS = request.financial(syminfo.tickerid, "TOTAL_CURRENT_ASSETS", "FQ")
+TOTAL_CURRENT_LIABILITIES = request.financial(syminfo.tickerid, "TOTAL_CURRENT_LIABILITIES", "FQ")
+current_ratio =  TOTAL_CURRENT_ASSETS/ TOTAL_CURRENT_LIABILITIES
+// plot(current_ratio)
+
+//Quick ratio (Acid-test ratio): (Current Assets – Inventories – Prepaid Expenses) / Current Liabilities
+PREPAID_EXPENSES = request.financial(syminfo.tickerid, "PREPAID_EXPENSES", "FQ")
+INVENTORY_FINISHED_GOODS = request.financial(syminfo.tickerid, "INVENTORY_FINISHED_GOODS", "FQ")
+quick_ratio = (TOTAL_CURRENT_ASSETS - INVENTORY_FINISHED_GOODS - PREPAID_EXPENSES) / TOTAL_CURRENT_LIABILITIES
+// plot(quick_ratio, color=color.white)
+
+//Cash ratio: Cash and cash equivalents / Current Liabilities
+CASH_N_EQUIVALENTS = request.financial(syminfo.tickerid, "CASH_N_EQUIVALENTS", "FQ")
+cash_ratio = CASH_N_EQUIVALENTS / TOTAL_CURRENT_LIABILITIES
+// plot(cash_ratio, color=color.orange)
+
+
+long_liquidity =  current_ratio > current_ratio[1] and quick_ratio > quick_ratio[1]  //and cash_ratio > cash_ratio[1]
+long_exit_liquidity =  current_ratio < current_ratio[1] and quick_ratio < quick_ratio[1] //or cash_ratio < cash_ratio[1]
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//Leverage ratios
+//Debt ratio: Total Debt / Total Assets
+TOTAL_DEBT= request.financial(syminfo.tickerid, "TOTAL_DEBT", "FQ")
+TOTAL_ASSETS = request.financial(syminfo.tickerid, "TOTAL_ASSETS", "FQ")
+debt_ratio = TOTAL_DEBT / TOTAL_ASSETS
+//plot(debt_ratio)
+
+//Debt to equity ratio: Total Debt / Total Equity
+TOTAL_EQUITY= request.financial(syminfo.tickerid, "TOTAL_EQUITY", "FQ")
+debt_equity_ratio = TOTAL_DEBT / TOTAL_EQUITY
+//plot(debt_equity_ratio,color=color.white)
+
+//Interest coverage ratio: EBIT / Interest expenses
+EBIT = request.financial(syminfo.tickerid, "EBIT", "FQ")
+INTEREST_EXPENSE_ON_DEBT = request.financial(syminfo.tickerid, "INTEREST_EXPENSE_ON_DEBT", "FQ")
+
+interest_ratio = EBIT / INTEREST_EXPENSE_ON_DEBT
+//plot(interest_ratio, color=color.orange)
+
+
+long_leverage =  debt_ratio < debt_ratio[1] and debt_equity_ratio< debt_equity_ratio[1] //or interest_ratio < interest_ratio[1]
+long_exit_leverage =  debt_ratio > debt_ratio[1] and debt_equity_ratio > debt_equity_ratio[1] //or interest_ratio > interest_ratio[1] 
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Efficiency ratios
+
+//Asset turnover ratio: Net sales / Average total assets
+SALES_OF_BUSINESS =request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")
+asset_turnover_ratio = SALES_OF_BUSINESS / TOTAL_ASSETS
+// plot(asset_turnover_ratio)
+
+//Inventory turnover: Cost of goods sold / Average value of inventory
+// COST_OF_GOODS= request.financial(syminfo.tickerid, "COST_OF_GOODS", "FQ")
+// TOTAL_INVENTORY = request.financial(syminfo.tickerid, "TOTAL_INVENTORY", "FQ")
+// inventory_turnover = COST_OF_GOODS/ TOTAL_INVENTORY
+INVENT_TO_REVENUE = request.financial(syminfo.tickerid, "INVENT_TO_REVENUE", "FQ")
+// plot(INVENT_TO_REVENUE,color=color.white)
+
+//Payables turnover ratio: Cost of Goods sold (or net credit purchases) / Average Accounts Payable
+COST_OF_GOODS = request.financial(syminfo.tickerid, "COST_OF_GOODS", "FQ")
+ACCOUNTS_PAYABLE= request.financial(syminfo.tickerid, "ACCOUNTS_PAYABLE", "FQ")
+payable_turnover = COST_OF_GOODS / ACCOUNTS_PAYABLE
+
+// plot(payable_turnover,color=color.orange)
+
+//Receivables turnover ratio: Net credit sales / Average accounts receivable
+
+long_Efficiency  = asset_turnover_ratio > asset_turnover_ratio[1]  and payable_turnover > payable_turnover[1] //and INVENT_TO_REVENUE > INVENT_TO_REVENUE[1]
+long_exit_Efficiency = asset_turnover_ratio < asset_turnover_ratio[1] and payable_turnover < payable_turnover[1]//  and INVENT_TO_REVENUE < INVENT_TO_REVENUE[1]
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Profitability  ratios
+//Gross margin: Gross profit / Net sales
+GROSS_PROFIT = request.financial(syminfo.tickerid, "GROSS_PROFIT", "FQ")
+SALES          = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")
+gross_margin =  GROSS_PROFIT / SALES
+// plot(gross_margin)
+
+//Operating margin: Operating income / Net sales
+OPER_INCOME = request.financial(syminfo.tickerid, "OPER_INCOME", "FQ")
+operating_margin = OPER_INCOME/ SALES
+// plot(operating_margin, color=color.white)
+
+//Return on assets (ROA): Net income / Total assets
+NET_INCOME= request.financial(syminfo.tickerid, "NET_INCOME", "FQ")
+roa = NET_INCOME/TOTAL_ASSETS
+//plot(roa, color=color.orange)
+ 
+//Return on equity (ROE): Net income / Total equity
+roe = NET_INCOME / TOTAL_EQUITY
+//plot(roe, color=color.purple)
+
+long_profitability =  (gross_margin > gross_margin[1] and operating_margin>operating_margin[1] )//and roe > roe[1] and roa > roa[1] ) // or ( roe > roe[1] and roa > roa[1]  ) 
+long_exit_profitability =  (gross_margin < gross_margin[1] and operating_margin<operating_margin[1] ) //or roe < roe[1] or roa < roa[1])  // or ( roe < roe[1] and roa < roa[1])
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//5)   Market Value ratios
+//Earnings per share ratio (EPS): (Net Income – Preferred Dividends) / End-of-Period Common Shares Outstanding
+PREFERRED_DIVIDENDS = request.financial(syminfo.tickerid, "PREFERRED_DIVIDENDS", "FQ")
+TOTAL_SHARES_OUTSTANDING = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ")
+eps_ratio = (NET_INCOME - PREFERRED_DIVIDENDS)/TOTAL_SHARES_OUTSTANDING
+// plot(eps_ratio)
+
+// //Price earnings ratio (P/E): Share price / Earnings per share
+// EPS = request.financial(syminfo.tickerid, "EARNINGS_PER_SHARE", "FQ")
+// closex = request.security(syminfo.tickerid, "M", close)
+// PE_RATIO = closex / eps_ratio
+// plot(PE_RATIO,color=color.white) 
+
+//Book value per share ratio: (Total Equity – Preferred Equity) / Total shares outstanding
+COMMON_EQUITY_TOTAL = request.financial(syminfo.tickerid, "COMMON_EQUITY_TOTAL", "FQ")
+preferred_equity = TOTAL_EQUITY - COMMON_EQUITY_TOTAL
+TSO = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ")
+
+book_value = (TOTAL_EQUITY - preferred_equity)/TSO
+// plot(book_value, color=color.white)
+
+
+//Dividend yield ratio: Dividend per share / Share price
+
+DIVIDENDS_YIELD = request.financial(syminfo.tickerid, "DIVIDENDS_YIELD", "FQ")
+// plot(DIVIDENDS_YIELD,color=color.orange)
+
+
+
+long_market = DIVIDENDS_YIELD > DIVIDENDS_YIELD[1] and eps_ratio > eps_ratio[1] and book_value > book_value[1]
+long_exit_market =   DIVIDENDS_YIELD < DIVIDENDS_YIELD[1] and eps_ratio < eps_ratio[1] and book_value < book_value[1]
+
+
+//and (current_ratio > current_ratio[1] )
+//and interest_ratio < interest_ratio[1]
+//and payable_turnover > payable_turnover[1]
+//and gross_margin > gross_margin[1]
+
+//long_tot = (long_liquidity or long_leverage or long_Efficiency or long_profitability )   // or long_market 
+long_tot = current_ratio > current_ratio[1] or interest_ratio < interest_ratio[1] or payable_turnover > payable_turnover[1] or gross_margin > gross_margin[1]
+long_tot_exit =  current_ratio < current_ratio[1] or interest_ratio > interest_ratio[1] or payable_turnover < payable_turnover[1] or gross_margin > gross_margin[1]
+
+// plot(current_ratio)
+// plot(interest_ratio, color=color.white)
+// plot(payable_turnover, color=color.orange)
+// plot(gross_margin, color=color.purple)
+
+// DEBT_TO_REVENUE = request.financial(syminfo.tickerid, "SPRINGATE_SCORE", "FQ")
+// plot(DEBT_TO_REVENUE)
+
+
+strategy.entry("long",strategy.long,when= ( long_tot or long_tot[1]  ))
+strategy.close("long",when= long_tot_exit )
+
+View in Pine Editor・176 lines
+Use on chart
+2
+1
+9
+6
+6 299
+What are financial ratios?
+Financial ratios are basic calculations using quantitative data from a company’s financial statements. They are used to get insights and important information on the company’s performance, profitability, and financial health.
+
+Common financial ratios come from a company’s balance sheet, income statement, and cash flow statement.
+
+Businesses use financial ratios to determine liquidity, debt concentration, growth, profitability, and market value.
+
+The common financial ratios every business should track are
+1) liquidity ratios
+2) leverage ratios
+3)efficiency ratio
+4) profitability ratios
+5) market value ratios.
+
+
+Initially I had a big list of 20 different ratios for testing, but in the end I decided to stick for the strategy with these ones :
+
+Current ratio: Current Assets / Current Liabilities
+The current ratio measures how a business’s current assets, such as cash, cash equivalents, accounts receivable, and inventories, are used to settle current liabilities such as accounts payable.
+
+Interest coverage ratio: EBIT / Interest expenses
+Companies generally pay interest on corporate debt. The interest coverage ratio shows if a company’s revenue after operating expenses can cover interest liabilities.
+
+Payables turnover ratio: Cost of Goods sold (or net credit purchases) / Average Accounts Payable
+The payables turnover ratio calculates how quickly a business pays its suppliers and creditors.
+
+
+Gross margin: Gross profit / Net sales
+The gross margin ratio measures how much profit a business makes after the cost of goods and services compared to net sales.
+
+
+With this data, I have created the long and long exit strategy:
+For long, if any of the 4 listed ratios,such as current ratio or interest coverage ratio or payable turn ratio or gross margin ratio is ascending after a quarter, its a potential long entry.
+For example in january the gross margin ratio is at 10% and in april is at 15%, this is an increase from a quarter to another, so it will get a long entry trigger.
+The same could happen if any of the 4 listed ratios follow the ascending condition since they are all treated equally as important
+
+
+For exit, if any of the 4 listed ratios are descending after a quarter, such as current ratio or interest coverage ratio or payable turn ratio or gross margin ratio is descending after a quarter, its a potential long exit.
+For example in april we entered a long trade, and in july data from gross margin comes as 12% .
+In this case it fell down from 15% to 12%, triggering an exit for our trade.
+
+
+However there is a special case with this strategy, in order to make it more re active and make use of the compound effect:
+So lets say on july 1 when the data came in, the gross margin data came descending (indicating an exit for the long trade), however at the same the interest coverage ratio came as positive, or any of the other 3 left ratios left . In that case the next day after the trade closed, it will enter a new long position and wait again until a new quarter data for the financial is being published.
+
+
+Regarding the guidelines of tradingview, they recommend to have more than 100 trades.
+With this type of strategy, using Daily timeframe and data from financials coming each quarter(4 times a year), we only have the financial data available since 2016, so that makes 28 quarters of data, making a maximum potential of 28 trades.
+This can however be "bypassed" to check the integrity of the strategy and its edge, by taking for example multiple stocks and test them in a row, for example, appl, msft, goog, brk and so on, and you can see the correlation between them all.
+At the same time I have to say that this strategy is more as an educational one since it miss a risk management and other additional filters to make it more adapted for real live trading, and instead serves as a guiding tool for those that want to make use of fundamentals in their trades
+
+
+If you have any questions, please let me know !

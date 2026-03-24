@@ -1,0 +1,111 @@
+//@version=5
+strategy(title="OBVious MA Strategy [1000X]", overlay=false, 
+         initial_capital=10000, margin_long=0.1, margin_short=0.1,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         slippage=1, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Direction Input ///
+tradeDirection = input.string("long", title="Direction", options=["long", "short"], group = "Direction Filter")
+
+    ///////////////////////////////////////
+   //  1000X OBV MA INDICATOR           //
+  ///////////////////////////////////////
+
+// OBV Trend Length Inputs //
+long_entry_length = input(190, title="Long Entry MA Length", group = "Moving Average Settings")
+long_exit_length = input(202, title="Long Exit MA Length", group = "Moving Average Settings")
+short_entry_length = input(395, title="Short MA Entry Length", group = "Moving Average Settings")
+short_exit_length = input(300, title="Short Exit MA Length", group = "Moving Average Settings")
+
+// OBV Calculation
+obv = ta.cum(ta.change(close) >= 0 ? volume : -volume)
+
+// Calculate OBV Moving Averages
+obv_ma_long_entry = ta.sma(obv, long_entry_length)
+obv_ma_long_exit = ta.sma(obv, long_exit_length)
+obv_ma_short_entry = ta.sma(obv, short_entry_length)
+obv_ma_short_exit = ta.sma(obv, short_exit_length)
+
+   ///////////////////////////////////////
+  //         STRATEGY RULES            //
+ ///////////////////////////////////////
+
+longCondition = ta.crossover(obv, obv_ma_long_entry) and tradeDirection != "short" and strategy.position_size <= 0
+longExitCondition = ta.crossunder(obv, obv_ma_long_exit)
+shortCondition = ta.crossunder(obv, obv_ma_short_entry) and tradeDirection != "long" and strategy.position_size >= 0
+shortExitCondition = ta.crossover(obv, obv_ma_short_exit)
+
+  ///////////////////////////////////////
+ //         ORDER EXECUTION           //
+///////////////////////////////////////
+
+// Close opposite trades before entering new ones
+if (longCondition and strategy.position_size < 0)
+    strategy.close("Short Entry")
+
+if (shortCondition and strategy.position_size > 0)
+    strategy.close("Long Entry")
+
+// Enter new trades
+if (longCondition)
+    strategy.entry("Long Entry", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short Entry", strategy.short)
+
+// Exit conditions
+if (longExitCondition)
+    strategy.close("Long Entry")
+
+if (shortExitCondition)
+    strategy.close("Short Entry")
+
+  ///////////////////////////////////////
+ //            PLOTTING               //
+///////////////////////////////////////
+
+// Plot OBV line with specified color
+plot(obv, title="OBV", color=color.new(#2962FF, 0), linewidth=1)
+
+// Conditionally plot Long MAs with specified colors based on Direction Filter
+plot(tradeDirection == "long" ? obv_ma_long_entry : na, title="Long Entry MA", color=color.new(color.rgb(2, 130, 228), 0), linewidth=1)
+plot(tradeDirection == "long" ? obv_ma_long_exit : na, title="Long Exit MA", color=color.new(color.rgb(106, 168, 209), 0), linewidth=1)
+
+// Conditionally plot Short MAs with specified colors based on Direction Filter
+plot(tradeDirection == "short" ? obv_ma_short_entry : na, title="Short Entry MA", color=color.new(color.rgb(163, 2, 227), 0), linewidth=1)
+plot(tradeDirection == "short" ? obv_ma_short_exit : na, title="Short Exit MA", color=color.new(color.rgb(192, 119, 205), 0), linewidth=1)
+
+View in Pine Editor・79 lines
+Use on chart
+2
+1
+1
+5 315
+Exploring OBV: The OBVious MA Strategy [1000X]
+
+Are you using On Balance Volume (OBV) effectively? OBV is a gift to traders. OBV often provides a leading signal at the outset of a trend, when compression in the markets produces a surge in OBV prior to increased volatility.
+
+This strategy demonstrates one method of utilizing OBV to your advantage. I call it the "OBVious MA Strategy [1000X]” only because it is so simple in its mechanics. This is meant to be a demonstration, not a strategy to utilize in live trading, as the primary utility of the OBVious MA indicator is as a volume confirmation filter that complements other components of a strategy. That said, I felt useful to present this indicator in isolation in this strategy to demonstrate the power it holds.
+
+Strategy Features:
+
+• OBV is the core signal: this strategy revolves around the On Balance Volume indicator. OBV is a straightforward indicator: it registers a value by adding total volume traded on up candles, and subtracts total volume on down candles, generating a line by connecting those values. OBV was described in 1963 by Joe Granville in his book "Granville's New Key to Stock Market Profits” in which the author argues that OBV is the most vital key to success as a trader, as volume changes are a major predictor of price changes.
+
+• Dual Moving Averages: here we use separate moving averages for entries and exits. This allows for more granular trade management; for example, one can either extend the length of the exit MA to hold positions longer, or shorten the MA for swifter exits, independently of the entry signals.
+
+Execution: long trades are taken when the OBV line crosses above the Long Entry Moving Average of the OBV. Long exits occur when the OBV line crosses under the Long Exit MA of the OBV. Shorts enter on a cross below the Short Entry MA, and exit on a cross above the Short Exit MA.
+
+• Directional Trading: a direction filter can be set to "long" or "short," but not “both”, given that there is no trend filter in this strategy. When used in a bi-directional strategy with a trend filter, we add “both” to the script as a third option.
+
+Application:
+While this strategy outlines entry and exit conditions based on OBV crossovers with designated moving averages, is is, as stated, best used in conjunction with a supporting cast of confirmatory indicators (feel free to drop me a note and tell me how you've used it). It can be used to confirm entries, or you might try using it as a sole exit indicator in a strategy.
+
+Visualization:
+The strategy includes conditional plotting of the OBV MAs, which plot based on the selected trading direction. This visualization aids in understanding how OBV interacts with the set moving averages.
+
+Further Discussion:
+We all know the importance of volume; this strategy demonstrates one simple yet effective method of incorporating the OBV for volume analysis. The OBV indicator can be used in many ways - for example, we can monitor OBV trend line breaks, look for divergences, or as we do here, watch for breaks of the moving average.
+
+Despite its simplicity, I'm unaware of any previously published cases of this method. The concept of applying MAs or EMAs to volume-based indicators like OBV is not uncommon in technical analysis, so I expect that work like this has been done before. If you know of other similar indicators or strategies, please mention in the comments.
+
+One comparable strategy that uses EMAs of the OBV is QuantNomad’s "On Balance Volume Oscillator Strategy [QuantNomad]", which uses a pair of EMAs on a normalized-range OBV-based oscillator. In that strategy, however, entries and exits occur on one EMA crossing the other, which places trades at distinctly different times than crossings of the OBV itself. Both are valid approaches with strength in simplicity.

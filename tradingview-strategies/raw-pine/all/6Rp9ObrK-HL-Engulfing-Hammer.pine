@@ -1,0 +1,264 @@
+//@version=3
+// Learn more about Autoview and how you can automate strategies like this one here: https://autoview.with.pink/
+// the above is the template i used to set up the strategy you can follow me on twitter at @Mike_Kisch
+strategy("$ HL Engulfing/Hammer", overlay=true,commission_value = 0.15, pyramiding=1)
+//study("$ HL Engulfing/Hammer")
+
+/////////////////////////////////////
+//* Put your strategy logic below *//
+/////////////////////////////////////
+
+leftBars1 = input(48,"hammer left bars")
+leftBars = input(12,"engulfing left bars")
+
+pl1 = pivotlow(low, leftBars1, 0)
+ph1 = pivothigh(high,leftBars1, 0)
+
+pl = pivotlow(low, leftBars, 0)
+ph = pivothigh(high,leftBars, 0)
+
+//plot(pl, style=cross, linewidth=1, color= blue) //plot on strategy
+//plot(ph, style=cross, linewidth=1, color= red)  //plot on strategy
+
+swinghigh1 = ph1>ph1[1]
+swinglow1 = pl1<pl1[1]
+
+swinghigh = ph>ph[1]
+swinglow = pl<pl[1]
+
+////////////////////////////////
+//======[ candle input ]======//
+////////////////////////////////
+
+hammer = (((high - low)>3*(open -close)) and  ((close - low)/(.001 + high - low) > 0.6) and ((open - low)/(.001 + high - low) > 0.6))
+dragonfly =  open[3]>close[3] and open[2]>close[2] and open[1]>close[1] and hammer 
+
+invhammer = (((high - low)>3*(open -close)) and  ((high - close)/(.001 + high - low) > 0.6) and ((high - open)/(.001 + high - low) > 0.6))
+gravestone =  open[3]<close[3] and open[2]<close[2] and open[1]<close[1] and invhammer 
+
+beargulf = open[2]<=open[1] and close[2]<=close[1] and close<=open[2] and open>=close[1] and close<open and close[2]>open[2] and close[1]>open[1]
+bullgulf = open[2]>=open[1] and close[2]>=close[1] and close>=open[2] and open<=open[1] and close>open and close[2]<open[2] and close[1]<open[1]
+
+// Put your long and short rules here
+
+longLocic = (swinglow and bullgulf) or (dragonfly and swinglow1)
+shortLogic = (swinghigh and beargulf) or (swinghigh1 and gravestone)
+
+//////////////////////////
+//* Strategy Component *//
+//////////////////////////
+
+isLong = input(true, "Longs Only")
+isShort = input(false, "Shorts Only")
+
+long = longLocic
+short = shortLogic
+
+if isLong
+    long := long
+    short := na
+
+if isShort
+    long := na
+    short := short
+    
+////////////////////////////////
+//======[ Signal Count ]======//
+////////////////////////////////
+
+sectionLongs = 0
+sectionLongs := nz(sectionLongs[1])
+sectionShorts = 0
+sectionShorts := nz(sectionShorts[1])
+
+if long
+    sectionLongs := sectionLongs + 1
+    sectionShorts := 0
+
+if short
+    sectionLongs := 0
+    sectionShorts := sectionShorts + 1
+
+//////////////////////////////
+//======[ Pyramiding ]======//
+//////////////////////////////
+
+pyrl = input(1, "Pyramiding less than") // If your count is less than this number
+pyre = input(0, "Pyramiding equal to") // If your count is equal to this number
+pyrg = input(1000000, "Pyramiding greater than") // If your count is greater than this number
+
+longCondition = long and sectionLongs <= pyrl or long and sectionLongs >= pyrg or long and sectionLongs == pyre ? 1 : 0
+shortCondition = short and sectionShorts <= pyrl or short and sectionShorts >= pyrg or short and sectionShorts == pyre ? 1 : 0
+
+////////////////////////////////
+//======[ Entry Prices ]======//
+////////////////////////////////
+
+last_open_longCondition = na
+last_open_shortCondition = na
+last_open_longCondition := longCondition ? close : nz(last_open_longCondition[1])
+last_open_shortCondition := shortCondition ? close : nz(last_open_shortCondition[1])
+
+////////////////////////////////////
+//======[ Open Order Count ]======//
+////////////////////////////////////
+
+sectionLongConditions = 0
+sectionLongConditions := nz(sectionLongConditions[1])
+sectionShortConditions = 0
+sectionShortConditions := nz(sectionShortConditions[1])
+
+if longCondition
+    sectionLongConditions := sectionLongConditions + 1
+    sectionShortConditions := 0
+
+if shortCondition
+    sectionLongConditions := 0
+    sectionShortConditions := sectionShortConditions + 1
+    
+///////////////////////////////////////////////
+//======[ Position Check (long/short) ]======//
+///////////////////////////////////////////////
+
+last_longCondition = na
+last_shortCondition = na
+last_longCondition := longCondition ? time : nz(last_longCondition[1])
+last_shortCondition := shortCondition ? time : nz(last_shortCondition[1])
+
+in_longCondition = last_longCondition > last_shortCondition
+in_shortCondition = last_shortCondition > last_longCondition
+
+/////////////////////////////////////
+//======[ Position Averages ]======//
+/////////////////////////////////////
+
+totalLongs = 0.0
+totalLongs := nz(totalLongs[1])
+totalShorts = 0.0
+totalShorts := nz(totalShorts[1])
+averageLongs = 0.0
+averageLongs := nz(averageLongs[1])
+averageShorts = 0.0
+averageShorts := nz(averageShorts[1]) 
+
+if longCondition
+    totalLongs := totalLongs + last_open_longCondition
+    totalShorts := 0.0
+
+if shortCondition
+    totalLongs := 0.0
+    totalShorts := totalShorts + last_open_shortCondition
+
+averageLongs := totalLongs / sectionLongConditions
+averageShorts := totalShorts / sectionShortConditions
+
+/////////////////////////////////
+//======[ Trailing Stop ]======//
+/////////////////////////////////
+
+isTS = input(false, "Trailing Stop")
+tsi = input(70, "Activate Trailing Stop Price (%). Divided by 100 (1 = 0.01%)") / 100 
+ts = input(100, "Trailing Stop (%). Divided by 100 (1 = 0.01%)") / 100
+
+last_high = na
+last_low = na
+last_high_short = na
+last_low_short = na
+last_high := not in_longCondition ? na : in_longCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_high_short := not in_shortCondition ? na : in_shortCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_shortCondition ? na : in_shortCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+last_low_short := not in_longCondition ? na : in_longCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+long_ts = isTS and not na(last_high) and low <= last_high - last_high / 100 * ts and longCondition == 0 and last_high >= averageLongs + averageLongs / 100 * tsi
+short_ts = isTS and not na(last_low) and high >= last_low + last_low / 100 * ts and shortCondition == 0 and last_low <= averageShorts - averageShorts/ 100 * tsi
+
+///////////////////////////////
+//======[ Take Profit ]======//
+///////////////////////////////
+
+isTP = input(true, "Take Profit")
+tp = input(120, "Take Profit (%). Divided by 100 (1 = 0.01%)") / 100
+long_tp = isTP and close > averageLongs + averageLongs / 100 * tp and not longCondition
+short_tp = isTP and close < averageShorts - averageShorts / 100 * tp and not shortCondition
+
+/////////////////////////////
+//======[ Stop Loss ]======//
+/////////////////////////////
+
+isSL = input(true, "Stop Loss")
+sl = input(70, "Stop Loss (%). Divided by 100 (1 = 0.01%)") / 100
+long_sl = isSL and close < averageLongs - averageLongs / 100 * sl and longCondition == 0
+short_sl = isSL and close > averageShorts + averageShorts / 100 * sl and shortCondition == 0
+
+/////////////////////////////////
+//======[ Close Signals ]======//
+/////////////////////////////////
+
+longClose = (long_tp or long_sl or long_ts ? 1 : 0) 
+shortClose = (short_tp or short_sl or short_ts ? 1: 0)
+
+///////////////////////////////
+//======[ Plot Colors ]======//
+///////////////////////////////
+
+longCloseCol = na
+shortCloseCol = na
+longCloseCol := long_tp ? purple : long_sl ? maroon : long_ts ? blue : longCloseCol[1]
+shortCloseCol := short_tp ? purple : short_sl ? maroon : short_ts ? blue : shortCloseCol[1]
+tpColor = isTP and in_longCondition ? purple : isTP and in_shortCondition ? purple : white
+slColor = isSL and in_longCondition ? red : isSL and in_shortCondition ? red : white
+
+//////////////////////////////////
+//======[ Strategy Plots ]======//
+//////////////////////////////////
+
+//plot(isTS and in_longCondition ? averageLongs + averageLongs / 100 * tsi : na, "Long Trailing Activate", blue, style=3, linewidth=2)
+//plot(isTS and in_longCondition and last_high >= averageLongs +  averageLongs / 100 * tsi ? last_high - last_high / 100 * ts : na, "Long Trailing", fuchsia, style=2, linewidth=3)
+//plot(isTS and in_shortCondition ? averageShorts - averageShorts/ 100 * tsi : na, "Short Trailing Activate", blue, style=3, linewidth=2)
+//plot(isTS and in_shortCondition and last_low <= averageShorts - averageShorts/ 100 * tsi ? last_low + last_low / 100 * ts : na, "Short Trailing", fuchsia, style=2, linewidth=3)
+//plot(isTP and in_longCondition and last_high < averageLongs + averageLongs / 100 * tp ? averageLongs + averageLongs / 100 * tp : na, "Long TP", tpColor, style=3, linewidth=2)
+//plot(isTP and in_shortCondition and last_low > averageShorts - averageShorts / 100 * tp ? averageShorts - averageShorts / 100 * tp : na, "Short TP", tpColor, style=3, linewidth=2)
+//plot(isSL and in_longCondition and last_low_short > averageLongs - averageLongs / 100 * sl ? averageLongs - averageLongs / 100 * sl : na, "Long SL", slColor, style=3, linewidth=2)
+//plot(isSL and in_shortCondition and last_high_short < averageShorts + averageShorts / 100 * sl ? averageShorts + averageShorts / 100 * sl : na, "Short SL", slColor, style=3, linewidth=2)
+
+///////////////////////////////
+//======[ Alert Plots ]======//
+///////////////////////////////
+
+//plot(longCondition, "Long", green)
+//plot(shortCondition, "Short", red)
+//plot(longClose, "Long Close", longCloseCol)
+//plot(shortClose, "Short Close", shortCloseCol)
+
+///////////////////////////////////
+//======[ Reset Variables ]======//
+///////////////////////////////////
+
+if longClose or not in_longCondition
+    averageLongs := 0
+    totalLongs := 0.0
+    sectionLongs := 0
+    sectionLongConditions := 0
+
+if shortClose or not in_shortCondition
+    averageShorts := 0
+    totalShorts := 0.0
+    sectionShorts := 0
+    sectionShortConditions := 0
+
+////////////////////////////////////////////
+//======[ Strategy Entry and Exits ]======//
+////////////////////////////////////////////
+
+strategy.entry("Long", 1, when=longCondition)
+strategy.entry("Short", 0,  when=shortCondition)
+strategy.close("Long", when=longClose)
+strategy.close("Short", when=shortClose)
+
+View in Pine Editor・256 lines
+Use on chart
+6
+3
+3
+3 952
+all my strategies have a 0.15 commision built in. this one works on btcusd on 5 min coinbase. maybe you guys can make it better

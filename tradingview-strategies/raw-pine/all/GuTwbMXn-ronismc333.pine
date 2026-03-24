@@ -1,0 +1,377 @@
+//@version=5
+strategy("Rare SMC BOS/CHoCH 5M 1:3 with Labels", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+
+lookback = input.int(5, "Swing Lookback")
+rr = input.float(3.0, "Risk Reward")  // יחס סיכון-תמורה 1:3
+
+// === י Swing High / Low ===
+swingHigh = ta.highest(high, lookback)[1]
+swingLow  = ta.lowest(low, lookback)[1]
+
+// =י BOS / CHoCH ===
+bullBOS = close > swingHigh
+bearBOS = close < swingLow
+
+// === + TP/SL ===
+
+// 🔹 
+if bullBOS
+    entryPrice = close
+    stopPrice  = swingLow
+    risk       = entryPrice - stopPrice
+    takeProfit = entryPrice + risk * rr
+    strategy.entry("BOS Long", strategy.long)
+    strategy.exit("TP/SL Long", "BOS Long", stop=stopPrice, limit=takeProfit)
+    label.new(bar_index, low, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal)
+
+// 🔹
+if bearBOS
+    entryPrice = close
+    stopPrice  = swingHigh
+    risk       = stopPrice - entryPrice
+    takeProfit = entryPrice - risk * rr
+    strategy.entry("BOS Short", strategy.short)
+    strategy.exit("TP/SL Short", "BOS Short", stop=stopPrice, limit=takeProfit)
+    label.new(bar_index, high, "SELL", color=color.red, style=label.style_label_down, textcolor=color.white, size=size.normal)
+
+// swig High / Low ===
+plot(swingHigh, color=color.red, title="Swing High")
+plot(swingLow, color=color.green, title="Swing Low")
+
+View in Pine Editor・40 lines
+Use on chart
+1
+2
+8
+2
+2 302
+[14:48, 5.1.2026] דור בן שימול: //+------------------------------------------------------------------+
+//| SMC GBP PRO EA – FTMO Ready 30M עם חצים |
+//+------------------------------------------------------------------+
+#property strict
+
+input double RiskPercent = 1.0;
+input int RSIPeriod = 14;
+input int StopLossPoints = 200;
+input int TakeProfitPoints = 400;
+input int MagicNumber = 202630;
+input bool EnableAlerts = true;
+
+int rsiHandle;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+rsiHandle = iRSI(_Symbol, PERIOD_M30, RSIPeriod, PRICE_CLOSE);
+Comment("SMC GBP PRO EA\nStatus: CONNECTED\nAccount: ", AccountNumber());
+return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+if(PositionsTotal() > 0)
+{
+UpdateStatus();
+return;
+}
+
+double rsi[];
+CopyBuffer(rsiHandle,0,0,1,rsi);
+
+double high1 = iHigh(_Symbol, PERIOD_M30,1);
+double low1 = iLow(_Symbol, PERIOD_M30,1);
+double close1= iClose(_Symbol, PERIOD_M30,1);
+
+double high2 = iHigh(_Symbol, PERIOD_M30,2);
+double low2 = iLow(_Symbol, PERIOD_M30,2);
+
+//==== HTF TREND (1H EMA50) ====
+double emaHTF = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE, 0);
+double closeHTF = iClose(_Symbol, PERIOD_H1, 0);
+
+bool htfBull = closeHTF > emaHTF;
+bool htfBear = closeHTF < emaHTF;
+
+//==== LIQUIDITY SWEEP ====
+bool sweepBuy = low1 < low2 && close1 > low2;
+bool sweepSell = high1 > high2 && close1 < high2;
+
+//==== BOS ====
+bool bosBuy = sweepBuy && close1 > high2;
+bool bosSell = sweepSell && close1 < low2;
+
+//==== BUY/SELL CONDITIONS ====
+bool buy = bosBuy && rsi[0] > 50 && htfBull;
+bool sell = bosSell && rsi[0] < 50 && htfBear;
+
+double lot = CalculateLot(StopLossPoints, RiskPercent);
+
+if(buy)
+{
+OpenTrade(ORDER_TYPE_BUY, lot, StopLossPoints, TakeProfitPoints, "BUY GBP");
+DrawArrow("BUY", 0, low1 - 10*_Point, clrLime, "BUY GBP");
+}
+
+if(sell)
+{
+OpenTrade(ORDER_TYPE_SELL, lot, StopLossPoints, TakeProfitPoints, "SELL GBP");
+DrawArrow("SELL", 0, high1 + 10*_Point, clrRed, "SELL GBP");
+}
+
+UpdateStatus();
+}
+
+//+------------------------------------------------------------------+
+double CalculateLot(int slPoints, double riskPercent)
+{
+double riskMoney = AccountBalance() * riskPercent / 100.0;
+double lot = riskMoney / (slPoints * _Point * 10);
+lot = MathMax(lot,0.01);
+return(NormalizeDouble(lot,2));
+}
+
+//+------------------------------------------------------------------+
+void OpenTrade(ENUM_ORDER_TYPE type,double lot,int sl,int tp,string comment)
+{
+double price = (type==ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+: SymbolInfoDouble(_Symbol,SYMBOL_BID);
+double slPrice = (type==ORDER_TYPE_BUY) ? price - sl*_Point
+: price + sl*_Point;
+double tpPrice = (type==ORDER_TYPE_BUY) ? price + tp*_Point
+: price - tp*_Point;
+
+MqlTradeRequest req;
+MqlTradeResult res;
+ZeroMemory(req);
+
+req.action = TRADE_ACTION_DEAL;
+req.symbol = _Symbol;
+req.volume = lot;
+req.type = type;
+req.price = price;
+req.sl = slPrice;
+req.tp = tpPrice;
+req.deviation= 20;
+req.magic = MagicNumber;
+req.comment = comment;
+
+if(!OrderSend(req,res))
+{
+Print("Trade failed: ",res.retcode);
+if(EnableAlerts) Alert("Trade failed: ",res.retcode);
+}
+else
+{
+if(EnableAlerts) Alert(comment," opened at ",price);
+Print(comment," opened at ",price);
+}
+}
+
+//+------------------------------------------------------------------+
+void UpdateStatus()
+{
+string text = "SMC GBP PRO EA\nStatus: CONNECTED\nAccount: "+IntegerToString(AccountNumber());
+if(PositionsTotal()>0) text += "\nTrade Open!";
+Comment(text);
+}
+
+//+------------------------------------------------------------------+
+void DrawArrow(string name, int shift, double price, color clr, string text)
+{
+string objName = name + IntegerToString(TimeCurrent());
+if(ObjectFind(0,objName) >=0) ObjectDelete(0,objName);
+
+ObjectCreate(0,objName,OBJ_ARROW,0,Time[shift],price);
+ObjectSetInteger(0,objName,OBJPROP_COLOR,clr);
+ObjectSetInteger(0,objName,OBJPROP_WIDTH,2);
+ObjectSetInteger(0,objName,OBJPROP_ARROWCODE,233); // חץ
+ObjectSetString(0,objName,OBJPROP_TEXT,text);
+}
+------------------------------------------------------------------+
+//| SMC GBP PRO EA – FTMO 30M + TP/SL + Trailing Stop |
+//+------------------------------------------------------------------+
+#property strict
+
+input double RiskPercent = 1.0;
+input int RSIPeriod = 14;
+input int StopLossPoints = 200;
+input int TakeProfitPoints = 400;
+input int MagicNumber = 202630;
+input bool EnableAlerts = true;
+
+int rsiHandle;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+rsiHandle = iRSI(_Symbol, PERIOD_M30, RSIPeriod, PRICE_CLOSE);
+Comment("SMC GBP PRO EA\nStatus: CONNECTED\nAccount: ", AccountNumber());
+return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+//
+UpdateStatus();
+
+// Trailing Stop
+ManageTrailing();
+
+
+if(PositionsTotal() > 0) return;
+
+double rsi[];
+CopyBuffer(rsiHandle,0,0,1,rsi);
+
+double high1 = iHigh(_Symbol, PERIOD_M30,1);
+double low1 = iLow(_Symbol, PERIOD_M30,1);
+double close1= iClose(_Symbol, PERIOD_M30,1);
+
+double high2 = iHigh(_Symbol, PERIOD_M30,2);
+double low2 = iLow(_Symbol, PERIOD_M30,2);
+
+//==== HTF TREND (1H EMA50) ====
+double emaHTF = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE, 0);
+double closeHTF = iClose(_Symbol, PERIOD_H1, 0);
+
+bool htfBull = closeHTF > emaHTF;
+bool htfBear = closeHTF < emaHTF;
+
+//==== LIQUIDITY SWEEP ====
+bool sweepBuy = low1 < low2 && close1 > low2;
+bool sweepSell = high1 > high2 && close1 < high2;
+
+//==== BOS ====
+bool bosBuy = sweepBuy && close1 > high2;
+bool bosSell = sweepSell && close1 < low2;
+
+//==== BUY/SELL CONDITIONS ====
+bool buy = bosBuy && rsi[0] > 50 && htfBull;
+bool sell = bosSell && rsi[0] < 50 && htfBear;
+
+double lot = CalculateLot(StopLossPoints, RiskPercent);
+
+if(buy)
+{
+OpenTrade(ORDER_TYPE_BUY, lot, StopLossPoints, TakeProfitPoints, "BUY GBP");
+DrawArrow("BUY", 0, low1 - 10*_Point, clrLime, "BUY GBP");
+}
+
+if(sell)
+{
+OpenTrade(ORDER_TYPE_SELL, lot, StopLossPoints, TakeProfitPoints, "SELL GBP");
+DrawArrow("SELL", 0, high1 + 10*_Point, clrRed, "SELL GBP");
+}
+}
+
+//+------------------------------------------------------------------+
+double CalculateLot(int slPoints, double riskPercent)
+{
+double riskMoney = AccountBalance() * riskPercent / 100.0;
+double lot = riskMoney / (slPoints * _Point * 10);
+lot = MathMax(lot,0.01);
+return(NormalizeDouble(lot,2));
+}
+
+//+------------------------------------------------------------------+
+void OpenTrade(ENUM_ORDER_TYPE type,double lot,int sl,int tp,string comment)
+{
+double price = (type==ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+: SymbolInfoDouble(_Symbol,SYMBOL_BID);
+double slPrice = (type==ORDER_TYPE_BUY) ? price - sl*_Point
+: price + sl*_Point;
+double tpPrice = (type==ORDER_TYPE_BUY) ? price + tp*_Point
+: price - tp*_Point;
+
+MqlTradeRequest req;
+MqlTradeResult res;
+ZeroMemory(req);
+
+req.action = TRADE_ACTION_DEAL;
+req.symbol = _Symbol;
+req.volume = lot;
+req.type = type;
+req.price = price;
+req.sl = slPrice;
+req.tp = tpPrice;
+req.deviation= 20;
+req.magic = MagicNumber;
+req.comment = comment;
+
+if(!OrderSend(req,res))
+{
+Print("Trade failed: ",res.retcode);
+if(EnableAlerts) Alert("Trade failed: ",res.retcode);
+}
+else
+{
+if(EnableAlerts) Alert(comment," opened at ",price);
+Print(comment," opened at ",price);
+}
+}
+
+//+------------------------------------------------------------------+
+void UpdateStatus()
+{
+string text = "SMC GBP PRO EA\nStatus: CONNECTED\nAccount: "+IntegerToString(AccountNumber());
+if(PositionsTotal()>0) text += "\nTrade Open!";
+Comment(text);
+}
+
+//+------------------------------------------------------------------+
+void DrawArrow(string name, int shift, double price, color clr, string text)
+{
+string objName = name + IntegerToString(TimeCurrent());
+if(ObjectFind(0,objName) >=0) ObjectDelete(0,objName);
+
+ObjectCreate(0,objName,OBJ_ARROW,0,Time[shift],price);
+ObjectSetInteger(0,objName,OBJPROP_COLOR,clr);
+ObjectSetInteger(0,objName,OBJPROP_WIDTH,2);
+ObjectSetInteger(0,objName,OBJPROP_ARROWCODE,233); // חץ
+ObjectSetString(0,objName,OBJPROP_TEXT,text);
+}
+
+//+------------------------------------------------------------------+
+void ManageTrailing()
+{
+for(int i=PositionsTotal()-1;i>=0;i--)
+{
+ulong ticket = PositionGetTicket(i);
+if(PositionSelectByTicket(ticket))
+{
+double price = PositionGetDouble(POSITION_PRICE_OPEN);
+double sl = PositionGetDouble(POSITION_SL);
+double tp = PositionGetDouble(POSITION_TP);
+ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+double newSL = 0;
+
+if(type == POSITION_TYPE_BUY)
+{
+double trail = SymbolInfoDouble(_Symbol,SYMBOL_BID) - StopLossPoints*_Point;
+if(trail > sl) newSL = trail;
+}
+else if(type == POSITION_TYPE_SELL)
+{
+double trail = SymbolInfoDouble(_Symbol,SYMBOL_ASK) + StopLossPoints*_Point;
+if(trail < sl) newSL = trail;
+}
+
+if(newSL != 0)
+{
+MqlTradeRequest req;
+MqlTradeResult res;
+ZeroMemory(req);
+req.action = TRADE_ACTION_SLTP;
+req.symbol = _Symbol;
+req.position = ticket;
+req.sl = newSL;
+req.tp = tp;
+OrderSend(req,res);
+}
+}
+}
+}

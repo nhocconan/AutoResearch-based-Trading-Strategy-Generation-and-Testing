@@ -1,0 +1,376 @@
+//@version=6
+strategy("ORB 15m Break & Retest PRO — SHARP (Red News List + Optional Trail)",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1)
+
+//====================================================================
+// Position sizing
+//====================================================================
+grpPos = "Position Sizing"
+contracts = input.int(2, "Contracts per trade", minval=1, group=grpPos)
+
+//====================================================================
+// Sessions + Timezone (declare tz EARLY)
+//====================================================================
+grpSess = "Sessions"
+tz = input.string("America/New_York", "Time zone", group=grpSess)
+
+useNY   = input.bool(true,  "Enable New York Session", group=grpSess)
+useAsia = input.bool(false, "Enable Asia Session",     group=grpSess)
+
+nyOrbSession   = input.session("0930-0945", "NY ORB window (15m)", group=grpSess)
+nyTradeSession = input.session("0945-1100", "NY Trade window",     group=grpSess)
+
+asiaOrbSession   = input.session("2000-2015", "Asia ORB window (15m)", group=grpSess)
+asiaTradeSession = input.session("2015-2300", "Asia Trade window",     group=grpSess)
+
+//====================================================================
+// News Filter (Red Folder Times) — 1-minute precision list
+// Pine cannot auto-detect red folder news; you paste the times.
+// Example: "10:05,10:10,10:15,14:00"
+//====================================================================
+grpNews = "News Filter (Red Folder Times)"
+useNewsFilter = input.bool(false, "Enable News Filter", group=grpNews)
+newsTimesStr  = input.string("08:30,10:00,14:00", "Red news times (ET)", group=grpNews)
+newsBefore    = input.int(5, "Block minutes BEFORE", minval=0, group=grpNews)
+newsAfter     = input.int(5, "Block minutes AFTER",  minval=0, group=grpNews)
+
+// Current time in minutes (ET)
+curMins = hour(time, tz) * 60 + minute(time, tz)
+
+// Parse "HH:MM" -> minutes, returns na if invalid
+parseHHMM(_s) =>
+    parts = str.split(str.trim(_s), ":")
+    if array.size(parts) != 2
+        na
+    else
+        hh = str.tonumber(array.get(parts, 0))
+        mm = str.tonumber(array.get(parts, 1))
+        valid = not na(hh) and not na(mm) and hh >= 0 and hh <= 23 and mm >= 0 and mm <= 59
+        valid ? (hh * 60 + mm) : na
+
+// True if current minute is within ANY news window
+inNewsList(_timesStr) =>
+    arr = str.split(_timesStr, ",")
+    hit = false
+    for i = 0 to array.size(arr) - 1
+        n = parseHHMM(array.get(arr, i))
+        if not na(n)
+            s = n - newsBefore
+            e = n + newsAfter
+            if curMins >= s and curMins <= e
+                hit := true
+    hit
+
+inNews = useNewsFilter and inNewsList(newsTimesStr)
+
+//====================================================================
+// Core Filters
+//====================================================================
+grpFilt = "Filters"
+useVWAP    = input.bool(true,  "VWAP direction filter", group=grpFilt)
+useORWidth = input.bool(true,  "OR width filter", group=grpFilt)
+minORticks = input.int(12, "Min OR width (ticks)", minval=1, group=grpFilt)
+maxORticks = input.int(100,"Max OR width (ticks)", minval=2, group=grpFilt)
+
+//====================================================================
+// Sharpening Filters (Pro Filters)
+//====================================================================
+grpSharp = "Sharpening (Pro Filters)"
+useHTF      = input.bool(true, "15m EMA bias filter", group=grpSharp)
+htfEmaLen   = input.int(20, "15m EMA length", minval=1, group=grpSharp)
+
+useVolExp   = input.bool(true, "Require volume expansion on break", group=grpSharp)
+volLen      = input.int(20, "Volume SMA length", minval=1, group=grpSharp)
+volMult     = input.float(1.20, "Volume multiplier", minval=1.0, step=0.05, group=grpSharp)
+
+useOrCloseFilter = input.bool(true, "OR close position filter", group=grpSharp)
+orCloseTopPct    = input.float(0.70, "Bull if OR close > (x of range)", minval=0.50, maxval=0.99, step=0.01, group=grpSharp)
+orCloseBotPct    = input.float(0.30, "Bear if OR close < (x of range)", minval=0.01, maxval=0.50, step=0.01, group=grpSharp)
+
+onlyFirstPerSession = input.bool(true, "Only 1 trade per session", group=grpSharp)
+
+//====================================================================
+// Daily Rules
+//====================================================================
+grpRules = "Daily Rules"
+maxTradesPerDay = input.int(3, "Max trades per day", minval=1, group=grpRules)
+stopAfterLoss   = input.bool(false, "Stop trading after first loss (daily)", group=grpRules)
+
+//====================================================================
+// Entry Logic
+//====================================================================
+grpEntry = "Entry"
+acceptTicks       = input.int(2, "Acceptance beyond OR (ticks)", minval=0, group=grpEntry)
+retestTolTicks    = input.int(2, "Retest tolerance (ticks)", minval=0, group=grpEntry)
+maxRetestBars     = input.int(10, "Retest must happen within N bars (sharper)", minval=1, group=grpEntry)
+invalidateReentry = input.bool(true, "Invalidate if close re-enters OR before entry", group=grpEntry)
+
+//====================================================================
+// Risk: TP/SL + BE + Optional Trailing
+//====================================================================
+grpRisk = "Risk (Auto by timeframe)"
+useBE      = input.bool(true, "Move to breakeven", group=grpRisk)
+beOffsetTk = input.int(1, "BE offset (ticks)", minval=0, group=grpRisk)
+
+useTrail         = input.bool(false, "Enable trailing stop (optional)", group=grpRisk)
+trailTicks       = input.int(24, "Trail distance (ticks)", minval=1, group=grpRisk)
+trailOffsetTicks = input.int(8,  "Trail offset (ticks)",   minval=0, group=grpRisk)
+keepTPWithTrail  = input.bool(false, "Keep TP even when trailing is ON", group=grpRisk)
+
+//====================================================================
+// Helpers
+//====================================================================
+tick = syminfo.mintick
+toPrice(t) => t * tick
+fz(x) => x == 0 ? 1 : x
+inSess(sess) => not na(time(timeframe.period, sess, tz))
+
+// Determine which session is active
+inNY_ORB     = useNY   and inSess(nyOrbSession)
+inNY_Trade   = useNY   and inSess(nyTradeSession)
+inAsia_ORB   = useAsia and inSess(asiaOrbSession)
+inAsia_Trade = useAsia and inSess(asiaTradeSession)
+
+inORB   = inNY_ORB or inAsia_ORB
+inTrade = inNY_Trade or inAsia_Trade
+
+orbStart = inORB and not inORB[1]
+orbEnd   = (not inORB) and inORB[1]
+
+//====================================================================
+// Timeframe-based defaults (1m / 5m / 15m)
+//====================================================================
+tfMin = timeframe.isminutes ? timeframe.multiplier : 5
+
+int slTicks = 16
+int tpTicks = 32
+int beTrig  = 20
+
+if tfMin == 1
+    slTicks := 12
+    tpTicks := 24
+    beTrig  := 12
+else if tfMin == 5
+    slTicks := 16
+    tpTicks := 32
+    beTrig  := 20
+else if tfMin == 15
+    slTicks := 24
+    tpTicks := 48
+    beTrig  := 30
+
+//====================================================================
+// Daily tracking
+//====================================================================
+var int tradesToday = 0
+var bool blockedToday = false
+var float dayStartNP = 0.0
+
+newDay = ta.change(time("D")) != 0
+if newDay
+    tradesToday := 0
+    blockedToday := false
+    dayStartNP := strategy.netprofit
+
+tradeClosed = (strategy.position_size == 0 and strategy.position_size[1] != 0)
+if stopAfterLoss and tradeClosed and not blockedToday
+    if strategy.netprofit < dayStartNP
+        blockedToday := true
+
+canTradeDaily = (not blockedToday) and (tradesToday < maxTradesPerDay)
+
+//====================================================================
+// Build OR High/Low + OR close position
+//====================================================================
+var float orH = na
+var float orL = na
+var bool  orReady = false
+var float orCloseVal = na
+var float orPos = na
+var int   orDir = 0   // +1 bullish, -1 bearish, 0 neutral
+
+if orbStart
+    orH := high
+    orL := low
+    orReady := false
+    orCloseVal := na
+    orPos := na
+    orDir := 0
+
+if inORB
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+
+if orbEnd
+    orReady := true
+    orCloseVal := close[1]
+    rng = fz(orH - orL)
+    orPos := (orCloseVal - orL) / rng
+    if useOrCloseFilter
+        orDir := orPos > orCloseTopPct ? 1 : orPos < orCloseBotPct ? -1 : 0
+    else
+        orDir := 0
+
+orW       = orReady ? math.abs(orH - orL) : na
+orW_ticks = orReady ? (orW / tick) : na
+orWidthOK = not useORWidth ? true : (orReady and orW_ticks >= minORticks and orW_ticks <= maxORticks)
+
+//====================================================================
+// VWAP bias + HTF EMA bias
+//====================================================================
+vwap = ta.vwap(hlc3)
+vwapLong  = not useVWAP ? true : close > vwap
+vwapShort = not useVWAP ? true : close < vwap
+
+htfEma = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen))
+htfLong  = not useHTF ? true : close > htfEma
+htfShort = not useHTF ? true : close < htfEma
+
+orAllowsLong  = not useOrCloseFilter ? true : (orDir >= 0)
+orAllowsShort = not useOrCloseFilter ? true : (orDir <= 0)
+
+longBias  = vwapLong  and htfLong  and orAllowsLong
+shortBias = vwapShort and htfShort and orAllowsShort
+
+//====================================================================
+// Volume expansion filter (on break bar)
+//====================================================================
+volOk = not useVolExp ? true : (volume > ta.sma(volume, volLen) * volMult)
+
+//====================================================================
+// Trading permissions (news blocks trades only if enabled)
+//====================================================================
+canTrade = orReady and inTrade and orWidthOK and canTradeDaily and (not inNews)
+
+accept = toPrice(acceptTicks)
+tol    = toPrice(retestTolTicks)
+
+//====================================================================
+// Only 1 trade per session
+//====================================================================
+var bool tradedThisSession = false
+if orbStart
+    tradedThisSession := false
+
+sessionTradeOk = not onlyFirstPerSession ? true : (not tradedThisSession)
+
+//====================================================================
+// Break -> Retest state machine (same as SHARP version)
+//====================================================================
+var bool waitingLong  = false
+var bool waitingShort = false
+var float longLevel   = na
+var float shortLevel  = na
+var int longBreakBar  = na
+var int shortBreakBar = na
+
+breakUp   = canTrade and sessionTradeOk and longBias  and volOk and close > (orH + accept)
+breakDown = canTrade and sessionTradeOk and shortBias and volOk and close < (orL - accept)
+
+// Arm setup (flat only)
+if strategy.position_size == 0
+    if breakUp and not waitingLong and not waitingShort
+        waitingLong := true
+        longLevel := orH
+        longBreakBar := bar_index
+
+    if breakDown and not waitingShort and not waitingLong
+        waitingShort := true
+        shortLevel := orL
+        shortBreakBar := bar_index
+
+// Expire setups
+if waitingLong and (bar_index - longBreakBar > maxRetestBars)
+    waitingLong := false
+    longLevel := na
+
+if waitingShort and (bar_index - shortBreakBar > maxRetestBars)
+    waitingShort := false
+    shortLevel := na
+
+// Invalidate if close re-enters OR before entry
+if invalidateReentry and waitingLong and close < orH
+    waitingLong := false
+    longLevel := na
+
+if invalidateReentry and waitingShort and close > orL
+    waitingShort := false
+    shortLevel := na
+
+// Retest confirm
+longRetest  = waitingLong  and (low  <= longLevel + tol)  and (close > longLevel)
+shortRetest = waitingShort and (high >= shortLevel - tol) and (close < shortLevel)
+
+//====================================================================
+// Entries
+//====================================================================
+if strategy.position_size == 0 and canTrade and sessionTradeOk
+    if longRetest and longBias
+        strategy.entry("Long", strategy.long, qty=contracts)
+        waitingLong := false
+        tradedThisSession := true
+        tradesToday += 1
+
+    if shortRetest and shortBias
+        strategy.entry("Short", strategy.short, qty=contracts)
+        waitingShort := false
+        tradedThisSession := true
+        tradesToday += 1
+
+//====================================================================
+// Exits (TP + SL + optional BE + optional trailing)
+//====================================================================
+entry = strategy.position_avg_price
+
+longTP      = entry + toPrice(tpTicks)
+longSL_base = entry - toPrice(slTicks)
+
+shortTP      = entry - toPrice(tpTicks)
+shortSL_base = entry + toPrice(slTicks)
+
+beLong  = useBE and strategy.position_size > 0 and high >= entry + toPrice(beTrig)
+beShort = useBE and strategy.position_size < 0 and low  <= entry - toPrice(beTrig)
+
+longSL_BE  = entry + toPrice(beOffsetTk)
+shortSL_BE = entry - toPrice(beOffsetTk)
+
+finalLongSL  = beLong  ? math.max(longSL_base,  longSL_BE)  : longSL_base
+finalShortSL = beShort ? math.min(shortSL_base, shortSL_BE) : shortSL_base
+
+trailPts = useTrail ? toPrice(trailTicks) : na
+trailOff = useTrail ? toPrice(trailOffsetTicks) : na
+
+longLimit  = (useTrail and not keepTPWithTrail) ? na : longTP
+shortLimit = (useTrail and not keepTPWithTrail) ? na : shortTP
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=finalLongSL, limit=longLimit, trail_points=trailPts, trail_offset=trailOff)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=finalShortSL, limit=shortLimit, trail_points=trailPts, trail_offset=trailOff)
+
+//====================================================================
+// Visuals
+//====================================================================
+plot(orReady ? orH : na, "OR High", color=color.new(color.yellow, 0), linewidth=2)
+plot(orReady ? orL : na, "OR Low",  color=color.new(color.yellow, 0), linewidth=2)
+plot(vwap, "VWAP", color=color.new(color.aqua, 0))
+plot(useHTF ? htfEma : na, "15m EMA (bias)", color=color.new(color.orange, 0))
+
+plotshape(longRetest,  title="Long Retest",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime,0), size=size.tiny, text="BR")
+plotshape(shortRetest, title="Short Retest", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0),  size=size.tiny, text="BR")
+
+bgcolor(inNews ? color.new(color.red, 88) : na, title="News Blackout Background")
+
+View in Pine Editor・367 lines
+Use on chart
+4
+1
+1
+855
+new
+wonderful to catch some good trades and works on the 5min timeframe

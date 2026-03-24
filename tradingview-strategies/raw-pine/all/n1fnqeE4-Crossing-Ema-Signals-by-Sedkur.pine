@@ -1,0 +1,53 @@
+//@version=4
+//
+
+strategy (title="Crossing Ema Signals by Sedkur", overlay=true)
+
+src = close
+
+
+d1 = input(title="Ema 1", type=input.integer, defval=20, minval=1, maxval=300)
+d2 = input(title="Ema 2", type=input.integer, defval=9, minval=1, maxval=300)
+dyear = input(title="Year", type=input.integer, defval=2017, minval=2000, maxval=2500)
+
+ema1 = ema(src, d1)
+ema2 = ema(src, d2)
+
+
+plot( ema1, color=color.orange, style=plot.style_line, title="Ema 1", linewidth=2)
+plot( ema2, color=color.blue, style=plot.style_line, title="Ema 2", linewidth=2)
+
+bullish = cross(ema1, ema2) and (ema2>=ema1)?true:false
+bearish = cross(ema1, ema2) and (ema1>=ema2)?true:false
+
+plotshape(bullish, style=shape.triangleup , location=location.belowbar, color=color.lime,size=size.tiny, title="BUY")
+plotshape(bearish, style=shape.triangledown , location=location.abovebar, color=color.red,size=size.tiny, title="SELL")
+    
+alertcondition(bullish, title="Bullish", message="BUY Signal")
+alertcondition(bearish, title="Bearish", message="SELL Signal")
+
+if (bullish)
+    strategy.entry("buy", strategy.long, comment="buy", when = year>=dyear)
+if (bearish)
+    strategy.entry("sell", strategy.short, comment="sell", when = year>=dyear)
+//plot(strategy.equity)
+
+View in Pine Editor・33 lines
+Use on chart
+4
+1
+4
+3
+11 255
+Aug 29, 2019
+Gives an signals when 2 Ema's cross.
+
+You can
+- change EMA values
+- change the signal start year
+Aug 30, 2019
+Release Notes
+overlay=true
+Aug 30, 2019
+Release Notes
+some changes

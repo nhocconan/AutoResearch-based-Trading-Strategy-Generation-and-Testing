@@ -1,0 +1,5 @@
+//@version=3
+BuyZone=##input(defval=60.0,type='INPUT_FLOAT',##id='in_2')
+SellZone=##input(defval=-60.0,type='INPUT_FLOAT',##id='in_3')
+##root(root_metainfo,rm_0,BuyZone)
+##root(root_metainfo,rm_1,SellZone)

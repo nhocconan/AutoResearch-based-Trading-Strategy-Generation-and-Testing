@@ -1,0 +1,85 @@
+//@version=6
+strategy("SuperTrade Ichimoku Cloud Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+conversionPeriods = input.int(9, minval=1, title="Conversion Line Length")
+basePeriods = input.int(26, minval=1, title="Base Line Length")
+laggingSpan2Periods = input.int(52, minval=1, title="Leading Span B Length")
+displacement = input.int(26, minval=1, title="Lagging Span")
+
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+// Buy condition: Price above cloud
+bullishKumo = leadLine1 > leadLine2
+priceAboveCloud = close > leadLine1 and close > leadLine2
+buyCondition = bullishKumo and priceAboveCloud
+
+// Sell condition: Price below cloud
+bearishKumo = leadLine1 < leadLine2
+priceBelowCloud = close < leadLine1 and close < leadLine2
+sellCondition = bearishKumo and priceBelowCloud
+
+// Execute trades
+if (buyCondition)
+    strategy.entry("Long", strategy.long)
+
+if (sellCondition)
+    strategy.close("Long")
+
+// Optional: draw Ichimoku components for visualization
+plot(conversionLine, color=#2962FF, title="Conversion Line")
+plot(baseLine, color=#B71C1C, title="Base Line")
+plot(close, offset = -displacement + 1, color=#43A047, title="Lagging Span")
+p1 = plot(leadLine1, offset = displacement - 1, color=#A5D6A7, title="Leading Span A")
+p2 = plot(leadLine2, offset = displacement - 1, color=#EF9A9A, title="Leading Span B")
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.rgb(67, 160, 71, 90) : color.rgb(244, 67, 54, 90))
+
+View in Pine Editor・39 lines
+Use on chart
+1
+0
+3
+2 605
+Unlike SuperTrade's Super Trend the Ichimoku Cloud Strategy is a trend-following system derived from the Ichimoku Kinko Hyo indicator. It helps identify market direction, momentum, and potential support/resistance zones. This strategy uses key components of the Ichimoku Cloud to determine bullish or bearish trends and executes trades accordingly.
+
+🔍 Key Components Used
+
+Conversion Line (Tenkan-sen) – short-term average (9-period Donchian midpoint by default)
+Base Line (Kijun-sen) – medium-term average (26-period Donchian midpoint)
+Leading Span A (Senkou Span A) – average of Conversion Line and Base Line, plotted forward by 26 periods.
+Leading Span B (Senkou Span B) – 52-period Donchian midpoint, plotted forward by 26 periods.
+Lagging Span (Chikou Span) – current close price, plotted backward by 26 periods (for visual reference only in this version).
+
+The cloud (Kumo) is the area between Leading Span A and B, representing trend direction and potential support/resistance.
+
+📈 Entry Rules (Buy Condition)
+
+A long trade is entered when:
+
+LeadLine1 > LeadLine2 → This implies a bullish cloud.
+Close > LeadLine1 and Close > LeadLine2 → The price is trading above the cloud, confirming upward momentum.
+
+This combination indicates a strong bullish trend, so the strategy enters a long position.
+
+📉 Exit Rules (Sell Condition / Close Position)
+
+The long trade is closed when:
+
+LeadLine1 < LeadLine2 → This implies a bearish cloud.
+Close < LeadLine1 and Close < LeadLine2 → The price has fallen below the cloud, signaling trend weakness or reversal.
+
+This confirms a bearish trend, prompting the strategy to exit the long position.
+
+✅ Must-Have Elements in This Strategy
+
+Entry Logic – based on price position relative to the cloud and cloud direction.
+Exit Logic – closes the position when price shifts to a bearish trend.
+Overlay Enabled – plotted over price for visual confirmation of signals.
+Dynamic Parameters – inputs for conversion/base/cloud lengths and displacement.
+Visualization – plots all Ichimoku components including cloud fill for clarity.
+No Shorting Logic Yet – this version only handles long trades; shorting can be added optionally.
+No Stop-Loss or Take-Profit – trades are closed purely based on Ichimoku trend reversal.

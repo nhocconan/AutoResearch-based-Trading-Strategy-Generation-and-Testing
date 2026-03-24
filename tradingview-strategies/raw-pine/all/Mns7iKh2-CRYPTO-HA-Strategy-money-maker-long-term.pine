@@ -1,0 +1,115 @@
+//@version=4
+//@SoftKill21
+strategy(title="CRYPTO HA Strategy", shorttitle="CRYPTO HA Strategy", overlay=true , default_qty_type =strategy.percent_of_equity, default_qty_value =100, commission_type= strategy.commission.percent,commission_value =0.1 )
+
+
+ma1_len = input(50)
+ma2_len = input(100)
+
+fromDay = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+fromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+fromYear = input(defval = 2020, title = "From Year", minval = 1970)
+ //monday and session 
+// To Date Inputs
+toDay = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+toMonth = input(defval = 12, title = "To Month", minval = 1, maxval = 12)
+toYear = input(defval = 2020, title = "To Year", minval = 1970)
+
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate 
+
+
+//First Moving Average data
+o = ema(open, ma1_len)
+c = ema(close, ma1_len)
+h = ema(high, ma1_len)
+l = ema(low, ma1_len)
+
+// === HA calculator ===
+ha_t = heikinashi(syminfo.tickerid)
+ha_o = security(ha_t, timeframe.period, o)
+ha_c = security(ha_t, timeframe.period, c)
+ha_h = security(ha_t, timeframe.period, h)
+ha_l = security(ha_t, timeframe.period, l)
+
+//Second Moving Average data
+
+o2 = ema(ha_o, ma2_len)
+c2 = ema(ha_c, ma2_len)
+h2 = ema(ha_h, ma2_len)
+l2 = ema(ha_l, ma2_len)
+
+// === Color def ===
+ha_col = o2 > c2 ? color.white : color.lime
+
+sell = o2 > c2 and o2[1] < c2[1] and time_cond
+buy = o2 < c2 and o2[1] > c2[1] and time_cond
+plotshape(buy, color=color.green, text= "Buy", location= location.belowbar,style= shape.labelup, textcolor=color.white, size = size.tiny, title="Buy Alert",editable=false, transp=60)
+plotshape(sell, color=color.red, text= "Sell", location= location.abovebar,style= shape.labeldown, textcolor=color.white, size = size.tiny, title="Sell Alert", editable=false, transp=60)
+
+trendColor = buy ? color.red : sell ? color.green : na
+plot( buy ? close: sell  ? close : na , color=trendColor, style=plot.style_line, linewidth=4, editable=false)
+
+
+
+onlylong=input(true)
+original=input(false)
+
+if(onlylong)
+    strategy.entry("long",1,when=buy)
+    strategy.close("long",when=sell)
+if(original)
+    strategy.entry("long",1,when=buy)
+    strategy.entry("short",0,when=sell)
+
+sl = input(0.075)
+strategy.exit("closelong", "long" , loss = close * sl / syminfo.mintick, alert_message = "sl point")
+strategy.exit("closeshort", "short" , loss = close * sl / syminfo.mintick, alert_message = "sl point")
+
+View in Pine Editor・68 lines
+Use on chart
+4
+2
+6
+11 589
+Today I bring you another amazing strategy.
+
+Its made of 2 EMA in this case 50 and 100.
+
+At the same time, internaly for candles we calculate the candles using the HA system ( while still using in live the normal candles). This way we can assure that even if we use HA candles, we avoid repainting, and its legit.
+
+We first calculate the HA candles based on the EMA 50 values, and after that , we use that candle properties to apply to EMA 100.
+
+Once we have that, for entries we have the next conditions :
+
+sell = o2 > c2 and o2[1] < c2[1] and time_cond
+buy = o2 < c2 and o2[1] > c2[1] and time_cond
+
+For sell : Our open from HA 100 is bigger than Close from ha 100, and the previous open is smaller than previous close
+For long : Our open from ha 100 is smaller than close from ha 100 and the previous open is bigger than previous close.
+
+
+Then we have 2 options :
+
+If we wnat to go only long , which is my prefered version ,or the original one where we go both long and short.
+
+I found that the best results are in general around bigger timeframes, 1h+ , 3h works the best so far on my tests.
+
+
+
+For exit we have 2 versions :
+1 lets say we had a long signal, as soon as we have a short signal we close the trade. Viceversa for short.
+2. Is based on price % movement. In this case I use 7.5% price movement of asset.
+
+We have no TP in use for this system.
+
+
+For the purpose of this test I use 10.000 $ account. For test I use 100% of it, without any leverage.
+I use the SL based on price movement , which is a very risky tool, since it can fluctuate even at 20-30% of our capital.
+For comission I used 0.1% for each deal, and a slippage of 5 points.
+
+Be cautious with this system !
+
+
+If you have any questions , message me.

@@ -1,0 +1,73 @@
+//@version=5
+strategy("Baseline Crossover Strategy", overlay=true)
+
+// Define length for short and long moving averages
+shortLength = input.int(9, "Short MA Length")
+longLength = input.int(21, "Long MA Length")
+
+// Calculate moving averages
+shortMA = ta.sma(close, shortLength)
+longMA = ta.sma(close, longLength)
+
+// Plot moving averages
+plot(shortMA, color=color.blue, title="Short MA")
+plot(longMA, color=color.red, title="Long MA")
+
+// Generate buy and sell signals
+buySignal = ta.crossover(shortMA, longMA)
+sellSignal = ta.crossunder(shortMA, longMA)
+
+// Strategy entry and exit conditions
+strategy.entry("Buy", strategy.long, when=buySignal)
+strategy.close("Buy", when=sellSignal)
+
+// Plot buy and sell signals on the chart
+plotshape(buySignal, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(sellSignal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+View in Pine Editor・29 lines
+Use on chart
+1
+6
+6
+1
+7 604
+Feb 21, 2023
+For trading ES on 30min Chart
+
+Trading Rules
+Post Baseline Cross Qualifier (PBCQ): If price crosses the baseline but the trade is invalid due to additional qualifiers, then the strategy doesn't enter a trade on that candle. This setting allows you override this disqualification in the following manner: If price crosses XX bars ago and is now qualified by other qualifiers, then the strategy enters a trade.
+
+Volatility: If price crosses the baseline, we check to see how far it has moved in terms of multiples of volatility denoted in price (ATR x multiple). If price has moved by at least "Qualifier multiplier" and less than "Range Multiplier", then the strategy enters a trade. This range is shown on the chart with yellow area that tracks price above/blow the baseline. Also, see the dots at the top of the chart. If the dots are green, then price passes the volatility test for a long. If the dots are red, then price passes the volatility test for a short.
+
+Take Profit/Stoploss Quantity Removed
+1 Take Profit: 100% of the trade is closed when the profit target or stoploss is reached.
+2 Take Profits: Quantity is split 50/50 between Take Profit 1 and Take Profit 2
+3 Take Profits: Quantify is split 50/25/25.
+
+Stratgey Inputs
+
+Baseline Length
+37
+Post Baseline Cross Qualifier Enabled
+On
+Post Baseline Cross Qualifier Bars Ago
+9
+ATR Length
+9
+Volatility Multiplier
+0
+Volatility Range Multiplier
+10
+Volatility Qualifier Multiplier
+2
+Take Profit Type
+1 Take Profit
+HMA Length
+11
+Apr 15, 2024
+Release Notes
+New Version Coming
+Apr 15, 2024
+Release Notes
+Baseline crossover

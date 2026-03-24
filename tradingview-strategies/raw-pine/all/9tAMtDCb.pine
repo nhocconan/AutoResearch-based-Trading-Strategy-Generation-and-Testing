@@ -1,0 +1,218 @@
+//@version=6
+strategy("HMK-2 | PCA-1 + Rejim + Chebyshev + VWAP (Input'lu, v6)", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- INPUTLAR ---
+zWin   = input.int(20, "Z-Pencere", minval=5, maxval=200, step=1)
+thr    = input.float(0.20, "Eşik (Threshold)", step=0.05, minval=0.0, maxval=2.0)
+retLen = input.int(5, "Getiri Periyodu", minval=1, maxval=50)
+muLen  = input.int(100, "Chebyshev Ortalama Periyodu", minval=20, maxval=500)
+kCheb  = input.float(2.0, "Chebyshev Katsayı", step=0.1, minval=0.5, maxval=5.0)
+adxLen = input.int(14, "ADX Periyodu", minval=5, maxval=50)
+probLen= input.int(50, "Rejim EMA Periyodu", minval=5, maxval=200)
+atrLen = input.int(14, "ATR Periyodu", minval=5, maxval=50)
+slATR  = input.float(2.0, "Stop (ATR çarpanı)", step=0.1, minval=0.5, maxval=10.0)
+tpATR  = input.float(2.0, "Hedef (ATR çarpanı)", step=0.1, minval=0.5, maxval=10.0)
+
+// --- Z-SCORE FONK ---
+zscore(src, len) =>
+    ma = ta.sma(src, len)
+    sd = ta.stdev(src, len)
+    sd != 0 ? (src - ma) / sd : 0.0
+
+// --- GÖSTERGELER ---
+rsi14 = ta.rsi(close, 14)
+mfi14 = ta.mfi(hlc3, 14)
+roc5  = ta.roc(close, 5)
+
+// PCA-1
+zRSI = zscore(rsi14, zWin)
+zMFI = zscore(mfi14, zWin)
+zROC = zscore(roc5,  zWin)
+signal = (zRSI + zMFI + zROC) / 3.0
+
+// Trend filtresi
+emaZ    = ta.ema(close, zWin)
+trendUp = emaZ > emaZ[1]
+trendDn = emaZ < emaZ[1]
+
+// --- ADX MANUEL ---
+f_adx(len) =>
+    up   = ta.change(high)
+    down = -ta.change(low)
+    plusDM  = (up > down and up > 0)   ? up   : 0.0
+    minusDM = (down > up and down > 0) ? down : 0.0
+    tr1 = high - low
+    tr2 = math.abs(high - close[1])
+    tr3 = math.abs(low  - close[1])
+    tr  = math.max(tr1, math.max(tr2, tr3))
+    trRma     = ta.rma(tr, len)
+    plusDMRma = ta.rma(plusDM, len)
+    minusDMRma= ta.rma(minusDM, len)
+    plusDI  = trRma != 0 ? 100 * plusDMRma  / trRma : 0.0
+    minusDI = trRma != 0 ? 100 * minusDMRma / trRma : 0.0
+    den = plusDI + minusDI
+    dx  = den != 0 ? 100 * math.abs(plusDI - minusDI) / den : 0.0
+    ta.rma(dx, len)
+
+adxVal      = f_adx(adxLen)
+regimeTrend = adxVal > 20 ? 1.0 : 0.0
+probTrend   = ta.ema(regimeTrend, probLen)
+regOK_Long  = probTrend > 0.50
+regOK_Short = probTrend > 0.50
+
+// --- CHEBYSHEV ---
+ret   = (close - close[retLen]) / close[retLen]
+mu    = ta.sma(ret, muLen)
+sigma = ta.stdev(ret, muLen)
+upper = mu + kCheb * sigma
+lower = mu - kCheb * sigma
+chebOK = (sigma > 0) and (ret < upper) and (ret > lower)
+
+// --- VWAP ---
+vwap = ta.vwap
+aboveVWAP = close >= vwap
+belowVWAP = close <= vwap
+
+// --- GİRİŞ KOŞULLARI ---
+longEntry  = ta.crossover(signal,  thr)  and trendUp and regOK_Long  and chebOK and aboveVWAP
+shortEntry = ta.crossunder(signal, -thr) and trendDn and regOK_Short and chebOK and belowVWAP
+
+// --- EMİRLER ---
+if (longEntry and strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long)
+if (shortEntry and strategy.position_size >= 0)
+    strategy.entry("Short", strategy.short)
+
+// --- ÇIKIŞ: ATR SL/TP ---
+atr = ta.atr(atrLen)
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",  stop=strategy.position_avg_price - slATR*atr, limit=strategy.position_avg_price + tpATR*atr)
+if strategy.position_size < 0
+    strategy.exit("Short Exit","Short", stop=strategy.position_avg_price + slATR*atr, limit=strategy.position_avg_price - tpATR*atr)
+
+// --- EK ÇIKIŞ (VWAP kırılımı veya sıfır kesişim) ---
+if strategy.position_size > 0 and (ta.crossunder(close, vwap) or ta.crossunder(signal, 0.0))
+    strategy.close("Long",  comment="VWAP/Sinyal Çıkış")
+if strategy.position_size < 0 and (ta.crossover (close, vwap) or ta.crossover (signal, 0.0))
+    strategy.close("Short", comment="VWAP/Sinyal Çıkış")
+
+// --- ETİKETLER ---
+plotshape(longEntry,  title="AL",    style=shape.labelup,   text="AL",    location=location.belowbar, color=color.new(color.green,0), textcolor=color.white, size=size.tiny)
+plotshape(shortEntry, title="SHORT", style=shape.labeldown, text="SHORT", location=location.abovebar, color=color.new(color.red,0),   textcolor=color.white, size=size.tiny)
+closedLong  = strategy.position_size == 0 and strategy.position_size[1] > 0
+closedShort = strategy.position_size == 0 and strategy.position_size[1] < 0
+plotshape(closedLong,  title="SAT",   style=shape.labeldown, text="SAT",   location=location.abovebar, color=color.new(color.orange,0), textcolor=color.white, size=size.tiny)
+plotshape(closedShort, title="COVER", style=shape.labelup,   text="COVER", location=location.belowbar, color=color.new(color.blue,0),   textcolor=color.white, size=size.tiny)
+
+// --- ÇİZGİ ---
+plot(vwap, title="VWAP", color=color.new(color.blue, 0), linewidth=2)
+
+View in Pine Editor・111 lines
+Use on chart
+4
+8
+1 356
+📌 HMK-2 | PCA-1 + Regime + Chebyshev + VWAP Strategy
+1️⃣ Core Structure
+
+Instead of relying on a single indicator, this system uses the Z-Score normalized average of three oscillators (RSI, MFI, ROC).
+
+Signal (PCA-1):
+
+RSI(14), MFI(14), ROC(5) → each is converted into a z-score.
+
+Their average becomes the “composite signal,” our PCA-1 value.
+
+Trend direction: If the Z-score EMA is rising → trend UP. If falling → trend DOWN.
+
+2️⃣ Side Filters
+
+Regime Filter (ADX + EMA)
+
+ADX is calculated manually.
+
+If ADX > 20 → trend exists → a 50-period EMA of this value smooths it.
+
+This turns “trend regime” into a probability between 0–1.
+
+Chebyshev Filter
+
+A return series is checked against mean ± k*sigma bands.
+
+If the return is within this band → valid signal. Extreme moves are filtered out.
+
+VWAP Filter
+
+Long trades: price must be above VWAP.
+
+Short trades: price must be below VWAP.
+
+Trades are only taken on the correct side of institutional cost averages.
+
+3️⃣ Entry Conditions
+
+Long:
+
+PCA-1 signal crosses above threshold.
+
+Trend Up + Regime OK + Chebyshev OK + Above VWAP.
+
+Short:
+
+PCA-1 signal crosses below threshold.
+
+Trend Down + Regime OK + Chebyshev OK + Below VWAP.
+
+4️⃣ Exit Mechanism
+
+Main Exit: ATR-based stop/target.
+
+Stop = entry price – ATR × (SL factor).
+
+Take profit = entry price + ATR × (TP factor).
+
+Additional Exit:
+
+If price crosses to the opposite side of VWAP.
+
+If PCA-1 signal crosses zero.
+👉 Prevents trades from being locked, makes exits adaptive.
+
+5️⃣ Labels / Visualization
+
+AL / SHORT → entry points.
+
+SAT / COVER → exit points.
+
+VWAP line plotted in blue.
+
+🧩 Strategy Features
+
+Optimizable parameters:
+
+Z-window (zWin)
+
+Threshold
+
+Chebyshev factor
+
+ATR stop/target multipliers
+
+This system works with:
+
+Disciplined core (PCA-1 signal)
+
+Triple protection (Regime + Chebyshev + VWAP)
+
+Adaptive exits (ATR + VWAP/signal cross)
+
+👉 Not a “single-indicator robot,” but a multi-filtered trade direction engine.
+
+💡 Final Note
+
+This is a base model of the system — open for further development.
+I’ve shared the logic to give you a roadmap.
+If you spot errors, fix them → that’s how you’ll improve it.
+
+Don’t waste time asking me questions — refine and build it better yourselves.
+Wishing you profitable trades. Stay well 🙏

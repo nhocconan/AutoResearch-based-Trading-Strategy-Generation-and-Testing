@@ -1,0 +1,5 @@
+//@version=5
+zScoreLongEntryThreshold=##input(defval=3.0,type='INPUT_FLOAT',##id='in_4')
+zScoreShortEntryThreshold=##input(defval=-3.0,type='INPUT_FLOAT',##id='in_5')
+##root(root_metainfo,rm_0,zScoreLongEntryThreshold,input__float)
+##root(root_metainfo,rm_1,zScoreShortEntryThreshold,input__float)

@@ -1,0 +1,90 @@
+//@version=4
+strategy("AMRS_LongOnly_PartTimer", overlay = true)
+
+//i_endTime = input(defval = timestamp("02 Jun 2021 15:30 +0000"), title = "End Time", type=input.time)
+
+StartYear=input(defval = 2000, title ="Start Year", type=input.integer)
+StartMonth=input(defval = 01, title ="Start Month", type=input.integer)
+StartDate=input(defval = 01, title ="Start Date", type=input.integer)
+
+endYear=input(defval = 2021, title ="End Year", type=input.integer)
+endMonth=input(defval = 06, title ="End Month", type=input.integer)
+endDate=input(defval = 03, title ="End Date", type=input.integer)
+
+ema11=ema(close,11)
+ema13=ema(close,13)
+ema21=ema(close,21)
+
+afterStartDate = (time >= timestamp(syminfo.timezone,StartYear, StartMonth, StartDate, 0, 0))
+//g=bar_index==1
+//ath()=>
+    //a=0.0
+    //a:=g ? high : high>a[1] ? high:a[1]
+    
+//a = security(syminfo.tickerid, 'M', ath(),lookahead=barmerge.lookahead_on)
+
+newHigh = (high > highest(high,504)[1])
+//plot down arrows whenever it's a new high
+plotshape(newHigh, style=shape.triangleup, location=location.abovebar, color=color.green, size=size.tiny)
+b=highest(high,504)[1]
+VarChk=((b-ema13)/b)*100
+TrigLow = (low <= ema13) and (low >= ema21) and (VarChk <= 10)
+plotshape(TrigLow, style=shape.triangleup, location=location.belowbar, color=color.white, size=size.tiny)
+ExitPrice=(ema21 - (ema21*0.05))
+DrawPrice=(b - (b*0.20))
+stopprice=0.0
+if (close <= ExitPrice)
+    stopprice := ExitPrice
+if (close <= DrawPrice)
+    stopprice := DrawPrice
+
+if (TrigLow and afterStartDate)
+    strategy.entry("Long", strategy.long)
+
+strategy.exit("exit","Long", stop=stopprice)
+//beforeEndDate = (time < i_endTime)
+beforeEndDate = (time >= timestamp(syminfo.timezone,endYear, endMonth, endDate, 0, 0))
+if (beforeEndDate)
+    strategy.close_all()
+
+View in Pine Editor・54 lines
+Use on chart
+7
+3
+10
+2 820
+This Script is created to back-test the data starting 01/01/2000 based on AMRS strategy.
+
+AMRS is long only strategy. It is based on unique calculation around moving averages and 2 year high price.
+
+There are few strategies for moving average crossovers but AMRS strategy is unique compared to other moving averages strategies as it has very specific below mentioned calculations evolving around moving average and stock price.
+
+AMRS strategy is unique one to generate buying signals when stock price creates new 2 year high and retraces back to 13 day EMA value.
+AMRS strategy is unique one having specific calculation for entry signal and exit signal as mentioned below. This strategy gives back testing results to help build conviction on entry/exits if trades were taken in past as per the AMRS rules.
+
+As per AMRS strategy this script generates green arrow on each time when new 2 year high is made and also generates long signal indicated by white arrow when stock price retraces back to 13 day EMA value and price is within 10% range from 2 year high.
+This strategy will generate white arrow on the chart for each buy signal when stock price reaches 13 day EMA after first Long signal is generated. These subsequent buy signals can be used for pyramiding.
+
+Entry Signal Logic : 1. Stock should be trading near 2 year high.
+2. Stock price should be within 10% range from 2 year high
+3. Stock price should be less than or equal to 13 day EMA and grater than equal to 21 day EMA
+
+This AMRS strategy also generates exit signal for already generated buy signal (open position).
+
+Exit signal generated when stock price closes 5% below 21 day EMA or when stock price closes below 20% from most recent 2 year high price.
+
+Exit Signal Logic : 1. Stock price closes 5% below 21 day EMA or stock price closes below 20% from most recent 2 year high price.
+2. Since exit logic is based on closing price it is plotted on the chart next day.
+3. So when exit signal is plotted on the chart, previous days stock price is either closed below 5% of 21 day EMA or corrected 20% from recent 2 year high.
+
+Note : To Calculate last entry positions % return, by default all positions are getting closed on mentioned end date.
+
+Script parameters :
+
+start date as 01/01/2000 - Constructed from Start Year - 2000, Start Month - 1 Start Date - 1
+End date (mostly current date) Constructed from Values in End Year, End Month, End Date.
+Initial Capital - Defaulted to 100000
+Order Size - 5% of Equity
+Pyramiding - 3 orders
+Commission - 0.2%
+Slippage - 1 tick (Since this strategy exit is on close basis mostly there wont be any slippages)

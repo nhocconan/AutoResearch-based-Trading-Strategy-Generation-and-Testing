@@ -1,0 +1,28 @@
+//@version=3
+strategy("Plot Entry Price", overlay=true)
+
+ep = 0.0
+ep := na(ep[1]) ? na : ep[1]
+
+longCondition = crossover(sma(close, 14), sma(close, 28))
+if (longCondition)
+    ep := close
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(sma(close, 14), sma(close, 28))
+if (shortCondition)
+    ep := close
+    strategy.entry("My Short Entry Id", strategy.short)
+    
+plot(ep)
+
+View in Pine Editor・17 lines
+Use on chart
+1
+6
+1
+12
+17 148
+Hi!
+It's just an answer to question from one TV user: "How can I store the price at which I enter the long or short position, so that I can use it later to calculate a percentage based exit strategy. "
+Hope this would help!

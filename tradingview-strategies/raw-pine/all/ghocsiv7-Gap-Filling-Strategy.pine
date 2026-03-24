@@ -1,0 +1,125 @@
+//@version=4
+strategy("Gap Filling Strategy",overlay=true)
+invert = input(false),clw = input("New Session","Close When:",
+  options=["New Session","New Gap","Reverse Position"])
+//----
+ses = change(time("D")) 
+o = open,c = close
+//----
+upgap = o > high[1] and min(c,o) > max(c[1],o[1])
+dngap = o < low[1] and min(c[1],o[1]) > max(c,o)
+//----
+val = upgap ? max(c[1],o[1]) : min(c[1],o[1])
+lim = valuewhen(ses and (upgap or dngap),val,0)
+//----
+strategy.close_all(clw == "New Session" ? ses :
+  clw == "New Gap" ? ses and (upgap or dngap) : false)
+if invert
+    strategy.entry("Buy", strategy.long, when=ses and upgap)
+    strategy.entry("Sell", strategy.short, when=ses and dngap)
+else
+    strategy.entry("Buy", strategy.long, when=ses and dngap)
+    strategy.entry("Sell", strategy.short, when=ses and upgap)
+if invert
+    strategy.exit("ExitBuy","Buy",stop=lim)
+    strategy.exit("ExitSell","Sell",stop=lim)
+else
+    strategy.exit("ExitBuy","Buy",limit=lim)
+    strategy.exit("ExitSell","Sell",limit=lim)
+//----
+plot(lim,"Limit/Stop",#ff1100,2)
+
+View in Pine Editor・33 lines
+Use on chart
+1.2 K
+11
+44 439
+Gaps are market prices structures that appear frequently in the stock market, and can be detected when the opening price is different from the previous closing price, this is why gaps are also called "opening price jumps". While gaps can occur frequently, some of them are more significant than others, and can be observed when looking at a long term chart.
+
+The following strategy is based on the exploitation of significant gaps occurring during a new session, and posses various options that can return a wide variety of results.
+
+
+Type Of Gaps And Occurence
+
+I'am not a professional when it comes to gaps, but as you know the stock market close for the day, however it is still possible to place orders, your broker will hold them until the market open back. Once the market reopen the broker execute the pending orders, and when many orders where pending the market register really high volume and the price might differ from the precedent close.
+
+Gaps are generally broken down into four types:
+
+
+Common : Gaps occurring within a certain price range, mostly occurs during ranging markets.
+
+Break Away : Gaps breaking a support and resistance, making a new higher high/lower low.
+
+Runaway : Gaps occurring within a trend, followed by a continuation of the trend.
+
+Exhaustion : Gaps occurring at the end of a trend, followed by a reversal.
+
+
+
+As said before, some gaps are more significant than others, the significance of a gap can be determined by comparing the opening price with the previous high/low price and by looking at volume. Significant up gaps will have an opening price greater than the previous high, while significant down gap will have an opening price lower than the previous low with both high volume accompanying them.
+
+After a gap, when the price go back to the point previous to the gap we say that it has been "filled", this characteristic is what will be exploited in this strategy.
+
+Strategy Rules & Logic
+
+In this strategy, the significance of a gap is determined by the position of the opening price relative to the previous high/low and make sure the bar following the gap don't fill it.
+
+When the setting invert is set to false the strategy interpret the detected gaps as being exhaustion gaps, therefore when an up gap occur a short position is opened, when a down gap occur a long position is opened. When invert is set to true gaps are considered to be runaway or break away gaps, therefore the contrary positions are opened. Positions are exited when the gap has been filled, which in the chart is show'n when the price cross the red level who act as either a take profit (invert = false) or as a stop loss (invert = true).
+
+There are various closing conditions available that the user can select from the "close when" setting.
+
+
+New Session : This option close all previous positions when the market is in a new session.
+
+New Gap : This option close all previous position when a new gap has been detected.
+
+Reverse Position : This option close all previous position when a contrary position to the current one is opened. This option would reduce the number of trades.
+
+
+
+
+Testing On Some Stocks
+
+The analysis will be tested in different tech stocks with a main TF of 15 minutes with no spread and commissions applied. Default settings will be used. We'll be making our first analysis using AMD, who has recently formed a full reverse HS pattern, where the neckline has been crossed by the price. (by the way i have a bad feeling about it, hey ! feeling filling ! Lame jokes!)
+
+Profit: $ -12.22
+
+Trades: 272
+
+Profitability: 65.07 %
+
+We can see negative results, with an heavily decreasing balance. Using invert would return positive results.
+
+We will now test the strategy on NVDA, the company is one of the biggest when it comes to the Gpu market.
+
+Profit: $ -215.54
+
+Trades: 297
+
+Profitability: 60.27 %
+
+Not better, using invert would of course create better results. Like AMD the balance is heavily decreasing.
+
+Finally we will test the strategy on Seagate technology, a company mostly known for their mechanical hard drives.
+
+Profit: $ -4.32
+
+Trades: 261
+
+Profitability: 65.9 %
+
+Here the balance does not appear so heavily decreasing and even managed to reach back the initial balance before going down again.
+
+
+Summary
+
+A strategy based on gap filling has been briefly introduced and tested with 3 tech stocks. The results show that using invert option might be better. The advantage of this strategy against ones using technical indicators is that this one does not heavily depend on user settings, which make it way more efficient, this a big advantage of patterns based strategies.
+
+Thx to LucF for helping with the "process_orders_on_close" element, since i had to use closing price i had to remove it tho, was afraid results would differ even more from a more realistic backtest. And thx for those who continuously support me, more cool stuff is coming up.
+
+Thx for reading and i hope you'll have learned something new today !
+
+
+
+
+

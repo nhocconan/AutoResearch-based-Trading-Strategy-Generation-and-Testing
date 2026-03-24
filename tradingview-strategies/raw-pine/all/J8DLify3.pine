@@ -1,0 +1,85 @@
+//@version=5
+strategy("Buy %50 - Sell %50 Strategy", 
+     overlay = true,
+     initial_capital = 100000,          // Başlangıç sermayen
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 50)            // Her işlemde sermayenin %50'siyle işlem aç
+
+// ==========================
+// Basit örnek sinyaller
+// ==========================
+fastMA = ta.sma(close, 10)
+slowMA = ta.sma(close, 30)
+
+buySignal  = ta.crossover(fastMA, slowMA)
+sellSignal = ta.crossunder(fastMA, slowMA)
+
+// ==========================
+// İşlem girişleri
+// ==========================
+if (buySignal)
+    strategy.entry("BUY", strategy.long)     // Sermayenin %50’siyle alım
+
+if (sellSignal)
+    strategy.entry("SELL", strategy.short)   // Sermayenin %50’siyle satım
+
+// ==========================
+// Çıkışlar (örnek stop/take profit)
+// ==========================
+strategy.exit("Exit BUY",  from_entry="BUY",  profit = 200, loss = 100)
+strategy.exit("Exit SELL", from_entry="SELL", profit = 200, loss = 100)
+
+// ==========================
+// Grafik gösterimleri
+// ==========================
+plot(fastMA, color=color.new(color.green, 0), title="Hızlı Ortalama")
+plot(slowMA, color=color.new(color.red, 0),   title="Yavaş Ortalama")
+
+View in Pine Editor・36 lines
+Use on chart
+2
+3
+7
+4 690
+This strategy is built to help investors get into a trend safely and smartly — without rushing and without getting in and out too often.
+
+
+When to Buy:
+
+First Signal – Small Step In (50% Buy)
+
+When the short-term trend (EMA 18) turns positive and goes above the medium trend (EMA 33),
+👉 we buy half of our planned position.
+
+This is an early warning that a new upward trend might be starting.
+
+Second Signal – Full Confidence (Buy other 50%)
+
+If the medium-term trend (EMA 33) also crosses above the long-term (EMA 50),
+👉 we buy the other half of the position.
+
+Now we’re more confident that the trend is real.
+
+When to Sell:
+
+First Warning – Reduce Position (Sell 50%)
+
+If EMA 33 falls below EMA 50,
+👉 we sell half of the position to reduce risk.
+
+Trend Reversal – Exit Completely (Sell the rest)
+
+If EMA 18 also falls below EMA 33,
+👉 we sell the remaining half and leave the trade fully.
+
+
+Why This Strategy?
+
+📉 We don’t jump in all at once.
+→ We wait for confirmation before going full in.
+
+⏳ We stay in the trade as long as the trend is healthy.
+→ No overtrading or reacting to small moves.
+
+📊 We get out slowly, not suddenly.
+→ This helps protect profits and avoid emotional decisions.

@@ -1,0 +1,151 @@
+//@version=5
+strategy("Zero-Lag MA Trend Following", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ユーザー入力
+length = input.int(34, title="Length")
+rr_ratio = input.float(2.0, title="Risk-Reward Ratio", step=0.1)
+
+// カラー設定
+up = input.color(color.green, "Up Label Color")
+dn = input.color(color.red, "Down Label Color")
+
+var box box1 = na
+atr = ta.atr(14)  // ATRでボックスの範囲を計算
+
+emaValue = ta.ema(close, length)
+correction = close + (close - emaValue)
+zlma = ta.ema(correction, length)
+
+signalUp = ta.crossover(zlma, emaValue)  // 上昇シグナル
+signalDn = ta.crossunder(zlma, emaValue)  // 下降シグナル
+
+// フラグでエントリー条件を管理
+var bool longConditionMet = false
+var bool shortConditionMet = false
+
+// ボックス生成ロジック
+if signalUp
+    box1 := box.new(bar_index, zlma, bar_index, zlma - atr, bgcolor=color.new(up, 90))
+    longConditionMet := true  // 上昇シグナル後、ロング条件を満たす
+
+if signalDn
+    box1 := box.new(bar_index, zlma + atr, bar_index, zlma, bgcolor=color.new(dn, 90))
+    shortConditionMet := true  // 下降シグナル後、ショート条件を満たす
+
+if na(box1) == false
+    box.set_right(box1, bar_index + 4)
+
+// エントリー条件：価格が再度ボックスを抜けた場合
+if longConditionMet and ta.crossover(low, box1.get_top()) and barstate.isconfirmed
+    sl = box1.get_bottom()
+    tp = close + (close - sl) * rr_ratio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", from_entry="Long", limit=tp, stop=sl)
+    longConditionMet := false  // 条件をリセット
+
+if shortConditionMet and ta.crossunder(high, box1.get_bottom()) and barstate.isconfirmed
+    sl = box1.get_top()
+    tp = close - (sl - close) * rr_ratio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", from_entry="Short", limit=tp, stop=sl)
+    shortConditionMet := false  // 条件をリセット
+
+// 補助プロット
+plot(zlma, color=color.new(color.blue, 0), linewidth=2)
+plot(emaValue, color=color.new(color.orange, 0), linewidth=2)
+
+// ダイヤモンドシグナルプロット（視覚補助）
+plotshape(series=signalUp, style=shape.diamond, location=location.abovebar, color=color.new(color.green, 50), size=size.small, title="Bullish Signal")
+plotshape(series=signalDn, style=shape.diamond, location=location.belowbar, color=color.new(color.red, 50), size=size.small, title="Bearish Signal")
+
+View in Pine Editor・62 lines
+Use on chart
+7
+1
+2
+1
+16 996
+Script Name: Zero-Lag MA Trend Following Auto-Trading
+
+Purpose and Unique Features:
+This script is designed to implement a trend-following auto-trading strategy by combining the Zero-Lag Moving Average (ZLMA), Exponential Moving Average (EMA), and ATR Bands. To differentiate it from similar scripts, the following key aspects are emphasized:
+
+
+
+Zero-Lag MA (ZLMA):
+
+Responds quickly to price changes, minimizing lag compared to EMA.
+Detects crossovers with EMA and generates Diamond Signals to indicate trend reversals.
+
+
+
+ATR Bands:
+
+Measures market volatility to set stop-loss levels.
+Helps optimize entry points and manage risk effectively.
+
+
+
+Diamond Signals:
+
+A vital visual cue indicating the early stages of trend reversals.
+Green diamonds signal an uptrend, while red diamonds signal a downtrend.
+Each component plays a distinct role, working synergistically to enhance trend detection and risk management. This system doesn’t merely combine indicators but optimizes them for comprehensive trend-following and risk control.
+
+Usage Instructions:
+Entry Conditions:
+
+Long Entry:
+Enter when a green Diamond Signal appears (ZLMA crosses above EMA).
+
+Short Entry:
+Enter when a red Diamond Signal appears (ZLMA crosses below EMA).
+Exit Conditions:
+
+Stop Loss:
+Set at the lower boundary of the ATR band for BUY or the upper boundary for SELL at entry.
+
+Take Profit:
+Automatically executed based on a 1:2 risk-reward ratio.
+
+
+Account Size: ¥100,0000
+Commissions and Slippage: Assumed commission of 90 pips per trade and slippage of 1 pip.
+Risk per Trade: 10% of account equity (adjustable based on risk tolerance).
+
+
+
+Improvements and Original Features:
+While based on open-source code, this script incorporates the following critical enhancements:
+
+
+Diamond Signals from ZLMA and EMA Integration:
+
+Improves entry accuracy with a proprietary trend detection strategy.
+
+ATR Bands Utilization:
+
+
+Adds a volatility-based risk management function.
+
+Optimized Visual Entry Signals:
+
+Includes plotted triangles (▲, ▼) to clearly indicate trend-following entry points.
+
+
+
+Credits:
+This script builds upon indicators developed by ChartPrime, whose innovative approach and insights have enabled a more advanced trend-following strategy. We extend our gratitude for their foundational work.
+
+Additionally, it integrates technical methods based on Zero-Lag Moving Average (ZLMA), EMA, and ATR Bands, leveraging insights from the trading community.
+
+
+
+Chart Display Options:
+The script offers options to toggle the visual signals (Diamond Signals, trend lines, and entry points) on or off, keeping the chart clean while maximizing analytical efficiency.
+
+
+
+Disclaimer:
+This script is provided for educational purposes and past performance does not guarantee future results.
+Use it responsibly with proper risk management.

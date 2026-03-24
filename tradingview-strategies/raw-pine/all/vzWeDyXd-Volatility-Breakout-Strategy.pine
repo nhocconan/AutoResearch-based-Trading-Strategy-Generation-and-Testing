@@ -1,0 +1,134 @@
+//@version=5
+strategy("Volatility Breakout Strategy", overlay=true, default_qty_type= strategy.percent_of_equity, default_qty_value=100)
+
+k = input.float(0.6)
+f_security(_sym, _res, _src) => 
+    request.security(_sym, _res, _src[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+o = f_security(syminfo.tickerid,"D",open)
+h = f_security(syminfo.tickerid,"D",high)
+l = f_security(syminfo.tickerid,"D",low)
+c = f_security(syminfo.tickerid,"D",close)
+
+
+var lp = 0.0
+var sl = 0.0
+var sp = 0.0
+var sl2 = 0.0
+
+if hour[1]-hour>1
+    lp := c+(h-l)*k
+    sl := (l+lp)/2
+    sp := c-(h-l)*k
+    sl2 := (h+sp)/2
+
+longcond = lp < high
+exit = hour[1]-hour>1 or  close < sl
+
+plot(lp,"Long Entry",color=color.yellow)
+plot(sl,"Long StopLoss",color=color.red)
+
+ 
+exit2 = hour[1]-hour>1 or close > sl2
+
+shortcond = sp > low
+
+shortopen = input.bool(false,"Short Postion Open??")
+
+plot(shortopen? sp : na,"Short Entry",color=color.new(color.yellow,50))
+plot(shortopen? sl2 : na,"Short StopLoss",color=color.new(color.red,50))
+
+
+
+
+trend = input.bool(false,"Trend Following?")
+
+longtrend = trend? lp/sl > sl2/sp : true
+shorttrend = trend? lp/sl < sl2/sp : true
+
+
+strategy.entry("Long", strategy.long,comment = "Long", when = longcond and strategy.opentrades == 0 and longtrend)
+strategy.close("Long", comment="Long Exit", when = exit)
+
+if shortopen
+    strategy.entry("Short", strategy.short,comment = "Short", when = shortcond and strategy.opentrades == 0 and shorttrend)
+    strategy.close("Short", comment="Short Exit", when = exit2)
+    
+
+var bg = 0
+if hour[1]-hour>1
+    bg := bg + 1
+
+
+bgcolor(bg/2== math.floor(bg/2) ? color.new(color.blue,95):na)
+
+View in Pine Editor・65 lines
+Use on chart
+5
+1
+7
+29
+14 557
+Feb 20, 2022
+This is a strategy used by Larry R. Williams called Volatility Breakout.
+
+By identifying a strong uptrend that exceeds 'a certain level' on a daily basis as a breakout signal, enter long position, take advantage of long at the the next day's open.
+
+'a certain level (Entry Price)' is calculated by { close[1] + 'k' * high[1]-low[1] }, and applied logarithmic calculation.
+
+Stop loss level is calculated by half of the previous day's Low and Entry Price.
+
+Strategy exit always at UTC+0.
+
+And expressed day session with the background color.
+
+Thanks and hope this helps you.
+
+
+
+(kor)
+이건 Larry R. Williams가 사용하는 변동성 돌파 전략입니다.
+
+특정 수준을 넘는 강한 상승세를 돌파 신호로 파악하여 매수하고, 장시간이 종료될때에 빠르게 수익을 실현하는 전략입니다.
+
+"특정 레벨(진입가)"은 close[1] + 'k' * high[1]-low[1]로 계산되며 로그 계산을 적용했습니다.
+
+손절 레벨은 전일 저가 및 진입 가격의 절반으로 계산됩니다.
+
+전략은 항상 UTC+0에서 종료합니다. ( 한국 기준 오전 9시 )
+
+그리고 배경색으로 일일세션을 표현했습니다.
+
+트뷰에 오픈소스의 래리윌리엄스 변동성전략이 없는것 같아 간단하게나마 만들어 보았습니다. 도움이 되었으면 좋겟워요..
+Feb 20, 2022
+Release Notes
+day session bug at minutes timeframe fixed
+Feb 21, 2022
+Release Notes
+Sorry.. there was a bug in using day timeframe's price.
+i fixed it.
+Feb 21, 2022
+Release Notes
+small bug fix
+Feb 22, 2022
+Release Notes
+1. Add Short position
+
+2. Add trend identification
+
+if turn on 'Apply previous inertia' option:
+
+If the downtrend was stronger on the previous day,
+this is an option that allows only short positions to enter.
+
+inertia is uptrend : 'long entry - long sl' > 'short sl - short entry'
+inertia is downtrend : 'long entry - long sl' < 'short sl - short entry'
+
+
+Feb 22, 2022
+Release Notes
+added information for k
+
+
+Jul 6, 2022
+Release Notes
+Fixed an issue that did not apply to Nifty 50

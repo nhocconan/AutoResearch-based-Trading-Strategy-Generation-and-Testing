@@ -1,0 +1,192 @@
+//@version=5
+strategy("BB Strategy FINAL - NAPRAWIONA", 
+     overlay           = true, 
+     initial_capital   = 40000, 
+     default_qty_type  = strategy.cash, 
+     default_qty_value = 10000)
+
+// ────────────────────────────────────────────────
+// 1. PARAMETRY BB
+// ────────────────────────────────────────────────
+bb_length = input.int(20, "BB okres", group="Bollinger Bands")
+bb_mult   = input.float(2.0, "BB mnożnik", group="Bollinger Bands")
+
+// ────────────────────────────────────────────────
+// --- PEŁNA INTELIGENTNA KONFIGURACJA (Wspólna dla Alertów i Strategii) ---
+prog_1m   = input.float(0.0, "Próg dla 1m (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_5m   = input.float(0.0, "Próg dla 5m (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_15m  = input.float(0.0, "Próg dla 15m (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_1h   = input.float(0.0, "Próg dla 1h (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_4h   = input.float(0.0, "Próg dla 4h (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_1D   = input.float(0.0, "Próg dla 1D (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+prog_def  = input.float(0.0, "Próg dla reszty TF (%)", step=0.01, group="USTAWIENIA INTERWAŁÓW")
+
+// Skrypt sprawdza interwał i przypisuje Twoje wartości
+float aktualny_prog = 0.0
+
+if timeframe.isintraday
+    if timeframe.multiplier == 1
+        aktualny_prog := prog_1m
+    else if timeframe.multiplier == 5
+        aktualny_prog := prog_5m
+    else if timeframe.multiplier == 15
+        aktualny_prog := prog_15m
+    else if timeframe.multiplier == 60
+        aktualny_prog := prog_1h
+    else if timeframe.multiplier == 240
+        aktualny_prog := prog_4h
+    else
+        aktualny_prog := prog_def
+else if timeframe.isdaily
+    aktualny_prog := prog_1D
+else
+    aktualny_prog := prog_def
+
+// PRZYPISANIE: Strategia i Alerty piją z tego samego źródła
+alert_up_pct = aktualny_prog / 100
+alert_dn_pct = aktualny_prog / 100
+breakout_pct = aktualny_prog / 100
+// --- KONFIGURACJA WOLUMENU ---
+v_length = input.int(50, "Średnia wolumenu (okres)", group="Wolumen")
+v_mult   = input.float(2.0, "Czułość (Mnożnik)", step=0.1, group="Wolumen")
+
+// Logika obliczeń
+v_ma = ta.sma(volume, v_length)
+v_std = ta.stdev(volume, v_length)
+
+// Warunek wysokiego wolumenu
+is_huge_vol = volume > (v_ma + v_mult * v_std)
+v_col = close > open ? color.green : color.red
+
+// Rysowanie - Poprawione dla Twojej wersji Pine Script
+plotshape(is_huge_vol, style=shape.triangleup, location=location.abovebar, color=v_col, title="Wolumen V", text="V", textcolor=color.white)
+
+// Kolorowanie świecy na żółto przy dużym wolumenie
+barcolor(is_huge_vol ? color.yellow : na, title="Kolor Wolumenu V")
+
+// 3. OBLICZENIA WSTĘG I POZIOMÓW
+// ────────────────────────────────────────────────
+basis = ta.sma(close, bb_length)
+dev   = bb_mult * ta.stdev(close, bb_length)
+upper = basis + dev
+lower = basis - dev
+
+level_up = upper * (1 + alert_up_pct)
+level_dn = lower * (1 - alert_dn_pct)
+
+// Wykrywanie przecięć (dla stabilności kodu)
+cross_under_basis = ta.crossunder(close, basis)
+cross_over_basis = ta.crossover(close, basis)
+
+// ────────────────────────────────────────────────
+// 4. ZARZĄDZANIE RYZYKIEM (Checkboxy)
+// ────────────────────────────────────────────────
+use_tp         = input.bool(true,  "Włącz Take Profit", group="Zarządzanie Ryzykiem")
+manual_tp_pct  = input.float(2.0,  "Take Profit (%)", step=0.1, group="Zarządzanie Ryzykiem") / 100
+use_sl         = input.bool(true,  "Włącz Stop Loss (Ręczny)", group="Zarządzanie Ryzykiem")
+manual_sl_pct  = input.float(1.0,  "Stop Loss (%)", step=0.1, group="Zarządzanie Ryzykiem") / 100
+
+exit_on_touch  = input.bool(false, "Wyjście: Knot dotyka średniej", group="Zarządzanie Ryzykiem")
+exit_on_close  = input.bool(false, "Wyjście: Świeca zamyka się za średnią", group="Zarządzanie Ryzykiem")
+
+// ────────────────────────────────────────────────
+// 5. WIZUALIZACJA I TRÓJKĄTY (DEBUG)
+// ────────────────────────────────────────────────
+plot(basis, "Basis", color=color.orange)
+plot(upper, "Upper BB", color=color.purple, linewidth=2)
+plot(lower, "Lower BB", color=color.teal,   linewidth=2)
+plot(level_up, "Poziom Alertu Góra", color=color.new(color.red, 40), style=plot.style_linebr)
+plot(level_dn, "Poziom Alertu Dół", color=color.new(color.green, 40), style=plot.style_linebr)
+
+
+// --- START BLOKU SL ---
+use_swing_sl   = input.bool(false, "WŁĄCZ: Stały SL pod Swingiem", group="Zarządzanie Ryzykiem")
+swing_lookback = input.int(5, "Ile świec wstecz szukać swingu", minval=1, group="Zarządzanie Ryzykiem")
+sl_margin      = input.float(0.05, "Margines pod swingiem (%)", step=0.01, group="Zarządzanie Ryzykiem") / 100
+
+var float fixed_sl_price = na
+
+// Logika zapamiętywania ceny - poprawiona składnia
+if strategy.position_size[1] == 0 and strategy.position_size != 0
+    if strategy.position_size > 0
+        fixed_sl_price := ta.lowest(low, swing_lookback)[1] * (1 - sl_margin)
+    else
+        fixed_sl_price := ta.highest(high, swing_lookback)[1] * (1 + sl_margin)
+
+if strategy.position_size == 0
+    fixed_sl_price := na
+
+// Rysowanie prostej kreski
+plot(use_swing_sl ? fixed_sl_price : na, "Poziom SL", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// Napis z ceną - jedna czysta linia
+if barstate.islast and not na(fixed_sl_price)
+    label.new(bar_index, fixed_sl_price, "SL: " + str.tostring(fixed_sl_price, "#.#####"), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+// --- KONIEC BLOKU SL ---
+
+warunek_long  = low < level_dn
+warunek_short = high > level_up
+
+plotshape(warunek_long,  "DEBUG LONG",  shape.triangleup,   location.belowbar, color.blue, size=size.small)
+plotshape(warunek_short, "DEBUG SHORT", shape.triangledown, location.abovebar, color.red,  size=size.small)
+
+// ────────────────────────────────────────────────
+//// 6. LOGIKA WEJŚCIA I WYJŚCIA
+// ────────────────────────────────────────────────
+if (high > upper * (1 + breakout_pct))
+    strategy.entry("Short", strategy.short)
+
+if (low < lower * (1 - breakout_pct))
+    strategy.entry("Long", strategy.long)
+
+// Obliczanie poziomów SL i TP raz, aby kod był czystszy
+float long_sl = strategy.position_avg_price * (1 - manual_sl_pct)
+float long_tp = strategy.position_avg_price * (1 + manual_tp_pct)
+float short_sl = strategy.position_avg_price * (1 + manual_sl_pct)
+float short_tp = strategy.position_avg_price * (1 - manual_tp_pct)
+
+// Zamykanie pozycji LONG
+if strategy.position_size > 0
+    // Wybór limitu: jeśli "Knot" jest włączony, użyj Basis. Jeśli nie, użyj TP.
+    float target_limit = exit_on_touch ? basis : (use_tp ? long_tp : na)
+    
+    // Jeden, konkretny rozkaz wyjścia dla Longa
+    strategy.exit("ExL", "Long", stop=use_sl ? long_sl : na, limit=target_limit, comment=exit_on_touch ? "Knot" : "TP")
+    
+    // Dodatkowe wyjście na zamknięcie świecy (jeśli zaznaczone)
+    if exit_on_close and ta.crossunder(close, basis)
+        strategy.close("Long", comment="Świeca")
+
+// Zamykanie pozycji SHORT
+if strategy.position_size < 0
+    // Wybór limitu: jeśli "Knot" jest włączony, użyj Basis. Jeśli nie, użyj TP.
+    float target_limit_s = exit_on_touch ? basis : (use_tp ? short_tp : na)
+    
+    // Jeden, konkretny rozkaz wyjścia dla Shorta
+    strategy.exit("ExS", "Short", stop=use_sl ? short_sl : na, limit=target_limit_s, comment=exit_on_touch ? "Knot" : "TP")
+    
+    // Dodatkowe wyjście na zamknięcie świecy (jeśli zaznaczone)
+    if exit_on_close and ta.crossover(close, basis)
+        strategy.close("Short", comment="Świeca")
+// ────────────────────────────────────────────────
+// 7. ALERT POWIADOMIENIE
+// ────────────────────────────────────────────────
+diff_up_bb = ((high - upper) / upper) * 100
+diff_dn_bb = ((lower - low) / lower) * 100
+
+if warunek_short
+    msg_up = "ALARM GORA (TF: " + str.tostring(timeframe.period) + ") | Odchyłka: " + str.tostring(diff_up_bb, "#.##") + "% (Prog: " + str.tostring(aktualny_prog) + "%)"
+    alert(msg_up, alert.freq_once_per_bar_close)
+
+if warunek_long
+    msg_dn = "ALARM DOL (TF: " + str.tostring(timeframe.period) + ") | Odchyłka: " + str.tostring(diff_dn_bb, "#.##") + "% (Prog: " + str.tostring(aktualny_prog) + "%)"
+    alert(msg_dn, alert.freq_once_per_bar_close)
+
+View in Pine Editor・183 lines
+Use on chart
+4
+1
+905
+strategia BB plus świece volumenowe. Wybicie procentowe poza wstęgi bolingera ustawiane ręcznie plus stochastic RSI.
+
+BB Strategy + Volume Spikes. Manual percentage breakout outside Bollinger Bands with Stochastic RSI filter.

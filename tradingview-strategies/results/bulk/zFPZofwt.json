@@ -1,0 +1,11 @@
+{
+  "chart_url": "https://www.tradingview.com/script/zFPZofwt/",
+  "name": "Super 8 - 30M BTC",
+  "pine_file": "raw-pine/bulk/zFPZofwt.pine",
+  "classification": "unsupported",
+  "timeframe": "30m",
+  "strategy_name": "zFPZofwt",
+  "reason": "depends on TradingView alert-specific behavior",
+  "adaptations": [],
+  "python_code": ""
+}

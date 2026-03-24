@@ -1,0 +1,55 @@
+//@version=5
+strategyTitle = "Signal Tester (v1.3)"
+strategy(strategyTitle, overlay=true, calc_on_every_tick=false, initial_capital=100, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=5)
+
+// Date condition inputs
+startDate = timestamp(year(timenow), month(timenow), dayofmonth(timenow), hour(timenow), minute(timenow)-3)
+// startDate = input.time(title="Date Start", defval=timestamp("11 October 2023 11:00 +0000"), group="Dates")
+timeCondition = time >= startDate 
+
+// Execute strategy
+longCondition = strategy.position_size <= 0 and timeCondition
+if (longCondition)
+    strategy.entry(id="long", direction=strategy.long)
+
+closeLongCondition = strategy.position_size > 0
+if (closeLongCondition)
+    strategy.close(id="long")
+
+
+messageToShow = ""
+if (timeframe.period != "1")
+    messageToShow := "Please switch your chart to the 1 minute timeframe before using this test strategy!"
+else
+    messageToShow := "Now set up the Strategy Alert to send trading signals. Turn off the Alert after your testing is done."
+
+var infoLabel = label.new(x=bar_index + 2, y=close, style=label.style_label_left, size=size.large, color=#ffeecc, textcolor=color.black, text=messageToShow)
+label.set_x(infoLabel, bar_index + 2)
+label.set_y(infoLabel, close)
+
+View in Pine Editor・28 lines
+Use on chart
+1 K
+5 955
+Aug 28, 2024
+This is an automation test Strategy, which helps you to get Strategy Alerts quickly on the 1m chart.
+
+This is useful when you want to start automating Strategies but first you want to see if the connection between TradingView and your automation tool works properly.
+
+This Strategy sends LONG Buy/Sell signals every 1 minute so you don't have to wait for a long time to see if your integration with an automation tool works.
+
+How it works:
+
+It works on the 1m chart
+
+Every 1 minute it will send a BUY or a SELL signal (alternating between them forever)
+
+Oct 10, 2024
+Release Notes
+Made it so that the strategy starts trading 3 minutes ago, so that you can also test absolute order sizes by setting the "Initial capital" to (a little lower than) your capital on the exchange.
+
+This way you can be sure the Signal Tester is not sending too large quantities to purchase.
+
+Also set the default qty value to 100% otherwise it can happen that you are confused why the Signal Tester is sending very small quantities per trade. Now it's sending what you expect it to.
+
+Happy testing :)

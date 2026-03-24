@@ -1,0 +1,11 @@
+//@version=4
+MAPeriod=##input(defval=50,type='INPUT_INTEGER',##id='in_0')
+MAResolution=##input(defval='00 Current',type='INPUT_STRING',##id='in_3')
+MA2Period=##input(defval=100,type='INPUT_INTEGER',##id='in_6')
+MA2Resolution=##input(defval='00 Current',type='INPUT_STRING',##id='in_9')
+MA3Period=##input(defval=200,type='INPUT_INTEGER',##id='in_12')
+MA3Resolution=##input(defval='00 Current',type='INPUT_STRING',##id='in_15')
+HighlightInclusion=##input(defval=true,type='INPUT_BOOL',##id='in_18')
+##root(root_metainfo,rm_0,((HighlightInclusion==false)?0:((MAResolution=='00 Current')?MAPeriod:0)),input__integer)
+##root(root_metainfo,rm_1,((HighlightInclusion==false)?0:((MA2Resolution=='00 Current')?MA2Period:0)),input__integer)
+##root(root_metainfo,rm_2,((HighlightInclusion==false)?0:((MA3Resolution=='00 Current')?MA3Period:0)),input__integer)

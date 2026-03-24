@@ -1,0 +1,29 @@
+//@version=5
+strategy("Options test Daily Long 08:30 → Exit 08:00", overlay=true, margin_long=100, margin_short=100)
+
+// Get current time in UTC
+currentHour   = hour(time, "UTC")
+currentMinute = minute(time, "UTC")
+
+// Entry condition: exactly 08:30 UTC
+enterLong = (currentHour == 8 and currentMinute == 30)
+
+// Exit condition: exactly 08:00 UTC
+exitLong = (currentHour == 8 and currentMinute == 0)
+
+// Submit orders
+if (enterLong)
+    strategy.entry("Long", strategy.long)
+
+if (exitLong)
+    strategy.close("Long")
+
+View in Pine Editor・19 lines
+Use on chart
+9
+552
+This strategy allows to "backtest" 0DTE option straddles. It "buys" right after the expiration time and sells next day on expiration. Once you run the script, you can download the excel file with the results of each trade that will give you the followng information:
+- potential move at expiry
+- largest drawups and drawdowns
+
+With this information you can manually backtest your options strategy on diffrent assets.

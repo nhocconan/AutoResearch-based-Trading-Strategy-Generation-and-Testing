@@ -1,0 +1,74 @@
+//@version=6
+strategy("Pin Bar Reversal Strategy", overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=false)
+
+// ── INPUTS ───────────────────────────────────────────────────────────────
+trendLen     = input.int(50,    "Trend SMA Length",            minval=1)
+maxBodyPct   = input.float(30,  "Max Body (% of range)",       minval=1) / 100
+minWickPct   = input.float(66,  "Min Wick (% of range)",       minval=1) / 100
+atrLen       = input.int(14,    "ATR Length",                  minval=1)
+stopMult     = input.float(1.0, "ATR Stop‑Loss Multiplier",     step=0.1)
+tpMult       = input.float(1.5, "ATR Take‑Profit Multiplier",   step=0.1)
+minATR       = input.float(0.0015, "Minimum ATR to Enter",   step=0.001)
+
+
+// ── CALCULATIONS ────────────────────────────────────────────────────────
+// Trend filter: price above/below a simple moving average
+trendSMA     = ta.sma(close, trendLen)
+inUpTrend    = close > trendSMA
+inDownTrend  = close < trendSMA
+
+// Candle geometry
+cRange       = high - low
+cBody        = math.abs(close - open)
+lowerWick    = math.min(open, close) - low
+upperWick    = high - math.max(open, close)
+
+// Identify pin bars
+bullPin      = inUpTrend and cBody <= maxBodyPct * cRange and lowerWick >= minWickPct * cRange
+bearPin      = inDownTrend and cBody <= maxBodyPct * cRange and upperWick >= minWickPct * cRange
+
+// ATR for dynamic stops/targets
+atrVal       = ta.atr(atrLen)
+
+// ── ENTRIES & EXITS ─────────────────────────────────────────────────────
+if bullPin and strategy.position_size == 0 and (atrVal > minATR)
+    stopLevel   = low  - atrVal * stopMult
+    profitLevel = close + atrVal * tpMult
+    strategy.entry("Long",  strategy.long)
+    strategy.exit ("Exit Long", from_entry="Long",
+                   stop=stopLevel, limit=profitLevel)
+
+if bearPin and strategy.position_size == 0 and (atrVal > minATR)
+    stopLevel   = high + atrVal * stopMult
+    profitLevel = close - atrVal * tpMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit ("Exit Short", from_entry="Short",
+                   stop=stopLevel, limit=profitLevel)
+
+//plot(ta.sma(close,trendLen))
+plot(ta.atr(atrLen))
+
+View in Pine Editor・52 lines
+Use on chart
+2
+2
+1 163
+Strategy: Pin Bar Reversal with Trend Filter
+One effective high-probability setup is a Pin Bar reversal in the direction of the larger trend. A pin bar is a candlestick with a tiny body and a long wick, signaling a sharp rejection of price
+
+By itself, a pin bar often marks a potential reversal, but not all pin bars lead to profitable moves. To boost reliability, this strategy trades pin bars only when they align with the prevailing trend – for example, taking a bullish pin bar while the market is in an uptrend, or a bearish pin bar in a downtrend. The trend bias can be determined by a long-term moving average or higher timeframe analysis.
+
+Why it works: In an uptrend, a bullish pin bar after a pullback often indicates that sellers tried to push price down but failed, and buyers are resuming control. Filtering for pin bars near key support or moving averages further improves odds of success. This aligns the entry with both a strong price pattern and the dominant market direction, yielding a higher win rate. The pin bar’s own structure provides natural levels for stop and target placement, keeping risk management straightforward.
+
+Example Setup:
+USDCHF - 4 Hour Chart
+Trend SMA 12
+Max Body - 34
+Min Wick - 66
+ATR -15
+ATR Stop Loss Multiplier - 2.3
+ATR Take Profit Multiplier - 2.9
+Minimum ATR to Enter - 0.0025

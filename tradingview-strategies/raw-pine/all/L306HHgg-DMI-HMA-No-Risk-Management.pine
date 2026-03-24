@@ -1,0 +1,83 @@
+//@version=4
+strategy(title="DMI + HMA - No Risk Management", overlay = false, pyramiding=1, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.025)
+
+//Inputs
+hullLen1 = input(title="Hull 1 length", type=input.integer, defval=29)
+hullLen2 = input(title="Hull 2 length", type=input.integer, defval=2)
+len = input(title="Length for DI", type=input.integer, defval=76)
+
+//Calculations
+TrueRange = max(max(high-low, abs(high-nz(close[1]))), abs(low-nz(close[1])))
+DirectionalMovementPlus = high-nz(high[1]) > nz(low[1])-low ? max(high-nz(high[1]), 0): 0
+DirectionalMovementMinus = nz(low[1])-low > high-nz(high[1]) ? max(nz(low[1])-low, 0): 0
+
+SmoothedTrueRange = 0.0
+SmoothedTrueRange := nz(SmoothedTrueRange[1]) - (nz(SmoothedTrueRange[1])/len) + TrueRange
+SmoothedDirectionalMovementPlus = 0.0
+SmoothedDirectionalMovementPlus := nz(SmoothedDirectionalMovementPlus[1]) - (nz(SmoothedDirectionalMovementPlus[1])/len) + DirectionalMovementPlus
+SmoothedDirectionalMovementMinus = 0.0
+SmoothedDirectionalMovementMinus := nz(SmoothedDirectionalMovementMinus[1]) - (nz(SmoothedDirectionalMovementMinus[1])/len) + DirectionalMovementMinus
+
+//Indicators
+fasthull = hma(close, hullLen1)
+slowhull = hma(close, hullLen2)
+DIPlus = SmoothedDirectionalMovementPlus / SmoothedTrueRange * 100
+DIMinus = SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100
+DX = abs(DIPlus-DIMinus) / (DIPlus+DIMinus)*100
+ADX = sma(DX, len)
+
+//Plots
+plot(DIPlus, color=color.green, title="DI+")
+plot(DIMinus, color=color.red, title="DI-")
+plot(ADX, color=color.black, title="ADX")
+
+//conditions
+go_long = crossover(DIPlus, DIMinus) and fasthull > slowhull //crossover(fasthull, slowhull) and DIPlus > DIMinus
+go_short = crossover(DIMinus, DIPlus) and fasthull < slowhull //crossunder(fasthull, slowhull) and DIMinus > DIPlus
+
+//Entry
+if strategy.position_size < 0 or strategy.position_size == 0
+    strategy.order("long", strategy.long, when=go_long)
+
+if strategy.position_size > 0 or strategy.position_size == 0
+    strategy.order("Short", strategy.short, when=go_short)
+
+View in Pine Editor・45 lines
+Use on chart
+3
+5
+6
+1
+11 088
+DMI (Directional Movement Index) and HMA (Hull Moving Average)
+
+The DMI and HMA make a great combination, The DMI will gauge the market direction, while the HMA will add confirmation to the trend strength.
+
+What is the DMI?
+The DMI is an indicator that was developed by J. Welles Wilder in 1978. The Indicator was designed to identify in which direction the price is moving. This is done by comparing previous highs and lows and drawing 2 lines.
+1. A Positive movement line
+2. A Negative movement line
+
+A third line can be added, which would be known as the ADX line or Average Directional Index. This can also be used to gauge the strength in which direction the market is moving.
+
+When the Positive movement line (DI+) is above the Negative movement line (DI-) there is more upward pressure. Ofcourse visa versa, when the DI- is above the DI+ that would indicate more downwards pressure.
+
+Want to know more about HMA? Check out one of our other published scripts
+https://www.tradingview.com/script/5BJ5tnca-Hull-Crossover-Strategy-no-TP-or-SL/
+
+What is this strategy doing?
+We are first waiting for the DMI to cross in our favoured direction, after that, we wait for the HMA to signal the entry. Without both conditions being true, no trade will be made.
+
+Long Entries
+1. DI+ crosses above DI-
+2. HMA line 1 is above HMA line 2
+
+Short Entries
+1. DI- Crosses above DI+
+2. HMA line 1 is below HMA lilne 2
+
+Its as simple as that.
+
+Conclusion
+While this strategy does have its downsides, that can be reduced by adding some risk manegment into the script. In general the trade profitability is above average, And the max drawdown is at a minimum.
+The settings have been optimised to suite BTCUSDT PERP markets. Though with small adjustments it can be used on many assets!

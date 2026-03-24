@@ -1,0 +1,83 @@
+//@version=2
+strategy("GoldFinger .007", title = "Gold Finger .007", overlay=true)
+
+//©2016 Boffin Hollow Lab
+//Author: Craig Harris
+
+// “I am a poet in deeds--not often in words.”― Ian Fleming, Goldfinger 
+
+//color the background by days of the week
+
+c = navy
+
+
+bgColor = (dayofweek == monday)    ? color(c, 94) :
+          (dayofweek == tuesday)   ? color(c, 90) :
+          (dayofweek == wednesday) ? color(c, 86) :
+          (dayofweek == thursday)  ? color(c, 84) :
+          (dayofweek == friday)    ? color(c, 82) : na
+          
+          
+bgcolor(color = bgColor)
+
+//input parms and variables maxxed for gold 
+
+length = input(title = "days back", defval=11, step = 1)
+doubledown = input(title = "1 = 2 contracts if last winner", defval=0, step = 1)
+momamtx = input(title = "length momentum amt", defval=1.5, step = .25)
+momamts = input (title = "one day momentum amt", defval= 0.20, step = .10)
+tgtt = input(title = "profit target", defval=1000, step = 50)
+mloss = input (title = "Maximum Loss",defval=-1400, step=50)
+price = close
+
+//momentuminator function subtracts close some length ago from current close
+
+momentum(seria, length) =>
+    mom = seria - seria[length]
+    mom
+    
+//trade 2 contracts if the last trade was a winner    
+contracts = (doubledown == 1) ? (strategy.wintrades - strategy.wintrades[1]   +  1): 1
+
+    
+// give it to a mom    momz is full length mom1 is price compared to one day ago
+
+momz = momentum(price, length)
+mom1 = momentum( momz, 1)
+
+if (momz > momamtx and mom1 > momamts)
+    strategy.entry("MomLE", strategy.long, qty = contracts, stop=high+syminfo.mintick, comment="MomLE")
+else
+    strategy.cancel("MomLE")
+
+strategy.close_all( when = strategy.openprofit > (tgtt))    
+//strategy.close("MomLE", when = strategy.openprofit > (tgtt))  
+//strategy.close("MomSE", when = strategy.openprofit > (tgtt))     
+
+if (momz < momamtx and mom1 < momamts)
+    strategy.entry("MomSE", strategy.short, qty = contracts, stop=low-syminfo.mintick, comment="MomSE")
+else
+    strategy.cancel("MomSE")
+    
+strategy.close_all( when = strategy.openprofit > (tgtt))     
+//strategy.close("MomLE", when = strategy.openprofit > (tgtt))    
+//strategy.close("MomSE", when = strategy.openprofit > (tgtt)) 
+
+strategy.close_all( when = strategy.openprofit < (mloss))
+
+//strategy.close("MomLE", when = strategy.openprofit < (mloss))    
+//strategy.close("MomSE", when = strategy.openprofit < (mloss))    
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr, transp = 93)
+
+View in Pine Editor・71 lines
+Use on chart
+9
+9
+4 277
+Goldfinger.
+He's the man, the man with the midas touch.
+A spider's touch.
+Such a cold finger.
+Beckons you to enter his web of sin
+But don't go in.

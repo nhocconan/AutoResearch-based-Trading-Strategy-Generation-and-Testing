@@ -1,0 +1,73 @@
+//@version=6
+strategy("Chaikin Momentum Scalper", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Inputs
+fastLength = input.int(3, minval=1, title="Chaikin Fast Length")
+slowLength = input.int(10, minval=1, title="Chaikin Slow Length")
+smaLength = input.int(200, minval=1, title="SMA Length")
+atrLength = input.int(14, minval=1, title="ATR Length")
+atrMultiplierSL = input.float(1.5, minval=0.1, title="ATR Multiplier for Stop-Loss")
+atrMultiplierTP = input.float(2.0, minval=0.1, title="ATR Multiplier for Take-Profit")
+
+// Calculations
+accDist = ta.accdist
+chaikin = ta.ema(accDist, fastLength) - ta.ema(accDist, slowLength)
+sma = ta.sma(close, smaLength)
+atr = ta.atr(atrLength)
+
+// Conditions
+longCondition = ta.crossover(chaikin, 0) and close > sma
+shortCondition = ta.crossunder(chaikin, 0) and close < sma
+
+// Entry and Exit
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=close - atr * atrMultiplierSL, limit=close + atr * atrMultiplierTP)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=close + atr * atrMultiplierSL, limit=close - atr * atrMultiplierTP)
+
+// Plotting
+plot(sma, title="200 SMA", color=color.orange)
+plot(chaikin, title="Chaikin Oscillator", color=color.blue)
+hline(0, title="Zero Line", color=color.gray, linestyle=hline.style_dashed)
+
+View in Pine Editor・34 lines
+Use on chart
+2
+0
+1 184
+🎯 Overview
+The Chaikin Momentum Scalper is a powerful trading strategy designed to identify momentum shifts in the market and ride the trend for maximum profits. This strategy is ideal for trading the USD/JPY currency pair on a 15-minute chart, making it perfect for high-frequency trading (HFT). Whether you’re starting with a small account of $1,000 or managing a larger portfolio, this strategy can scale to suit your needs.
+________________________________________
+🔑 How the Strategy Works
+Here’s how the Chaikin Momentum Scalper identifies trade opportunities:
+1️⃣ Momentum Detection
+The core of this strategy is the Chaikin Oscillator, a tool that measures the flow of money into or out of a market. It helps us understand whether buyers (bulls) or sellers (bears) are in control.
+• When the indicator crosses above zero, it signals that buying momentum is picking up – a buying opportunity.
+• When the indicator crosses below zero, it signals that selling momentum is increasing – a selling opportunity.
+2️⃣ Trend Confirmation
+We don’t just jump into trades based on momentum alone. We also use a 200-period simple moving average (SMA) to confirm the overall trend.
+• If the price is above the SMA, it confirms an uptrend, so we look for buy trades.
+• If the price is below the SMA, it confirms a downtrend, so we look for sell trades.
+This way, we align our trades with the broader market direction for higher success rates.
+3️⃣ Volatility & Risk Management
+We use a tool called the Average True Range (ATR) to measure market volatility. This helps us:
+• Set a stop-loss (where we’ll exit the trade if the market moves against us) at a safe distance from our entry point.
+• Set a take-profit (where we’ll lock in profits) at a target that’s larger than the stop-loss, ensuring a good reward-to-risk ratio.
+This approach adapts to the market’s behavior, tightening stops in calmer conditions and widening them when volatility increases.
+________________________________________
+📈 Why This Strategy Works
+✅ It combines momentum and trend-following principles, increasing the chances of trading in the right direction.
+✅ It dynamically adjusts risk levels based on market volatility, keeping losses small and profits big.
+✅ It’s scalable – perfect for both small accounts (like $1,000) and larger, corporate-sized portfolios.
+✅ It has been deep-backtested on USD/JPY 15-minute charts, proving its consistency across different market conditions.
+________________________________________
+📝 Important Notes
+📌 This strategy is best used for USD/JPY on a 15-minute chart, making it great for high-frequency trading while you continue to build and refine your trading system.
+📌 It’s designed to work on both small ($1,000+) and large accounts, so it can grow with you as your capital increases.
+📌 While it has passed deep backtesting on this pair and timeframe, remember that no strategy is perfect. It’s crucial to test it yourself, start with a demo account, and apply proper risk management before trading real money.
+🌟 Final Thoughts
+The Chaikin Momentum Scalper is a solid, adaptable trading approach combining momentum, trend direction, and volatility awareness. If you’re looking for a strategy to kick-start your trading journey—or to add to your existing system—it offers a strong foundation.
+

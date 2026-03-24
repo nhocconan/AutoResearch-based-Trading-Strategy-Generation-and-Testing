@@ -1,0 +1,45 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 03/07/2018
+// This script shows a high and low period value.
+//    Width - width of lines
+//    SelectPeriod - Day or Week or Month and etc.
+//    LookBack - Shift levels 0 - current period, 1 - previous and etc.
+//
+// You can change long to short in the Input Settings
+// WARNING:
+// - For purpose educate only
+// - This script to change bars colors.
+////////////////////////////////////////////////////////////
+strategy(title="High and Low Levels Backtest", shorttitle="HL Levels", overlay = true)
+SelectPeriod = input("D", defval="D", type=string)
+LookBack = input(1,  minval=0)
+reverse = input(false, title="Trade reverse")
+xHigh  = security(tickerid, SelectPeriod, high[LookBack])
+xLow   = security(tickerid, SelectPeriod, low[LookBack])
+vS1 = xHigh
+vR1 = xLow
+pos = iff(close > vR1, 1,
+       iff(close < vS1, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue )
+
+View in Pine Editor・30 lines
+Use on chart
+5
+0
+3 056
+This script shows a high and low period value.
+Width - width of lines
+SelectPeriod - Day or Week or Month and etc.
+LookBack - Shift levels 0 - current period, 1 - previous and etc.
+
+You can change long to short in the Input Settings
+WARNING:
+- For purpose educate only
+- This script to change bars colors.

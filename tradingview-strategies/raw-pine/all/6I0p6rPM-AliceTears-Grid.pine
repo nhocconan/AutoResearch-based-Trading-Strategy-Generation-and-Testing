@@ -1,0 +1,390 @@
+//@version=6
+strategy('AliceTears Grid', overlay = true, process_orders_on_close = true, pyramiding = 100, initial_capital = 1000, commission_value = 0.025, default_qty_type = strategy.cash, default_qty_value = 10)
+
+// ==========================
+// ======= INPUTS ===========
+// ==========================
+grp_strat = 'Strategy Settings'
+i_reversalMode = input.bool(true, 'Entry Reversal Mode', group = grp_strat)
+i_stepPercent = input.float(1.0, 'Grid Step (%)', minval = 0.1, step = 0.1, group = grp_strat)
+i_maxSteps = input.int(20, 'Max Grid Lines per Side', group = grp_strat)
+
+grp_exit = 'Exit Logic'
+i_tpReversal = input.bool(true, 'TP Reversal Mode', group = grp_exit)
+i_useTrailing = input.bool(true, 'Use Trailing TP', group = grp_exit)
+i_trailOffset = input.float(1, 'Trailing Offset (%)', step = 0.1, group = grp_exit)
+
+grp_safe = 'Safety'
+i_useStopLoss = input.bool(false, 'Use Manual Stop Loss', group = grp_safe)
+i_slMultiplier = input.float(2.0, 'Stop Loss Multiplier', group = grp_safe)
+i_closeEOD = input.bool(false, 'Force Close at End of Session', group = grp_safe)
+
+grp_time = 'Session & Timezone'
+i_useDateFilter = input.bool(false, 'Use Date Range', group = grp_time)
+i_startDate = input.time(timestamp('01 Jan 2024 00:00 +0000'), 'Start Date', group = grp_time)
+i_endDate = input.time(timestamp('01 Jan 2030 00:00 +0000'), 'End Date', group = grp_time)
+
+i_useSession = input.bool(false, 'Use Custom Session', group = grp_time)
+i_marketSession = input.session('0930-1600', 'Session Hours', group = grp_time, tooltip = 'Format: HHMM-HHMM')
+// UPDATED: Float input for Timezone
+i_utcOffset = input.float(0.0, 'UTC Timezone Offset', minval = -12.0, maxval = 14.0, step = 0.25, group = grp_time, tooltip = 'Example: New York = -5 (or -4 DST), India = 5.5, Thailand = 7')
+
+
+// ==========================
+// ====== CALCULATIONS ======
+// ==========================
+[dOpen, dHigh, dLow, dTime] = request.security(syminfo.tickerid, 'D', [open, high, low, time], lookahead = barmerge.lookahead_on)
+
+// --- 1. TIMEZONE HELPER ---
+// Converts float (e.g., 5.5) to GMT String ("GMT+0530")
+offsetToZone(off) =>
+    hrs = math.floor(math.abs(off))
+    mins = math.round((math.abs(off) - hrs) * 60)
+    sign = off >= 0 ? '+' : '-'
+    // Manual zero padding
+    hStr = str.tostring(hrs)
+    hStr := str.length(hStr) < 2 ? '0' + hStr : hStr
+    mStr = str.tostring(mins)
+    mStr := str.length(mStr) < 2 ? '0' + mStr : mStr
+    'GMT' + sign + hStr + mStr
+
+// Get the formatted Timezone String
+tzString = offsetToZone(i_utcOffset)
+
+// --- 2. SESSION STATE LOGIC ---
+// We pass the calculated Timezone String to the time() function
+inSessionString = time(timeframe.period, i_marketSession, tzString)
+isInSession = i_useSession ? not na(inSessionString) : true
+
+// Detect Start of Session
+isSessionStart = false
+if i_useSession
+    isSessionStart := isInSession and (na(inSessionString[1]) or dayofmonth(time) != dayofmonth(time[1]))
+    isSessionStart
+else
+    isSessionStart := dayofmonth(time) != dayofmonth(time[1])
+    isSessionStart
+
+// --- 3. CALCULATE SESSION DURATION (For Drawing) ---
+// Instead of guessing the timestamp, we calculate length in ms: (EndHour - StartHour)
+getSessionDuration() =>
+    int dur = 86400000 // Default 24h
+    if i_useSession
+        array<string> parts = str.split(i_marketSession, '-')
+        if array.size(parts) >= 2
+            // Parse Start
+            sStr = array.get(parts, 0)
+            sH = str.tonumber(str.substring(sStr, 0, 2))
+            sM = str.tonumber(str.substring(sStr, 2, 4))
+            startMins = sH * 60 + sM
+
+            // Parse End
+            eStr = array.get(parts, 1)
+            eH = str.tonumber(str.substring(eStr, 0, 2))
+            eM = str.tonumber(str.substring(eStr, 2, 4))
+            endMins = eH * 60 + eM
+
+            // Calculate Diff
+            diffMins = 0
+            if endMins >= startMins
+                diffMins := int(endMins - startMins)
+                diffMins
+            else // Overnight session (e.g. 2200 to 0200)
+                diffMins := int(1440 - startMins + endMins)
+                diffMins
+
+            dur := diffMins * 60 * 1000
+            dur
+    dur
+
+// --- 4. STORE SESSION VARIABLES ---
+var float sessionBasePrice = na
+var int sessionStartTime = na
+var int sessionEndTime = na
+var int sessionLen = na
+
+if isSessionStart
+    sessionBasePrice := i_useSession ? open : dOpen
+    sessionStartTime := time
+    sessionLen := getSessionDuration()
+    sessionEndTime := sessionStartTime + sessionLen
+    sessionEndTime
+
+// ==========================
+// ======= DRAWING ==========
+// ==========================
+var array<line> gridLines = array.new_line()
+drawLine(t1, p1, t2, p2, col) =>
+    l = line.new(x1 = t1, y1 = p1, x2 = t2, y2 = p2, xloc = xloc.bar_time, color = col, width = 3)
+    array.push(gridLines, l)
+
+if array.size(gridLines) > 400
+    for i = 0 to 50 by 1
+        line.delete(array.shift(gridLines))
+
+if isSessionStart
+    // Draw Base (Blue)
+    drawLine(sessionStartTime, sessionBasePrice, sessionEndTime, sessionBasePrice, color.blue)
+
+    // Draw UP Grid
+    for i = 1 to i_maxSteps by 1
+        p = sessionBasePrice * (1 + i_stepPercent / 100 * i)
+        drawLine(sessionStartTime, p, sessionEndTime, p, color.new(color.teal, 50))
+        if p > dHigh
+            break
+
+    // Draw DOWN Grid
+    for i = 1 to i_maxSteps by 1
+        p = sessionBasePrice * (1 - i_stepPercent / 100 * i)
+        drawLine(sessionStartTime, p, sessionEndTime, p, color.new(color.red, 50))
+        if p < dLow
+            break
+
+// ==========================
+// ====== TRADING LOGIC =====
+// ==========================
+inDateRange = i_useDateFilter ? time >= i_startDate and time <= i_endDate : true
+canTrade = inDateRange and isInSession
+
+// Reset Arrays
+var array<bool> triggeredShorts = array.new_bool(i_maxSteps + 1, false)
+var array<bool> triggeredLongs = array.new_bool(i_maxSteps + 1, false)
+var array<bool> breachedShorts = array.new_bool(i_maxSteps + 1, false)
+var array<bool> breachedLongs = array.new_bool(i_maxSteps + 1, false)
+
+if isSessionStart
+    array.fill(triggeredShorts, false)
+    array.fill(triggeredLongs, false)
+    array.fill(breachedShorts, false)
+    array.fill(breachedLongs, false)
+
+calcStop(isLong, price) =>
+    float sl = na
+    if i_useStopLoss
+        dist = price * i_stepPercent / 100 * i_slMultiplier
+        sl := isLong ? price - dist : price + dist
+        sl
+    sl
+
+// ------------------------------------
+// 1. SHORT SIDE
+// ------------------------------------
+for i = 1 to i_maxSteps by 1
+    entryPrice = sessionBasePrice * (1 + i_stepPercent / 100 * i)
+    targetPrice = sessionBasePrice * (1 + i_stepPercent / 100 * (i - 1))
+    slPrice = calcStop(false, entryPrice)
+
+    idShort = 'Short_' + str.tostring(i)
+    bool hasTraded = array.get(triggeredShorts, i)
+    bool entryTriggered = false
+
+    if not hasTraded and canTrade
+        if i_reversalMode
+            if close[1] > entryPrice
+                array.set(breachedShorts, i, true)
+            if array.get(breachedShorts, i) and close < entryPrice
+                strategy.entry(idShort, strategy.short, comment = 'RevSell ' + str.tostring(i) + '%')
+                array.set(triggeredShorts, i, true)
+                entryTriggered := true
+                entryTriggered
+        else
+            if ta.crossover(close, entryPrice)
+                strategy.entry(idShort, strategy.short, comment = 'Sell ' + str.tostring(i) + '%')
+                array.set(triggeredShorts, i, true)
+                entryTriggered := true
+                entryTriggered
+
+    if strategy.position_size < 0
+        offsetTicks = close * (i_trailOffset / 100) / syminfo.mintick
+        if i_tpReversal
+            bool reversalTriggered = close[1] < targetPrice and close > targetPrice
+            if reversalTriggered
+                if i_useTrailing
+                    strategy.exit('TrailS_Rev_' + str.tostring(i), from_entry = idShort, trail_price = close, trail_offset = offsetTicks, stop = slPrice, comment = 'RevTrail')
+                else
+                    strategy.close(idShort, comment = 'RevTP')
+        else
+            if i_useTrailing
+                strategy.exit('TrailS_Std_' + str.tostring(i), from_entry = idShort, trail_price = targetPrice, trail_offset = offsetTicks, stop = slPrice, comment = 'StdTrail')
+            else
+                if close <= targetPrice
+                    strategy.close(idShort, comment = 'TP')
+
+    if i_useStopLoss and close >= slPrice
+        strategy.close(idShort, comment = 'SL')
+
+// ------------------------------------
+// 2. LONG SIDE
+// ------------------------------------
+for i = 1 to i_maxSteps by 1
+    entryPrice = sessionBasePrice * (1 - i_stepPercent / 100 * i)
+    targetPrice = sessionBasePrice * (1 - i_stepPercent / 100 * (i - 1))
+    slPrice = calcStop(true, entryPrice)
+
+    idLong = 'Long_' + str.tostring(i)
+    bool hasTraded = array.get(triggeredLongs, i)
+    bool entryTriggered = false
+
+    if not hasTraded and canTrade
+        if i_reversalMode
+            if close[1] < entryPrice
+                array.set(breachedLongs, i, true)
+            if array.get(breachedLongs, i) and close > entryPrice
+                strategy.entry(idLong, strategy.long, comment = 'RevBuy -' + str.tostring(i) + '%')
+                array.set(triggeredLongs, i, true)
+                entryTriggered := true
+                entryTriggered
+        else
+            if ta.crossunder(close, entryPrice)
+                strategy.entry(idLong, strategy.long, comment = 'Buy -' + str.tostring(i) + '%')
+                array.set(triggeredLongs, i, true)
+                entryTriggered := true
+                entryTriggered
+
+    if strategy.position_size > 0
+        offsetTicks = close * (i_trailOffset / 100) / syminfo.mintick
+        if i_tpReversal
+            bool reversalTriggered = close[1] > targetPrice and close < targetPrice
+            if reversalTriggered
+                if i_useTrailing
+                    strategy.exit('TrailL_Rev_' + str.tostring(i), from_entry = idLong, trail_price = close, trail_offset = offsetTicks, stop = slPrice, comment = 'RevTrail')
+                else
+                    strategy.close(idLong, comment = 'RevTP')
+        else
+            if i_useTrailing
+                strategy.exit('TrailL_Std_' + str.tostring(i), from_entry = idLong, trail_price = targetPrice, trail_offset = offsetTicks, stop = slPrice, comment = 'StdTrail')
+            else
+                if close >= targetPrice
+                    strategy.close(idLong, comment = 'TP')
+
+    if i_useStopLoss and close <= slPrice
+        strategy.close(idLong, comment = 'SL')
+
+
+// ==========================
+// ==== END OF SESSION EXIT =
+// ==========================
+sessionExited = i_useSession and isInSession[1] and not isInSession
+if i_closeEOD and sessionExited
+    strategy.close_all(comment = 'Session Close')
+
+// ==========================
+// ====== STAT TRACKER ======
+// ==========================
+// We use 'var' to keep these values persistent across the whole history
+var int maxLongStack  = 0
+var int maxShortStack = 0
+
+// Check current active trades
+int currentTrades = strategy.opentrades
+
+// Update Peak Counts
+if strategy.position_size > 0
+    // If we are Long, check if this is a new record for Longs
+    maxLongStack := math.max(maxLongStack, currentTrades)
+else if strategy.position_size < 0
+    // If we are Short, check if this is a new record for Shorts
+    maxShortStack := math.max(maxShortStack, currentTrades)
+    
+// ==========================
+// ====== DASHBOARD =========
+// ==========================
+var table infoTable = table.new(position.bottom_right, 2, 7, border_width=1) // Increased rows to 6
+
+// -- Header --
+table.cell(infoTable, 0, 0, "AliceTears Grid", bgcolor=color.new(color.blue, 20), text_color=color.white)
+table.cell(infoTable, 1, 0, "Stats", bgcolor=color.new(color.blue, 20), text_color=color.white)
+
+// -- Row 1: Current Open Trades --
+table.cell(infoTable, 0, 1, "Active Trades", bgcolor=color.black, text_color=color.white)
+table.cell(infoTable, 1, 1, str.tostring(strategy.opentrades), bgcolor=color.black, text_color=color.white)
+
+// -- Row 2: Current Open Trades --
+table.cell(infoTable, 0, 2, "AVG Price", bgcolor=color.black, text_color=color.white)
+table.cell(infoTable, 1, 2, str.tostring(strategy.position_avg_price), bgcolor=color.black, text_color=color.white)
+
+// -- Row 3: Max Simultaneous LONGS --
+// We color this RED if it gets too high (e.g., > 10) as a warning
+color longWarn = maxLongStack > 10 ? color.red : color.black
+table.cell(infoTable, 0, 3, "Max Long Stack", bgcolor=longWarn, text_color=color.white)
+table.cell(infoTable, 1, 3, str.tostring(maxLongStack), bgcolor=longWarn, text_color=color.white)
+
+// -- Row 4: Max Simultaneous SHORTS --
+color shortWarn = maxShortStack > 10 ? color.red : color.black
+table.cell(infoTable, 0, 4, "Max Short Stack", bgcolor=shortWarn, text_color=color.white)
+table.cell(infoTable, 1, 4, str.tostring(maxShortStack), bgcolor=shortWarn, text_color=color.white)
+
+// -- Row 5: Net Profit --
+c_pnl = strategy.netprofit
+c_col = c_pnl >= 0 ? color.teal : color.red
+table.cell(infoTable, 0, 5, "Total Profit", bgcolor=color.black, text_color=color.white)
+table.cell(infoTable, 1, 5, str.tostring(c_pnl, format.mintick), bgcolor=c_col, text_color=color.white)
+
+// -- Row 6: Drawdown Warning --
+// Showing Max Drawdown is also very useful for Grid users
+max_dd = strategy.max_drawdown
+table.cell(infoTable, 0, 6, "Max Drawdown", bgcolor=color.maroon, text_color=color.white)
+table.cell(infoTable, 1, 6, str.tostring(max_dd, format.mintick), bgcolor=color.maroon, text_color=color.white)
+
+View in Pine Editor・330 lines
+Use on chart
+1
+8
+1
+912
+Dec 1, 2025
+AliceTears Grid is a customizable Mean Reversion system designed to capitalize on market volatility during specific trading sessions. Unlike standard grid bots that place blind limit orders, this strategy establishes a daily or session-based "Baseline" and looks for price over-extensions to fade the move back to the mean.
+
+This strategy is best suited for ranging markets (sideways accumulation) or specific forex sessions (e.g., Asian Session or NY/London overlap) where price tends to revert to the opening price.
+
+🛠 How It Works
+1. The Baseline & Grid Generation At the start of every session (or the daily open), the script records the Open price. It then projects visual grid lines above and below this price based on your Step % input.
+
+Example: If the Open is $100 and Step is 1%, lines are drawn at $101, $102, $99, $98, etc.
+
+2. Entry Logic: Reversal Mode This script features a "Reversal Mode" (enabled by default) to filter out "falling knives."
+
+Standard Grid: Buys immediately when price touches the line.
+
+AliceTears Logic: Waits for the price to breach a grid level and then close back inside towards the mean. This confirms a potential rejection of that level before entering.
+
+3. Exit Logic
+
+Target Profit: The primary target is the previous grid level (Mean Reversion).
+
+Trailing Stop: If the price continues moving in your favor, a trailing stop activates to maximize the run.
+
+Stop Loss: A manual percentage-based stop loss is available to prevent deep drawdowns in trending markets.
+
+⚙️ Key Features
+Visual Grid: Automatically draws entry levels on the chart for the current session, helping you visualize where the "math" is waiting for price.
+
+Timezone & Session Control: Includes a custom Timezone Offset tool. You can trade specific hours (e.g., 09:30–16:00) regardless of your chart's UTC setting.
+
+Grid Management: Independent logic for Long and Short grids with pyramiding capabilities.
+
+Safety Filters: Options to force-close trades at the end of the session to avoid overnight gaps.
+
+⚠️ Risk Warning
+Please Read Before Using: This is a Counter-Trend / Grid Strategy.
+
+Pros: High win rate in sideways/ranging markets.
+
+Cons: In strong trending markets (parabolic pumps or crashes), this strategy will add to losing positions ("catch a falling knife").
+
+Recommendation: Always use the Stop Loss and Date Filter inputs. Do not run this on highly volatile assets without strict risk management parameters.
+
+Settings Guide
+Entry Reversal Mode: Keep checked for safer entries. Uncheck for aggressive limit-order style execution.
+
+Grid Step (%): The distance between lines. For Forex, use lower values (0.1% - 0.5%). For Crypto, use higher values (1.0% - 3.0%).
+
+UTC Offset: Adjust this to align the Session Hours with your target market (e.g., -5 for New York).
+
+This script is open source. Feel free to use it for educational purposes or modify it to fit your trading style.
+Dec 1, 2025
+Release Notes
+updatedashboard
+Dec 2, 2025
+Release Notes
+update dashboard

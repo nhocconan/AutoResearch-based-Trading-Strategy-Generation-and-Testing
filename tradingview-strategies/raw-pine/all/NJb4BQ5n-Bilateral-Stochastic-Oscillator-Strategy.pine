@@ -1,0 +1,153 @@
+//@version=4
+strategy("Bilateral Stochastic Oscillator Strategy",commission_type = strategy.commission.cash_per_contract)
+//----
+length = input(100),slen = input(20,title="Signal Length")
+method = input("TMA",title="Pre-Filtering Method",options=["SMA","TMA","LSMA"])
+
+Ds = input(1,title="Order Size")
+sm = input("Bull/Bear Cross",title="Strategy Method",options=["Bull/Bear Cross","Signal Cross"])
+mult = input(1.,title="Martingale Multiplier")
+//----
+source = close
+f(x)=>method==x
+s(x,p)=>f("SMA")?sma(x,p):f("TMA")?sma(sma(x,p),p):f("LSMA")?linreg(x,p,0):na
+//----
+src = s(source,length)
+a = highest(src,length) 
+b = lowest(src,length)
+//----
+bull = src/sma(a - b,length) - b/sma(a - b,length)
+bear = abs(src/sma(a - b,length) - a/sma(a - b,length))
+signal = sma(max(bull,bear),slen)
+//----
+w = strategy.wintrades
+l = strategy.losstrades
+size = 0.
+size := change(l) ? nz(size[1],1) * mult : change(w) ? 1 : nz(size[1],1)
+//----
+long = sm == "Bull/Bear Cross" ? crossover(bull,bear) : crossover(bull,signal)
+short = sm == "Bull/Bear Cross" ? crossunder(bull,bear) : crossover(bear,signal)
+strategy.order("Buy",true,qty=size*Ds,when=long)
+strategy.order("Sell",false,qty=size*Ds,when=short)
+strategy.close("Buy",crossunder(bull,signal))
+strategy.close("Sell",crossunder(bear,signal))
+//----
+plot(bull,title="Bull",color=#2196f3,linewidth=2,transp=0)
+plot(bear,title="Bear",color=#ff1100,linewidth=2,transp=0)
+plot(signal,title="Signal",color=color.orange,linewidth=1,transp=0)
+
+View in Pine Editor・37 lines
+Use on chart
+5
+6
+6
+3
+12 986
+Introduction
+
+Strategy based on the bilateral stochastic oscillator, this oscillator aim to detect trends and possible reversal points of the current trend. The oscillator is composed of 1 bull line in blue and 1 bear line in red as well as a signal line in orange, the strategy have many options such as two different strategy framework and a martingale mode. If you require more information about the indicator go check it into my uploaded indicators.
+
+Strategy Frameworks
+
+There are two frameworks available that can be selected from the strategy settings window. Both have the same closing conditions, the "Bull/Bear Cross" entry conditions are :
+
+Buy : when the bull line cross over the bear line
+Sell : when the bear line cross over the bull line
+
+The "Signal Cross" entry conditions are :
+
+Buy : when the bull line cross over the signal line
+Sell : when the bear line cross over the signal line
+
+Both have the same close conditions that is : close when bull/bear cross under the signal line.
+
+Introduction To Martingale
+
+The martingale money management system consist to double the order size after a loosing trade and can be described as a 2^x where x is the current number of loosing trades since the last win trade, when we win a trade the order size return to the default order size. Therefore our order size function is based on exponential growth.
+
+This system enable the trader to win back his previous losses plus a potential profit, martingales must always be used with stops and sometimes take profits in order to get control in a strategy.
+
+It must always be taken into account that in a series of losses the balance can exponentially decay thus ending to 0 in a matter of trades, this is why it is not recommended to use such system. The strategy allow you to select a martingale multiplier that can be inferior to 2 thus limiting risks, a multiplied of 1 disable the martingale.
+
+Results
+
+Those are the some statistics of the strategy applied to some forex majors by using the default settings in a time frames of 15 minutes.
+
+//-------------------------------------------------------
+
+EURUSD - Order Size 1000 - Spread 0.0002
+
+Profit : $ 21.08
+
+Trades : 19
+
+PP : 57.89 %
+
+Profit Factor : 3.228
+
+Max Drawdown : -$ 3.81
+
+Average Trade : $ 1.11
+
+//-------------------------------------------------------
+
+GBPUSD - Order Size 1000 - Spread 0.0002
+
+Profit : $ 2.31
+
+Trades : 20
+
+PP : 55 %
+
+Profit Factor : 0.938
+
+Max Drawdown : -$ 20.29
+
+Average Trade : $ 0.12
+
+//-------------------------------------------------------
+
+EURAUD - Order Size 1000 - Spread 0.0002
+
+Profit : -$ 9.22
+
+Trades : 20
+
+PP : 40 %
+
+Profit Factor : 0.698
+
+Max Drawdown : -$ 23.44
+
+Average Trade : $ 0.46
+
+//-------------------------------------------------------
+
+EURCHF - Order Size 1000 - Spread 0.0002
+
+Profit : $ 1.58
+
+Trades : 24
+
+PP : 54.17 %
+
+Profit Factor : 1.103
+
+Max Drawdown : -$ 7.23
+
+Average Trade : $ 0.07
+
+//-------------------------------------------------------
+
+Conclusions
+
+Based on the results the strategy does not posses the sufficient performance in order to apply a martingale or any other growth systems as order size. Parameters might be subject to drastic changes depending on the market/time-frame in order to return long-term positive results. I let you draw your conclusions.
+
+
+
+
+
+
+
+
+

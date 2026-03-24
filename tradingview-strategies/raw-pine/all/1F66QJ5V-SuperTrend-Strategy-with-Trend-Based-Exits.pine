@@ -1,0 +1,123 @@
+//@version=6
+strategy('SuperTrend Strategy with Trend-Based Exits', overlay = true, initial_capital = 10000, default_qty_type = strategy.cash, default_qty_value = 1000, pyramiding = 1, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 5)
+
+// === User Inputs ===
+risk_per_trade = input.float(200, title = 'Risk per trade (USD)', minval = 10, step = 10)  // Fixed dollar risk per trade, recommened risk per trade = 2% of initial capital
+atrPeriod = input.int(92, title = 'ATR Length', minval = 1, step = 1)                      // ATR period for SuperTrend, relevant for ETH only, please adjust for other assets
+factor = input.float(4.6, title = 'Factor', minval = 0.01, step = 0.1)                    // SuperTrend multiplier, relevant for ETH only, please adjust for other assets
+lot_step = input.float(0.01, title = 'Qty step', step = 0.01)                             // Position rounding step, default 0.01 is suitable for ETH, BTC, MKR or other "expensive" assets, otherwise use 1,10 or 100)
+
+// === SuperTrend Calculation ===
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+price = close
+stop_loss_distance = math.abs(price - supertrend)
+
+// === Position Sizing with Rounding ===
+position_size_raw = risk_per_trade / stop_loss_distance
+position_size = math.floor(position_size_raw / lot_step) * lot_step
+
+// === Trend Direction Logic ===
+intDirection = int(direction)
+var int lastDirection = na
+isNewDirection = na(lastDirection) or intDirection != lastDirection
+
+// === Entry Logic ===
+if isNewDirection
+    // Close existing positions before reversing
+    strategy.close('Long')
+    strategy.close('Short')
+
+    // Enter new position based on direction
+    if intDirection == -1 and strategy.position_size <= 0
+        strategy.entry('Long', strategy.long, qty = position_size)
+    else if intDirection == 1 and strategy.position_size >= 0
+        strategy.entry('Short', strategy.short, qty = position_size)
+
+    // Save current direction
+    lastDirection := intDirection
+
+// === Exit Logic (Stop on SuperTrend) ===
+if strategy.position_size > 0
+    strategy.exit('Exit Long', 'Long', stop = supertrend)
+if strategy.position_size < 0
+    strategy.exit('Exit Short', 'Short', stop = supertrend)
+
+// === SuperTrend Visualization ===
+plot(supertrend, title = 'Supertrend', color = direction < 0 ? color.green : color.red)
+
+View in Pine Editor・46 lines
+Use on chart
+9
+9
+2 451
+🟩 SuperTrend Strategy with Trend-Based Exits
+
+This is a fully automated trend-following strategy based on the popular SuperTrend indicator, enhanced with a position sizing algorithm tied to stop-loss distance and dynamic entry/exit rules. The strategy is designed for futures trading with an emphasis on sustainable risk, realistic backtesting, and transparent logic.
+
+🧠 Concept and Methodology
+The strategy uses the SuperTrend indicator, which is derived from ATR (Average True Range) and is widely used to capture medium- to long-term market trends.
+
+Key features:
+
+✅ Entries are triggered only when the SuperTrend direction changes (trend reversal).
+
+✅ Exits are performed using a dynamic stop-loss placed at the SuperTrend line.
+
+✅ Position size is automatically calculated based on the trader’s fixed dollar risk per trade and the current distance to the stop-loss.
+
+✅ Rounding logic is included to ensure quantity is valid for the exchange’s lot size.
+
+This strategy does not use any take-profit or classic trailing stop — the position is only closed when the trend reverses or the stop is hit by touching the SuperTrend line.
+
+⚙️ Default Parameters
+
+ATR Length: 300
+
+Factor: 7.5
+
+Risk per trade: $90 (3% of the default $3,000 capital)
+
+Lot step: 10
+
+Commission: 0.05%
+
+These default parameters are not universal. They were optimized specifically for STXUSDT swap at 15M timeframe at Bybit and may not produce viable results on other pairs and timeframes.
+
+Users are encouraged to customize the settings according to specific asset’s volatility, timeframe and other characteristics.
+
+❗ These default settings yield meaningful backtesting results on STXUSDT with a reasonable number of trades (105+) over 7-month period. If applied to other assets, results may vary significantly.
+
+📈 Position Sizing Logic
+The strategy uses a dynamic position sizing formula:
+
+Pine Script®
+
+position_size = floor((risk_per_trade / stop_loss_distance) / lot_step) * lot_step
+
+
+This ensures the trader always risks a fixed dollar amount per trade and never exceeds a sustainable equity exposure (recommended 2% or less).
+
+✅ Realism in Backtesting
+To ensure realistic and non-misleading backtest results, this strategy includes:
+
+— Slippage and commission settings matching average exchange conditions (commission = 0.05%, slippage 5 ticks).
+— Position sizing based on stop-loss distance (not fixed contract quantity).*
+— A fixed risk-per-trade model that adheres to responsible capital management principles.
+— This is in compliance with TradingView's Script publishing rules and House Rules.
+
+📌 How to Use
+Apply the strategy to a clean chart (preferably 15M for STXUSDT by default).
+
+If using another asset, adjust:
+
+- ATR Length
+- Factor
+- Risk per trade
+- Qty step (lot precision for the symbol)
+
+Avoid using with other indicators unless you understand their purpose.
+
+Use the Strategy Tester to evaluate performance and optimize parameters.
+
+⚠️ Disclaimer
+This is not financial advice. Always perform forward testing and assess risk before deploying any strategy on live capital. The strategy is designed for educational and experimental use.

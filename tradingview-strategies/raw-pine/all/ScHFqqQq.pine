@@ -1,0 +1,95 @@
+//@version=5
+strategy("Long-Term Strategy: 1-Year Breakout + 6-Month Exit", 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10, // RIESGO: 10% del capital (Norma: Realista)
+     commission_type=strategy.commission.percent,
+     commission_value=0.1, // COMISIÓN: 0.1% (Norma: Realista)
+     slippage=3)           // SLIPPAGE: 3 ticks (Norma: Realista)
+
+// --- 1. SETTINGS (Configuration) ---
+// SuperTrend Settings (Entry Filter)
+atrPeriod = input.int(10, "ATR Period (SuperTrend)", group="Entry Settings")
+factor = input.float(3.0, "Factor (SuperTrend)", group="Entry Settings")
+
+// Entry Filter (12 Months / 1 Year)
+// 252 trading days approx 1 year
+diasEntrada = input.int(252, "Entry High Lookback (Days)", group="Entry Settings")
+
+// Exit Settings (6 Months)
+// 126 trading days approx 6 months
+diasSalida = input.int(126, "Exit Low Lookback (Days)", group="Exit Settings")
+
+// --- 2. CALCULATIONS ---
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// 1-Year High (For Entry)
+maximoAnual = ta.highest(high, diasEntrada)[1] 
+
+// 6-Month Low (For Exit)
+minimoSemestral = ta.lowest(low, diasSalida)[1]
+
+// --- 3. TRADING LOGIC ---
+
+// ENTRY CONDITION (LONG):
+// 1. SuperTrend is Bullish (direction < 0)
+// 2. Price closes above the 1-Year High
+longCondition = (direction < 0) and (close >= maximoAnual)
+
+// EXIT CONDITION (CLOSE):
+// Price CLOSES below the 6-Month Low.
+exitCondition = close < minimoSemestral
+
+// --- 4. EXECUTION ---
+
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="Breakout 1Y")
+
+if (exitCondition)
+    strategy.close("Long", comment="Exit 6M Low")
+
+// --- 5. VISUALIZATION ---
+// Entry Level (Blue Line)
+plot(maximoAnual, color=color.new(color.blue, 0), title="1-Year High (Entry)")
+
+// Exit Level (Red Line) - Dynamic Stop Loss
+plot(minimoSemestral, color=color.new(color.red, 0), linewidth=2, title="6-Month Low (Exit)")
+
+// Background color if position is open
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : na)
+
+View in Pine Editor・63 lines
+Use on chart
+1
+6
+790
+Descripción (Description): (Copia y pega todo lo que está dentro del recuadro de abajo)
+
+Description
+
+This is a long-term trend-following strategy designed to capture major market moves while filtering out short-term noise. It is based on the classic principle of "buying strength" (Breakouts) and allowing profits to run, while cutting losses when the medium-term trend reverses.
+
+How it Works (Logic)
+
+1. Entry Condition (Long Only): The strategy looks for a significant display of strength. It enters a Long position only when two conditions are met simultaneously:
+
+Price Breakout: The closing price exceeds the highest high of the last 252 trading days (approximately 1 year). This ensures we are entering during a strong momentum phase.
+
+Trend Filter: The SuperTrend indicator (Settings: ATR 10, Factor 3.0) must be bullish. This acts as a confirmation filter to avoid false breakouts in choppy markets.
+
+2. Exit Condition: The strategy uses a trailing stop based on price action, not a fixed percentage.
+
+It closes the position when the price closes below the lowest low of the last 126 trading days (approximately 6 months).
+
+This wide exit allows the trade to "breathe" during normal market corrections without exiting the position prematurely.
+
+Settings & Risk Management
+
+Capital Usage: The script is configured to use 10% of equity per trade to reflect realistic risk management (compounding).
+
+Commissions: Included at 0.1% to simulate real trading costs.
+
+Slippage: Included (3 ticks) to account for market execution variability.
+
+Best Use: This strategy is intended for higher timeframes (Daily or Weekly) on trending assets like Indices, Crypto, or Commodities.

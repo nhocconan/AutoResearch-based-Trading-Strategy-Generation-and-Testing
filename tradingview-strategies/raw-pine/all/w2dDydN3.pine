@@ -1,0 +1,541 @@
+//@version=6
+strategy("META Scalp 5m (RSI+ADX/DMI+TSI+Vol+Squeeze+SMC-lite) [v1.1]",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     calc_on_every_tick=false,
+     pyramiding=0,
+     max_labels_count=200)
+
+// -------------------- Inputs
+useTrend   = input.bool(true,  "Usar filtro de tendencia (EMA)")
+useRSI     = input.bool(true,  "Usar RSI")
+useADX     = input.bool(true,  "Usar ADX/DMI")
+useTSI     = input.bool(true,  "Usar TSI")
+useVolume  = input.bool(true,  "Usar filtro de volumen")
+useSqueeze = input.bool(true,  "Usar Squeeze (aprox)")
+useSMC     = input.bool(true,  "Usar SMC-lite (sweep + BOS)")
+
+useHTF     = input.bool(true,  "Confirmación HTF (15m)")
+htfTF      = input.timeframe("15", "TF confirmación")
+
+emaFastLen = input.int(21, "EMA rápida", minval=1)
+emaSlowLen = input.int(55, "EMA lenta",  minval=2)
+
+rsiLen     = input.int(14, "RSI len", minval=2)
+rsiMid     = input.float(50.0, "RSI mid", step=0.5)
+
+adxLen     = input.int(14, "DMI/ADX len", minval=2)
+adxMin     = input.float(18.0, "ADX mínimo", step=0.5)
+
+tsiLong    = input.int(25, "TSI long", minval=2)
+tsiShort   = input.int(13, "TSI short", minval=2)
+tsiSig     = input.int(7,  "TSI signal", minval=1)
+
+volLen     = input.int(20, "Vol SMA len", minval=2)
+volMult    = input.float(1.10, "Vol > SMA *", step=0.05)
+
+bbLen      = input.int(20, "BB len", minval=5)
+bbMult     = input.float(2.0, "BB mult", step=0.1)
+kcLen      = input.int(20, "KC len", minval=5)
+kcMult     = input.float(1.5, "KC mult", step=0.1)
+
+pvL        = input.int(3, "Pivot L", minval=1)
+pvR        = input.int(3, "Pivot R", minval=1)
+eqTolATR   = input.float(0.20, "EQ tol (ATR mult)", minval=0.0, step=0.05)
+smcLookback= input.int(200, "SMC lookback (barras)", minval=50)
+
+atrLen     = input.int(14, "ATR len", minval=2)
+slATR      = input.float(1.2, "SL (ATR x)", step=0.1)
+tpATR      = input.float(1.5, "TP (ATR x)", step=0.1)
+useTrail   = input.bool(false, "Trailing stop")
+trailATR   = input.float(1.0, "Trail (ATR x)", step=0.1)
+
+scoreEntry = input.int(60, "Umbral entrada (score)", minval=10, maxval=100)
+scoreExit  = input.int(25, "Umbral salida (score)",  minval=0,  maxval=100)
+
+wTrend     = input.int(20, "Peso Trend",   minval=0, maxval=100)
+wRSI       = input.int(15, "Peso RSI",     minval=0, maxval=100)
+wADX       = input.int(15, "Peso ADX/DMI", minval=0, maxval=100)
+wTSI       = input.int(15, "Peso TSI",     minval=0, maxval=100)
+wVolume    = input.int(10, "Peso Vol",     minval=0, maxval=100)
+wSqueeze   = input.int(10, "Peso Squeeze", minval=0, maxval=100)
+wSMC       = input.int(15, "Peso SMC",     minval=0, maxval=100)
+
+// -------------------- Helpers
+atr = ta.atr(atrLen)
+
+f_prob(_score) =>
+    x = _score / 25.0
+    1.0 / (1.0 + math.exp(-x))
+
+// -------------------- Trend (EMA)
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+trendUp = emaFast > emaSlow and ta.rising(emaFast, 3)
+trendDn = emaFast < emaSlow and ta.falling(emaFast, 3)
+
+// -------------------- RSI
+rsi = ta.rsi(close, rsiLen)
+rsiUp = rsi > rsiMid
+rsiDn = rsi < rsiMid
+
+// -------------------- ADX/DMI (MÁXIMA COMPATIBILIDAD: ta.dmi)
+[diplus, diminus, adx] = ta.dmi(adxLen, adxLen)
+adxOk = adx >= adxMin
+dmiUp = diplus > diminus
+dmiDn = diminus > diplus
+
+// -------------------- TSI
+tsiVal = ta.tsi(close, tsiLong, tsiShort)
+tsiSigV = ta.ema(tsiVal, tsiSig)
+tsiUp = tsiVal > tsiSigV
+tsiDn = tsiVal < tsiSigV
+
+// -------------------- Volume filter
+volSMA = ta.sma(volume, volLen)
+volOk  = volume > volSMA * volMult
+
+// -------------------- Squeeze (BB vs KC) + momentum simple
+basis = ta.sma(close, bbLen)
+dev   = ta.stdev(close, bbLen)
+bbU   = basis + dev * bbMult
+bbL   = basis - dev * bbMult
+
+maKC  = ta.ema(close, kcLen)
+rng   = ta.ema(ta.tr(true), kcLen)
+kcU   = maKC + rng * kcMult
+kcL   = maKC - rng * kcMult
+
+squeezeOn  = (bbU < kcU) and (bbL > kcL)
+squeezeOff = not squeezeOn
+
+momSrc = close - ta.sma(close, kcLen)
+mom    = ta.linreg(momSrc, kcLen, 0)
+momUp  = mom > 0 and ta.rising(mom, 2)
+momDn  = mom < 0 and ta.falling(mom, 2)
+
+// -------------------- SMC-lite (EQH/EQL + sweep + BOS)
+tol = atr * eqTolATR
+
+ph = ta.pivothigh(high, pvL, pvR)
+pl = ta.pivotlow(low,  pvL, pvR)
+
+var float prevPH = na
+var int   prevPHBar = na
+var float prevPL = na
+var int   prevPLBar = na
+
+var float lastEQH = na
+var float lastEQL = na
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+isPH = not na(ph)
+isPL = not na(pl)
+
+if isPH
+    p = ph
+    b = bar_index - pvR
+    if not na(prevPH) and math.abs(p - prevPH) <= tol and (b - prevPHBar) <= smcLookback
+        lastEQH := (p + prevPH) / 2.0
+    prevPH := p
+    prevPHBar := b
+    lastSwingHigh := p
+
+if isPL
+    p = pl
+    b = bar_index - pvR
+    if not na(prevPL) and math.abs(p - prevPL) <= tol and (b - prevPLBar) <= smcLookback
+        lastEQL := (p + prevPL) / 2.0
+    prevPL := p
+    prevPLBar := b
+    lastSwingLow := p
+
+sweepH = useSMC and not na(lastEQH) and high > lastEQH + tol*0.25 and close < lastEQH
+sweepL = useSMC and not na(lastEQL) and low  < lastEQL - tol*0.25 and close > lastEQL
+
+bosUp = useSMC and not na(lastSwingHigh) and close > lastSwingHigh
+bosDn = useSMC and not na(lastSwingLow)  and close < lastSwingLow
+
+// -------------------- HTF confirm
+htfEmaFast = request.security(syminfo.tickerid, htfTF, ta.ema(close, emaFastLen))
+htfEmaSlow = request.security(syminfo.tickerid, htfTF, ta.ema(close, emaSlowLen))
+htfTrendUp = htfEmaFast > htfEmaSlow
+htfTrendDn = htfEmaFast < htfEmaSlow
+
+// -------------------- Score engine
+score = 0
+
+if useTrend
+    score += trendUp ?  wTrend : trendDn ? -wTrend : 0
+
+if useRSI
+    rsiBias = math.min(1.0, math.abs(rsi - rsiMid) / 15.0)
+    score += rsiUp ?  math.round(wRSI * rsiBias) : rsiDn ? -math.round(wRSI * rsiBias) : 0
+
+if useADX
+    score += (dmiUp and adxOk) ?  wADX : (dmiDn and adxOk) ? -wADX : 0
+
+if useTSI
+    score += tsiUp ?  wTSI : tsiDn ? -wTSI : 0
+
+if useVolume
+    dir = close >= open ? 1 : -1
+    score += volOk ? dir * wVolume : 0
+
+if useSqueeze
+    score += (squeezeOff and momUp) ?  wSqueeze : (squeezeOff and momDn) ? -wSqueeze : 0
+
+if useSMC
+    // sweep contrarian + BOS continuation (suave)
+    score += sweepH ? -wSMC : 0
+    score += sweepL ?  wSMC : 0
+    score += bosUp  ?  math.round(wSMC * 0.6) : 0
+    score += bosDn  ? -math.round(wSMC * 0.6) : 0
+
+if useHTF
+    if htfTrendUp and score < 0
+        score := math.round(score * 0.6)
+    if htfTrendDn and score > 0
+        score := math.round(score * 0.6)
+
+score := math.max(-100, math.min(100, score))
+
+probLong  = f_prob(score)
+probShort = 1.0 - probLong
+
+// -------------------- Entries/Exits
+longOk  = score >= scoreEntry
+shortOk = score <= -scoreEntry
+
+chop = useADX ? not adxOk : false
+
+enterLong  = longOk  and not chop
+enterShort = shortOk and not chop
+
+slPts = atr * slATR
+tpPts = atr * tpATR
+
+if enterLong and strategy.position_size <= 0
+    strategy.entry("L", strategy.long)
+
+if enterShort and strategy.position_size >= 0
+    strategy.entry("S", strategy.short)
+
+if strategy.position_size > 0
+    stopL = strategy.position_avg_price - slPts
+    takeL = strategy.position_avg_price + tpPts
+    if useTrail
+        strategy.exit("LX", "L", stop=stopL, limit=takeL, trail_points=atr * trailATR)
+    else
+        strategy.exit("LX", "L", stop=stopL, limit=takeL)
+
+if strategy.position_size < 0
+    stopS = strategy.position_avg_price + slPts
+    takeS = strategy.position_avg_price - tpPts
+    if useTrail
+        strategy.exit("SX", "S", stop=stopS, limit=takeS, trail_points=atr * trailATR)
+    else
+        strategy.exit("SX", "S", stop=stopS, limit=takeS)
+
+if strategy.position_size > 0 and score <= scoreExit
+    strategy.close("L", comment="ScoreExit L")
+
+if strategy.position_size < 0 and score >= -scoreExit
+    strategy.close("S", comment="ScoreExit S")
+
+// -------------------- Visuals
+plot(emaFast, "EMA Fast", color=color.new(color.teal, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0))
+
+plotshape(enterLong,  title="LONG",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), text="L")
+plotshape(enterShort, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  text="S")
+
+plotshape(sweepH, title="Sweep High", style=shape.xcross, location=location.abovebar, color=color.new(color.fuchsia, 0), size=size.tiny, text="SW↑")
+plotshape(sweepL, title="Sweep Low",  style=shape.xcross, location=location.belowbar, color=color.new(color.aqua, 0),    size=size.tiny, text="SW↓")
+
+// Panel (sin caracteres raros, 1 label reutilizable)
+showPanel = input.bool(true, "Mostrar panel (score/prob)")
+var label panel = na
+
+if showPanel and barstate.islast
+    txt =
+         "Score: " + str.tostring(score) +
+         "\nP(Long): " + str.tostring(math.round(probLong*100)) + "%" +
+         "\nP(Short): " + str.tostring(math.round(probShort*100)) + "%" +
+         "\nADX: " + str.tostring(math.round(adx)) +
+         "\nVolOk: " + (volOk ? "Sí" : "No") +
+         "\nSqueeze: " + (squeezeOn ? "ON" : "OFF")
+
+    if na(panel)
+        panel := label.new(bar_index, high, txt, style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 55), size=size.small)
+    else
+        label.set_x(panel, bar_index)
+        label.set_y(panel, high)
+        label.set_text(panel, txt)
+        label.set_style(panel, label.style_label_left)
+        label.set_textcolor(panel, color.white)
+        label.set_color(panel, color.new(color.black, 55))
+        label.set_size(panel, size.small)
+
+// Alerts
+alertcondition(enterLong,  "META LONG",  "META Scalp: LONG (score >= umbral) en 5m")
+alertcondition(enterShort, "META SHORT", "META Scalp: SHORT (score <= -umbral) en 5m")
+alertcondition(sweepH, "SMC Sweep High", "SMC-lite: Liquidity sweep HIGH detectado")
+alertcondition(sweepL, "SMC Sweep Low",  "SMC-lite: Liquidity sweep LOW detectado")
+
+View in Pine Editor・288 lines
+Use on chart
+1
+5
+836
+Script Description
+
+META Scalp 5m (RSI+ADX/DMI+TSI+Vol+Squeeze+SMC-lite) [v1.1] is a futures scalping strategy designed primarily for the 5-minute timeframe. Its goal is to filter higher-probability entries through a multi-indicator confluence engine that calculates a Score (from -100 to +100) and converts it into an estimated short-term probability of bullish or bearish continuation.
+
+This script is not a magic predictor. It is a consensus-based decision engine: when multiple conditions align (direction + strength + volatility + context), it triggers entries with automatic risk management (SL/TP) based on ATR.
+
+What it shows on the chart
+
+Plots Fast EMA and Slow EMA for trend direction.
+
+Entry markers:
+
+Triangle “L” = Long signal
+
+Triangle “S” = Short signal
+
+SMC-lite events:
+
+SW↑ = High sweep (possible stop hunt above)
+
+SW↓ = Low sweep (possible stop hunt below)
+
+Information panel showing:
+
+Current Score
+
+P(Long) / P(Short) in %
+
+ADX
+
+Volume confirmation (VolOk)
+
+Squeeze status (ON/OFF)
+
+Indicators and Modules Included
+1) Trend Filter (EMA)
+
+Fast EMA (default 21) and Slow EMA (default 55).
+
+Bullish bias when:
+
+Fast EMA > Slow EMA and rising.
+
+Bearish bias when:
+
+Fast EMA < Slow EMA and falling.
+
+Purpose: avoid trading against strong trend momentum.
+
+2) RSI
+
+RSI (default 14) with configurable midpoint (default 50).
+
+Bias:
+
+RSI > 50 → bullish bias
+
+RSI < 50 → bearish bias
+
+RSI weight increases as it moves further away from 50.
+
+3) ADX/DMI (Strength + Direction)
+
+Uses +DI, -DI and ADX via ta.dmi().
+
+Works as:
+
+Strength filter: market considered tradable only if ADX ≥ threshold (default 18).
+
+Direction: +DI > -DI → bullish; -DI > +DI → bearish.
+
+When ADX is low, the script treats the market as choppy and avoids trades.
+
+4) TSI (True Strength Index)
+
+Momentum confirmation:
+
+TSI above signal → bullish
+
+TSI below signal → bearish
+
+5) Volume Filter
+
+Compares current volume vs Volume SMA (default 20).
+
+VolOk when:
+
+Volume > SMA(volume) × multiplier (default 1.10)
+
+Filters low-participation signals.
+
+6) Squeeze (BB vs KC approximation) + Momentum
+
+Detects volatility compression:
+
+Bollinger Bands inside Keltner Channels = Squeeze ON
+
+Expansion signal when:
+
+Squeeze OFF and momentum aligns:
+
+Momentum rising → bullish bias
+
+Momentum falling → bearish bias
+
+Goal: capture post-compression expansions.
+
+7) SMC-lite (Basic Smart Money Concepts)
+
+This module implements simplified SMC logic:
+
+A) Equal Highs / Equal Lows + Sweep
+
+Detects equal highs/lows using pivots and ATR tolerance.
+
+Sweep logic:
+
+Wick above EQH and close back below → SW↑ (bearish/contrarian)
+
+Wick below EQL and close back above → SW↓ (bullish/contrarian)
+
+B) BOS-lite (Break of Structure)
+
+Continuation signal when price closes beyond the last swing high/low.
+
+Higher Timeframe Confirmation (15m)
+
+Optional but recommended.
+
+Calculates EMAs on a higher timeframe (default 15m).
+
+If Score goes against HTF trend → score is penalized.
+
+This avoids many bad 5m trades.
+
+Score Engine & Probability
+
+Core engine produces a Score between -100 and +100.
+
+Positive score → Long bias
+
+Negative score → Short bias
+
+Converted into estimated probabilities:
+
+P(Long) increases with Score
+
+P(Short) = 100% − P(Long)
+
+Important: probability is a mathematical transformation of the score, not a guaranteed statistical prediction.
+
+Entry Rules
+Long Entry
+
+Triggered when:
+
+Score ≥ Entry threshold (default 60)
+
+Market not in chop (ADX filter)
+
+Short Entry
+
+Triggered when:
+
+Score ≤ −Entry threshold
+
+Market not in chop
+
+Trade Management (SL/TP)
+
+Risk management uses ATR-based dynamic levels:
+
+Stop Loss = ATR × SL multiplier (default 1.2)
+
+Take Profit = ATR × TP multiplier (default 1.5)
+
+Optional:
+
+ATR trailing stop
+
+Early Exit (Score deterioration)
+
+Positions can close early when confluence weakens:
+
+Long closes if score falls below exit threshold.
+
+Short closes if score rises above negative exit threshold.
+
+Recommended Trading Approach
+
+Best used as a quality filter, not blind signals.
+
+Recommended Settings (5m scalping)
+
+Timeframe: 5m
+
+HTF confirmation: 15m ON
+
+ADX minimum: 18–22
+
+Entry score: 60–75
+
+SL: 1.0–1.3 ATR
+
+TP: 1.2–1.8 ATR
+
+Trailing stop: useful in trending markets.
+
+Workflow
+
+Wait for Score to exceed threshold.
+
+Avoid trades when ADX is low.
+
+Prefer trades aligned with HTF trend.
+
+Let SL/TP manage the trade.
+
+Alerts
+
+Built-in alerts:
+
+META LONG
+
+META SHORT
+
+SMC Sweep High
+
+SMC Sweep Low
+
+Limitations
+
+Pine Script cannot access private indicators (LuxAlgo, SmartBuzz, etc.).
+
+TradingView VPVR/VRVP cannot be accessed directly via Pine.
+
+Designed for backtesting and screening. Adjust settings per asset and exchange.
+
+Best Practices
+
+Test separately on BTC, ETH, and altcoins.
+
+Include realistic fees and slippage.
+
+Avoid high-impact news periods.
+
+

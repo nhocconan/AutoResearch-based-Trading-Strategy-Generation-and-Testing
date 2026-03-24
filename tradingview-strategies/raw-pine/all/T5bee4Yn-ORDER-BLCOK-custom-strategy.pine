@@ -1,0 +1,1131 @@
+//@version=5
+strategy("ORDER BLCOK custom strategy", overlay=true, initial_capital=50, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+rr_threshold = input.float(1,"Risk Rewar threeshold" , group="MONEY MANAGEMENT") 
+
+formatVolume(vol) =>
+    vol >= 1000000 ? str.tostring(math.round(vol / 1000000, 2)) + "M" :
+         vol >= 1000 ? str.tostring(math.round(vol / 1000, 2)) + "K" :
+         str.tostring(math.round(vol, 2))
+
+// === ORDER BLOCKS INPUTS ===
+obLookback = input.int(10, "Order Block Breadth", minval=1, group="ORDER BLOCKS")
+obmode = input.string("Full", "Method", options=["Breadth", "Full"], 
+     tooltip="[Breadth] Use Breadth to adjust coordinate of the orderblocks\n[Full] Use whole candle body", group="ORDER BLOCKS")
+obmiti = input.string("Close", "Risk Method", options=["Close", "Wick"], 
+     tooltip="Risk method for when to trigger order blocks", group="ORDER BLOCKS")
+obMaxBlocks = input.int(6, "Maximum Order Blocks", minval=1, maxval=500, group="ORDER BLOCKS")
+
+windowsis = true
+mswindow = 1000
+
+// =========================
+// INPUT UTENTE
+// =========================
+Width = input.int(2, minval=1, title="Spessore linea", group="SWING IDENTIFICATION" )
+SelectPeriod = input.timeframe("15", "Timeframe",group="SWING IDENTIFICATION")
+LookBack = input.int(0, minval=0, title="Barre di ritardo",group="SWING IDENTIFICATION")
+
+// ===========================
+// Variabili contatore ordini e memorizzazione bar_index
+// ===========================
+//var int maxOrdersPerDirection = input(3, "Entry filter", group = "ENTRY FILTER")
+//var array<int> longOrderBars = array.new_int(0)
+//var array<int> shortOrderBars = array.new_int(0)
+var int orderTimeout = 60  // numero di candele prima della chiusura forzata
+var label tradeLabel = na
+
+atrMultiplier = input.float(1, "Atr Multiplier", group="ATR PARAMETER") 
+
+amountOfBoxes = input.int(7, "Number of Grid Segments", minval=3, maxval=20, group="VISUAL SETTINGS")
+showBorder = input.bool(true, "Show Block Borders", group="VISUAL SETTINGS")
+borderWidth = input.int(1, "Border Width", minval=0, maxval=4, group="VISUAL SETTINGS")
+showVolume = input.bool(true, "Show Volume Text", group="VISUAL SETTINGS")
+volumePosition = input.float(0.80, "Volume Text Position (0-1)", minval=0.1, maxval=5.1, step=0.05, group="VISUAL SETTINGS") 
+
+obHighVolumeColor = color.new(#089981, 10)
+obLowVolumeColor = color.new(#089981, 85)
+obBearHighVolumeColor = color.new(#f23645, 10)
+obBearLowVolumeColor = color.new(#f23645, 85)
+obBullBorderColor = color.new(#089981, 20)
+obBearBorderColor = color.new(#ffa8af, 20)
+obBullFillColor = color.new(#089981, 65)
+obBearFillColor = color.new(#f23645, 65)
+volumeTextColor = color.rgb(0, 0, 0)
+
+// === SCREENER TABLE INPUTS ===
+showScreener = input.bool(true, "Show Screener Table", group="SCREENER")
+tablePosition = input.string("Top Right", "Table Position", 
+     options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="SCREENER")
+tableSize = input.string("Normal", "Table Size", 
+     options=["Small", "Normal", "Large"], group="SCREENER")
+     
+// Table position mapping
+var position = 
+     tablePosition == "Top Left" ? position.top_left :
+     tablePosition == "Top Right" ? position.top_right :
+     tablePosition == "Bottom Left" ? position.bottom_left :
+     position.bottom_right
+
+// Table size mapping
+var tSize = 
+     tableSize == "Small" ? size.small :
+     tableSize == "Large" ? size.large :
+     size.normal
+
+// === ENHANCED ORDER BLOCK TYPE ===
+type orderBlock
+    array<box> boxArray
+    array<float> boxVolumes
+    float topValue
+    float botValue
+    int leftTime
+    int rightTime
+    string direction
+    float totalVolume
+    label volumeLabel
+    line volumeLine
+    bool mitigated
+    line topLine
+    line botLine
+    linefill bgFill
+
+var float atr = ta.atr(14)
+atr := ta.atr(14)
+
+var array<orderBlock> bullBlocks = array.new<orderBlock>()
+var array<orderBlock> bearBlocks = array.new<orderBlock>()
+
+var float last_bull_volume = 0.0
+var float last_bear_volume = 0.0
+var string dom_block = "None"
+var float block_strength = 0.0
+var float price_distance = 0.0
+var int touch_count = 0
+var float block_size = 0.0
+var float size_ratio = 1.0
+
+var bool bull_touch = false
+var bool bear_touch = false
+var bool bull_reject = false
+var bool bear_reject = false
+var bool new_bull = false
+var bool new_bear = false
+
+bull_touch := false
+bear_touch := false
+bull_reject := false
+bear_reject := false
+new_bull := false
+new_bear := false
+
+generateBorderLines(orderBlock block, topValue, botValue) =>
+    if showBorder
+        borderColor = block.direction == "Bull" ? obBullBorderColor : obBearBorderColor
+        fillColor = block.direction == "Bull" ? obBullFillColor : obBearFillColor
+        
+        newTopLine = line.new(
+             x1 = block.leftTime, 
+             y1 = topValue, 
+             x2 = time, 
+             y2 = topValue, 
+             xloc = xloc.bar_time, 
+             extend = extend.none, 
+             color = borderColor, 
+             style = line.style_solid, 
+             width = borderWidth)
+        
+        newbotLine = line.new(
+             x1 = block.leftTime, 
+             y1 = botValue, 
+             x2 = time, 
+             y2 = botValue, 
+             xloc = xloc.bar_time, 
+             extend = extend.none, 
+             color = borderColor, 
+             style = line.style_solid, 
+             width = borderWidth)
+        
+        newlinefill = linefill.new(newTopLine, newbotLine, fillColor)
+        [newTopLine, newbotLine, newlinefill]
+    else
+        [na, na, na]
+
+// Generate volume boxes for an order block
+generateVolumeBoxes(orderBlock block, float orderVolume) =>
+    volumeArray = array.new_float(amountOfBoxes, 0)
+    array.set(volumeArray, 0, orderVolume)
+    
+    boxesArray = array.new_box()
+    
+    startValue = block.topValue
+    increment = (block.topValue - block.botValue) / amountOfBoxes
+    
+    highestVolume = orderVolume
+    timeLength = time - block.leftTime
+    
+    timeRatio = highestVolume > 0 ? timeLength / highestVolume * 0.9 : 0
+    
+    for i = 0 to amountOfBoxes - 1
+        topOfGrid = startValue - (increment * i)
+        botOfGrid = startValue - (increment * (i + 1))
+        
+        multiplier = 1.0
+        if i == 0 or i == amountOfBoxes - 1
+            multiplier := 0.4
+        else if i == 1 or i == amountOfBoxes - 2
+            multiplier := 0.6
+        else if i == 2 or i == amountOfBoxes - 3
+            multiplier := 0.8
+        else
+            multiplier := 1.0
+            
+        segmentVolume = orderVolume * multiplier / amountOfBoxes * 2
+        array.set(volumeArray, i, segmentVolume)
+        
+        color highVol = block.direction == "Bull" ? obHighVolumeColor : obBearHighVolumeColor
+        color lowVol = block.direction == "Bull" ? obLowVolumeColor : obBearLowVolumeColor
+        
+        color boxColor = color.from_gradient(multiplier, 0.2, 1.0, lowVol, highVol)
+        
+        maxWidth = math.min(timeLength * 1.2, segmentVolume * timeRatio)
+        
+        newBox = box.new(
+             left = block.leftTime, 
+             top = topOfGrid, 
+             right = block.leftTime + math.round(maxWidth), 
+             bottom = botOfGrid, 
+             border_color = boxColor, 
+             border_width = 1, 
+             xloc = xloc.bar_time, 
+             bgcolor = boxColor, 
+             extend = extend.none)
+        
+        array.push(boxesArray, newBox)
+    
+    [boxesArray, volumeArray, array.sum(volumeArray)]
+
+updateBoxes(orderBlock block, currentTime) =>
+    if array.size(block.boxArray) > 0
+        highestVolume = array.max(block.boxVolumes)
+        timeLength = currentTime - block.leftTime
+        timeRatio = highestVolume > 0 ? timeLength / highestVolume * 0.9 : 0
+        
+        for i = 0 to math.min(amountOfBoxes - 1, array.size(block.boxArray) - 1)
+            if i < array.size(block.boxVolumes)
+                boxVolume = array.get(block.boxVolumes, i)
+                if not na(boxVolume)
+                    maxWidth = math.min(timeLength * 1.2, boxVolume * timeRatio)
+                    box.set_right(array.get(block.boxArray, i), block.leftTime + math.round(maxWidth))
+    
+    if not na(block.topLine) and not na(block.botLine)
+        line.set_x2(block.topLine, currentTime)
+        line.set_x2(block.botLine, currentTime)
+    
+    if not na(block.volumeLine) and not na(block.volumeLabel) and showVolume
+        blockCenter = (block.topValue + block.botValue) / 2
+        lineStartX = block.leftTime + math.round((currentTime - block.leftTime) * 0.95)
+        lineEndX = lineStartX + math.round((currentTime - block.leftTime) * 0.2)
+        
+        lineEndY = block.direction == "Bull" ? 
+             blockCenter + (block.topValue - block.botValue) * 0.3 :
+             blockCenter - (block.topValue - block.botValue) * 0.3
+            
+        line.set_x1(block.volumeLine, lineStartX)
+        line.set_y1(block.volumeLine, blockCenter)
+        line.set_x2(block.volumeLine, lineEndX)
+        line.set_y2(block.volumeLine, lineEndY)
+        
+        label.set_x(block.volumeLabel, lineEndX)
+        label.set_y(block.volumeLabel, lineEndY)
+
+wipeBlock(orderBlock block) =>
+    if not na(block.topLine)
+        line.delete(block.topLine)
+    if not na(block.botLine)
+        line.delete(block.botLine)
+    if not na(block.bgFill)
+        linefill.delete(block.bgFill)
+    
+    if not na(block.volumeLabel)
+        label.delete(block.volumeLabel)
+    
+    if not na(block.volumeLine)
+        line.delete(block.volumeLine)
+    
+    if array.size(block.boxArray) > 0
+        for i = array.size(block.boxArray) - 1 to 0
+            selectedBox = array.get(block.boxArray, i)
+            box.delete(selectedBox)
+
+checkObCondition(tuning)=>
+    bear = false
+    for i = tuning - 1 to 0
+        start = tuning - 1
+        if i == start
+            if close[i] <= open[i]
+                break
+        else
+            if close[i] > open[i]
+                break
+            
+            if i == 0
+                bear := true
+
+    bull = false
+    for i = tuning - 1 to 0
+        start = tuning - 1
+        if i == start
+            if close[i] >= open[i]
+                break
+        else
+            if close[i] < open[i]
+                break
+            
+            if i == 0
+                bull := true
+    
+    bullAlt = (high[tuning] - low[tuning]) > atr[tuning] * 0.8 and close[tuning] > open[tuning] and low[tuning] < low[tuning+1]
+    bearAlt = (high[tuning] - low[tuning]) > atr[tuning] * 0.8 and close[tuning] < open[tuning] and high[tuning] > high[tuning+1]
+    
+    [bear or bearAlt, bull or bullAlt]
+
+inWindowRange = windowsis ? bar_index > (last_bar_index - mswindow) : true
+processBar = inWindowRange or not windowsis
+
+if barstate.isfirst
+    if bullBlocks.size() > 0
+        for i = bullBlocks.size() - 1 to 0
+            block = bullBlocks.get(i)
+            wipeBlock(block)
+    
+    if bearBlocks.size() > 0
+        for i = bearBlocks.size() - 1 to 0
+            block = bearBlocks.get(i)
+            wipeBlock(block)
+    
+    bullBlocks.clear()
+    bearBlocks.clear()
+
+if processBar
+    [is_bearish, is_bullish] = checkObCondition(obLookback)
+    
+    if barstate.isconfirmed
+        if is_bullish
+            new_bull := true
+            
+            topValue = high[obLookback - 1]
+            botValue = obmode == "Breadth" ? 
+               (low[obLookback - 1] + atr * 1) > high[obLookback - 1] ? 
+                  high[obLookback - 1] : (low[obLookback - 1] + atr * 1) : 
+               low[obLookback - 1]
+                
+            leftTime = time[obLookback - 1]
+            
+            createNewBlock = true
+            if bullBlocks.size() > 0
+                for i = bullBlocks.size() - 1 to 0
+                    block = bullBlocks.get(i)
+                    if math.max(block.botValue, botValue) <= math.min(block.topValue, topValue)
+                        wipeBlock(block)
+                        bullBlocks.remove(i)
+                        createNewBlock := true
+            
+            if createNewBlock
+                orderVolume = volume[obLookback - 1]
+                
+                newBlock = orderBlock.new(
+                     array.new_box(), 
+                     array.new_float(amountOfBoxes, 0), 
+                     topValue,        
+                     botValue,        
+                     leftTime,        
+                     time,            
+                     "Bull",          
+                     orderVolume,     
+                     na,              
+                     na,              
+                     false,           
+                     na,              
+                     na,              
+                     na)              
+                
+                [topLine, botLine, bgFill] = generateBorderLines(newBlock, topValue, botValue)
+                newBlock.topLine := topLine
+                newBlock.botLine := botLine
+                newBlock.bgFill := bgFill
+                
+                [boxArray, volumeArray, totalVolume] = generateVolumeBoxes(newBlock, orderVolume)
+                newBlock.boxArray := boxArray
+                newBlock.boxVolumes := volumeArray
+                newBlock.totalVolume := totalVolume
+                
+                if showVolume
+                    blockCenter = (topValue + botValue) / 2
+                    lineStartX = leftTime + math.round((time - leftTime) * 0.95)
+                    lineEndX = lineStartX + math.round((time - leftTime) * 0.2)
+                    lineEndY = blockCenter + (topValue - botValue) * 0.3
+                    
+                    newBlock.volumeLine := line.new(
+                         x1 = lineStartX,
+                         y1 = blockCenter,
+                         x2 = lineEndX,
+                         y2 = lineEndY,
+                         xloc = xloc.bar_time,
+                          extend = extend.none,
+                         color = color.new(volumeTextColor, 20),
+                         style = line.style_solid,
+                         width = 1)
+                    
+                    formattedVolume = formatVolume(orderVolume) + " " + syminfo.basecurrency
+                    newBlock.volumeLabel := label.new(
+                         x = lineEndX,
+                         y = lineEndY,
+                         text = formattedVolume,
+                         textcolor = volumeTextColor,
+                         style = label.style_none,
+                         xloc = xloc.bar_time,
+                         size = size.normal)
+                
+                array.push(bullBlocks, newBlock)
+                last_bull_volume := orderVolume
+        
+        if is_bearish
+            new_bear := true
+            
+            topValue = obmode == "Breadth" ? 
+               (high[obLookback - 1] - atr * 1) < low[obLookback - 1] ? 
+                  low[obLookback - 1] : (high[obLookback - 1] - atr * 1) : 
+               high[obLookback - 1]
+                
+            botValue = low[obLookback - 1]
+            leftTime = time[obLookback - 1]
+            
+            createNewBlock = true
+            if bearBlocks.size() > 0
+                for i = bearBlocks.size() - 1 to 0
+                    block = bearBlocks.get(i)
+                    if math.max(block.botValue, botValue) <= math.min(block.topValue, topValue)
+                        wipeBlock(block)
+                        bearBlocks.remove(i)
+                        createNewBlock := true
+            
+            if createNewBlock
+                orderVolume = volume[obLookback - 1]
+                
+                newBlock = orderBlock.new(
+                     array.new_box(), 
+                     array.new_float(amountOfBoxes, 0), 
+                     topValue,        
+                     botValue,        
+                     leftTime,
+                     time,            
+                     "Bear",          
+                     orderVolume,    
+                     na,              
+                     na,              
+                     false,          
+                     na,             
+                     na,              
+                     na)              
+                
+                [topLine, botLine, bgFill] = generateBorderLines(newBlock, topValue, botValue)
+                newBlock.topLine := topLine
+                newBlock.botLine := botLine
+                newBlock.bgFill := bgFill
+                
+                [boxArray, volumeArray, totalVolume] = generateVolumeBoxes(newBlock, orderVolume)
+                newBlock.boxArray := boxArray
+                newBlock.boxVolumes := volumeArray
+                newBlock.totalVolume := totalVolume
+                
+                if showVolume
+                    blockCenter = (topValue + botValue) / 2
+                    lineStartX = leftTime + math.round((time - leftTime) * 0.95)
+                    lineEndX = lineStartX + math.round((time - leftTime) * 0.2)
+                    lineEndY = blockCenter - (topValue - botValue) * 0.3
+                    
+                    newBlock.volumeLine := line.new(
+                         x1 = lineStartX,
+                         y1 = blockCenter,
+                         x2 = lineEndX,
+                         y2 = lineEndY,
+                         xloc = xloc.bar_time,
+                         extend = extend.none,
+                         color = color.new(volumeTextColor, 20),
+                         style = line.style_solid,
+                         width = 1)
+                    
+                    formattedVolume = formatVolume(orderVolume) + " " + syminfo.basecurrency
+                    newBlock.volumeLabel := label.new(
+                         x = lineEndX,
+                         y = lineEndY,
+                         text = formattedVolume,
+                          textcolor = volumeTextColor,
+                         style = label.style_none,
+                         xloc = xloc.bar_time,
+                         size = size.normal)
+                
+                array.push(bearBlocks, newBlock)
+                last_bear_volume := orderVolume
+    
+    if bullBlocks.size() > 0
+        for i = bullBlocks.size() - 1 to 0
+            if i < bullBlocks.size()
+                block = bullBlocks.get(i)
+                
+                if not block.mitigated
+                    mitigated = obmiti == "Close" ? 
+                       math.min(close, open) < block.botValue : 
+                       obmiti == "Wick" ? 
+                          low < block.botValue : 
+                          obmiti == "Avg" ? 
+                             low < (block.topValue + block.botValue) / 2 : 
+                             false
+                                
+                    if mitigated
+                        block.mitigated := true
+                        
+                        wipeBlock(block)
+                        
+                        bullBlocks.remove(i)
+                        continue
+                
+                if close <= block.topValue and close >= block.botValue
+                    bull_touch := true
+                
+                if low <= block.botValue and close >= block.botValue
+                    bull_reject := true
+                
+                updateBoxes(block, time)
+    
+    if bearBlocks.size() > 0
+        for i = bearBlocks.size() - 1 to 0
+            if i < bearBlocks.size()
+                block = bearBlocks.get(i)
+                
+                if not block.mitigated
+                    mitigated = obmiti == "Close" ? 
+                       math.max(close, open) > block.topValue : 
+                       obmiti == "Wick" ? 
+                          high > block.topValue : 
+                          obmiti == "Avg" ? 
+                             high > (block.topValue + block.botValue) / 2 : 
+                             false
+                                
+                    if mitigated
+                        block.mitigated := true
+                        
+                        wipeBlock(block)
+                        
+                        bearBlocks.remove(i)
+                        continue
+                
+                if close <= block.topValue and close >= block.botValue
+                    bear_touch := true
+                
+                if high >= block.topValue and close <= block.topValue
+                    bear_reject := true
+                
+                updateBoxes(block, time)
+    
+    if bullBlocks.size() > obMaxBlocks
+        bullBlocks_to_remove = bullBlocks.size() - obMaxBlocks
+        
+        for _ = 0 to bullBlocks_to_remove - 1
+            if bullBlocks.size() <= 0
+                break
+                
+            oldestIdx = 0
+            oldestTime = time_close + 999999999  
+            
+            for i = 0 to bullBlocks.size() - 1
+                block = bullBlocks.get(i)
+                if block.leftTime < oldestTime
+                    oldestTime := block.leftTime
+                    oldestIdx := i
+            
+            if oldestIdx < bullBlocks.size()
+                oldBlock = bullBlocks.get(oldestIdx)
+                
+                wipeBlock(oldBlock)
+                
+                bullBlocks.remove(oldestIdx)
+    
+    while bearBlocks.size() > obMaxBlocks
+        oldestIdx = 0
+        oldestTime = time
+        
+        for i = 0 to bearBlocks.size() - 1
+            block = bearBlocks.get(i)
+            if block.leftTime < oldestTime
+                oldestTime := block.leftTime
+                oldestIdx := i
+        
+        oldBlock = bearBlocks.get(oldestIdx)
+        
+        wipeBlock(oldBlock)
+        
+        bearBlocks.remove(oldestIdx)
+
+if barstate.islast
+    float nearest_bull_distance = 1000000.0
+    float nearest_bear_distance = 1000000.0
+    int nearest_bull_idx = -1
+    int nearest_bear_idx = -1
+
+    if bullBlocks.size() > 0
+        for i = 0 to bullBlocks.size() - 1
+            block = bullBlocks.get(i)
+            if close > block.botValue
+                float dist = (close - block.botValue) / close * 100
+                if dist < nearest_bull_distance
+                    nearest_bull_distance := dist
+                    nearest_bull_idx := i
+    
+    if bearBlocks.size() > 0
+        for i = 0 to bearBlocks.size() - 1
+            block = bearBlocks.get(i)
+            if close < block.topValue
+                float dist = (block.topValue - close) / close * 100
+                if dist < nearest_bear_distance
+                    nearest_bear_distance := dist
+                    nearest_bear_idx := i
+    
+    if nearest_bull_distance < nearest_bear_distance and nearest_bull_idx >= 0
+        dom_block := "Bullish"
+        if nearest_bull_idx < bullBlocks.size()
+            bullBlock = bullBlocks.get(nearest_bull_idx)
+            block_strength := bullBlock.totalVolume / ta.sma(volume, 20)
+            price_distance := nearest_bull_distance
+            block_size := bullBlock.topValue - bullBlock.botValue
+            size_ratio := block_size / atr
+    else if nearest_bear_distance < nearest_bull_distance and nearest_bear_idx >= 0
+        dom_block := "Bearish"
+        if nearest_bear_idx < bearBlocks.size()
+            bearBlock = bearBlocks.get(nearest_bear_idx)
+            block_strength := bearBlock.totalVolume / ta.sma(volume, 20)
+            price_distance := nearest_bear_distance
+            block_size := bearBlock.topValue - bearBlock.botValue
+            size_ratio := block_size / atr
+    else
+        dom_block := "None"
+    
+    // Create screener table
+    if showScreener
+        var table screener = table.new(position, 7, 3, color.new(#000000, 0), border_color=color.white, border_width=1, frame_color=color.white, frame_width=1)
+        
+        table.set_border_color(screener, color.white)
+        table.set_border_width(screener, 1)
+        
+        table.clear(screener, 0, 0, 6, 2)    
+        color headerBg = color.new(#000000, 0)
+        color bullishBg = color.new(#008060, 0)  
+        
+        table.merge_cells(screener, 0, 0, 6, 0)
+        table.cell(screener, 0, 0, "Order Blocks Screener" + (windowsis ? " (Window Mode)" : ""), text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        
+        // Header row
+        table.cell(screener, 0, 1, "Symbol", text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 1, 1, "Timeframe", text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 2, 1, "Order Block", text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 3, 1, "Status", text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 4, 1, "Retests", text_color=color.white, bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 5, 1, "Bullish Volume", text_color=color.new(#02ffe6, 0), bgcolor=headerBg, text_size=tSize)
+        table.cell(screener, 6, 1, "Bearish Volume", text_color=color.new(#ff4040, 0), bgcolor=headerBg, text_size=tSize)
+        
+        // Data row
+        table.cell(screener, 0, 2, syminfo.ticker, text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+        table.cell(screener, 1, 2, timeframe.period, text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+        
+        string blockEmoji = dom_block == "Bullish" ? "🟢" : dom_block == "Bearish" ? "🔴" : "⚪"
+        string blockText = dom_block + " " + blockEmoji
+        color blockTextColor = dom_block == "Bullish" ? color.rgb(255, 255, 255) : dom_block == "Bearish" ? color.red : color.gray
+        table.cell(screener, 2, 2, blockText, text_color=blockTextColor, bgcolor=bullishBg, text_size=tSize)
+        
+        string status = ""
+        if price_distance < 1.0
+            status := "Near"
+        else if price_distance < 3.0
+            status := "Medium"
+        else
+            status := "Far"
+        table.cell(screener, 3, 2, status, text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+        
+        // Retests count
+        string retestText = touch_count > 0 ? str.tostring(touch_count) : "None"
+        table.cell(screener, 4, 2, retestText, text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+        
+        // Volume information
+        table.cell(screener, 5, 2, formatVolume(last_bull_volume), text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+        table.cell(screener, 6, 2, formatVolume(last_bear_volume), text_color=color.white, bgcolor=bullishBg, text_size=tSize)
+
+// Alert conditions
+alertcondition(condition = bull_touch, title = "Price Inside Bullish Max Volume Zone")
+alertcondition(condition = bear_touch, title = "Price Inside Bearish Max Volume Zone")
+alertcondition(condition = bull_reject, title = "Confirmed Rejection Off Bullish Max Volume Zone")
+alertcondition(condition = bear_reject, title = "Confirmed Rejection Off Bearish Max Volume Zone")
+alertcondition(condition = new_bull, title = "New Bullish Order Block")
+alertcondition(condition = new_bear, title = "New Bearish Order Block")
+
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 31/07/2017
+// This script shows a high and low period value.
+//    Width - width of lines
+//    SelectPeriod - Day or Week or Month and etc.
+//    LookBack - Shift levels 0 - current period, 1 - previous and etc.
+////////////////////////////////////////////////////////////
+
+// VARIABILI PER CHIUSURA ORDINI APERTI OLTRE UN CERTO TEMPO 
+var string[] longOrderIDs  = array.new_string(0)
+var int[] longOrderBars    = array.new_int(0)
+var string[] shortOrderIDs = array.new_string(0)
+var int[] shortOrderBars   = array.new_int(0)
+maxPendingBars = input.int(60, "Max Pending Order Bars", group="MONEY MANAGEMENT")  // numero massimo di barre che un ordine può rimanere aperto
+maxBarsOpen = input.int(60, "Max Position Bars", group="MONEY MANAGEMENT") 
+// VARIABILI PER CHIUSURA POSIZIONI APERTE OLTRE UN CERTO TEMPO 
+var int longOpenBar  = na
+var int shortOpenBar = na
+
+
+// VARIABILI PER CANCELLAZIONE LABEL ORDINI ELIMINATI
+var label[] longLabels = array.new_label()
+var label[] shortLabels = array.new_label()
+
+// Colore grigio trasparente
+traspColor = color.new(color.gray, 90)  // 0 = opaco, 100 = completamente trasparente
+
+
+// Controllo e cancellazione ordine pending
+while array.size(longOrderIDs) > 0
+    orderID = array.get(longOrderIDs, 0)
+    orderBar = array.get(longOrderBars, 0)
+    if bar_index - orderBar > maxPendingBars
+        strategy.cancel(orderID)
+        array.remove(longOrderIDs, 0)
+        array.remove(longOrderBars, 0)
+
+        // Trasforma la label in grigio trasparente
+        lbl = array.get(longLabels, 0)
+        if not na(lbl)
+            label.set_color(lbl, traspColor)
+            label.set_textcolor(lbl, traspColor)
+        array.remove(longLabels, 0)
+    else
+        break  // non rimuovere più ordini, restano pending
+
+
+while array.size(shortOrderIDs) > 0
+    orderID = array.get(shortOrderIDs, 0)
+    orderBar = array.get(shortOrderBars, 0)
+    if bar_index - orderBar > maxPendingBars
+        strategy.cancel(orderID)
+        array.remove(shortOrderIDs, 0)
+        array.remove(shortOrderBars, 0)
+
+        // Trasforma la label in grigio trasparente
+        lbl = array.get(shortLabels, 0)
+        if not na(lbl)
+            label.set_color(lbl, traspColor)
+            label.set_textcolor(lbl, traspColor)
+        array.remove(shortLabels, 0)
+    else
+        break  // non rimuovere più ordini, restano pending
+
+//CANCELLAZIONE OR
+
+
+// Gestione chiusura posizioni aperte da troppo tempo
+// Aggiorniamo la barra di apertura solo quando la posizione cambia da 0
+if strategy.position_size > 0 and na(longOpenBar)
+    longOpenBar := bar_index  // posizione long aperta ora
+if strategy.position_size == 0
+    longOpenBar := na         // posizione chiusa
+
+if strategy.position_size < 0 and na(shortOpenBar)
+    shortOpenBar := bar_index  // posizione short aperta ora
+if strategy.position_size == 0
+    shortOpenBar := na         // posizione chius
+
+
+
+if strategy.position_size > 0 and bar_index - longOpenBar > maxBarsOpen
+    strategy.close("Close Long Timeout")
+    longOpenBar := na
+
+if strategy.position_size < 0 and bar_index - shortOpenBar > maxBarsOpen
+    strategy.close("Close Short Timeout")
+    shortOpenBar := na
+
+
+
+
+
+// =========================
+// CALCOLO HIGH E LOW
+// =========================
+xHigh = request.security(syminfo.tickerid, SelectPeriod, high[LookBack])
+xLow  = request.security(syminfo.tickerid, SelectPeriod, low[LookBack])
+
+vS1 = xHigh
+vR1 = xLow
+
+// =========================
+// PLOT LIVELLI
+// =========================
+plot(vS1, color=color.new(color.red, 0), title="S1", style=plot.style_linebr, linewidth=Width)
+plot(vR1, color=color.new(color.green, 0), title="R1", style=plot.style_linebr, linewidth=Width)
+// ===========================
+// TREND FILTER
+// ===========================
+// ema filter
+emaPeriod= input.int(223, "Ema Lenght", group = "ENTRY FILTER")
+// ema filter
+emaTrend = ta.ema(close, emaPeriod)
+bullishTrend = close > emaTrend
+bearishTrend = close < emaTrend
+
+// Mostra EMA sul grafico
+plot(emaTrend , title="EMA 50", color=color.orange, linewidth=2)
+
+// ===========================
+// ATR e Swing High/Low
+// ===========================
+atrLength = input.int(14, "ATR Period", group = "ATR PARAMETER")
+atrValue = ta.atr(atrLength)
+
+swingHigh(len) => ta.pivothigh(high, len, len)
+swingLow(len)  => ta.pivotlow(low, len, len)
+
+swingHighValue = swingHigh(5)
+swingLowValue  = swingLow(5)
+
+f_getSwingTargets(entryPrice, direction) =>
+    float sl = na
+    float tp = na
+    if direction == "Bull"
+        sl := swingLowValue
+        tp := swingHighValue
+    else if direction == "Bear"
+        sl := swingHighValue
+        tp := swingLowValue
+    [sl, tp]
+
+// ===========================
+// Ultimi blocchi bullish/bearish
+// ===========================
+float bullishOBPrice = na
+float bearishOBPrice = na
+orderBlock lastBull = na
+orderBlock lastBear = na
+
+// Parametro utente per scegliere il metodo
+methodOB = input.string("medio", "Metodo OB Price", options=["minimo", "massimo", "medio"], group="ORDER BLOCKS")
+
+
+if bullBlocks.size() > 0
+    lastBull := bullBlocks.get(bullBlocks.size() - 1)
+    bullishOBPrice := switch methodOB
+        "minimo" => lastBull.botValue
+        "massimo" => lastBull.topValue
+        "medio" => (lastBull.botValue + lastBull.topValue) / 2
+    //bullishOBPrice := lastBull.botValue
+    //bullishOBPrice := lastBull.topValue
+
+if bearBlocks.size() > 0
+    lastBear := bearBlocks.get(bearBlocks.size() - 1)
+    bearishOBPrice := switch methodOB
+        "minimo" => lastBear.topValue
+        "massimo" => lastBear.botValue
+        "medio" => (lastBear.botValue + lastBear.topValue) / 2
+    //bearishOBPrice := lastBear.topValue
+    //bearishOBPrice := lastBear.botValue
+// ===========================
+// LINEE ORIZZONTALI TP / SL
+// ===========================
+var line tpLine1 = na
+var line tpLine2 = na
+var line tpLine3 = na
+var line slLine = na
+
+tpColor = input.color(color.new(color.green, 0), "TP Line Color", group = "VISUAL SETTINGS")
+slColor = input.color(color.new(color.red, 0), "SL Line Color", group = "VISUAL SETTINGS")
+extendBars = input.int(80, "Estensione linee TP/SL", group = "VISUAL SETTINGS")
+
+
+
+// === INPUT ===
+risk_percent = input.float(2.0, "Rischio (%) per Trade", step=0.1, group = "MONEY MANAGEMENT")
+
+capitale_iniziale = strategy.initial_capital
+capitale_disponibile = capitale_iniziale + strategy.netprofit
+
+qty_tp1 = input.int(25,"% Qty TP1", group="MONEY MANAGEMENT") 
+qty_tp2 = input.int(50,"% Qty TP2", group="MONEY MANAGEMENT") 
+qty_tp3 = input.int(25,"% Qty TP3", group="MONEY MANAGEMENT") 
+// ===========================
+// BUY LIMIT su Bullish OB (Trend rialzista)
+// ===========================
+var string  tradeText = ""
+if new_bull and not na(bullishOBPrice) and bullishTrend //and array.size(longOrderBars) < maxOrdersPerDirection
+    //[sl_long, tp_long] = f_getSwingTargets(bullishOBPrice, "Bull")
+    tp_long = xHigh
+    sl_long = bullishOBPrice * (1-atrValue*atrMultiplier)
+    tp_mid = bullishOBPrice + (tp_long - bullishOBPrice) * 0.5
+    tp_far = bullishOBPrice + (tp_long - bullishOBPrice) * 0.8
+
+    // === CALCOLO SIZE ===
+    
+    risk_amount = capitale_disponibile * (risk_percent / 100)
+ 
+
+    position_size = risk_amount / (bullishOBPrice - sl_long)
+
+    // Calcolo R/R
+    rr = (tp_long - bullishOBPrice) / (bullishOBPrice - sl_long)
+    if rr > rr_threshold
+        trade_id = "Buy Limit OB " + str.tostring(bar_index)
+        tradeText := "BUY HERE: " + str.tostring(trade_id) + "\n" + "Entry: " + str.tostring(bullishOBPrice) + "\n" + "SL: " + str.tostring(sl_long) + "\n" +"TP1: " + str.tostring(tp_mid) + "\n" +"TP2: " + str.tostring(tp_far) + "\n" + "TP3: " + str.tostring(tp_long) + "\n" + "RR: " + str.tostring(rr) + "\n" + "Size" + str.tostring(position_size)
+        newLabel = label.new(bar_index, bullishOBPrice, tradeText, xloc=xloc.bar_index, yloc=yloc.price, color=color.rgb(38, 139, 69), textcolor=color.rgb(255, 255, 255), style=label.style_label_up, size=size.small)
+      
+        strategy.order(trade_id, strategy.long, limit=bullishOBPrice, qty=position_size, alert_message=tradeText)
+        
+        array.push(longOrderIDs, trade_id)
+        array.push(longOrderBars, bar_index)
+            // Testo unico con tutte le informazioni
+        alert(tradeText)
+        array.push(longLabels, newLabel)
+        //label.new(bar_index, bullishOBPrice, "BUY HERE", xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "Entry:" + str.tostring(bullishOBPrice), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "SL:" + str.tostring(sl_long), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP1:" + str.tostring(tp_mid), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP2:" + str.tostring(tp_far), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP3:" + str.tostring(tp_long), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+
+        if qty_tp1 != 0
+            strategy.exit("TP1 Long", from_entry=trade_id, stop=sl_long, limit=tp_mid, qty_percent=qty_tp1)
+
+        if qty_tp2 != 0
+            strategy.exit("TP2 Long", from_entry=trade_id, stop=sl_long, limit=tp_far, qty_percent=qty_tp2)
+
+        if qty_tp3 != 0
+            strategy.exit("TP3 Long", from_entry=trade_id, stop=sl_long, limit=tp_long, qty_percent=qty_tp3)
+
+
+// ===========================
+// SELL LIMIT su Bearish OB (Trend ribassista)
+// ===========================
+if new_bear and not na(bearishOBPrice) and bearishTrend //and array.size(shortOrderBars) < maxOrdersPerDirection
+    //[sl_short, tp_short] = f_getSwingTargets(bearishOBPrice, "Bear")
+    tp_short = xLow
+    sl_short = bearishOBPrice * (1+atrValue*atrMultiplier)
+    tp_mid = bearishOBPrice - (bearishOBPrice - tp_short) * 0.5
+    tp_far = bearishOBPrice - (bearishOBPrice - tp_short) * 0.8
+    // Calcolo R/R per short
+    rr = (bearishOBPrice - tp_short) / (sl_short - bearishOBPrice)
+
+ 
+    risk_amount = capitale_disponibile * (risk_percent / 100)
+
+ 
+    position_size = risk_amount / (sl_short - bearishOBPrice)
+
+    if rr > rr_threshold
+        // Testo unico con tutte le informazioni
+        trade_id = "Sell Limit OB " + str.tostring(bar_index)
+        tradeText := "SELL HERE: " + str.tostring(trade_id) + "\n" + "Entry: " + str.tostring(bearishOBPrice) + "\n" + "SL: " + str.tostring(sl_short) + "\n" +"TP1: " + str.tostring(tp_mid) + "\n" +"TP2: " + str.tostring(tp_far) + "\n" + "TP3: " + str.tostring(tp_short) + "\n"  + "RR: " + str.tostring(rr) + "\n" + "Size" + str.tostring(position_size)
+        strategy.order(trade_id, strategy.short, limit=bearishOBPrice, qty=position_size, alert_message=tradeText)
+
+        // Alert message generico
+        alert(tradeText)
+
+        array.push(shortOrderIDs, trade_id)
+        array.push(shortOrderBars, bar_index)
+        newLabel =label.new(bar_index, bearishOBPrice, tradeText, xloc=xloc.bar_index, yloc=yloc.price, color=color.red, textcolor=color.black, style=label.style_label_down, size=size.small)
+         
+        array.push(shortLabels, newLabel)
+        //label.new(bar_index, bullishOBPrice, "Entry:" + str.tostring(bullishOBPrice), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "SL:" + str.tostring(sl_short), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP1:" + str.tostring(tp_mid), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP2:" + str.tostring(tp_far), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+        //label.new(bar_index, bullishOBPrice, "TP3:" + str.tostring(tp_short), xloc=xloc.bar_index, yloc=yloc.price, color=color.green, textcolor=color.black, style=label.style_label_up, size=size.small)
+
+ 
+        exit_id_1 = "TP1 Short " + trade_id
+        exit_id_2 = "TP2 Short " + trade_id
+        exit_id_3 = "TP3 Short " + trade_id
+        exit_id_4 = "SL Short " + trade_id
+        //exit_id_2
+        if qty_tp1 != 0
+            strategy.exit("TP1 Short", from_entry=trade_id, stop=sl_short, limit=tp_mid, qty_percent=qty_tp1)
+        if qty_tp2 != 0
+            strategy.exit("TP2 Short", from_entry=trade_id, stop=sl_short, limit=tp_far, qty_percent=qty_tp2)
+        if qty_tp3 != 0    
+            strategy.exit("TP3 Short", from_entry=trade_id, stop=sl_short, limit=tp_short, qty_percent=qty_tp3)
+       
+
+
+
+
+//alertcondition(new_bull, title="Long Alert on {Symbol}", message=tradeText)
+
+//alertcondition(new_bear, title="Short Alert on {Symbol}", message=tradeText)
+
+View in Pine Editor・972 lines
+Use on chart
+8
+1
+2 040
+# OB Matrix Strategy - Documentation
+
+**Version:** 1.0
+**Author:** HPotter
+**Date:** 31/07/2017
+
+The **OB Matrix Strategy** is based on the identification of **bullish and bearish Order Blocks** and the management of conditional orders with multiple Take Profit (TP) and Stop Loss (SL) levels. It uses trend filters, ATR, and percentage-based risk management.
+
+---
+
+## 1. Main Parameters
+
+### Strategy
+- `initial_capital`: 50
+- `default_qty_type`: percentage of capital
+- `default_qty_value`: 10
+
+### Money Management
+- `rr_threshold`: minimum Risk/Reward threshold to open a trade
+- `risk_percent`: percentage of capital to risk per trade (default 2%)
+- `maxPendingBars`: maximum number of bars for a pending order
+- `maxBarsOpen`: maximum number of bars for an open position
+- `qty_tp1`, `qty_tp2`, `qty_tp3`: quantity percentages for multiple TPs
+
+---
+
+## 2. Order Block Identification
+
+### Order Block Parameters
+- `obLookback`: number of bars to identify an Order Block
+- `obmode`: method to calculate the block (`Full` or `Breadth`)
+- `obmiti`: method to determine block mitigation (`Close`, `Wick`, `Avg`)
+- `obMaxBlocks`: maximum number of Order Blocks displayed
+
+### Main Variables
+- `bullBlocks`: array of bullish blocks
+- `bearBlocks`: array of bearish blocks
+- `last_bull_volume`, `last_bear_volume`: volume of the last block
+- `dom_block`: dominant block type (Bullish/Bearish/None)
+- `block_strength`: block strength (normalized volume)
+- `price_distance`: distance between current price and nearest block
+
+---
+
+## 3. Visual Parameters
+
+- `Width`: line thickness for swing high/low
+- `amountOfBoxes`: block grid segments
+- `showBorder`: show block borders
+- `borderWidth`: width of block borders
+- `showVolume`: display volume inside blocks
+- `volumePosition`: vertical position of volume text
+
+Customizable colors:
+- `obHighVolumeColor`, `obLowVolumeColor`, `obBearHighVolumeColor`, `obBearLowVolumeColor`
+- `obBullBorderColor`, `obBearBorderColor`
+- `obBullFillColor`, `obBearFillColor`
+- `volumeTextColor`
+
+---
+
+## 4. Screener Table
+
+- `showScreener`: display the screener table
+- `tablePosition`: table position (`Top Left`, `Top Right`, `Bottom Left`, `Bottom Right`)
+- `tableSize`: table size (`Small`, `Normal`, `Large`)
+
+The table shows:
+- Symbol, Timeframe
+- Type and status of Order Block
+- Number of retests
+- Bullish and bearish volumes
+
+---
+
+## 5. Trend Filters
+
+- EMA as a trend filter (`emaPeriod`, default 223)
+- `bullishTrend` if close > EMA
+- `bearishTrend` if close < EMA
+
+---
+
+## 6. ATR and Swing Points
+
+- ATR calculated with a customizable period (`atrLength`)
+- Swing High/Low for SL/TP calculation
+- `f_getSwingTargets` function to calculate SL and TP based on direction
+
+---
+
+## 7. Trade Logic
+
+### Buy Limit on Bullish OB
+- Conditions:
+- New bullish block
+- Uptrend
+- RR > threshold (`rr_threshold`)
+- SL: `bullishOBPrice * (1 - atr * atrMultiplier)`
+- Multiple TPs: TP1 (50%), TP2 (80%), TP3 (100% max)
+- Quantity calculation based on percentage risk
+
+### Sell Limit on Bearish OB
+- Conditions:
+- New bearish block
+- Downtrend
+- RR > threshold (`rr_threshold`)
+- SL: `bearishOBPrice * (1 + atr * atrMultiplier)`
+- Multiple TPs: TP1 (50%), TP2 (80%), TP3 (100% max)
+- Quantity calculation based on percentage risk
+
+---
+
+## 8. Order Management and Timeout
+- Close pending orders after `maxPendingBars` bars
+- Close open positions after `maxBarsOpen` bars
+- Label management for open orders
+
+---
+
+## 9. Alert Conditions
+- `bull_touch`: price inside maximum bullish volume zone
+- `bear_touch`: price inside maximum bearish volume zone
+- `bull_reject`: confirmation of bullish zone rejection
+- `bear_reject`: confirmation of bearish zone rejection
+- `new_bull`: new bullish block
+- `new_bear`: new bearish block
+
+---
+
+## 10. Level Calculation
+- Swing levels based on selected timeframe (`SelectPeriod`)
+- `xHigh` and `xLow` for S1 and R1 calculation
+- Levels plotted on chart
+
+---
+
+## 11. Take Profit / Stop Loss
+- Extended horizontal lines (`extendBars`) to visualize TP and SL
+- Customizable colors (`tpColor`, `slColor`)
+
+---
+
+## 12. Notes
+- Complete script based on Pine Script v5
+- Advanced graphical management with boxes, lines, labels
+- Dynamically displays volumes and Order Blocks
+- Integrated internal screener
+
+---
+
+### End of Documentation
+

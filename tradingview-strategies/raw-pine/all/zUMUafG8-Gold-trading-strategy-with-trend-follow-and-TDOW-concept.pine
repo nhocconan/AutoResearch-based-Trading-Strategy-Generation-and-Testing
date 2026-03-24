@@ -1,0 +1,98 @@
+//@version=2
+strategy("MACD + Stochastic + RSI by X001TK", shorttitle="MACD_Stoch_RSI_Strat", overlay=true)
+
+// X001TK MACD + Stochastic + RSI Strategy
+//
+// 
+// This strategy combines the special approach in stochastic and rsi
+// strategy to buy once stochastic and rsi closes above center line "50" level 
+// with a MACD strategy to buy when the MACD value goes above Signal line.
+//
+//
+// This strategy goes long if the MACD goes above Signal and stochastic 
+// goes above 50 level and rsi goes above 50 level.
+//
+// This pure strategy does not have any
+// stop loss or take profit money management logic.
+//
+// Exit rule is simple. We close the position once MACD goes below Signal line
+//
+// 
+// 
+//
+// Input
+fastMAlen = input(12, minval=1, title="MACD fast moving average")
+slowMAlen=input(26,minval=1, title="MACD slow moving average")
+signalMACDlen = input(9,minval=1, title="MACD signal line moving average")
+StochLength = input(14, minval=1, title="Stochastic Length")
+switch=input(true, title="Enable MACD Bar Color?")
+SL = input(defval=-700.00, title="Stop Loss in $", type=float, step=1)
+TP = input(defval=500.00, title="Target Point in $", type=float, step=1)
+plot(valuewhen(low>low[1] , low[1] , 1), linewidth=2, color=purple)
+
+// MACD Calculation
+MACD = ema(close, fastMAlen) - ema(close, slowMAlen)
+signalMACD = ema(MACD, signalMACDlen)
+delta = MACD - signalMACD
+fastMA = ema(close,fastMAlen)
+slowMA = ema(close,slowMAlen)
+
+// Stochastic Calculation
+smoothK = input(3, title="Smoothing of Stochastic %K ")
+smoothD = input(3, title="Moving Average of Stochastic %K")
+k = sma(stoch(close, high, low, StochLength), smoothK)
+d = sma(k, smoothD)
+
+//RSI Calculation
+xRSI = rsi(close, 14)
+
+// Colors
+bartrendcolor = MACD > signalMACD and k > 50 and xRSI > 50? green : MACD < signalMACD and k < 50 and xRSI < 50? red : MACD < signalMACD? yellow : gray   
+barcolor(switch?bartrendcolor:na)
+
+// === STRATEGY ===
+// conditions
+longCond = MACD > signalMACD and k > 50 and xRSI > 50  
+tdowCond = dayofweek==monday or dayofweek==wednesday or dayofweek==thursday
+shortCond = MACD < signalMACD and k < 50 and xRSI < 50
+ExitLongCond = MACD < signalMACD or strategy.openprofit<SL 
+ExitShortCond = MACD > signalMACD or strategy.openprofit<SL
+
+strategy.entry("long", strategy.long,  when=longCond==true and tdowCond==true)
+strategy.close("long", when=ExitLongCond==true)
+//strategy.entry("short", strategy.short,  when=shortCond==true)
+//strategy.close("short", when=ExitShortCond==true)
+
+// === /STRATEGY ===
+
+View in Pine Editor・66 lines
+Use on chart
+4
+5
+2
+4
+27 002
+My strategy uses a combination of three indicators MACD Stochastic RSI.
+
+The Idea is to buy when ( MACD > Signal and RSI > 50 and Stochastic > 50) occures at the same time
+
+This strategy works well on stocks and cryptos especially during market breaking up after consolidation
+
+The best results are on Daily charts , so its NOT a scalping strategy. But it can work also on 1H charts.
+
+The strategy does not have any stops and profit targets, so we can take all the market can give us at the moment.
+
+The exit point only when MACD goes under Signal
+
+In addition I've decided to add a stop loss and "Trading day of week" concept
+
+So the results are much more stable and we get more profit !
+
+
+
+So, use it, trade it.
+
+
+If it will help you to imprive your trading results, please donate me
+
+BTC: 12kd1F8buWisUBdq27BBwRkUvzW7Ey3og5

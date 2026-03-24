@@ -1,0 +1,240 @@
+//@version=6
+strategy("shasha多周期均线缠绕突破策略加激活跟踪止损", overlay=true,default_qty_type=strategy.percent_of_equity, default_qty_value=50, process_orders_on_close = true, calc_on_every_tick = false, calc_on_order_fills = false)
+
+// === 输入参数 ===
+emaLens = array.new_int(4)
+array.set(emaLens, 0, 5)
+array.set(emaLens, 1, 10)
+array.set(emaLens, 2, 20)
+array.set(emaLens, 3, 30)
+
+maLenDaily = input.int(15, "日线趋势EMA周期", minval=1)
+sl_pct = input.float(0.5, "止损百分比", step=0.1)
+tp_pct = input.float(3.0, "止盈百分比", step=0.1)
+vol_factor = input.float(0.92, "成交量放大因子", step=0.01)
+
+// === 追踪止损参数 ===
+use_trailing_stop = input.bool(true, "启用追踪止损", tooltip="开启或关闭追踪止损功能")
+trailing_activate_pct = input.float(0.7, "追踪止损激活百分比", step=0.01, tooltip="当利润达到此百分比时激活追踪止损")
+trailing_stop_pct = input.float(0.12, "追踪止损回撤百分比", step=0.01, tooltip="从最高点回撤此百分比时触发止损")
+
+// === 多周期处理:日线级别 ===
+[daily_close, daily_ema] = request.security(syminfo.tickerid, "D", [close[1], ta.ema(close[1], maLenDaily)],lookahead = barmerge.lookahead_off)
+
+isLongTrend = daily_close > daily_ema
+isShortTrend = daily_close < daily_ema
+
+// === 小周期缠绕检测(小时线)===
+ema1 = ta.ema(close, 5)
+ema2 = ta.ema(close, 10)
+ema3 = ta.ema(close, 20)
+ema4 = ta.ema(close, 30)
+ema_max = math.max(math.max(ema1, ema2), math.max(ema3, ema4))
+ema_min = math.min(math.min(ema1, ema2), math.min(ema3, ema4))
+ema_range = ema_max - ema_min
+
+basis = ta.sma(close, 10)
+dev = ta.stdev(close, 10)
+boll_upper = basis + dev * 2
+boll_lower = basis - dev * 2
+boll_width = boll_upper - boll_lower
+tight_threshold = boll_width * 0.95
+isTight = ema_range < tight_threshold
+
+breakUp = close > ema_max and isTight
+breakDown = close < ema_min and isTight
+
+vol_ma = ta.sma(volume, 25)
+vol_up = volume > vol_ma * vol_factor
+
+exitTrendBroken = ema1 < ema2
+exitTrendBrokenshort = ema1 > ema2
+
+exitLong = false
+exitShort = false
+
+// === 状态追踪 ===
+var int exitBarLong = na
+var int exitBarShort = na
+var bool watchShort = false
+var bool watchLong = false
+
+// === 追踪止损状态追踪 ===
+var float long_highest_price = na
+var float short_lowest_price = na
+var bool long_trailing_active = false
+var bool short_trailing_active = false
+
+// === 入场逻辑(顺应日线趋势)===
+longCondition = isLongTrend and breakUp and vol_up and close > open
+shortCondition = isShortTrend and breakDown and vol_up and close < open
+
+if (shortCondition and strategy.position_size >=0)
+    // if (strategy.position_size > 0)
+        // strategy.close("Long")
+    // alert("sell Alert!", alert.freq_once_per_bar)
+    strategy.entry("Short", strategy.short)
+    // 重置追踪止损状态
+    long_highest_price := na
+    long_trailing_active := false
+    short_lowest_price := close
+    short_trailing_active := false
+
+if (longCondition and strategy.position_size <=0)
+    // if (strategy.position_size < 0)
+    //     strategy.close("Short")
+    // alert("buy Alert!", alert.freq_once_per_bar)
+    strategy.entry("Long", strategy.long)
+    // 重置追踪止损状态
+    short_lowest_price := na
+    short_trailing_active := false
+    long_highest_price := close
+    long_trailing_active := false
+
+// === 止盈止损逻辑 ===
+var float entry_price = na
+if (strategy.opentrades > 0)
+    entry_price := strategy.opentrades.entry_price(0)
+
+if (strategy.position_size > 0)
+    profit_pct = (close - entry_price) / entry_price * 100
+    
+    // 更新最高价格
+    if (na(long_highest_price) or close > long_highest_price)
+        long_highest_price := close
+    
+    // 检查是否激活追踪止损
+    if (use_trailing_stop and profit_pct >= trailing_activate_pct and not long_trailing_active)
+        long_trailing_active := true
+    
+    // 追踪止损逻辑
+    if (use_trailing_stop and long_trailing_active)
+        drawdown_pct = (long_highest_price - close) / long_highest_price * 100
+        if (drawdown_pct >= trailing_stop_pct)
+            exitLong := true
+            exitBarLong := bar_index
+            // alert("多头追踪止损 Alert!", alert.freq_once_per_bar)
+            strategy.close("Long", comment="多头追踪止损")
+            // 重置追踪止损状态
+            long_highest_price := na
+            long_trailing_active := false
+    
+    // 原有止盈止损逻辑
+    if (not exitLong and profit_pct >= tp_pct)
+        exitLong := true
+        exitBarLong := bar_index
+        // alert("多头盈利止盈 Alert!", alert.freq_once_per_bar)
+        strategy.close("Long", comment="多头盈利止盈")
+        long_highest_price := na
+        long_trailing_active := false
+    else if (not exitLong and exitTrendBroken)
+        exitLong := true
+        exitBarLong := bar_index
+        watchShort := true
+        // alert("多头趋势跌破出场 Alert!", alert.freq_once_per_bar)
+        strategy.close("Long", comment="多头趋势跌破出场")
+        long_highest_price := na
+        long_trailing_active := false
+
+if (strategy.position_size < 0)
+    profit_pct = (entry_price - close) / entry_price * 100
+    
+    // 更新最低价格
+    if (na(short_lowest_price) or close < short_lowest_price)
+        short_lowest_price := close
+    
+    // 检查是否激活追踪止损
+    if (use_trailing_stop and profit_pct >= trailing_activate_pct and not short_trailing_active)
+        short_trailing_active := true
+    
+    // 追踪止损逻辑
+    if (use_trailing_stop and short_trailing_active)
+        drawdown_pct = (close - short_lowest_price) / short_lowest_price * 100
+        if (drawdown_pct >= trailing_stop_pct)
+            exitShort := true
+            exitBarShort := bar_index
+            // alert("空头追踪止损 Alert!", alert.freq_once_per_bar)
+            strategy.close("Short", comment="空头追踪止损")
+            // 重置追踪止损状态
+            short_lowest_price := na
+            short_trailing_active := false
+    
+    // 原有止盈止损逻辑
+    if (not exitShort and profit_pct >= tp_pct)
+        exitShort := true
+        exitBarShort := bar_index
+        // alert("空头盈利止盈Alert!", alert.freq_once_per_bar)
+        strategy.close("Short", comment="空头盈利止盈")
+        short_lowest_price := na
+        short_trailing_active := false
+    else if (not exitShort and exitTrendBrokenshort)
+        exitShort := true
+        exitBarShort := bar_index
+        watchLong := true
+        // alert("空头趋势升破出场Alert!", alert.freq_once_per_bar)
+        strategy.close("Short", comment="空头趋势升破出场")
+        short_lowest_price := na
+        short_trailing_active := false
+
+if (strategy.position_size == 0)
+    entry_price := na
+    long_highest_price := na
+    short_lowest_price := na
+    long_trailing_active := false
+    short_trailing_active := false
+
+// === 平多后观察5根K线内是否开空 ===
+if (watchShort and strategy.position_size == 0 and close < open)
+    if (low < boll_lower)
+        // alert("观察窗口开空Alert!", alert.freq_once_per_bar)
+        strategy.entry("Short", strategy.short, comment="观察窗口开空")
+        watchShort := false
+        exitBarLong := na
+    else if (bar_index - exitBarLong >= 5)
+        watchShort := false
+        exitBarLong := na
+
+// === 平空后观察5根K线内是否开多 ===
+if (watchLong and strategy.position_size == 0 and close > open)
+    if (high > boll_upper)
+        // alert("观察窗口开多Alert!", alert.freq_once_per_bar)
+        strategy.entry("Long", strategy.long, comment="观察窗口开多")
+        watchLong := false
+        exitBarShort := na
+    else if (bar_index - exitBarShort >= 5)
+        watchLong := false
+        exitBarShort := na
+
+// === 辅助绘图 ===
+plot(ema1, color=color.orange, title="EMA5")
+plot(ema2, color=color.yellow, title="EMA10")
+plot(ema3, color=color.blue, title="EMA20")
+plot(ema4, color=color.green, title="EMA30")
+plot(boll_upper, color=color.red, title="Boll上轨")
+plot(boll_lower, color=color.green, title="Boll下轨")
+
+// 绘制追踪止损状态
+plotshape(long_trailing_active, style=shape.diamond, location=location.abovebar, color=color.rgb(0, 255, 255), size=size.tiny, title="多头追踪激活")
+plotshape(short_trailing_active, style=shape.diamond, location=location.belowbar, color=color.rgb(255, 0, 255), size=size.tiny, title="空头追踪激活")
+
+// === 条件信号标记 ===
+plotshape(breakDown, title="breakDown", location=location.belowbar, color=color.rgb(245, 15, 15), style=shape.labeldown, text="下破缠绕")
+plotshape(isShortTrend, title="isShortTrend", location=location.abovebar, color=color.yellow, style=shape.labeldown, text="空头趋势")
+plotshape(vol_up, title="vol_up", location=location.abovebar, color=color.green, style=shape.labeldown, text="量能放大")
+plotshape(shortCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Short Signal", text="空头信号")
+plotshape(breakUp, title="breakUp", location=location.belowbar, color=color.rgb(19, 238, 66), style=shape.labelup, text="上破缠绕")
+plotshape(isLongTrend, title="isLongTrend", location=location.belowbar, color=color.yellow, style=shape.labelup, text="多头趋势")
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Long Signal", text="多头信号")
+plotshape(strategy.position_size == 0 and close > open and high > boll_upper,location=location.belowbar,style=shape.circle,color=color.green, title="上破布林")
+plotshape(strategy.position_size == 0 and close < open and low < boll_lower,location=location.abovebar,style=shape.circle,color=color.red, title="下破布林")
+plotshape(watchLong, style=shape.triangleup, location=location.belowbar, color=color.rgb(18, 207, 103), title="观察多状态")
+plotshape(watchShort, style=shape.triangledown, location=location.belowbar, color=color.rgb(243, 26, 37), title="观察空状态")
+
+View in Pine Editor・231 lines
+Use on chart
+3
+5
+937
+visit jiahejuzhen.com
+ join teacher Liu's quant class
+

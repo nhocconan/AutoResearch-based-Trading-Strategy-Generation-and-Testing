@@ -1,0 +1,117 @@
+//@version=5
+strategy("Bullish Divergence Short-term Long Trade Finder", overlay=false)
+
+max_range = 50 
+min_range = 5
+///pivot_left = 25
+pivot_right = 5
+
+//Inputs
+src = input(close, title="Source")
+rsiBearCondMin = input.int(50, title="RSI Bearish Condition Minimum")
+rsiBearCondSellMin = input.int(60, title="RSI Bearish Condition Sell Min")
+rsiBullCondMin = input.int(40, title="RSI Bull Condition Minimum")
+pivot_left = input.int(25, title="Look Back this many candles")
+SellWhenRSI = input.int(75, title="RSI Sell Value")
+StopLossPercent = input.int(5, title="Stop loss Percentage")
+rsiPeriod = input.int(14, title="RSI Length")
+rsiOversold = input.int(30, title="RSI Oversold Level")
+rsiOverbought = input.int(70, title="RSI Overbought Level")
+
+//RSI Function/ value 
+rsi_value = ta.rsi(src, rsiPeriod)
+rsi_hour = request.security(syminfo.tickerid,'60',rsi_value)
+rsi_4hour = request.security(syminfo.tickerid,'240',rsi_value)
+rsi_Day = request.security(syminfo.tickerid,'D',rsi_value)
+plot(rsi_value, title="RSI", linewidth = 2, color = color.black, display =display.all)
+hline(50, linestyle = hline.style_dotted)
+rsi_ob = hline(70, linestyle=hline.style_dotted)
+rsi_os = hline(30, linestyle=hline.style_dotted)
+fill(rsi_ob, rsi_os, color.white)
+SL_percent = (100-StopLossPercent)/100 
+
+pivot_low_true = na(ta.pivotlow(rsi_value, pivot_left, pivot_right)) ? false : true
+
+//create a function that returns truee/false
+confirm_range(x) => 
+    bars = ta.barssince(x == true) //counts the number of bars since thee last time condition was true
+    min_range <= bars and bars <= max_range // makees sure bars is less than max_range(50) and greater than min_range(5) 
+
+
+// RSI higher check / low check
+RSI_HL_check = rsi_value<rsiBullCondMin and rsi_value > ta.valuewhen(pivot_low_true and rsi_value<rsiBullCondMin, rsi_value,1) and confirm_range(pivot_low_true[1]) 
+
+// price check for lower low
+price_ll_check = low < ta.valuewhen(pivot_low_true, low, 1)
+
+bullCond = price_ll_check and RSI_HL_check and pivot_low_true
+
+//pivot_high_true = na(ta.pivothigh(rsi_value, pivot_left, pivot_right))  ? false : true
+pivot_high_true = na(ta.pivothigh(rsi_value, pivot_left, pivot_right))   ? false : true
+
+// RSI Lower check / high check ensuring that the RSI dips below 30 to start divergence 
+RSI_LH_check = rsi_value < ta.valuewhen(pivot_high_true and rsi_value>rsiBearCondMin, rsi_value,1) and confirm_range(pivot_high_true[1]) //and rsi_value[pivot_right] >= 65
+
+// price check for lower low
+price_hh_check = high > ta.valuewhen(pivot_high_true, high, 1)
+
+bearCond = price_hh_check and RSI_LH_check and pivot_high_true and rsi_value[3] > rsiBearCondSellMin
+
+plot(pivot_low_true ? rsi_value : na, offset=-5, linewidth=3, color=(bullCond ? color.green : color.new(color.white, 100)))
+
+plotshape(bullCond ? rsi_value : na , text = "BUY", style =  shape.labelup, location = location.absolute, color = color.green, offset =0, textcolor = color.white )
+
+plot(pivot_low_true ? rsi_value : na, offset=-5, linewidth=3, color=(bearCond ? color.red : color.new(color.white, 100)))
+
+plotshape(bearCond ? rsi_value : na , text = "Sell", style =  shape.labelup, location = location.absolute, color = color.red, offset =0, textcolor = color.white )
+//[bbUpperBand, bbMiddleBand, bbLowerBand] = ta.bb(src, bbPeriod, bbDev)
+
+//Entry Condition
+longCondition = false
+
+//bullEntry = bullCond and RSI_HL_check and confirm_range(pivot_low_true[1])
+if bullCond and close < ta.valuewhen(pivot_low_true, low, 1) and rsi_hour <40 ///and rsi_4hour<40 //and rsi_Day<50
+    strategy.entry("Long", strategy.long)
+    
+//Exit Condition
+if (strategy.position_size > 0 and close < strategy.position_avg_price*SL_percent)
+    strategy.close("Long")
+if (strategy.position_size > 0 and (rsi_value > SellWhenRSI or bearCond))
+    strategy.close("Long")
+
+View in Pine Editor・80 lines
+Use on chart
+3
+6
+7
+5
+11 088
+This script is a Bullish divergence trade finder built to find small periods where Bitcoin will likely rise from. It looks for bullish divergence followed by a higher low as long as the hour RSI value is below the 40 mark, if then it will enter an long. It marks out Buy signals on the RSI if the value dips below 'RSI Bull Condition Minimum' (Default 40) on the current time frame in view. It also marks out Sell signals found when the RSI is above the 'RSI Bearish Condition Minimum' (Default 50). The sell signals are bearish divergence that has occurred recently on the RSI. When a long is in play it will sell if it finds bearish divergence or the time frame in view reaches RSI value higher than the 'RSI Sell Value'(Default 75). You can set your stop loss value with the 'Stop loss Percentage' (default 5).
+
+Available inputs:
+RSI Period: relative strength measurement length(Typically 14)
+RSI Oversold Level: the bottom bar of the RSI (Typically 30)
+RSI Overbought Level: the top bar of the RSI (Typically 70)
+RSI Bearish Condition Minimum: The minimum value the script will use to look for a pivot high that starts the Bearish condition to Sell (Default 50)
+RSI Bearish Condition Sell Min: the minimum value the script will accept a bearish condition (Default 60)
+RSI Bull Condition Minimum: the minimum value it will consider a pivot low value in the RSI to find a divergence buy (Default 40)
+Look Back this many candles: the amount of candles thee script will look back to find a low value in the RSI (Default 25)
+RSI Sell Value: The RSI value of the exit condition for a long when value is reached (Default 75)
+Stop loss Percentage: Percentage value for amount to lose (Default 5)
+
+The formula to enter a long is stated below:
+If price finds a lower low and there is a higher low found following a lower low and price has just made another dip and price closes lower than the last divergence and Relative strength index hour value is less than 40 enter a long.
+
+The formula to exit a long is stated below:
+If the value drops below the stop loss percentage OR (the RSI value is greater than the value of the parameter 'RSI Sell Value' or bearish divergence is found greater than the parameter 'RSI Bearish Condition Minimum' )
+
+This script was built from much strategy testing on BTC but works with alts (occasionally) also. It is most successful to my knowledge using the 15 min and 7 min time frames with default values. Hope it helps! Follow for further possible updates to this script or other entry or exit strategies.
+snapshot:
+
+
+
+I only have a Pro trading view account so I cannot share a larger data set about this script because the buy signals happen pretty rarely. The most amount that I could find within a view for me was 40 trades within a viewable time. The suggested/default parameters that I have do not occur very often so it limits the data set. Adjustments can be made to the parameters so that trades can be entered more often. The scripts success is dependent on the values of the parameters set by the user. This script was written to be used for BTC/USD or BTC/USDT trading. I am unable to share a larger dataset without putting out results that are intended to fail or having a premium account so reaching the 100 trade minimum is not possible with my account.
+
+
+
+

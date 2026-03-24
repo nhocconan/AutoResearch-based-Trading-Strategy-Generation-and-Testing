@@ -1,0 +1,64 @@
+//@version=3
+strategy("SB_Elder Impulse System", overlay=true)
+useCustomResolution=input(false, type=bool)
+customResolution=input("D", type=resolution)
+source = security(tickerid, useCustomResolution ? customResolution : period, close)
+showColorBars=input(false, type=bool)
+lengthEMA = input(13)
+fastLength = input(12, minval=1), slowLength=input(26,minval=1)
+signalLength=input(9,minval=1)
+
+calc_hist(source, fastLength, slowLength) =>
+    fastMA = ema(source, fastLength)
+    slowMA = ema(source, slowLength)
+    macd = fastMA - slowMA
+    signal = sma(macd, signalLength)
+    macd - signal
+
+get_color(emaSeries, macdHist) =>
+    g_f = (emaSeries > emaSeries[1]) and (macdHist > macdHist[1])
+    r_f = (emaSeries < emaSeries[1]) and (macdHist < macdHist[1])
+    g_f ? green : r_f ? red : blue
+    
+b_color = get_color(ema(source, lengthEMA), calc_hist(source, fastLength, slowLength))    
+//bgcolor(b_color, transp=0)
+//barcolor(showColorBars ? b_color : na)
+
+chk=b_color==green?1:b_color==red?-1:0
+
+
+if (not na(chk))
+    if(chk==1)
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if(chk==-1)
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+    if(chk==0)
+        strategy.close_all()
+
+View in Pine Editor・37 lines
+Use on chart
+3
+0
+1
+3
+8 008
+The strategy is based on LazyBear's Elder Impulse System
+
+Strategy(in layman terms):
+
+Long: When the green bar in the Elder Impulse System's indicator shows up
+Short: When the red bar in the Elder Impulse System's indicator shows up
+Close trade/Profit booking: When the blue bar in the Elder Impulse System's indicator shows up
+
+
+Original Idea:
+
+
+
+Message in the script if you think of any modifications/ enhancements.
+
+Donations/Tips... :) -
+
+BTC: 1BjswGcRR6c23pka7qh5t5k56j46cuyyy2
+ETH: 0x64fed71c9d6c931639c7ba4671aeb6b05e6b3781
+LTC: LKT2ykQ8QSzzfTDB6Tnsf12xwYPjgq95h4

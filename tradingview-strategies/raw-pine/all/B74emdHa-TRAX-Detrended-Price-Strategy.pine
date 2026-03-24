@@ -1,0 +1,62 @@
+//@version=5
+strategy("TRAX DPO", overlay=true)
+
+// TRAX Calculation
+traxlength = input.int(12, title = "TRAX Length", minval=1)
+trax = 10000 * ta.change(ta.vwma(ta.vwma(ta.vwma(math.log(close), traxlength), traxlength), traxlength))
+
+// DPO Calculation
+period_ = input.int(19, title="DPO Length", minval=1)
+barsback = period_/2 + 1
+ma = ta.sma(close, period_)
+dpo = close[barsback] - ma
+
+// MA Confirmation Calculation
+len = input.int(3, minval=1, title="SMA Confirmation Length")
+src = input(close, title="SMA Source")
+offset = input.int(title="Offset", defval=0, minval=-500, maxval=500)
+out = ta.sma(src, len)
+plot(out, color=color.white, title="MA", offset=offset)
+
+// DPO-TRAX Oscillator
+dpotrax = dpo - trax
+plot(dpotrax, color=color.blue, title="DPO-TRAX Oscillator", offset=offset)
+
+// Crossover Conditions
+longCondition = ta.crossover(dpo, trax) and trax < 0 and close > out
+shortCondition = ta.crossunder(dpo, trax) and trax > 0 and close < out
+
+// Strategy Logic
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Highlight periods of zero-line crossover
+bgcolor(longCondition ? color.new(color.green, 80) : na)
+bgcolor(shortCondition ? color.new(color.red, 80) : na)
+
+// Strategy by KP
+
+View in Pine Editor・42 lines
+Use on chart
+8
+0
+3 460
+In this script, the "TRAX" (TRIX) indicator is calculated using the Volume Weighted Moving Average (VWMA) instead of Exponential Moving Average (EMA) like the standard TRIX. The Detrended Price is used to identify short term cycles with a rate of change verses the rate of change from a triple smoothed TRAX VWMA . The strategy is intended for counter-trend trading, meaning it tries to capture potential reversals.
+
+1. Indicators Used:
+
+TRAX is calculated using the Volume Weighted Moving Average (VWMA) of the logarithm of the closing price.
+DPO (Detrended Price Oscillator) is calculated by taking the closing price and subtracting a simple moving average (SMA) of the closing price shifted back.
+
+2. Crossover Conditions:
+
+Longs occur when DPO crosses above the TRAX, with the TRAX trending below 0, and the stock is trading above an adjustable simple moving average. Shorts occur due to the inverse conditions.
+
+3. Visualization:
+
+This script plots the SMA and the TRAX-DPO Combined Oscillator.
+It highlights the periods of zero-line crossover using a green background for potential long positions and a red background for potential short positions. However, it will trigger verified entries/exits in accordance with the SMA.
+
+In conclusion, this fun prototype underwent a unique alteration using the Volume Weighted Moving Average and focuses on capturing shorter counter-trend cycles. You have the freedom to fine-tune the strategy by adjusting parameters and incorporating other analysis methods that resonate with your trading style and risk tolerance.

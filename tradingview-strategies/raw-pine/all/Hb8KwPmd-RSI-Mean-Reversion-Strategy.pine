@@ -1,0 +1,69 @@
+//@version=5
+strategy("RSI ≤35 → Exit at RSI ≥70 (5m)", overlay=true,
+         initial_capital=1000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         currency=currency.USD,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=1)
+
+// ── INPUTS ─────────────────────────────────────────────────────
+rsiLength     = input.int(14, "RSI Length")
+entryRSI      = input.float(30, "Enter when RSI ≤", step=0.5)
+exitRSI       = input.float(70, "Exit when RSI ≥", step=0.5)
+useStopLoss   = input.bool(true, "Use Stop Loss")
+stopLossPct   = input.float(2.0, "Stop Loss %", step=0.1) / 100
+
+// ── RSI CALCULATION ───────────────────────────────────────────
+rsi = ta.rsi(close, rsiLength)
+
+// ── ENTRY CONDITION ───────────────────────────────────────────
+longEntry = rsi <= entryRSI and strategy.position_size == 0
+
+// ── EXECUTE ENTRY ─────────────────────────────────────────────
+var float entryPrice = na
+var float slPrice    = na
+
+if longEntry
+    entryPrice := close
+    slPrice    := useStopLoss ? close * (1 - stopLossPct) : na
+    strategy.entry("Long", strategy.long)
+
+// ── EXIT CONDITIONS ───────────────────────────────────────────
+inPosition = strategy.position_size > 0
+tpHit      = inPosition and rsi >= exitRSI
+slHit      = useStopLoss and inPosition and low <= slPrice
+
+if tpHit or slHit
+    strategy.close("Long")
+    entryPrice := na
+    slPrice    := na
+
+// ── PLOTTING ──────────────────────────────────────────────────
+hline(entryRSI, "Entry RSI", color=color.red, linestyle=hline.style_dashed)
+hline(exitRSI,  "Exit RSI",  color=color.green, linestyle=hline.style_dashed)
+
+// Stop Loss Line
+plot(useStopLoss and inPosition ? slPrice : na, 
+     "Stop Loss", color=color.red, linewidth=2, style=plot.style_circles)
+
+// Visual Signals
+plotshape(longEntry, title="BUY", location=location.belowbar, style=shape.triangleup, 
+          color=color.green, text="BUY", size=size.small)
+
+plotshape(tpHit, title="TP", location=location.abovebar, style=shape.triangledown, 
+          color=color.rgb(4, 21, 255), text="TP", size=size.small)
+
+plotshape(slHit, title="SL", location=location.belowbar, style=shape.cross, 
+          color=color.red, text="SL", size=size.small)
+
+// Background Highlight
+bgcolor(rsi <= entryRSI ? color.new(color.yellow, 92) : na)
+
+View in Pine Editor・62 lines
+Use on chart
+2
+6
+980
+Long entry when RSI ≤ 30; exit at RSI ≥ 70. 100% equity per trade, 0.1% commission + 1 tick slippage. Optional 2% stop-loss. Visual buy/sell signals, dynamic SL line, and background highlight on oversold zones. Clean, backtest-ready Pine Script v5. Everything is easily adjustable to suit your liking.

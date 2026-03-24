@@ -1,0 +1,82 @@
+//@version=4
+strategy("高交易量交易系统", overlay=true)
+
+rule = input(3,'')
+length = input(40,'')
+factor = input(1.0,'')
+
+vavg = 0.0
+vsd = 0.0
+uplimit = 0.0
+mavg = 0.0
+aror = 0.0
+adjvol = 0.0
+savevol = 0.0
+
+//Find average volume, replacing bad values
+adjvol := volume
+
+if (volume != 0)
+    savevol := volume
+else
+    savevol := savevol[1]
+    adjvol := savevol
+
+// Replace high volume days because they distort standard deviation
+if (adjvol > vavg + 2 * factor * vsd)
+    adjvol := savevol
+else
+    adjvol := adjvol[1]
+
+vavg := sma(adjvol,length)
+vsd := stdev(adjvol,length)
+
+// Extreme volume limit
+uplimit := vavg + 2*factor*vsd
+
+// System rules based on moving average trend
+
+mavg := sma(close,length/2)
+
+// Only enter on new trend signals without high volume
+if (rule == 0 or rule == 2)
+    if (mavg > mavg[1] and strategy.position_size != 1)
+        strategy.entry("Long", strategy.long)
+
+    if (mavg < mavg[1] and strategy.position_size != -1)
+        strategy.entry("Short", strategy.short)
+
+// Don't reenter after high volume exit
+if ( rule == 1 or rule == 3)
+    if (mavg > mavg[1] and volume < uplimit and strategy.position_size != 1)
+        strategy.entry("Long", strategy.long)
+
+    if (mavg < mavg[1] and volume < uplimit and strategy.position_size != -1)
+        strategy.entry("Short", strategy.short)
+
+// Exit on profitable high volume
+if (rule == 0 or rule == 1)
+    if (mavg < mavg[1])
+        strategy.close("Long")
+    if (mavg > mavg[1])
+        strategy.close("Short")
+if (rule == 2 or rule == 3)
+    if (mavg < mavg[1] or (close > close[1] and volume > uplimit))
+        strategy.close("Long")
+
+    if (mavg>mavg[1] or (close<close[1] and volume>uplimit))
+        strategy.close("Short")
+
+View in Pine Editor・71 lines
+Use on chart
+4
+9
+3 295
+On the basis of moving average, add moving average and standard deviation line of volume to filter the entry and exit time.
+Do not enter trades on high volume and price in trend direction.
+Exit on high volume and price in profitable direction.
+Option 0 = No entry or exit filter
+Option 1 = Entry filter only
+Option 2 = Exit filter only
+Option 3 = Both entry and exit filters
+

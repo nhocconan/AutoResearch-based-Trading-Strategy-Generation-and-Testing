@@ -1,0 +1,4 @@
+//@version=3
+exclusion=##input(defval=0.2,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,exclusion)
+##root(root_metainfo,rm_1,(0-exclusion))

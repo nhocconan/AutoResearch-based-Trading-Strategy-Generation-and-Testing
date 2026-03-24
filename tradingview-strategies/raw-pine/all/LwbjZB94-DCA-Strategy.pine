@@ -1,0 +1,102 @@
+//@version=6
+strategy("DCA Strategy", overlay=true, calc_on_every_tick=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, pyramiding=1, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=0, fill_orders_on_standard_ohlc=true, margin_long=0, margin_short=0)
+
+// Vars
+var float investedCapital = 0
+var int lastBuyBarIndex = 0
+
+// Date condition inputs
+startDate = input.time(title="Start Date", defval=timestamp("1 Jan 2018 00:00 +0000"), group="Dates")
+endDate = input.time(title="End Date", defval=timestamp("31 Dec 2069 00:00 +0000"), group="Dates")
+timeCondition = time >= startDate and time <= endDate
+
+// Strategy settings
+toInvestQuote = input.int(title="Capital to invest per trade", defval=100, minval=0, group="Strategy", tooltip = "This refers to the 'right side' of the trading pair you are using aka. the 'quote asset'. For BTC/USD, it refers to USD. For BTC/GBP it refers to GBP.")
+toInvestBase = toInvestQuote/close
+
+closeAllOnLastCandle = input.bool(title="Close All on last candle", defval=true, group="Strategy", tooltip="Forces the strategy to close all long positions on the last candle so you can see its performance in the Strategy Tester. Turn it OFF when automating, otherwise it would sell at each candle open.")
+
+basedOnDayOfWeek = input.bool(title="Use Day of Week Mode", defval=true, group="Frequency")
+buyOnDayOfWeek = input.int(title="Day of Week", defval=1, minval=1, maxval=7, tooltip="Buy on every: 1 = Monday ... 7 = Sunday.", group="Frequency")
+basedOnXDays = input.int(title="Every X Candles", defval=7, minval=1, tooltip="Buy every X candles.", group="Frequency")
+
+longCondition = false
+
+if basedOnDayOfWeek
+    longCondition := dayofweek(time) == buyOnDayOfWeek and timeCondition // 1=Monday
+else
+    longCondition := ((lastBuyBarIndex == 0) or (lastBuyBarIndex + basedOnXDays == bar_index)) and timeCondition
+
+if (longCondition)
+    strategy.order(id="long"+str.tostring(bar_index), direction=strategy.long, qty=toInvestBase)
+    lastBuyBarIndex := bar_index
+    investedCapital := investedCapital + toInvestQuote
+
+if (time >= endDate) or (closeAllOnLastCandle and bar_index >= last_bar_index - 1)
+    strategy.close_all()
+
+var infoLabel = label.new(x=bar_index + 2, y=close, style=label.style_label_left, size=size.large, color=#ffeecc, textcolor=color.black, text=str.tostring(investedCapital))
+infoLabel.set_text(str.tostring(investedCapital))
+label.set_x(infoLabel, bar_index + 2)
+label.set_y(infoLabel, close)
+if strategy.initial_capital != investedCapital
+    label.set_color(infoLabel, color.red) // If Initial Capital does not match how much the strategy actually invested
+else
+    label.set_color(infoLabel, color.green) // Initial Capital is set correctly
+
+// Display equity line
+plot(title="Equity Line", series=strategy.equity, trackprice=true, display=display.data_window, color=color.red)
+
+View in Pine Editor・48 lines
+Use on chart
+1
+8
+0
+3 273
+This strategy makes it easy for you to backtest and automate the DCA strategy based on 2 triggers:
+
+Day of the week
+
+Every X candles
+
+
+This way you can set up your DCA strategy the way you like and automate on any exchange or even a DEX, which offers an API.
+
+The strategy is auto selling on the last candle, otherwise you won't see any performance numbers because all positions will still be open (non conclusive).
+
+Settings
+Start Date & End Date
+Use those dates to help you with your backtest period. It also helps when automating, to start at a specific time to mimic what you have already done on your own portfolio and thus be in sync in TV as well.
+
+Capital to invest per trade
+Set how capital to use per DCA buy signal. Hover over the tooltip to understand, which currency is used.
+
+Close All on last candle
+When backtesting, you must close open positions, otherwise the Strategy Tester won't show you any numbers. This is why the strategy automatically closes all positions on the last candle for your convenience (ON per default).
+BUT, when automating, you cannot have this checked because it would sell all of your asset on every candle open. So turn this OFF when automating.
+
+Use Day of Week Mode
+This checkbox switches between the "Day of Week" mode or the "Every X Candles" mode.
+
+Day of Week
+Opens a long position at the start of the weekday you have set it to.
+Hover over the tooltip to understand, which number to use for the day of the week you need.
+
+Every X Candles
+Opens a long position after every x candles. Always at the start of every such candle.
+On the daily chart, this number represents "1 day", on the 1h chart, it's "1 hour" and so on.
+
+Properties
+Initial Capital
+DCA has a special quirk and that is that it invests more and more and more funds the longer it runs. But TradingView takes the Initial Capital number to calculate Net Profit, thus the Initial Capital number has to grow with every additional dollar (money) that is being invested over time, otherwise the Net Profit number will be wrong.
+
+Sadly PineScript does not allow to set the Initial Capital number dynamically. So you have to set it manually.
+
+To that end, this strategy shows a Label on the last candle, which shows the Invested Capital. You must take that number and put it into the Initial Capital input and click Ok.
+If you don't do this, your Net Profit Number will be totally wrong!
+
+The label must show green.
+If it shows red it means you need to change the Initial Capital number before looking at the performance numbers.
+
+
+After every timeframe or settings change, you must adapt the Initial Capital, otherwise you will get wrong numbers.

@@ -1,0 +1,259 @@
+//@version=5
+strategy("Pivot Percentile Trend - Strategy [presentTrading]", shorttitle="Pivot PercenTrend - Strategy[presentTrading]",  overlay=false, precision=3, commission_value=0.1, commission_type=strategy.commission.percent, slippage=1, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000)
+
+// User-defined settings for trading direction
+tradeDirection = input.string("Both", "Trading Direction", options=["Both", "Long", "Short"])
+// User input for defining the lengths to be used in percentile calculations
+length= input.int(10, "Length (recommend <20)", minval=1)
+
+
+// Function to calculate percentiles for a given set of lengths
+// This function takes a source (like 'high' or 'low'), an array of lengths (like [10, 20, 30]), and a percentile value (like 75)
+calculatePercentiles(src, lengths, percentile) =>
+    result = array.new_float(0)
+    for length in lengths
+        value = ta.percentile_nearest_rank(src, length, percentile)
+        array.push(result, value)
+    result
+    
+// Function to calculate trend strength counts based on the calculated percentiles
+// This function evaluates the trend strengths (bullish and bearish) and weak counts
+calculateTrendCounts(highPercentiles, lowPercentiles, highest_high, lowest_low) =>
+    countBull = 0
+    countBear = 0
+    weakBullCount = 0
+    weakBearCount = 0
+
+    for i = 0 to array.size(highPercentiles) - 1
+        trendBullHigh = array.get(highPercentiles, i) > highest_high
+        trendBullLow = array.get(lowPercentiles, i) > highest_high
+        trendBearHigh = array.get(highPercentiles, i) < lowest_low
+        trendBearLow = array.get(lowPercentiles, i) < lowest_low
+        weakBull = array.get(lowPercentiles, i) < highest_high and array.get(lowPercentiles, i) > lowest_low
+        weakBear = array.get(highPercentiles, i) > lowest_low and array.get(highPercentiles, i) < highest_high
+
+        countBull := countBull + (trendBullHigh ? 1 : 0) + (trendBullLow ? 1 : 0)
+        countBear := countBear + (trendBearHigh ? 1 : 0) + (trendBearLow ? 1 : 0)
+        weakBullCount := weakBullCount + (weakBull ? 1 : 0)
+        weakBearCount := weakBearCount + (weakBear ? 1 : 0)
+
+    [countBull, countBear, weakBullCount, weakBearCount]
+
+// Manually creating an array of lengths
+lengths = array.new_int(7)
+array.set(lengths, 0, length)
+array.set(lengths, 1, length * 2)
+array.set(lengths, 2, length * 3)
+array.set(lengths, 3, length * 4)
+array.set(lengths, 4, length * 5)
+array.set(lengths, 3, length * 6)
+array.set(lengths, 4, length * 7)
+
+// Calculating high and low percentiles using the user-defined lengths
+percentilesHigh = calculatePercentiles(high, lengths, 75)
+percentilesLow = calculatePercentiles(low, lengths, 25)
+
+// Calculating the highest high and the lowest low based on the 144 length
+highest_high = ta.percentile_nearest_rank(high, 144, 75) 
+lowest_low = ta.percentile_nearest_rank(low, 144, 25) 
+
+// Determining trend strengths and counts
+[countBull, countBear, weakBullCount, weakBearCount] = calculateTrendCounts(percentilesHigh, percentilesLow, highest_high, lowest_low)
+
+// Calculating the bull and bear strength based on the counts
+bullStrength = countBull + 0.5*weakBullCount - 0.5*weakBearCount - countBear
+bearStrength = countBear + 0.5*weakBearCount - 0.5*weakBullCount - countBull
+
+// Determining the current trend value based on bull and bear strengths
+currentTrendValue = bullStrength - bearStrength
+
+upCss = input.color(color.new(#089981, 10), '', inline = 'mesh', group = 'Style')
+dnCss = input.color(color.new(#f23645, 10), '', inline = 'mesh', group = 'Style')
+
+// ---------------------------------------------
+
+type bar
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+
+type supertrend_
+    float s = na
+    int   d = na
+
+method src(bar b, simple string src) =>
+    float x = switch src
+        'oc2'   => math.avg(b.o, b.c          )
+        'hl2'   => math.avg(b.h, b.l          )
+        'hlc3'  => math.avg(b.h, b.l, b.c     )
+        'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
+        'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
+
+    x
+
+method atr(bar b, simple int len) =>
+    float tr = 
+         na(b.h[1]) ? 
+         b.h - b.l  : 
+         math.max(
+             math.max(
+                 b.h - b.l, 
+                 math.abs(b.h - b.c[1])), 
+             math.abs    (b.l - b.c[1]))
+
+    len == 1 ? tr : ta.rma(tr, len)
+
+method st(bar b, simple float factor, simple int len) =>
+    float atr = b.atr( len )
+    float up  = b.src('hl2') + factor * atr
+    up       := up < nz(up[1]) or b.c[1] > nz(up[1]) ? up : nz(up[1])
+    float dn  = b.src('hl2') - factor * atr
+    dn       := dn > nz(dn[1]) or b.c[1] < nz(dn[1]) ? dn : nz(dn[1])
+    
+    float st  = na
+    int   dir = na
+    dir := switch
+        na(atr[1])         => 1
+        st[1] == nz(up[1]) => dir := b.c > up ? -1 : +1
+        =>                    dir := b.c < dn ? +1 : -1
+    st  :=                    dir == -1       ? dn : up
+    
+    supertrend_.new(st, dir)
+
+
+var string tp = 'Choose an indicator source of which to base the SuperTrend on.'
+var string g1 = "SuperTrend Settings", var string gu = "UI Options"
+src  = currentTrendValue
+len  = input.int   (20       , "Length"            ,             inline = '1', group = g1)
+mlt  = input.float (16.       , "Factor"            , 1, 20, 0.5, inline = '1', group = g1)
+clbl = input.bool  (true    , "Contrarian Signals",                           group = gu)
+colu = input.color (#008cff, "Bull Color"        ,                           group = gu)
+cold = input.color (#ff4800, "Bear Color"        ,                           group = gu)
+
+
+bar        b  = bar.new(
+       nz(src[1])               ,
+       math.max(nz(src[1]), src),
+       math.min(nz(src[1]), src),
+       src                      )
+float      tr = b .atr(     len)
+supertrend_ st = b .st (mlt, len)
+
+
+color cst = switch st.d
+    +1 => cold
+    -1 => colu
+    
+t = plot(st.d > 0 ? st.s : na, 'Bear ST'  , cst           , 1, plot.style_linebr)
+d = plot(st.d < 0 ? st.s : na, 'Bull ST'  , cst           , 1, plot.style_linebr)
+i = plot(st.d                , 'Direction', display =          display.none     )
+c = plot(b.src('oc2')        , 'Filler'   , display =          display.none     )
+
+fill(t, c, color.new(cold, 90))
+fill(d, c, color.new(colu, 90))
+
+bool scon = clbl and math.sign(ta.change(st.d)) ==  1 ? true : false
+bool bcon = clbl and math.sign(ta.change(st.d)) == -1 ? true : false
+
+plotshape(scon ? st.s + tr / 3 : na, 'Sell Signal', shape.labeldown, location.absolute, color.new(cold, 60), 0, '𝓢', chart.fg_color)
+plotshape(bcon ? st.s - tr / 3 : na, 'Buy Signal' , shape.labelup  , location.absolute, color.new(colu, 60), 0, '𝓑', chart.fg_color)
+// Determine the color based on current trend value
+color_change = currentTrendValue> 0 ? upCss : (currentTrendValue < 0 ? dnCss : color.white) 
+plot(currentTrendValue, color=color_change, title="Trend Strength")
+
+// Entry conditions
+shouldEnterLong = currentTrendValue >0 and st.d <0
+shouldEnterShort = currentTrendValue <0 and st.d >0
+
+// Strategy logic
+if  (tradeDirection == "Long" or tradeDirection == "Both")
+    if shouldEnterLong
+        strategy.entry("Long Entry", strategy.long)
+
+if (tradeDirection == "Short" or tradeDirection == "Both")
+    if shouldEnterShort
+        strategy.entry("Short Entry", strategy.short)
+
+if  (tradeDirection == "Long" or tradeDirection == "Both")
+    if shouldEnterShort
+        strategy.close("Long Entry")
+
+if (tradeDirection == "Short" or tradeDirection == "Both")
+    if shouldEnterLong
+        strategy.close("Short Entry")
+
+View in Pine Editor・192 lines
+Use on chart
+7
+0
+2
+7
+14 855
+
+█ Introduction and How it is Different
+
+The "Pivot Percentile Trend - Strategy" from PresentTrading represents a paradigm shift in technical trading strategies. What sets this strategy apart is its innovative use of pivot percentiles, a method that goes beyond traditional indicator-based analyses. Unlike standard strategies that might depend on single-dimensional signals, this approach takes a multi-layered view of market movements, blending percentile calculations with SuperTrend indicators for a more nuanced and dynamic market analysis.
+
+This strategy stands out for its ability to process multiple data points across various timeframes and pivot lengths, thereby capturing a broader and more detailed picture of market trends. It's not just about following the price; it's about understanding its position in the context of recent historical highs and lows, offering a more profound insight into potential market movements.
+
+BTC 6h L/S
+
+
+
+Where traditional methods might react to market changes, the Pivot Percentile Trend strategy anticipates them, using a calculated approach to identify trend strengths and weaknesses. This foresight gives traders a significant advantage, allowing for more strategic decision-making and potentially increasing the chances of successful trades.
+
+In essence, this strategy introduces a more comprehensive and proactive approach to trading, harnessing the power of advanced percentile calculations combined with the robustness of SuperTrend indicators. It's a strategy designed for traders who seek a deeper understanding of market dynamics and a more calculated approach to their trading decisions.
+
+Local picture
+
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+🔶 Percentile Calculations
+- The strategy employs percentile calculations to assess the relative position of current market prices against historical data.
+- For a set of lengths (e.g., `length * 1`, `length * 2`, up to `length * 7`), it calculates the 75th percentile for high values (`percentilesHigh`) and the 25th percentile for low values (`percentilesLow`).
+- These percentiles provide a sense of where the current price stands compared to recent price ranges.
+
+Length - 10
+
+
+
+Length - 15
+
+
+
+🔶 SuperTrend Indicator
+- The SuperTrend indicator is a key component, providing trend direction signals.
+- It uses the `currentTrendValue`, derived from the difference between bull and bear strengths calculated from the percentile data.
+* used the Supertrend toolkit by EliCobra
+
+🔶 Trend Strength Counts
+- The strategy calculates counts of bullish and bearish indicators based on comparisons between the current high and low against high and low percentiles.
+- `countBull` and `countBear` track the number of times the current high is above the high percentiles and the current low is below the low percentiles, respectively.
+- Weak bullish (`weakBullCount`) and bearish (`weakBearCount`) counts are also determined by how often the current lows and highs fall within the percentile range.
+*The idea of this strength counts mainly comes from 'Trend Strength Over Time' federalTacos5392b
+
+🔶 Trend Value Calculation
+- The `currentTrendValue` is a crucial metric, computed as `bullStrength - bearStrength`.
+- It indicates the market's trend direction, where a positive value suggests a bullish trend and a negative value indicates a bearish trend.
+
+🔶 Trade Entry and Exit Logic
+- The entry points for trades are determined by the combination of the trend value and the direction indicated by the SuperTrend indicator.
+- For a long entry (`shouldEnterLong`), the `currentTrendValue` must be positive and the SuperTrend indicator should show a downtrend.
+- Conversely, for a short entry (`shouldEnterShort`), the `currentTrendValue` should be negative with the SuperTrend indicating an uptrend.
+- The strategy closes positions when these conditions reverse.
+
+█ Trade Direction
+
+The strategy is versatile, allowing traders to choose their preferred trading direction: long, short, or both. This flexibility enables traders to tailor their strategies to their market outlook and risk appetite.
+
+█ Default Settings and Customization
+1. Trade Direction: Selectable as Long, Short, or Both, affecting the type of trades executed.
+2. Indicator Source: Pivot Percentile Calculations, key for identifying market trends and reversals.
+3. Lengths for Percentile Calculation: Various configurable lengths, influencing the scope of trend analysis.
+4. SuperTrend Settings: ATR Length 20, Multiplier 18, affecting indicator sensitivity and trend detection.
+5. Style Options: Custom colors for bullish (green) and bearish (red) trends, aiding visual interpretation.
+6. Additional Settings: Includes contrarian signals and UI enhancements, offering strategic and visual flexibility.

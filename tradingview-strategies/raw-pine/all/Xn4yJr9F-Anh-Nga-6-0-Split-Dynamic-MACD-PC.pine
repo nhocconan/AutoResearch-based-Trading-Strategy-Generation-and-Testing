@@ -1,0 +1,297 @@
+//@version=5
+strategy(title="Anh Nga 6.0 Split (Dynamic + MACD + PC)", 
+     shorttitle="Anh Nga 6.0 PC Dynamic", 
+     overlay=true, 
+     initial_capital=50000, 
+     calc_on_order_fills=false,    
+     process_orders_on_close=true, 
+     calc_on_every_tick=true,      
+     pyramiding=0)
+
+// --- 1. SETTINGS ---
+group_time  = "Trading Window (GMT+7)"
+group_risk  = "Risk Management"
+group_logic = "Strategy Logic (Signal & Trend)"
+group_auto  = "PineConnector Automation"
+group_guard = "Reversal Guard"
+
+session_entry = input.session("0800-0000:234567", "Entry Window", group=group_time)
+
+// Logic Inputs
+use_ma_filter   = input.bool(true, "Use Fast/Slow MA Trend Filter?", group=group_logic)
+use_macd_filter = input.bool(true, "Use MACD MTF Filter?", group=group_logic)
+ma_fast_len     = input.int(70, "Fast MA Length", group=group_logic)
+ma_slow_len     = input.int(140, "Slow MA Length", group=group_logic)
+ma_distance_min = input.float(10.0, "Min Distance from Slow MA", group=group_logic)
+lookback        = input.int(3, "Signal Window (Bars)", group=group_logic)
+use_overext     = input.bool(true, "Enable Overextension Filter?", group=group_logic)
+atr_limit       = input.float(4.0, "Overextension ATR Limit", step=0.1, group=group_logic)
+
+// Guard Inputs
+wait_bars       = input.int(1, "Bars Between Trades (Guard)", group=group_guard)
+use_rev_guard   = input.bool(true, "Enable Reversal Guard?", group=group_guard)
+rev_cooldown    = input.int(5, "Opposite Trade Cooldown (Bars)", minval=1, group=group_guard)
+
+// Risk Inputs
+rr_ratio        = input.float(1.0, "Risk:Reward Ratio", group=group_risk)
+bb_mult         = input.float(1.7, "BB Stop Multiplier", group=group_risk)
+use_max_sl      = input.bool(true, "Filter: Skip if SL is too wide?", group=group_risk)
+max_sl_dollars  = input.float(35.0, "Max SL in Dollars", group=group_risk)
+
+// Auto Inputs (PineConnector Ready)
+license_id      = input.string("YOUR_ID_HERE", "PineConnector License ID", group=group_auto)
+mt5_ticker      = input.string("XAUUSDc", "MT5 Symbol Name", group=group_auto)
+base_qty        = input.float(1.0, "Total Contract Size (Lot)", step=0.01, group=group_auto)
+magic_number    = input.int(12345, "MT5 Magic Number (Base)", group=group_auto)
+
+// --- 2. INDICATORS ---
+ma_fast = ta.sma(close, ma_fast_len)
+ma_slow = ta.sma(close, ma_slow_len)
+basis   = ta.sma(close, 20)
+atr     = ta.atr(14)
+stdev_val = ta.stdev(close, 20)
+
+// Standard BB for Stop Loss (Multiplier 1.7)
+dev_sl   = bb_mult * stdev_val
+lower_bb_sl = basis - dev_sl
+upper_bb_sl = basis + dev_sl
+
+// ZONES for Sizing
+dev_1 = 1.0 * stdev_val
+upper_bb_1 = basis + dev_1
+lower_bb_1 = basis - dev_1
+
+dev_1_5 = 1.5 * stdev_val
+upper_bb_1_5 = basis + dev_1_5
+lower_bb_1_5 = basis - dev_1_5
+
+wt1 = ta.ema((hlc3 - ta.ema(hlc3, 10)) / (0.015 * ta.ema(math.abs(hlc3 - ta.ema(hlc3, 10)), 10)), 21)
+wt2 = ta.sma(wt1, 4)
+
+// --- MACD Filter ---
+get_macd_prev() =>
+    [m, s, h] = ta.macd(close, 12, 26, 9)
+    [m[1], s[1], h[1]] 
+
+[m15, s15, hist_15] = request.security(syminfo.tickerid, "15", get_macd_prev(), lookahead=barmerge.lookahead_on)
+[m30, s30, hist_30] = request.security(syminfo.tickerid, "30", get_macd_prev(), lookahead=barmerge.lookahead_on)
+
+macd_long_ok  = not use_macd_filter or not (hist_15 < 0 and hist_30 < 0)
+macd_short_ok = not use_macd_filter or not (hist_15 > 0 and hist_30 > 0)
+
+// --- 3. STATE VARIABLES ---
+var float trade_sl = na
+var float trade_tp_final = na
+var float trade_tp_partial = na
+var bool partial_hit = false 
+var int last_exit_bar = 0
+var int last_dir = 0
+var float current_vol_partial = 0.0
+var float current_vol_runner = 0.0
+
+if strategy.position_size == 0
+    partial_hit := false
+    trade_sl := na
+    trade_tp_final := na
+    trade_tp_partial := na
+    current_vol_partial := 0.0
+
+// --- 4. LOGIC ---
+is_entry_window = not na(time(timeframe.period, session_entry, "GMT+7"))
+cross_long  = ta.crossover(wt1, wt2) and wt1 < 0
+cross_short = ta.crossunder(wt1, wt2) and wt1 > 0
+bars_since_exit = bar_index - last_exit_bar
+long_allowed    = not use_rev_guard or (last_dir != -1 or bars_since_exit > rev_cooldown)
+short_allowed   = not use_rev_guard or (last_dir != 1 or bars_since_exit > rev_cooldown)
+can_trade_now = bars_since_exit > wait_bars
+
+long_signal   = ta.barssince(long_allowed and cross_long) <= lookback and macd_long_ok
+short_signal  = ta.barssince(short_allowed and cross_short) <= lookback and macd_short_ok
+
+not_overext   = not use_overext or (math.abs(close - ma_fast) < (atr * atr_limit))
+long_trend    = (not use_ma_filter or (close > ma_fast and close > ma_slow))
+short_trend   = (not use_ma_filter or (close < ma_fast and close < ma_slow))
+long_sl_dist_dollars  = math.abs(close - lower_bb_sl)
+short_sl_dist_dollars = math.abs(close - upper_bb_sl)
+sl_ok_long  = not use_max_sl or (long_sl_dist_dollars <= max_sl_dollars)
+sl_ok_short = not use_max_sl or (short_sl_dist_dollars <= max_sl_dollars)
+
+// --- 5. EXECUTION ---
+magic_runner = magic_number + 1
+
+// FIX: Newline separator and License ID for Close All
+msg_flat = license_id + ",closeall," + mt5_ticker + ",magic=" + str.tostring(magic_number) + "\n" + license_id + ",closeall," + mt5_ticker + ",magic=" + str.tostring(magic_runner)
+
+// ENTRY LOGIC (Split Trades - Run on Bar Close)
+if barstate.isconfirmed and is_entry_window and can_trade_now and strategy.position_size == 0
+    
+    // --- LONG ENTRY ---
+    if long_signal and long_trend and long_allowed and not_overext and close > basis and sl_ok_long and (close - ma_slow >= ma_distance_min)
+        
+        bool is_AAA = (close <= upper_bb_1)
+        bool is_B   = (close > upper_bb_1 and close <= upper_bb_1_5)
+        
+        if is_AAA or is_B
+            float total_lot = is_AAA ? base_qty : (base_qty * 0.8)
+            current_vol_partial := math.round(total_lot * 0.65, 2)
+            current_vol_runner  := math.round(total_lot - current_vol_partial, 2)
+            
+            if current_vol_runner < 0.01
+                current_vol_runner := 0.01
+                current_vol_partial := total_lot - 0.01
+
+            trade_sl       := math.round_to_mintick(lower_bb_sl)
+            trade_tp_final := math.round_to_mintick(close + (math.abs(close - trade_sl) * rr_ratio))
+            trade_tp_partial := math.round_to_mintick(close + (math.abs(close - trade_tp_final) * 0.5))
+            last_dir       := 1
+            
+            // FIX: License ID, Split Msg, and Newline Separator
+            msg_A = license_id + ",buy," + mt5_ticker + ",volume=" + str.tostring(current_vol_partial, "#.##") + ",sl=" + str.tostring(trade_sl) + ",tp=" + str.tostring(trade_tp_partial) + ",magic=" + str.tostring(magic_number)
+            msg_B = license_id + ",buy," + mt5_ticker + ",volume=" + str.tostring(current_vol_runner, "#.##")  + ",sl=" + str.tostring(trade_sl) + ",tp=" + str.tostring(trade_tp_final)   + ",magic=" + str.tostring(magic_runner)
+            
+            string type_txt = is_AAA ? "AAA (100%)" : "B (80%)"
+            strategy.entry("Long", strategy.long, qty=total_lot, comment=type_txt, alert_message=msg_A + "\n" + msg_B)
+
+    // --- SHORT ENTRY ---
+    if short_signal and short_trend and short_allowed and not_overext and close < basis and sl_ok_short and (ma_slow - close >= ma_distance_min)
+        
+        bool is_AAA = (close >= lower_bb_1)
+        bool is_B   = (close < lower_bb_1 and close >= lower_bb_1_5)
+
+        if is_AAA or is_B
+            float total_lot = is_AAA ? base_qty : (base_qty * 0.8)
+            current_vol_partial := math.round(total_lot * 0.65, 2)
+            current_vol_runner  := math.round(total_lot - current_vol_partial, 2)
+
+            if current_vol_runner < 0.01
+                current_vol_runner := 0.01
+                current_vol_partial := total_lot - 0.01
+
+            trade_sl       := math.round_to_mintick(upper_bb_sl)
+            trade_tp_final := math.round_to_mintick(close - (math.abs(close - trade_sl) * rr_ratio))
+            trade_tp_partial := math.round_to_mintick(close - (math.abs(close - trade_tp_final) * 0.5))
+            last_dir       := -1
+
+            // FIX: License ID, Split Msg, and Newline Separator
+            msg_A = license_id + ",sell," + mt5_ticker + ",volume=" + str.tostring(current_vol_partial, "#.##") + ",sl=" + str.tostring(trade_sl) + ",tp=" + str.tostring(trade_tp_partial) + ",magic=" + str.tostring(magic_number)
+            msg_B = license_id + ",sell," + mt5_ticker + ",volume=" + str.tostring(current_vol_runner, "#.##")  + ",sl=" + str.tostring(trade_sl) + ",tp=" + str.tostring(trade_tp_final)   + ",magic=" + str.tostring(magic_runner)
+
+            string type_txt = is_AAA ? "AAA (100%)" : "B (80%)"
+            strategy.entry("Short", strategy.short, qty=total_lot, comment=type_txt, alert_message=msg_A + "\n" + msg_B)
+
+// MANAGEMENT LOGIC (Run on Every Tick)
+if strategy.position_size > 0 and not partial_hit
+    if high >= trade_tp_partial
+        // FIX: Added License ID here for the modification alert
+        new_sl = strategy.position_avg_price
+        msg_mod = license_id + ",modify," + mt5_ticker + ",sl=" + str.tostring(new_sl) + ",magic=" + str.tostring(magic_runner)
+        alert(msg_mod, alert.freq_once_per_bar)
+        
+        // B. BACKTEST SYNC
+        strategy.close("Long", qty=current_vol_partial, comment="Partial Hit", alert_message="IGNORE")
+        
+        trade_sl := new_sl 
+        partial_hit := true
+
+if strategy.position_size < 0 and not partial_hit
+    if low <= trade_tp_partial
+        // FIX: Added License ID here for the modification alert
+        new_sl = strategy.position_avg_price
+        msg_mod = license_id + ",modify," + mt5_ticker + ",sl=" + str.tostring(new_sl) + ",magic=" + str.tostring(magic_runner)
+        alert(msg_mod, alert.freq_once_per_bar)
+        
+        // B. BACKTEST SYNC
+        strategy.close("Short", qty=current_vol_partial, comment="Partial Hit", alert_message="IGNORE")
+        
+        trade_sl := new_sl
+        partial_hit := true
+
+// FINAL EXIT (Sync)
+if strategy.position_size > 0
+    if low <= trade_sl or high >= trade_tp_final
+        strategy.close_all(comment="Exit Long", alert_message=msg_flat)
+        last_exit_bar := bar_index
+
+if strategy.position_size < 0
+    if high >= trade_sl or low <= trade_tp_final
+        strategy.close_all(comment="Exit Short", alert_message=msg_flat)
+        last_exit_bar := bar_index
+
+// --- 6. VISUALS ---
+plot(ma_fast, "Fast MA", color=color.new(color.teal, 0), linewidth=2)
+plot(ma_slow, "Slow MA", color=color.new(color.white, 0), linewidth=3)
+plot(trade_sl, "Active SL", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(trade_tp_final, "Final TP", color=color.green, style=plot.style_linebr, linewidth=2)
+
+// ZONES VISUALIZATION
+fill(plot(upper_bb_1, display=display.none), plot(basis, display=display.none), color=color.new(color.green, 90), title="AAA Zone Long")
+fill(plot(lower_bb_1, display=display.none), plot(basis, display=display.none), color=color.new(color.red, 90), title="AAA Zone Short")
+fill(plot(upper_bb_1_5, display=display.none), plot(upper_bb_1, display=display.none), color=color.new(color.yellow, 90), title="B Zone Long")
+fill(plot(lower_bb_1_5, display=display.none), plot(lower_bb_1, display=display.none), color=color.new(color.yellow, 90), title="B Zone Short")
+
+View in Pine Editor・230 lines
+Use on chart
+2
+9
+645
+The script **Anh Nga 6.0 Split** is a professional-grade TradingView strategy designed for high-precision trading (specifically optimized for Gold/XAUUSD). It combines trend-following, momentum oscillators, and multi-timeframe analysis with a built-in automation bridge for **PineConnector** (MT4/MT5).
+
+Here is a breakdown of how the strategy works for users.
+
+---
+
+## 1. Core Logic: How it Triggers
+
+The strategy uses a "filter-first" approach, meaning it only looks for trades when multiple conditions align:
+
+* **Primary Signal:** Uses the **Wave Trend (WT)** oscillator. It looks for "Gold Crosses" (long) or "Death Crosses" (short) when momentum is at extreme levels.
+* **Trend Filter:** A dual Moving Average system (Fast 70 / Slow 140). It only buys if the price is above both and sells if below both.
+* **MACD MTF Filter:** A "Big Brother" check. It looks at the MACD histogram on the **15-minute** and **30-minute** timeframes to ensure you aren't trading against the higher-timeframe momentum.
+* **Overextension Guard:** It calculates the distance from the Fast MA using **ATR**. If the price has "run too far" from the average, it skips the trade to avoid buying the top or selling the bottom.
+
+---
+
+## 2. The "Split" Execution (Advanced Sizing)
+
+The strategy classifies trades into two quality tiers based on **Bollinger Band Zones**:
+
+| Trade Type | Condition | Position Size |
+| --- | --- | --- |
+| **AAA Zone** | Price is close to the Basis (Mean) | **100%** of your base lot |
+| **B Zone** | Price is slightly stretched | **80%** of your base lot |
+
+**Automated Partial Exits:**
+When a trade is entered, it splits the position into two orders:
+
+1. **Partial Runner (65%):** Aimed at a closer "TP1" to lock in profits early.
+2. **Final Runner (35%):** Aimed at the full Risk:Reward target.
+
+* **Break-Even Logic:** Once the first target is hit, the script automatically sends a command to move the Stop Loss to the entry price (BE).
+
+---
+
+## 3. Risk Management & Guards
+
+* **Reversal Guard:** Prevents "revenge trading" by enforcing a cooldown period (default 5 bars) after an exit before you can trade in the opposite direction.
+* **Dynamic Stop Loss:** Uses a **Bollinger Band Multiplier (1.7x)** to place stops outside of immediate market noise.
+* **Max SL Filter:** If the market is too volatile and the calculated Stop Loss is larger than your "Max SL Dollars" (e.g., $35), the strategy will skip the trade entirely.
+
+---
+
+## 4. PineConnector Automation
+
+The script is pre-configured to talk to MetaTrader 4/5 via **PineConnector**.
+
+* It generates formatted alert messages containing your **License ID**, **Magic Number**, and **Volume**.
+* It handles `buy`, `sell`, `modify` (for Break-Even), and `closeall` commands automatically.
+
+### Visual Guide
+
+* **Teal Line:** Fast Moving Average ().
+* **White Line:** Slow Moving Average ().
+* **Green/Red Zones:** Visual "AAA" and "B" zones for entry quality.
+* **Red/Green Lines:** Active Stop Loss and Take Profit levels currently being tracked.
+
+---
+
+

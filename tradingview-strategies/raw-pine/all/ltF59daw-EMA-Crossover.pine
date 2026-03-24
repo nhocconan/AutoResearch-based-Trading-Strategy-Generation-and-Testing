@@ -1,0 +1,125 @@
+//@version=2
+strategy("EMA Crossover", overlay=true)
+
+// Pull traditional Open / Close candle data
+tClose = security(tickerid, period, close)
+tOpen = security(tickerid, period, open)
+
+// Inputs
+mgPeriod = input(14, title = "Period length", minval=1)
+mgEnvelopes = input(defval = true, title = "Use High/Low envelopes?", type = bool)
+
+// Calculate McGinley MA
+// Major change is to adjust the period length to 1/2 entered value. This is based on McGinleys research giving the last half of a data set the stronger weight
+mgAvgClose = na(mgAvgClose[1]) ? ema(tClose, mgPeriod) : mgAvgClose[1] + (tClose - mgAvgClose[1]) / ((mgPeriod/2) * pow(tClose/mgAvgClose[1], 4))
+mgAvgOpen = na(mgAvgOpen[1]) ? ema(tOpen, mgPeriod) : mgAvgOpen[1] + (tOpen - mgAvgOpen[1]) / ((mgPeriod/2) * pow(tOpen/mgAvgOpen[1], 4))
+
+// Plot McGinley Moving Average
+mgAvgOpenPlot = mgEnvelopes == true ? mgAvgOpen : na
+mc_ginley = mgAvgOpenPlot ? mgAvgOpenPlot : na
+mgOpenPlot = plot(mc_ginley, title = "McGinley Moving Average", color = yellow, transp = 0, style = cross, linewidth = 2, join = true)
+
+ema_day = input(8, "EMA Day")
+ema_val = ema(close, ema_day)
+
+// long = crossunder(mc_ginley, ema_val)
+// short = crossover(mc_ginley, ema_val)
+long = (mc_ginley < ema_val) and (mc_ginley[1] > ema_val[1])
+short = (mc_ginley > ema_val) and (mc_ginley[1] < ema_val[1])
+
+
+up = ema_val > ema_val[1]
+down = ema_val < ema_val[1]
+mycolor = up ? green : down ? red : blue
+
+//exit_input = input("Exit Signal", defval="When EMA crosses price", options=["When EMA crosses price", "When EMA changes direction"])
+exit_input = input(1, "Exit Signal (When EMA crosses price: 1, When EMA changes direction: 2)")
+
+// cross(close, ema_val) or cross(high, ema_val) or cross(low, ema_val) or cross(open, ema_val)
+
+skipBars = input(1, "Skip Bars")
+
+isLongOrShort = true
+for i = 0 to skipBars
+    isLongOrShort := isLongOrShort and (not long[i] and not short[i])
+
+exit_signal = if exit_input == 1//"When EMA crosses price"
+    (isLongOrShort) and (cross(close, ema_val) or cross(high, ema_val) or cross(low, ema_val) or cross(open, ema_val))
+else
+    tmp = if exit_input == 2//"When EMA changes direction"
+        (isLongOrShort) and mycolor != mycolor[1]
+    tmp
+
+
+bgColour = long ? green : short ? red : exit_signal ? blue : na
+
+bgcolor(color=bgColour, transp=80)
+
+
+plot(ema_val, title="EMA (user)", color=mycolor, linewidth=2)
+
+testStartYear = input(2019, "Backtest Start Year")
+testStartMonth = input(6, "Backtest Start Month")
+testStartDay = input(17, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(6, "Backtest Stop Month")
+testStopDay = input(17, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,23,59)
+
+stop_loss = input(1, "Stop loss (ticks)") * 12.5
+
+if time >= testPeriodStart and time <= testPeriodStop
+    strategy.entry("Long", strategy.long, 1.0, when=long)
+    strategy.entry("Short", strategy.short, 1.0, when=short)
+
+if time >= testPeriodStart and time <= testPeriodStop
+    strategy.close("Long", when = exit_signal)
+    strategy.exit("Close Long", "Long", loss=stop_loss, when=exit_signal)
+    
+    strategy.close("Short", when = exit_signal)
+    strategy.exit("Close Short", "Short", loss=stop_loss, when=exit_signal)
+
+View in Pine Editor・82 lines
+Use on chart
+2
+8
+6
+8 599
+Jun 4, 2019
+EMA Crossover
+
+Input Parameters:
+
+Stop loss (ticks) - define stop loss in unit of ticks (*1 tick = 12.5)
+Exit signal - 1: When EMA and price crosses
+2: When EMA changes direction
+Start year, month, day & Stop year, month, day - define backtest period
+
+
+You can set Order size, Commission in Settings, Properties tab.
+Jun 7, 2019
+Release Notes
+Updated default Start Hour, End Hour
+Jun 8, 2019
+Release Notes
+updated Long / Short condition
+Jun 8, 2019
+Release Notes
+Replaced crossover, crossunder with comparison
+Jun 9, 2019
+Release Notes
+Added colors for testing
+Jun 10, 2019
+Release Notes
+Updated Test Period Stop
+Jun 17, 2019
+Release Notes
+Updated date time range
+Jun 17, 2019
+Release Notes
+Updated exit conditions, background
+Jun 18, 2019
+Release Notes
+Skip a few bars after placing order

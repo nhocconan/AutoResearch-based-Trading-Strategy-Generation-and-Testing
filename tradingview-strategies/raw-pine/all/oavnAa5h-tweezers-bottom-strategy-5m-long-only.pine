@@ -1,0 +1,54 @@
+//@version=5
+strategy("Tweezers Bottom Strategy 5m - Long Only", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Параметры
+stopLossPerc = 0.1 / 100   // 0.1%
+takeProfitPerc = 0.3 / 100 // 0.3%
+tolerancePerc = 0.02 / 100 // допустимая разница между свечами для пинцета (0.02%)
+
+// Функция для определения пинцета снизу
+tweezersBottom() =>
+    math.abs(low - low[1]) <= low * tolerancePerc
+
+// Сигнал на лонг
+longSignal = tweezersBottom()
+
+// Уровни стоп-лосса и тейк-профита
+stopLossLong = close * (1 - stopLossPerc)
+takeProfitLong = close * (1 + takeProfitPerc)
+
+// Входы и стрелка вверх
+if longSignal
+    strategy.entry(id="Long", direction=strategy.long)
+    strategy.exit(id="Long TP/SL", from_entry="Long", stop=stopLossLong, limit=takeProfitLong)
+    label.new(x=bar_index, y=low, text="▲", color=color.green, style=label.style_label_up, yloc=yloc.belowbar, size=size.small)
+
+// ================= Visualization =================
+var line slLine = na
+var line tpLine = na
+var label slLabel = na
+var label tpLabel = na
+
+// Динамическая визуализация
+if strategy.position_size > 0
+    // Лонг
+    if na(slLine)
+        slLine := line.new(x1=bar_index, y1=stopLossLong, x2=bar_index + 1, y2=stopLossLong, color=color.red, width=2)
+        slLabel := label.new(x=bar_index, y=stopLossLong, text="SL", color=color.red, style=label.style_label_down, yloc=yloc.abovebar)
+    else
+        line.set_xy1(slLine, x=bar_index, y=stopLossLong)
+        line.set_xy2(slLine, x=bar_index + 1, y=stopLossLong)
+        label.set_xy(slLabel, x=bar_index, y=stopLossLong)
+
+View in Pine Editor・41 lines
+Use on chart
+2
+8
+940
+Tweezers Bottom 5m Strategy – Catch Reversals Like a Pro!
+
+Looking for fast, precise entries on the 5-minute chart? This strategy automatically detects the Tweezers Bottom candlestick pattern and opens long positions at the perfect moment. Signals appear as ▲ arrows on the chart, making it incredibly easy to spot high-probability setups.
+
+Risk and Reward Perfectly Managed: Stop-loss is set just 0.1% below entry, and take-profit at 0.3% above, giving you a clear, controlled trading edge. All levels are visualized on the chart with lines and labels, so you always know where your risk and profit targets are.
+
+Ideal for scalpers and short-term traders across Forex, crypto, and stocks. Enter reversals before the crowd, maximize your winning trades, and automate your trading with minimal risk!

@@ -1,0 +1,476 @@
+//@version=5
+strategy('Enhanced OB Retest Strategy v7.0', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 0.1, commission_type = strategy.commission.percent, commission_value = 0.05)
+import TradingView/Strategy/3
+
+// ==== Inputs
+backtestStart = input.time(timestamp('2024-08-01 00:00 +0000'), 'Backtest Start')  // Adjusted to past date for better backtesting
+minBarsBetweenTrades = input.int(2, "Minimum Bars Between Trades", minval=1)
+sw = input.int(5, 'Swing lookback (bars)', minval = 2)
+lookbackOB = input.int(6, 'Search last N bars for OB candle', minval = 2)
+minBreakPct = input.float(2, 'Min breakout %', step = 1) /100
+minATRmult = input.float(50, 'Min OB size (ATR)', step = 1) /100
+minRetracePct = input.float(25.0, 'Min retrace depth (%)', minval = 0, maxval = 100, step = 1.0) / 100  // Now used in entry logic
+useTrailing = true
+trailATR = input.float(1.5, 'ATR Multiplier for Trailing', step = 0.1)
+toBreakeven = input.bool(false, 'Move SL to BE at 1R')
+timeframeOB = input.timeframe('60', 'Timeframe for OB Detection')
+tablePosition = input.string('Bottom Right', 'Table Position', options = ['Top Left', 'Top Right', 'Bottom Left', 'Bottom Right', 'Middle Left', 'Middle Right'])
+flipATRmult = input.float(3.0, 'Flip Zone ATR Multiplier', step = 1)
+inDateRange = time >= backtestStart
+allowLong  = input.bool(true,  "Allow Longs")
+allowShort = input.bool(true,  "Allow Shorts")
+useBullOB  = input.bool(true,  "Use Bullish OB")
+useBearOB  = input.bool(true,  "Use Bearish OB")
+entryDepth = input.float(100,  "Max Entry Depth (%)", minval = 0) / 100  // Normalized to fraction
+
+// Wick Zone Inputs
+lookbackWick = input.int(20, "Wick Lookback bars")
+drawWickBoxes = input.bool(true, "Draw Wick Zone Boxes")
+tradesOnWick = input.bool(true, "Trades on Wick Zones")
+
+// ==== Map Input String to Table Position Constant
+getTablePosition(pos) =>
+    switch pos
+        'Top Left' => position.top_left
+        'Top Right' => position.top_right
+        'Bottom Left' => position.bottom_left
+        'Bottom Right' => position.bottom_right
+        'Middle Left' => position.middle_left
+        'Middle Right' => position.middle_right
+        => position.top_right
+
+// ==== Helpers
+atr = ta.atr(14)
+isBearish(idx) =>
+    close[idx] < open[idx]
+isBullish(idx) =>
+    close[idx] > open[idx]
+rngPct(a, b) =>
+    math.abs(a - b) / nz(b, a) * 100.0
+var int lastTradeBar = na
+
+// ==== Fetch Data from Higher Timeframe for OB Detection
+[htf_open, htf_close, htf_high, htf_low, htf_volume] = request.security(syminfo.tickerid, timeframeOB, [open, close, high, low, volume], lookahead = barmerge.lookahead_on)
+
+// ==== Detect BOS on Higher Timeframe
+swingHigh = ta.highest(htf_high[1], sw)
+swingLow = ta.lowest(htf_low[1], sw)
+breakUp = htf_close > swingHigh and rngPct(htf_close, swingHigh) >= minBreakPct
+breakDn = htf_close < swingLow and rngPct(htf_close, swingLow) >= minBreakPct
+
+// ==== Function to Merge Overlapping Boxes
+mergeBoxes(box1, box2, volumeText, box_type) =>
+    if na(box1) or na(box2)
+        box1
+    else
+        top1 = box.get_top(box1)
+        bottom1 = box.get_bottom(box1)
+        top2 = box.get_top(box2)
+        bottom2 = box.get_bottom(box2)
+        left1 = box.get_left(box1)
+        right1 = box.get_right(box1)
+        left2 = box.get_left(box2)
+        right2 = box.get_right(box2)
+        
+        // Check if boxes overlap
+        if not (bottom1 > top2 or top1 < bottom2)
+            // Merge by taking the highest top and lowest bottom
+            new_top = math.max(top1, top2)
+            new_bottom = math.min(bottom1, bottom2)
+            new_left = math.min(left1, left2)
+            new_right = math.max(right1, right2)
+            
+            // Delete old boxes
+            box.delete(box1)
+            box.delete(box2)
+            
+            // Create new merged box with volume text
+            new_box = box.new(
+                 left = new_left, 
+                 top = new_top, 
+                 right = new_right, 
+                 bottom = new_bottom, 
+                 bgcolor = box_type == 'bull' ? color.new(color.teal, 70) : color.new(color.red, 70), 
+                 border_color = box_type == 'bull' ? color.new(color.teal, 80) : color.new(color.red, 80), 
+                 text = volumeText,
+                 text_color = color.white, 
+                 text_size = size.small)
+            new_box
+        else
+            box1
+
+// ==== State
+var box bullBox = na
+var box bearBox = na
+var bool bullArmed = false
+var bool bearArmed = false
+var float initSL = na
+var float longTrailStop = na
+var float shortTrailStop = na
+var float avgEntry = na
+
+if not na(bullBox)
+    box.set_right(bullBox, bar_index + 10)
+if not na(bearBox)
+    box.set_right(bearBox, bar_index + 10)
+
+// ==== Create Bull OB on Higher Timeframe
+if breakUp
+    int idx = na
+    float obVolume = na
+    for i = 1 to lookbackOB by 1
+        if isBearish(i)
+            idx := i
+            obVolume := htf_volume[i]
+            break
+    
+    if not na(idx)
+        float top = htf_open[idx]
+        float bottom = htf_close[idx]
+        if bottom > top
+            float tmp = top
+            top := bottom
+            bottom := tmp
+        
+        if top - bottom >= minATRmult * atr
+            // Create candidate box
+            candidateBox = box.new(
+                 bar_index - idx, top, bar_index + 60, bottom, 
+                 bgcolor = color.new(color.teal, 85), 
+                 border_color = color.rgb(0, 137, 123, 48),
+                 text = str.tostring(obVolume, format.volume),
+                 text_color = color.white,
+                 text_size = size.small)
+            
+            // Merge with existing box if needed
+            if not na(bullBox)
+                bullBox := mergeBoxes(candidateBox, bullBox, str.tostring(obVolume, format.volume), 'bull')
+            else
+                bullBox := candidateBox
+            
+            bullArmed := true
+
+// ==== Create Bear OB on Higher Timeframe
+if breakDn
+    int idx = na
+    float obVolume = na
+    for i = 1 to lookbackOB by 1
+        if isBullish(i)
+            idx := i
+            obVolume := htf_volume[i]
+            break
+    
+    if not na(idx)
+        float top = htf_close[idx]
+        float bottom = htf_open[idx]
+        if bottom > top
+            float tmp = top
+            top := bottom
+            bottom := tmp
+        
+        if top - bottom >= minATRmult * atr
+            // Create candidate box
+            candidateBox = box.new(
+                 bar_index - idx, top, bar_index + 60, bottom, 
+                 bgcolor = color.new(color.red, 85), 
+                 border_color = color.rgb(255, 82, 82, 48),
+                 text = str.tostring(obVolume, format.volume),
+                 text_color = color.white,
+                 text_size = size.small)
+            
+            // Merge with existing box if needed
+            if not na(bearBox)
+                bearBox := mergeBoxes(candidateBox, bearBox, str.tostring(obVolume, format.volume), 'bear')
+            else
+                bearBox := candidateBox
+            
+            bearArmed := true
+
+// ==== Check for OB Overlap
+boxesOverlap(box1, box2) =>
+    if na(box1) or na(box2)
+        false
+    else
+        box1Top = box.get_top(box1)
+        box1Bottom = box.get_bottom(box1)
+        box2Top = box.get_top(box2)
+        box2Bottom = box.get_bottom(box2)
+        not (box1Bottom > box2Top or box1Top < box2Bottom)
+
+obOverlap = boxesOverlap(bullBox, bearBox)
+
+// ==== Zone Flipping
+float flipDist = flipATRmult * atr
+if not na(bearBox) and close > box.get_top(bearBox) + flipDist
+    left = box.get_left(bearBox)
+    right = box.get_right(bearBox)
+    top_ = box.get_top(bearBox)
+    bottom = box.get_bottom(bearBox)
+    box.delete(bearBox)
+    bearBox := na
+    if not na(bullBox)
+        box.delete(bullBox)
+    bullBox := box.new(left, top_, right + 60, bottom, 
+         bgcolor = color.new(color.teal, 85), 
+         border_color = color.rgb(0, 137, 123, 48))
+    bullArmed := true
+
+if not na(bullBox) and close < box.get_bottom(bullBox) - flipDist
+    left = box.get_left(bullBox)
+    right = box.get_right(bullBox)
+    top_ = box.get_top(bullBox)
+    bottom = box.get_bottom(bullBox)
+    box.delete(bullBox)
+    bullBox := na
+    if not na(bearBox)
+        box.delete(bearBox)
+    bearBox := box.new(left, top_, right + 60, bottom, 
+         bgcolor = color.new(color.red, 85), 
+         border_color = color.rgb(255, 82, 82, 48))
+    bearArmed := true
+
+if useBullOB
+    if not na(bullBox)
+        box.set_right(bullBox, bar_index + 20)
+    if not na(bearBox)
+        box.set_right(bearBox, bar_index + 20)
+
+// ==== Entry Logic with retrace depth
+canTrade = not obOverlap and (na(lastTradeBar) or (bar_index - lastTradeBar >= minBarsBetweenTrades)) and strategy.opentrades == 0
+
+bullDepth = not na(bullBox) ? (box.get_top(bullBox) - close) / (box.get_top(bullBox) - box.get_bottom(bullBox)) : na
+bearDepth = not na(bearBox) ? (close - box.get_bottom(bearBox)) / (box.get_top(bearBox) - box.get_bottom(bearBox)) : na
+
+// === Long Entries on OB ===
+if allowLong and inDateRange and useBullOB and not na(bullBox) and canTrade
+    if close > box.get_bottom(bullBox) and close < box.get_top(bullBox)
+        bullDepth := (box.get_top(bullBox) - close) / (box.get_top(bullBox) - box.get_bottom(bullBox))
+        if bullDepth >= minRetracePct and bullDepth <= entryDepth
+            strategy.entry("Long", strategy.long, comment = "Long OB")
+            avgEntry := strategy.position_avg_price
+            initSL := close - trailATR * atr
+            longTrailStop := initSL
+            lastTradeBar := bar_index
+
+// === Short Entries on OB ===
+if allowShort and inDateRange and useBearOB and not na(bearBox) and canTrade 
+    if close > box.get_bottom(bearBox) and close < box.get_top(bearBox)
+        bearDepth := (close - box.get_bottom(bearBox)) / (box.get_top(bearBox) - box.get_bottom(bearBox))
+        if bearDepth >= minRetracePct and bearDepth <= entryDepth
+            strategy.entry("Short", strategy.short, comment = "Short OB")
+            avgEntry := strategy.position_avg_price
+            initSL := close + trailATR * atr
+            shortTrailStop := initSL
+            lastTradeBar := bar_index
+
+// ==== Wick Zone Variables
+var box highWickBox = na
+var box lowWickBox = na
+var float highWickTop = na
+var float highWickBottom = na
+var float lowWickTop = na
+var float lowWickBottom = na
+
+// ==== Detect new wick zones
+if ta.highestbars(high, lookbackWick) == 0
+    // new high wick candle
+    highWickTop    := high
+    highWickBottom := math.max(open, close)
+    box.delete(highWickBox[1])
+    if drawWickBoxes
+        highWickBox := box.new(bar_index, highWickTop, bar_index, highWickBottom,
+             border_color=color.new(color.orange, 85), 
+             bgcolor=color.new(color.orange, 85),
+             text="Vol: " + str.tostring(volume, format.volume),
+             text_size = size.tiny)
+
+if ta.lowestbars(low, lookbackWick) == 0
+    // new low wick candle
+    lowWickBottom := low
+    lowWickTop    := math.min(open, close)
+    box.delete(lowWickBox[1])
+    if drawWickBoxes
+        lowWickBox := box.new(bar_index, lowWickTop, bar_index, lowWickBottom,
+             border_color=color.new(color.blue, 80), 
+             bgcolor=color.new(color.blue, 85),
+             text="Vol: " + str.tostring(volume, format.volume),
+             text_size = size.tiny)
+
+
+
+shorOverlap = boxesOverlap(lowWickBox,bullBox) and not boxesOverlap(lowWickBox,bullBox)[1]
+longOverlap = boxesOverlap(highWickBox,bearBox) and not boxesOverlap(highWickBox,bearBox)[1]
+
+plotshape(longOverlap, title = 'Long Wick Entry', color = color.blue, style = shape.triangleup, location = location.belowbar, size = size.small)
+plotshape(shorOverlap, title = 'Short Wick Entry', color = color.purple, style = shape.triangledown, location = location.abovebar, size = size.small)
+
+// ==== Long Entries on Wick
+if longOverlap and allowLong and inDateRange  and strategy.position_size == 0  and canTrade
+    strategy.entry("Long", strategy.long, comment = "Long Wick")
+    avgEntry := strategy.position_avg_price
+    initSL := close - trailATR * atr
+    longTrailStop := initSL
+    lastTradeBar := bar_index
+
+// ==== Short Entries on Wick
+if shorOverlap and allowShort and strategy.position_size == 0 and inDateRange and canTrade
+    strategy.entry("Short", strategy.short, comment = "Short Wick")
+    avgEntry := strategy.position_avg_price
+    initSL := close + trailATR * atr
+    shortTrailStop := initSL
+    lastTradeBar := bar_index
+
+
+// ==== Extend wick boxes forward
+if drawWickBoxes
+    if not na(highWickBox)
+        box.set_right(highWickBox, bar_index + 20)
+    if not na(lowWickBox)
+        box.set_right(lowWickBox, bar_index + 20)
+
+// ==== Wick Entry Signals
+plotshape(drawWickBoxes and tradesOnWick and low < lowWickTop and ta.crossover(close, lowWickTop) ? close : na, title = 'Long Wick Entry', color = color.green, style = shape.triangleup, location = location.belowbar, size = size.small)
+plotshape(drawWickBoxes and tradesOnWick and high > highWickBottom and ta.crossunder(close, highWickBottom) ? close : na, title = 'Short Wick Entry', color = color.red, style = shape.triangledown, location = location.abovebar, size = size.small)
+
+// ==== Long Entries on Wick
+if allowLong and drawWickBoxes and tradesOnWick and low < lowWickTop and ta.crossover(close, lowWickTop) and strategy.position_size == 0 and inDateRange and canTrade
+    strategy.entry("Long", strategy.long, comment = "Long Wick")
+    avgEntry := strategy.position_avg_price
+    initSL := close - trailATR * atr
+    longTrailStop := initSL
+    lastTradeBar := bar_index
+
+// ==== Short Entries on Wick
+if allowShort and drawWickBoxes and tradesOnWick and high > highWickBottom and ta.crossunder(close, highWickBottom) and strategy.position_size == 0 and inDateRange and canTrade
+    strategy.entry("Short", strategy.short, comment = "Short Wick")
+    avgEntry := strategy.position_avg_price
+    initSL := close + trailATR * atr
+    shortTrailStop := initSL
+    lastTradeBar := bar_index
+
+
+// ==== Reset on Position Exit
+if strategy.position_size == 0
+    longTrailStop := na
+    shortTrailStop := na
+    initSL := na
+    avgEntry := na
+
+// ==== Trailing Stop Logic with Breakeven
+if strategy.position_size != 0
+    if strategy.position_size > 0
+        float newTrail = close - trailATR * atr
+        longTrailStop := math.max(nz(longTrailStop, newTrail), newTrail)
+        if toBreakeven and close >= avgEntry + (avgEntry - initSL)
+            longTrailStop := math.max(longTrailStop, avgEntry)
+        strategy.exit('Close Long', from_entry = 'Long', stop = longTrailStop)
+    else if strategy.position_size < 0
+        float newTrail = close + trailATR * atr
+        shortTrailStop := math.min(nz(shortTrailStop, newTrail), newTrail)
+        if toBreakeven and close <= avgEntry - (initSL - avgEntry)
+            shortTrailStop := math.min(shortTrailStop, avgEntry)
+        strategy.exit('Close Short', from_entry = 'Short', stop = shortTrailStop)
+    else 
+        strategy.close_all()
+
+// ==== Invalidation for Wick Zones
+if not na(highWickBox) and close > highWickTop
+    box.delete(highWickBox)
+    highWickTop := na
+    highWickBottom := na
+
+if not na(lowWickBox) and close < lowWickBottom
+    box.delete(lowWickBox)
+    lowWickTop := na
+    lowWickBottom := na
+
+// ==== Performance Metrics Panel
+var table perfTable = na
+if strategy.closedtrades + strategy.opentrades > 0
+    if not na(perfTable)
+        table.delete(perfTable)
+    perfTable := table.new(position = getTablePosition(tablePosition), columns = 2, rows = 5, bgcolor = color.new(color.gray, 90), border_color = color.gray, border_width = 1)
+
+    // Calculate metrics
+    float netProfit = strategy.netprofit
+    int totalTrades = strategy.closedtrades
+    float winRate = totalTrades > 0 ? strategy.wintrades / totalTrades * 100 : 0
+    float pnl = strategy.openprofit
+    
+    // Populate table
+    tsize = size.normal
+    table.cell(perfTable, 0, 0, 'Open PnL', text_color = color.white, text_size = tsize)
+    table.cell(perfTable, 1, 0, '$'+ str.tostring(pnl, '#.##'), text_color = pnl > 0 ? color.green : color.red, text_size = tsize)
+
+    table.cell(perfTable, 0, 1, 'Net Profit', text_color = color.white, text_size = tsize)
+    table.cell(perfTable, 1, 1, '$'+ str.tostring(netProfit, '#.##'), text_color = netProfit >= 0 ? color.green : color.red, text_size = tsize)
+    table.cell(perfTable, 0, 2, 'Total Trades', text_color = color.white, text_size = tsize)
+    table.cell(perfTable, 1, 2, str.tostring(totalTrades), text_color = color.white, text_size = tsize)
+    table.cell(perfTable, 0, 3, 'Win Rate (%)', text_color = color.white, text_size = tsize)
+    table.cell(perfTable, 1, 3, str.tostring(winRate, '#.##') + '%', text_color = winRate >= 50 ? color.green : color.red, text_size = tsize)
+    table.cell(perfTable, 0, 4, 'Position', text_color=color.white, text_size = tsize)
+    direction = strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "None"
+    table.cell(perfTable, 1, 4, direction , bgcolor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : na, text_size = tsize)
+
+// ==== Profit Label
+var label profitLabel = na
+if strategy.position_size == 0 and not na(profitLabel)
+    label.delete(profitLabel)
+    profitLabel := na
+
+if strategy.position_size != 0
+    if not na(profitLabel)
+        label.delete(profitLabel)
+    profitLabel := label.new(bar_index, high, text = str.tostring(strategy.openprofit, '#.##' + '$'), style = label.style_label_down, color = strategy.openprofit < 0 ? color.red : color.green, textcolor = color.white)
+
+// ==== Plotting
+plot(longTrailStop, 'Long Trailing Stop', color = strategy.position_size > 0 ? (longTrailStop > avgEntry ? color.green : color.red) : na, style = plot.style_steplinebr)
+plot(shortTrailStop, 'Short Trailing Stop', color = strategy.position_size < 0 ? (shortTrailStop < avgEntry ? color.green : color.red) : na, style = plot.style_steplinebr)
+plot(strategy.position_size != 0 ? avgEntry : na, 'Entry Price', color = color.white, style = plot.style_steplinebr, linewidth = 2)
+
+View in Pine Editor・429 lines
+Use on chart
+8
+8
+5
+5
+13 663
+The OB Retest Strategy is a full Order Block retest trading system that detects, plots, and trades OB zones across multiple timeframes. It uses structure breaks, retrace depth, and ATR filters to identify strong reversal or continuation setups.
+
+⸻
+
+⚙️ Core Features
+• Multi-timeframe OB detection using break-of-structure (BOS) logic
+• Automatic zone creation for bullish and bearish order blocks
+• Smart merging of overlapping OB zones
+• Dynamic flip-zone logic that turns invalidated OBs into new zones
+• Wick zone detection for high-precision entries
+• ATR-based trailing stop and optional breakeven
+• Adjustable retrace depth, breakout %, and ATR filters
+• Built-in performance table showing PnL, win rate, and total trades
+• Fully backtestable with date range and commission control
+
+⸻
+
+🧠 Logic Summary
+1. Detects a BOS on the higher timeframe.
+2. Identifies the last opposing candle as the valid OB.
+3. Validates the OB based on ATR size and breakout strength.
+4. Waits for price to retest the zone to a set depth.
+5. Executes trades and manages exits using trailing stop or breakeven.
+6. Flips invalidated zones automatically.
+
+⸻
+
+💡 Usage Tips
+• Best used on 1H to 4H charts for swing setups.
+• Tune ATR and breakout thresholds for your market’s volatility.
+• Combine with higher-timeframe bias or liquidity levels for better accuracy.
+
+⸻
+
+⚠️ Notes
+• For educational and testing purposes only.
+• Backtested results do not predict future performance.
+• Always test before live use.
+

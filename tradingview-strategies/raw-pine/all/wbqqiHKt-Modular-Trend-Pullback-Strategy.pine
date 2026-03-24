@@ -1,0 +1,124 @@
+//@version=6
+strategy(
+    "Modular Trend Pullback Strategy",
+    overlay=true,
+    initial_capital=100000,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=5,
+    commission_type=strategy.commission.percent,
+    commission_value=0.05,
+    slippage=1
+)
+
+// ───────── INPUTS ─────────
+fastLen = input.int(20, "Fast EMA")
+slowLen = input.int(50, "Slow EMA")
+atrLen  = input.int(14, "ATR Length")
+atrMult = input.float(1.5, "Stop ATR Mult")
+rr      = input.float(2.0, "Risk Reward")
+
+// ───────── INDICATORS ─────────
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+atrVal  = ta.atr(atrLen)
+
+// ───────── TREND ─────────
+trendUp   = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+// ───────── GLOBAL TRIGGERS (ALWAYS EXECUTE) ─────────
+breakHigh = ta.crossover(close, high[1])
+breakLow  = ta.crossunder(close, low[1])
+
+// ───────── PULLBACK LOGIC ─────────
+pullbackLong  = trendUp and close < emaFast
+pullbackShort = trendDown and close > emaFast
+
+longTrigger  = pullbackLong and breakHigh
+shortTrigger = pullbackShort and breakLow
+
+// ───────── ENTRIES ─────────
+if longTrigger and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if shortTrigger and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+// ───────── RISK MANAGEMENT ─────────
+longSL  = strategy.position_avg_price - atrVal * atrMult
+longTP  = strategy.position_avg_price + atrVal * atrMult * rr
+
+shortSL = strategy.position_avg_price + atrVal * atrMult
+shortTP = strategy.position_avg_price - atrVal * atrMult * rr
+
+strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// ───────── VISUALS ─────────
+plot(emaFast, color=color.orange)
+plot(emaSlow, color=color.blue)
+
+View in Pine Editor・63 lines
+Use on chart
+9
+588
+This strategy focuses on trading pullbacks within established trends. Instead of entering immediately when a trend forms, it waits for a temporary retracement and then looks for confirmation before placing a trade. The goal is to improve entry timing while keeping risk controlled.
+
+Core Idea
+Markets often move in waves. During a strong trend, price tends to retrace toward a short-term average before continuing in the dominant direction. This script attempts to participate in those continuation moves.
+
+How It Works
+1. Trend Identification
+Two exponential moving averages (EMAs) define direction.
+
+Fast EMA above Slow EMA → bullish environment
+
+Fast EMA below Slow EMA → bearish environment
+
+
+
+2. Pullback Condition
+
+In an uptrend, price must retrace below the fast EMA.
+
+In a downtrend, price must retrace above the fast EMA.
+
+
+This avoids chasing extended moves.
+
+3. Break Confirmation
+After a pullback, the strategy waits for price to break the previous candle’s high (for longs) or low (for shorts).
+This acts as confirmation that momentum is returning in the direction of the trend.
+
+4. Risk Management
+Stop-loss and take-profit levels are based on ATR (Average True Range), allowing exits to adapt to current volatility.
+A configurable risk-reward ratio defines profit targets.
+
+Key Features
+
+Non-repainting logic
+
+Entries only when flat (no stacking positions)
+
+ATR-based dynamic stop and target levels
+
+Commission and slippage included for more realistic backtests
+
+Structured, modular logic for easier testing and adjustment
+
+
+
+Suitable Market Conditions
+This type of approach generally performs best in:
+
+Trending environments
+
+Instruments with sustained directional movement
+
+Timeframes where pullbacks are clearly visible
+
+
+It may underperform in sideways or low-volatility markets.
+
+Notes
+This script is intended for research and testing purposes. Results will vary depending on symbol, timeframe, and market regime. Always evaluate performance across multiple market conditions before considering live execution.

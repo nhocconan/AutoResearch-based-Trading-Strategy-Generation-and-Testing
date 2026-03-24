@@ -1,0 +1,191 @@
+//@version=5
+
+//_______ <declaration_statement>
+strategy(title = "Bollinger Bands Enhanced Strategy", 
+         shorttitle = "Bollinger Bands Strategy", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 1, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = true, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 30, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen       = color.new(#2ECD99, 0)
+var const color skyrexGray        = color.new(#F2F2F2, 0)
+var const color skyrexWhite       = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var float stopLossLevel                = na
+var float takeProfitLevel              = na 
+var float tralingProfitActivationLevel = na
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2025-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+stopLossAtrNum                 = input.float(defval = 1.75, title = "ATR stop loss", step = 0.25, group = "📈Strategy settings📈")
+tralingProfitActivationNum     = input.float(defval = 2.25, title = "ATR Traling profit activation level", step = 0.25, group = "📈Strategy settings📈")
+bollingerMult                  = input.float(2.0, minval=0.001, maxval=50, title="StdDev", group = "📈Strategy settings📈")
+
+//_______ <function_declarations>
+
+
+//_______ <calculations>
+//Calculating Bollinger bands 
+basis = ta.sma(close, 20)
+dev = bollingerMult * ta.stdev(close, 20)
+upper = basis + dev
+lower = basis - dev
+
+
+//Average true range (ATR) calculations
+ATR = ta.atr(14)
+
+
+//Calculating EMA
+filterEMA = ta.ema(close, 200)
+
+
+//Calculating stop loss level
+stopLossLevel := strategy.position_avg_price - stopLossAtrNum * ATR
+
+
+//Calculating traling profit activation level
+tralingProfitActivationLevel := strategy.position_avg_price + tralingProfitActivationNum * ATR
+
+
+//Calculating dynamic traling take profit level
+if strategy.opentrades == 0 or ta.barssince(strategy.opentrades == 1 and strategy.opentrades[1] == 0) < ta.barssince(ta.crossover(high, tralingProfitActivationLevel))
+    takeProfitLevel := na
+else
+    takeProfitLevel := basis
+
+
+//_______ <strategy_calls>
+//Defining long condition
+longCondition =  low > filterEMA and low <= lower 
+
+
+//Defining trade close condition
+closeCondition =  close < takeProfitLevel or low <= stopLossLevel 
+
+
+//Strategy entry
+//Scrip places the stop order at the upFractalActivationLevel if longCondition is true
+if (longCondition and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+if (closeCondition)
+    strategy.close(id = "entry1",immediately = true , alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+pricePlot = plot(close, title="Price", color=color.new(color.blue, 100))
+emaPlot = plot(takeProfitLevel, title="EMA", color=skyrexGreen, style=plot.style_linebr, linewidth = 3)
+plot(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? takeProfitLevel : na, title="EMA", color=skyrexGreen, join = false, style=plot.style_circles, linewidth = 6)
+fill(pricePlot, emaPlot, color=color.new(skyrexGreen, 70))
+plotshape(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? true: na,text="Strong Uptrend",size=size.small,offset=0,color=color.new(skyrexGreen, 0),textcolor=skyrexWhite,style=shape.triangleup,location=location.belowbar)
+
+
+//_______ <alerts>
+
+View in Pine Editor・115 lines
+Use on chart
+1.2 K
+5
+16 067
+Overview
+The common practice of using Bollinger bands is to use it for building mean reversion or squeeze momentum strategies. In the current script Bollinger Bands Enhanced Strategy we are trying to combine the strengths of both strategies types. It utilizes Bollinger Bands indicator to buy the local dip and activates trailing profit system after reaching the user given number of Average True Ranges (ATR). Also it uses 200 period EMA to filter trades only in the direction of a trend. Strategy can execute only long trades.
+
+Unique Features
+
+Trailing Profit System: Strategy uses user given number of ATR to activate trailing take profit. If price has already reached the trailing profit activation level, scrip will close long trade if price closes below Bollinger Bands middle line.
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Major Trend Filter: Strategy utilizes 100 period EMA to take trades only in the direction of a trend.
+
+Flexible Risk Management: Users can choose number of ATR as a stop loss (by default = 1.75) for trades. This is flexible approach because ATR is recalculated on every candle, therefore stop-loss readjusted to the current volatility.
+
+
+
+Methodology
+First of all, script checks if currently price is above the 200-period exponential moving average EMA. EMA is used to establish the current trend. Script will take long trades on if this filtering system showing us the uptrend. Then the strategy executes the long trade if candle’s low below the lower Bollinger band. To calculate the middle Bollinger line, we use the standard 20-period simple moving average (SMA), lower band is calculated by the substruction from middle line the standard deviation multiplied by user given value (by default = 2).
+
+When long trade executed, script places stop-loss at the price level below the entry price by user defined number of ATR (by default = 1.75). This stop-loss level recalculates at every candle while trade is open according to the current candle ATR value. Also strategy set the trailing profit activation level at the price above the position average price by user given number of ATR (by default = 2.25). It is also recalculated every candle according to ATR value. When price hit this level script plotted the triangle with the label “Strong Uptrend” and start trail the price at the middle Bollinger line. It also started to be plotted as a green line.
+
+When price close below this trailing level script closes the long trade and search for the next trade opportunity.
+
+Risk Management
+The strategy employs a combined and flexible approach to risk management:
+It allows positions to ride the trend as long as the price continues to move favorably, aiming to capture significant price movements. It features a user-defined ATR stop loss parameter to mitigate risks based on individual risk tolerance. By default, this stop-loss is set to a 1.75*ATR drop from the entry point, but it can be adjusted according to the trader's preferences.
+
+There is no fixed take profit, but strategy allows user to define user the ATR trailing profit activation parameter. By default, this stop-loss is set to a 2.25*ATR growth from the entry point, but it can be adjusted according to the trader's preferences.
+
+Justification of Methodology
+This strategy leverages Bollinger bangs indicator to open long trades in the local dips. If price reached the lower band there is a high probability of bounce. Here is an issue: during the strong downtrend price can constantly goes down without any significant correction. That’s why we decided to use 200-period EMA as a trend filter to increase the probability of opening long trades during major uptrend only.
+
+Usually, Bollinger Bands indicator is using for mean reversion or breakout strategies. Both of them have the disadvantages. The mean reversion buys the dip, but closes on the return to some mean value. Therefore, it usually misses the major trend moves. The breakout strategies usually have the issue with too high buy price because to have the breakout confirmation price shall break some price level. Therefore, in such strategies traders need to set the large stop-loss, which decreases potential reward to risk ratio.
+
+In this strategy we are trying to combine the best features of both types of strategies. Script utilizes ate ATR to setup the stop-loss and trailing profit activation levels. ATR takes into account the current volatility. Therefore, when we setup stop-loss with the user-given number of ATR we increase the probability to decrease the number of false stop outs. The trailing profit concept is trying to add the beat feature from breakout strategies and increase probability to stay in trade while uptrend is developing. When price hit the trailing profit activation level, script started to trail the price with middle line if Bollinger bands indicator. Only when candle closes below the middle line script closes the long trade.
+
+Backtest Results
+
+Operating window: Date range of backtests is 2020.10.01 - 2024.07.01. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 30%
+
+Maximum Single Position Loss: -9.78%
+
+Maximum Single Profit: +25.62%
+
+Net Profit: +6778.11 USDT (+67.78%)
+
+Total Trades: 111 (48.65% win rate)
+
+Profit Factor: 2.065
+
+Maximum Accumulated Loss: 853.56 USDT (-6.60%)
+
+Average Profit per Trade: 61.06 USDT (+1.62%)
+
+Average Trade Duration: 76 hours
+
+
+
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 4h BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation
+

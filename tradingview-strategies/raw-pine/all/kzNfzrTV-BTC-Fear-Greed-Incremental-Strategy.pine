@@ -1,0 +1,350 @@
+//@version=6
+strategy("BTC Fear & Greed Incremental Strategy", 
+     overlay                  = true,
+     initial_capital          = 1000000000,
+     currency                 = currency.USD,
+     pyramiding               = 10000,
+     commission_value         = 0,
+     slippage                 = 0,
+     process_orders_on_close  = true,
+     margin_long              = 100,
+     margin_short             = 0,
+     precision                = 2)
+
+// ── Main Inputs ─────────────────────────────────────────────────────────────
+initialBTC       = input.float(10.0, "Starting BTC Quantity (pure stack mode)", minval = 0.01, step = 0.01, group = "Main Parameters")
+greedThreshold   = input.float(80, "Greed threshold (sell above)",    minval = 50, maxval = 95, group = "Main Parameters")
+fearThreshold    = input.float(20, "Normal Fear threshold (buy below in bull)", minval = 5,  maxval = 40, group = "Main Parameters")
+greedSellPercent = input.float(5.0, "Standard Greed → Daily sell % of portfolio", minval = 0.1, maxval = 50, group = "Main Parameters")
+fearBuyPercent   = input.float(5.0, "Normal Fear → Daily buy % of portfolio", minval = 0.1, maxval = 50, group = "Main Parameters")
+startDate        = input.time(timestamp("2024-01-24 00:00 +0000"), "Start Date (initial BTC stack)", group = "Main Parameters")
+
+// ── Bull Year Logic ─────────────────────────────────────────────────────────
+enableBullYearLogic = input.bool(true, "Enable Bull Year Logic", group = "Bull Year Management")
+bullYearsInput      = input.string("2017,2021,2025", "Bull Years (comma-separated)", group = "Bull Year Management")
+q1SellPercent       = input.float(1.0, "Q1 Sell % (Jan-Mar)", minval = 0.1, maxval = 50, group = "Bull Year Management")
+q2SellPercent       = input.float(2.0, "Q2 Sell % (Apr-Jun)", minval = 0.1, maxval = 50, group = "Bull Year Management") 
+q3SellPercent       = input.float(5.0, "Q3 Sell % (Jul-Sep)", minval = 0.1, maxval = 50, group = "Bull Year Management")
+q4SellPercent       = input.float(5.0, "Q4 Sell % (Oct-Dec)", minval = 0.1, maxval = 50, group = "Bull Year Management")
+
+// ── Bear Market Filters ─────────────────────────────────────────────────────
+enableBearFilters = input.bool(true, "Enable Bear Market Buy Filters", group = "Bear Parameters")
+plotBearMAs       = input.bool(false, "Plot Bear MAs on Chart (visual only)", group = "Bear Parameters")
+bullMAPeriodDays  = input.int(365, title = "Bull Confirmation MA (days)", minval = 100, maxval = 1000, group = "Bear Parameters")
+deepBearMAWeeks   = input.int(150, title = "Deep Bear MA (weeks)", minval = 50, maxval = 300, group = "Bear Parameters")
+deepFearThreshold = input.float(25, title = "Deep Bear Fear Threshold (< this)", minval = 5, maxval = 50, group = "Bear Parameters")
+deepBuyMultiplier = input.float(2.0, title = "Buy Multiplier in Deep Bear zone", minval = 1.0, step = 0.5, group = "Bear Parameters")
+
+// ── Risk Management ─────────────────────────────────────────────────────────
+minAllocationPct  = input.float(20.0, "Minimum BTC Allocation % (floor during greed)", minval = 0.0, maxval = 90.0, group = "Risk Management")
+
+// ▼ CRITICAL: SELECT THE 0–100 FEAR & GREED PLOT ▼
+fng = input.source(close, title = "Fear & Greed Source → MUST select the 0–100 series", group = "CRITICAL")
+
+// Warning if wrong source
+var label warningLabel = na
+if barstate.islast and (na(fng) or fng < 0 or fng > 100)
+    warningLabel := label.new(bar_index, high * 1.1, "⚠️ WRONG F&G SOURCE!\nSelect the 0–100 plot in settings", color = color.red, textcolor = color.white, style = label.style_label_left, size = size.large)
+
+// ── Bull Year Detection Function ────────────────────────────────────────────
+isBullYear() =>
+    currentYear = year(time)
+    bullYearsList = str.split(bullYearsInput, ",")
+    isBull = false
+    for i = 0 to array.size(bullYearsList) - 1
+        yearStr = str.trim(array.get(bullYearsList, i))
+        if str.tonumber(yearStr) == currentYear
+            isBull := true
+            break
+    isBull
+
+// ── Get Current Quarter ─────────────────────────────────────────────────────
+getCurrentQuarter() =>
+    currentMonth = month(time)
+    if currentMonth >= 1 and currentMonth <= 3
+        1  // Q1
+    else if currentMonth >= 4 and currentMonth <= 6
+        2  // Q2
+    else if currentMonth >= 7 and currentMonth <= 9
+        3  // Q3
+    else
+        4  // Q4
+
+// ── Get Dynamic Sell Percentage ─────────────────────────────────────────────
+getDynamicSellPercent() =>
+    if enableBullYearLogic and isBullYear()
+        quarter = getCurrentQuarter()
+        switch quarter
+            1 => q1SellPercent
+            2 => q2SellPercent
+            3 => q3SellPercent
+            4 => q4SellPercent
+            => greedSellPercent  // fallback
+    else
+        0.0  // No sells in non-bull years
+
+// Fixed position ID
+string pos_id = "BTC Position"
+
+// Trend MAs
+float bullMA     = ta.sma(close, bullMAPeriodDays)
+float deepBearMA = request.security(syminfo.tickerid, "W", ta.sma(close, deepBearMAWeeks), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Optional MA plots
+plot(plotBearMAs and enableBearFilters ? bullMA : na, title = "Bull Confirmation MA", color = color.blue, linewidth = 2)
+plot(plotBearMAs and enableBearFilters ? deepBearMA : na, title = "Deep Bear MA", color = color.purple, linewidth = 2)
+
+// Regime detection
+var string regime = "Bull"
+if enableBearFilters
+    if close > bullMA
+        regime := "Bull"
+    else if close <= deepBearMA
+        regime := "Deep Bear"
+    else
+        regime := close[1] <= deepBearMA ? "Early Bull" : "Early Bear"
+else
+    regime := "Bull"
+
+// Background regime coloring
+bgcolor(regime == "Bull"      ? color.new(color.green,  93) :
+       regime == "Early Bear" ? color.new(color.orange, 90) :
+       regime == "Deep Bear"  ? color.new(color.red,    90) :
+       regime == "Early Bull" ? color.new(color.blue,   88) : na)
+
+// ── Pure Stack Logic ───────────────────────────────────────────────────────
+var float artificialCash = 0.0
+var bool started = false
+var bool initialEntryMade = false
+var int initialEntryBar = na
+
+if not started and time >= startDate
+    started := true
+
+if started and not initialEntryMade and time >= startDate
+    float initialStackValue = initialBTC * close
+    artificialCash := strategy.initial_capital - initialStackValue
+    strategy.entry(pos_id, strategy.long, qty = initialBTC, comment = "Initial BTC Stack")
+    initialEntryMade := true
+    initialEntryBar := bar_index
+
+if started and initialEntryMade and time >= startDate and barstate.isconfirmed and bar_index != initialEntryBar
+    float portValue = strategy.equity
+    float posValue = math.abs(strategy.position_size) * close
+    float realCash = portValue - posValue - artificialCash
+    float pureEquity = posValue + math.max(realCash, 0)
+    
+    // Get dynamic sell percentage based on bull year logic
+    float currentSellPercent = getDynamicSellPercent()
+    
+    // Greed sell (only if currentSellPercent > 0, meaning it's a bull year or bull logic is disabled)
+    if currentSellPercent > 0 and fng > greedThreshold and strategy.position_size > 0
+        float desiredSellValue = pureEquity * (currentSellPercent / 100)
+        float floorValue = pureEquity * (minAllocationPct / 100)
+        float maxSellValue = posValue - floorValue
+        float sellValue = math.min(desiredSellValue, math.max(maxSellValue, 0))
+        float sell_qty_btc = sellValue / close
+        if sell_qty_btc > 0.001
+            string quarter = getCurrentQuarter() == 1 ? "Q1" : getCurrentQuarter() == 2 ? "Q2" : getCurrentQuarter() == 3 ? "Q3" : "Q4"
+            string comment = isBullYear() ? quarter + " Bull Sell " + str.tostring(currentSellPercent, "#.##") + "%" : "Greed Sell " + str.tostring(currentSellPercent, "#.##") + "%"
+            strategy.close(pos_id, qty = sell_qty_btc, comment = comment)
+    
+    // Fear buy (unchanged logic)
+    bool doBuy = false
+    float buyPercentUsed = fearBuyPercent
+
+    if not enableBearFilters
+        doBuy := fng < fearThreshold
+    else
+        if close > bullMA
+            doBuy := fng < fearThreshold
+        else if close <= deepBearMA and fng < deepFearThreshold
+            doBuy := true
+            buyPercentUsed *= deepBuyMultiplier
+
+    if doBuy and realCash > 0
+        float buyValue = pureEquity * (buyPercentUsed / 100)
+        float buy_qty_btc = math.min(buyValue / close, realCash / close)
+        if buy_qty_btc > 0.001
+            strategy.entry(pos_id, strategy.long, qty = buy_qty_btc, comment = "Fear Buy " + str.tostring(buyPercentUsed, "#.##") + "%")
+
+// ── ENFORCED 2 DECIMAL SCALE ────────────────────────────────────────────────
+float portValue = strategy.equity
+float posValue = math.abs(strategy.position_size) * close
+float realCash = portValue - posValue - artificialCash
+float pureEquity = posValue + math.max(realCash, 0)
+float alloc_pct = pureEquity != 0 ? (posValue / pureEquity) * 100 : 0
+
+// Scale enforcement
+plot(-5.00, "Scale Floor", color = color.new(color.white, 100), display = display.none)
+plot(110.00, "Scale Ceiling", color = color.new(color.white, 100), display = display.none)
+
+// Main plots
+plot(started ? math.round(alloc_pct, 2) : na, "BTC Allocation %", color = color.orange, linewidth = 3)
+plot(math.round(fng, 2), "Fear & Greed Index", color = color.fuchsia, linewidth = 2)
+plot(started ? math.round(strategy.position_size, 2) : na, "BTC Holdings", color = color.blue, linewidth = 3)
+
+// Scale anchors
+plot(0.00, "Anchor 0", color = color.new(color.red, 95), linewidth = 1)
+plot(100.00, "Anchor 100", color = color.new(color.green, 95), linewidth = 1)
+
+// Reference lines
+hline(0.00, "0.00%", color = color.red)
+hline(20.00, "20.00%", color = color.new(color.red, 50))
+hline(50.00, "50.00%", color = color.gray, linestyle = hline.style_dashed)
+hline(80.00, "80.00%", color = color.new(color.green, 50))
+hline(100.00, "100.00%", color = color.green)
+
+// Additional reference lines
+hline(25.00, "25.00", color = color.new(color.gray, 80), linestyle = hline.style_dotted)
+hline(75.00, "75.00", color = color.new(color.gray, 80), linestyle = hline.style_dotted)
+
+// Enhanced info table
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 85), border_width = 1, frame_color = color.orange)
+
+if barstate.islast and started
+    float currentSellPercent = getDynamicSellPercent()
+    string yearType = isBullYear() ? "BULL" : "NORMAL"
+    string quarterInfo = isBullYear() ? "Q" + str.tostring(getCurrentQuarter()) : "N/A"
+    
+    table.cell(infoTable, 0, 0, "STACK TRACKER", text_color = color.white, bgcolor = color.new(color.orange, 20))
+    table.cell(infoTable, 1, 0, "", bgcolor = color.new(color.orange, 20))
+    table.cell(infoTable, 0, 1, "Year Type:", text_color = isBullYear() ? color.yellow : color.gray)
+    table.cell(infoTable, 1, 1, yearType + " " + quarterInfo, text_color = color.white)
+    table.cell(infoTable, 0, 2, "Sell %:", text_color = color.red)
+    table.cell(infoTable, 1, 2, str.tostring(currentSellPercent, "#.#") + "%", text_color = color.white)
+    table.cell(infoTable, 0, 3, "Regime:", text_color = regime == "Bull" ? color.green : regime == "Early Bear" ? color.orange : regime == "Deep Bear" ? color.red : color.blue)
+    table.cell(infoTable, 1, 3, regime, text_color = color.white)
+    table.cell(infoTable, 0, 4, "F&G:", text_color = color.fuchsia)
+    table.cell(infoTable, 1, 4, str.tostring(fng, "#.##"), text_color = color.white)
+    table.cell(infoTable, 0, 5, "BTC Holdings:", text_color = color.blue)
+    table.cell(infoTable, 1, 5, str.tostring(strategy.position_size, "#.####") + " BTC", text_color = color.white)
+    table.cell(infoTable, 0, 6, "USD Cash:", text_color = color.yellow)
+    table.cell(infoTable, 1, 6, "$" + str.tostring(math.round(math.max(realCash, 0))), text_color = color.white)
+
+View in Pine Editor・223 lines
+Use on chart
+2
+6
+1
+949
+IMPORTANT: READ SETUP GUIDE BELOW OR IT WON'T WORK
+
+# BTC Fear & Greed Incremental Strategy — TradeMaster AI (Pure BTC Stack)
+
+## Strategy Overview
+
+This advanced Bitcoin accumulation strategy is designed for long-term hodlers who want to systematically take profits during greed cycles and accumulate during fear periods, while preserving their core BTC position. Unlike traditional strategies that start with cash, this approach begins with a specified BTC allocation, making it perfect for existing Bitcoin holders who want to optimize their stack management.
+
+## Key Features
+
+### 🎯 **Pure BTC Stack Mode**
+- Start with any amount of BTC (configurable)
+- Strategy manages your existing stack, not new purchases
+- Perfect for hodlers who want to optimize without timing markets
+
+### 📊 **Fear & Greed Integration**
+- Uses market sentiment data to drive buy/sell decisions
+- Configurable thresholds for greed (selling) and fear (buying) triggers
+- Automatic validation to ensure proper 0-100 scale data source
+
+### 🐂 **Bull Year Optimization**
+- Smart quarterly selling during bull market years (2017, 2021, 2025)
+- Q1: 1% sells, Q2: 2% sells, Q3/Q4: 5% sells (configurable)
+- **NO SELLING** during non-bull years - pure accumulation mode
+- Preserves BTC during early bull phases, maximizes profits at peaks
+
+### 🐻 **Bear Market Intelligence**
+- Multi-regime detection: Bull, Early Bear, Deep Bear, Early Bull
+- Different buying strategies based on market conditions
+- Enhanced buying during deep bear markets with configurable multipliers
+- Visual regime backgrounds for easy market condition identification
+
+### 🛡️ **Risk Management**
+- Minimum BTC allocation floor (prevents selling entire stack)
+- Configurable position sizing for all trades
+- Multiple safety checks and validation
+
+### 📈 **Advanced Visualization**
+- Clean 0-100 scale with 2 decimal precision
+- Three main indicators: BTC Allocation %, Fear & Greed Index, BTC Holdings
+- Real-time portfolio tracking with cash position display
+- Enhanced info table showing all key metrics
+
+## How to Use
+
+### **Step 1: Setup**
+1. Add the strategy to your BTC/USD chart (daily timeframe recommended)
+2. **CRITICAL**: In settings, change the "Fear & Greed Source" from "close" to a proper 0-100 Fear & Greed indicator
+---------------
+I recommend Crypto Fear & Greed Index by TIA_Technology indicator
+When selecting source with this indicator, look for "Crypto Fear and Greed Index:Index"
+---------------
+3. Set your "Starting BTC Quantity" to match your actual holdings
+4. Configure your preferred "Start Date" (when you want the strategy to begin)
+
+### **Step 2: Configure Bull Year Logic**
+- Enable "Bull Year Logic" (default: enabled)
+- Adjust quarterly sell percentages:
+- Q1 (Jan-Mar): 1% (conservative early bull)
+- Q2 (Apr-Jun): 2% (moderate mid bull)
+- Q3/Q4 (Jul-Dec): 5% (aggressive peak targeting)
+- Add future bull years to the list as needed
+
+### **Step 3: Fine-tune Thresholds**
+- **Greed Threshold**: 80 (sell when F&G > 80)
+- **Fear Threshold**: 20 (buy when F&G < 20 in bull markets)
+- **Deep Bear Fear Threshold**: 25 (enhanced buying in bear markets)
+- Adjust based on your risk tolerance
+
+### **Step 4: Risk Management**
+- Set "Minimum BTC Allocation %" (default 20%) - prevents selling entire stack
+- Configure sell/buy percentages based on your position size
+- Enable bear market filters for enhanced timing
+
+### **Step 5: Monitor Performance**
+- **Orange Line**: Your BTC allocation percentage (target: fluctuate between 20-100%)
+- **Blue Line**: Actual BTC holdings (should preserve core position)
+- **Pink Line**: Fear & Greed Index (drives all decisions)
+- **Table**: Real-time portfolio metrics including cash position
+
+## Reading the Indicators
+
+### **BTC Allocation Percentage (Orange Line)**
+- **100%**: All portfolio in BTC, no cash available for buying
+- **80%**: 80% BTC, 20% cash ready for fear buying
+- **20%**: Minimum allocation, maximum cash position
+
+### **Trading Signals**
+- **Green Buy Signals**: Appear during fear periods with available cash
+- **Red Sell Signals**: Appear during greed periods in bull years only
+- **No Signals**: Either allocation limits reached or non-bull year
+
+## Strategy Logic
+
+### **Bull Years (2017, 2021, 2025)**
+- Q1: Conservative 1% sells (preserve stack for later)
+- Q2: Moderate 2% sells (gradual profit taking)
+- Q3/Q4: Aggressive 5% sells (peak targeting)
+- Fear buying active (accumulate on dips)
+
+### **Non-Bull Years**
+- **Zero selling** - pure accumulation mode
+- Enhanced fear buying during bear markets
+- Focus on rebuilding stack for next bull cycle
+
+## Important Notes
+
+- **This is not financial advice** - backtest thoroughly before use
+- Designed for **long-term holders** (4+ year cycles)
+- **Requires proper Fear & Greed data source** - validate in settings
+- Best used on **daily timeframe** for major trend following
+- **Cash calculations**: Use allocation % and BTC holdings to calculate available cash: `Cash = (Total Portfolio × (1 - Allocation%/100))`
+
+## Risk Disclaimer
+
+This strategy involves active trading and position management. Past performance does not guarantee future results. Always do your own research and never invest more than you can afford to lose. The strategy is designed for educational purposes and long-term Bitcoin accumulation thesis.
+
+---
+
+*Developed by Sol_Crypto for the Bitcoin community. Happy stacking! 🚀*

@@ -1,0 +1,6 @@
+//@version=6
+##root(root_metainfo,rm_0,'cash_per_order',const__string,strategy,commission_type,'2_111_2_144')
+zscoreThreshold=##input(defval=2.0,type='INPUT_FLOAT',##id='in_3')
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth,'36_61_36_61')
+##root(root_metainfo,rm_2,zscoreThreshold,input__float)
+##root(root_metainfo,rm_3,(-zscoreThreshold),input__float)

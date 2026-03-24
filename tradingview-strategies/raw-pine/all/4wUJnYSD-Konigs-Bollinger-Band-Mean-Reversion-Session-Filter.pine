@@ -1,0 +1,60 @@
+//@version=5
+strategy("Konigs | Bollinger Band Mean Reversion (Session Filter)",overlay = true,default_qty_type = strategy.percent_of_equity,default_qty_value = 10)
+
+// === Input Parameters ===
+bbLength = input.int(20, title="Bollinger Band Length")
+bbMult   = input.float(2.0, title="Bollinger Band Multiplier")
+
+// === Trading Session (18:00 – 15:00) ===
+tradeSession = input.session("1800-1500", title="Trading Session")
+inSession    = not na(time(timeframe.period, tradeSession))
+
+// === Bollinger Band Calculation ===
+basis = ta.sma(close, bbLength)
+dev   = bbMult * ta.stdev(close, bbLength)
+upper = basis + dev
+lower = basis - dev
+
+// === Entry Conditions (Session Restricted) ===
+longCond  = close < lower and inSession
+shortCond = close > upper and inSession
+
+if longCond
+    strategy.entry("Buy", strategy.long)
+
+if shortCond
+    strategy.entry("Sell", strategy.short)
+
+// === Exit Conditions (Always Active) ===
+exitLong  = strategy.position_size > 0 and close >= basis
+exitShort = strategy.position_size < 0 and close <= basis
+
+if exitLong
+    strategy.close("Buy")
+
+if exitShort
+    strategy.close("Sell")
+
+// === Plot Bollinger Bands ===
+plot(basis, title="Basis (Mean)", color=color.orange)
+plot(upper, title="Upper Band", color=color.red)
+plot(lower, title="Lower Band", color=color.green)
+
+View in Pine Editor・41 lines
+Use on chart
+3
+0
+879
+Core Idea:
+In sideways markets, price tends to revert to the mean (the middle band).
+
+Strategy:
+Buy when price touches or moves below the lower band.
+Sell when price reaches or exceeds the upper band.
+Exit at the middle band (20-period moving average).
+Confirm with: RSI/Stochastic or candle patterns for reversal at the bands.
+
+Only works with low-volatility instruments:
+EURCHF
+
+Filter certain time to avoid unexpected volatility

@@ -1,0 +1,5 @@
+//@version=5
+zThreshold=##input(defval=1.618,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,zThreshold,input__float)
+##root(root_metainfo,rm_2,(-zThreshold),input__float)

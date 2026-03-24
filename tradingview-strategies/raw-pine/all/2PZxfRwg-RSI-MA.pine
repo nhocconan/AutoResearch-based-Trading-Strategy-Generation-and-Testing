@@ -1,0 +1,273 @@
+//@version=6
+strategy(title="RSI MA ", overlay=true, max_bars_back=5000, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+import TradingView/ta/9 as ta
+
+// - - - - - INPUTS - - - - - //{
+var string G1 = "RSI Settings"
+var string G2 = "Strategy Settings"
+var string G3 = "Backtesting Table Settings"
+
+// RSI Settings
+rsiinp = input.int(title="RSI Length", defval=14, minval=1, group=G1)
+rsi_ma_type = input.string(title="RSI MA Type", defval="EMA", options=["SMA", "EMA", "WMA", "LSMA", "VWMA", "HMA", "DEMA", "TEMA"], group=G1)
+rsi_ma_len = input.int(title="RSI MA Length", defval=8, minval=1, group=G1)
+rsicross = input.int(title="RSI MA Cross Line", defval=55, minval=0, maxval=100, group=G1)
+
+// Strategy Settings
+string signals = input.string("Long & Short", "Allowed Signals", options=["Long & Short", "Long Only", "Short Only"], group=G2)
+
+// Backtesting Table Settings
+string disp_ind = input.string("Equity", "Display Indicator", options=["Equity", "Open Profit", "Gross Profit", "Net Profit"], group=G3)
+color disp_col = input.color(color.yellow, "Display Color", group=G3)
+//}
+
+// - - - - - CALCULATIONS - - - - - //{
+// RSI
+rsi = ta.rsi(close, rsiinp)
+
+// RSI MA (dropdown type applied to RSI)
+rsi_ma_sma = ta.sma(rsi, rsi_ma_len)
+rsi_ma_ema = ta.ema(rsi, rsi_ma_len)
+rsi_ma_wma = ta.wma(rsi, rsi_ma_len)
+rsi_ma_lsma = ta.linreg(rsi, rsi_ma_len, 0)
+rsi_ma_vwma = ta.vwma(rsi, rsi_ma_len)
+rsi_hma_wma_half = ta.wma(rsi, math.max(1, rsi_ma_len / 2))
+rsi_hma_wma_full = ta.wma(rsi, rsi_ma_len)
+rsi_ma_hma = ta.wma(2 * rsi_hma_wma_half - rsi_hma_wma_full, math.max(1, math.round(math.sqrt(rsi_ma_len))))
+rsi_ema1 = ta.ema(rsi, rsi_ma_len)
+rsi_ma_dema = 2 * rsi_ema1 - ta.ema(rsi_ema1, rsi_ma_len)
+rsi_ema2 = ta.ema(rsi_ema1, rsi_ma_len)
+rsi_ma_tema = 3 * rsi_ema1 - 3 * rsi_ema2 + ta.ema(rsi_ema2, rsi_ma_len)
+
+rsiNA = rsi_ma_type == "SMA" ? rsi_ma_sma : rsi_ma_type == "EMA" ? rsi_ma_ema : rsi_ma_type == "WMA" ? rsi_ma_wma : rsi_ma_type == "LSMA" ? rsi_ma_lsma : rsi_ma_type == "VWMA" ? rsi_ma_vwma : rsi_ma_type == "HMA" ? rsi_ma_hma : rsi_ma_type == "DEMA" ? rsi_ma_dema : rsi_ma_tema
+
+// Rules
+rsicrocs = (rsiNA > rsicross)
+rsicrocs2 = (rsiNA < rsicross)
+amcross = ta.crossover(rsiNA, rsicross)
+amcrossunder = ta.crossunder(rsiNA, rsicross)
+//}
+
+// - - - - - PLOTS - - - - - //{
+plot(rsiNA, title="RSI MA", color=rsicrocs ? color.green : rsicrocs2 ? color.red : color.gray, linewidth=2)
+
+// Background colors
+bgcolor(amcross ? color.rgb(7, 220, 11) : amcrossunder ? color.rgb(255, 8, 123) : na, title="Cross Background")
+bgcolor(amcross ? color.rgb(34, 213, 49) : amcrossunder ? color.rgb(255, 8, 123) : na, title="Cross Background 2")
+
+// Bar colors
+barcolor(rsicrocs ? color.rgb(0, 255, 132) : rsicrocs2 ? color.red : na)
+//}
+
+// - - - - - STRATEGY LOGIC - - - - - //{
+// Entry signals based on RSI MA crossovers
+bool long_entry = amcross
+bool short_entry = amcrossunder
+
+// Close opposite positions before entering new ones
+if long_entry and strategy.position_size < 0
+    strategy.close_all()
+
+if short_entry and strategy.position_size > 0
+    strategy.close_all()
+
+// Enter positions based on signals and allowed signal types
+if (signals == "Long & Short" or signals == "Long Only") and long_entry
+    strategy.entry("Long", strategy.long)
+
+if (signals == "Long & Short" or signals == "Short Only") and short_entry
+    strategy.entry("Short", strategy.short)
+//}
+
+// - - - - - BACKTESTING TABLE - - - - - //{
+// DISPLAY DATA
+plot_equity = plot(disp_ind == "Equity" ? strategy.equity/strategy.initial_capital : na, color=disp_col, title="strategy Equity")
+plot_op = plot(disp_ind == "Open Profit" ? strategy.openprofit : na, color=disp_col, title="Open Profit")
+plot_gp = plot(disp_ind == "Gross Profit" ? strategy.grossprofit : na, color=disp_col, title="Gross Profit")
+plot_np = plot(disp_ind == "Net Profit" ? strategy.netprofit : na, color=disp_col, title="Net Profit")
+
+truncate(number, decimals) =>
+    factor = math.pow(10, decimals)
+    int(number * factor) / factor
+
+// EQUITY DISPLAY TABLES
+var table equityBox = table.new(position.top_center, 2, 1, bgcolor=color.new(color.black,100))
+if barstate.islast
+    if disp_ind == "Equity"
+        table.cell(equityBox, 0, 0, "Equity", text_color=disp_col)
+        table.cell(equityBox, 1, 0, str.tostring(truncate(strategy.equity/strategy.initial_capital, 2)) + "x", text_color=disp_col)
+
+// PERFORMANCE STATS
+max_dd = 0.
+max_eq = strategy.equity
+max_eq := math.max(nz(max_eq[1]), strategy.equity)
+max_dd := math.min(nz(max_dd[1]), strategy.equity/max_eq - 1)
+
+var max_dd_table = table.new(position=position.middle_left, columns=1, rows=2, bgcolor=color.yellow, border_width=1)
+if barstate.islast
+    table.cell(max_dd_table, 0, 0, "Max DD")
+    table.cell(max_dd_table, 0, 1, str.tostring(math.ceil(max_dd * 1000)/10) + "%")
+
+maxTradeDrawDown() =>
+    tradeEntryEquity = 0.0
+    maxDrawdownPercent = 0.0
+    for tradeNo = 0 to strategy.closedtrades-1
+        maxDrawdownPercent := math.max(maxDrawdownPercent, (strategy.closedtrades.max_drawdown(tradeNo) / (math.abs(strategy.closedtrades.size(tradeNo)) * strategy.closedtrades.entry_price(tradeNo)) * 100))
+    maxDrawdownPercent
+
+AVG_bar() =>
+    sumBarsPerTrade = 0
+    for tradeNo = 0 to strategy.closedtrades - 1
+        sumBarsPerTrade += strategy.closedtrades.exit_bar_index(tradeNo) - strategy.closedtrades.entry_bar_index(tradeNo) + 1
+    nz(sumBarsPerTrade / strategy.closedtrades)
+
+// RETURN CALCULATIONS
+daily_return = strategy.equity/strategy.equity[1]-1
+var returns_array = array.new<float>(0)
+var negative_returns_array = array.new<float>(0)
+var positive_returns_array = array.new<float>(0)
+
+if year > 2017
+    array.push(returns_array, daily_return)
+    if daily_return <= 0.0
+        array.push(negative_returns_array, daily_return)
+        array.push(positive_returns_array, 0.0)
+    else
+        array.push(positive_returns_array, daily_return)
+        array.push(negative_returns_array, 0.0)
+
+// STATS CALCULATIONS
+intrade_drawdown = strategy.closedtrades > 0 ? math.round(maxTradeDrawDown()*(-1),2) : 0.0
+standard_deviation = array.size(returns_array) > 0 ? array.stdev(returns_array) : 0.0
+negative_returns_standard_deviation = array.size(negative_returns_array) > 0 ? array.stdev(negative_returns_array) : 0.0
+mean = array.size(returns_array) > 0 ? array.avg(returns_array) : 0.0
+sharpe = standard_deviation > 0 ? math.round(mean/standard_deviation*math.sqrt(365),2) : 0.0
+sortino = negative_returns_standard_deviation > 0 ? math.round(mean/negative_returns_standard_deviation*math.sqrt(365),2) : 0.0
+
+// Omega (calculated but not displayed)
+positive_area = array.sum(positive_returns_array)
+negative_area = array.sum(negative_returns_array)*(-1)
+positive_count = array.size(positive_returns_array)
+negative_count = array.size(negative_returns_array)
+annualized_positive = positive_count > 0 ? positive_area * 365 / positive_count : 0.0
+annualized_negative = negative_count > 0 ? negative_area * 365 / negative_count : 0.0
+omega = annualized_negative > 0 ? math.round(annualized_positive / annualized_negative, 2) : 0.0
+
+// Other stats
+trades = strategy.closedtrades
+avg_bars = trades > 0 ? math.round(AVG_bar()) : 0
+profitable_percent = trades > 0 ? math.round(strategy.wintrades/trades*100,2) : 0.0
+profit_factor = strategy.grossloss > 0 ? math.round(strategy.grossprofit/strategy.grossloss,2) : (strategy.grossprofit > 0 ? 999.0 : 0.0)
+
+// SLAPPER PARAMETERS
+intrade_drawdown_slap_value = -15
+intrade_drawdown_low_value = -35
+sharpe_slap_value = 1.75
+sharpe_low_value = 1.0
+sortino_slap_value = 2.0
+sortino_low_value = 1.25
+trades_slap_value = 25
+trades_low_value = 10
+trades_high_value = 80
+profitable_slap_value = 55
+profitable_low_value = 40
+profit_factor_slap_value = 3
+profit_factor_low_value = 1.5
+AVG_Bar_slap_value_low = 20
+AVG_Bar_slap_value_high = 80
+omega_slap_value = 1.5
+omega_low_value = 1.0
+
+// TABLE (WITH OMEGA)
+var stats_table = table.new(position=position.middle_left, columns=2, rows=8, bgcolor=color.yellow, border_width=1)
+
+// DRAW TABLE (WITH OMEGA ROW) - Update on every bar
+labels = array.from(
+     "Max DD",
+     "Sharpe",
+     "Sortino",
+     "Profit Factor",
+     "Profitable %",
+     "Trades",
+     "AVG Bar",
+     "Omega")
+
+values = array.from(
+     str.tostring(intrade_drawdown)+"%", 
+     str.tostring(sharpe), 
+     str.tostring(sortino), 
+     str.tostring(profit_factor), 
+     str.tostring(profitable_percent)+"%", 
+     str.tostring(trades), 
+     str.tostring(avg_bars),
+     str.tostring(omega))
+
+raw_values = array.from(
+     intrade_drawdown, 
+     sharpe, 
+     sortino, 
+     profit_factor, 
+     profitable_percent, 
+     trades, 
+     avg_bars,
+     omega)
+
+green_thresh = array.from(
+     intrade_drawdown_slap_value, 
+     sharpe_slap_value, 
+     sortino_slap_value, 
+     profit_factor_slap_value, 
+     profitable_slap_value, 
+     trades_slap_value, 
+     AVG_Bar_slap_value_low,
+     omega_slap_value)
+
+red_thresh = array.from(
+     intrade_drawdown_low_value, 
+     sharpe_low_value, 
+     sortino_low_value, 
+     profit_factor_low_value, 
+     profitable_low_value, 
+     trades_low_value, 
+     AVG_Bar_slap_value_high,
+     omega_low_value)
+
+for j = 0 to array.size(labels)-1
+    table.cell(stats_table, 0, j, array.get(labels, j), text_halign=text.align_left)
+    table.cell(stats_table, 1, j, array.get(values, j), text_halign=text.align_right)
+    raw = array.get(raw_values, j)
+    green = array.get(green_thresh, j)
+    red = array.get(red_thresh, j)
+    if raw >= green
+        table.cell_set_bgcolor(stats_table, 1, j, color.green)
+    else if raw <= red
+        table.cell_set_bgcolor(stats_table, 1, j, color.red)
+//}
+
+View in Pine Editor・246 lines
+Use on chart
+1
+0
+445
+RSI MA is a simple but really good strategy
+
+-LOGIC-
+
+If the RSI MA crosses above the RSI thereshold it goes long
+basicly
+
+-FEATURES-
+
+-propare backtest table
+-RSI lenght
+-RSI thereshold
+-many MAs to choose from
+-can select long only, short only or long and short signal generation
+
+-DOES IT WORK?-
+
+i managed to get 1.4 sharpe, 1.5 omega and a maxdd of 12% on really volitile assets like BTC
+for less volitile assets it worked even better
+
+

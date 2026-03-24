@@ -1,0 +1,82 @@
+//@version=5
+strategy(title = "How To Set Backtest Range", shorttitle = "Dates", overlay = true, format = format.price, precision = 8,
+     default_qty_type = strategy.cash, default_qty_value = 100, initial_capital = 10000, currency = currency.NONE,
+     slippage = 2, commission_type = strategy.commission.percent, commission_value = 0.25)
+
+// === INPUT MA SOURCES AND LENGTHS ===
+i_srcF = input     (defval = hlc3, title = "Faster   ",                       inline = 'F')
+i_lenF = input.int (defval = 12,   title = "Length",    minval = 1, step = 1, inline = 'F')
+i_srcS = input     (defval = hlc3, title = "Slower ",                         inline = 'S')
+i_lenS = input.int (defval = 26,   title = "Length",    minval = 1, step = 1, inline = 'S')
+
+// === INPUT BACKTEST RANGE ===
+i_from = input.time(defval = timestamp("01 Jan 2023 00:00 +0000"), title = "From")
+i_thru = input.time(defval = timestamp("01 Mar 2023 00:00 +0000"), title = "Thru")
+
+// === INPUT SHOW PLOT ===
+i_show = input     (defval = true, title = "Show Date Range")
+
+// === FUNCTION EXAMPLE ===
+date() => time >= i_from and time <= i_thru  // create date function "within window of time"
+
+// === LOGIC ===
+fastMA = ta.ema(i_srcF, i_lenF)              // create Fast MA
+slowMA = ta.ema(i_srcS, i_lenS)              // create Slow MA
+crsOvr = ta.crossover (fastMA, slowMA)       // true when Fast MA crosses over  Slow MA
+crsUnd = ta.crossunder(fastMA, slowMA)       // true when Fast MA crosses under Slow MA
+
+// === EXECUTION ===
+if date() and crsOvr                         // if "within window of time" AND crossover
+    strategy.entry("Long", strategy.long)    //     enter long
+if date() and crsUnd                         // if "within window of time" AND crossunder
+    strategy.close("Long")                   //     close long         
+
+// === PLOTTING ===
+bgcolor(color = i_show and date() ? color.new(color.gray, 90) : na)  // plot if "Show Date Range" and "within window of time"
+plot(series = fastMA, title = 'FastMA', color = color.yellow, linewidth = 2, style = plot.style_line)  // plot Fast MA
+plot(series = slowMA, title = 'SlowMA', color = color.aqua,   linewidth = 2, style = plot.style_line)  // plot Slow MA
+
+View in Pine Editor・42 lines
+Use on chart
+5.1 K
+131
+165 854
+Oct 26, 2017
+Example how to select and set date range window to be backtested. Normally when you change chart period it changes the number of days being backtested which means as you increas the chart period (for example from 5min to 15min) you also increase the number of days traded, so you can not compare apples to apples for which period would yield best returns for your strategy. Now you can. Incorporate this code replacing buy and sell with your strategy, then simply input the From and To dates in Format -> Inputs, and then change the chart period to view updated results.
+
+NOTE: There is a limit in backtesting to 2000 orders, so please be aware of this when setting your date ranges. If you set your range too high, you may be exceeding this limit on some periods and not on others, so this would yield incorrect comparison of returns per period. If you see in your backtesting results that you are nearing this limit for one of your periods you are testing, then reduce the date range to a smaller number of days.
+
+Enjoy!
+
+(Thanks to Gesundheit "Adeel" for pointing me in the right direction on this!)
+Nov 4, 2017
+Release Notes
+Changed default settings to remove need for setting present date if backtesting up to current moment in time.
+Apr 27, 2018
+Release Notes
+Per requests added examples of:
+
+- Using input statements for MA lengths.
+
+- Using date range condition within execution.
+
+- BONUS example of creating a function for date range.
+
+Also added simple error checking to input statements for month and day.
+Apr 27, 2018
+Release Notes
+Added "max_bars_back=2000" in top strategy line to prevent possibility of exceeding 2000 event limit. This will prevent that error from possibly occurring.
+Sep 19, 2018
+Release Notes
+Statement in "Release Notes" immediately above is incorrect. Setting "max_bars_back=2000" in top strategy line does not prevent possibility of exceeding 2000 order limit. It instead is used to manually define how many historical bars are preloaded for indicator calculations. If you receive an ‘out of depth at index’ error this means something in your script calculations requires a certain number of historical bars and for some reason those bars were not automatically allocated. Raising this setting may help prevent that error from occurring.
+
+For preventing the error on exceeding 2000 orders you must take steps to reduce the number of trades. Various means to do this include changing the range you are backtesting, changing the period, changing the frequency of how often your strategy trades, etc.
+Jan 21, 2020
+Release Notes
+Updated for Pine Script v4.
+Nov 15, 2021
+Release Notes
+Updated for Pine Script v5.
+Mar 3, 2023
+Release Notes
+Merged the individual inputs for year, date, and day which allows for entering of both date and time within a single input, as well as providing the additional ability of interactive selection by clicking on the indicator and then dragging vertical lines horizontally on chart. Added source inputs for the moving averages.

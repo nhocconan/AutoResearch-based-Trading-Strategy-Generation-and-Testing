@@ -1,0 +1,148 @@
+//@version=5
+strategy(title='TradingView Alerts to MT4 MT5 Strategy example', commission_type=strategy.commission.cash_per_order, commission_value=0.00003, overlay=false, default_qty_value=100000, initial_capital=1000)
+//
+//
+// This script was created for educational purposes only.
+// It is showing how to use dynamic variables in TradingView alerts.
+// And how to execute them in Forex, indices and commodities markets
+
+
+
+// **** Entries logic **** {
+periodK = input.int(13, title='K', minval=1, inline="stoch", group="Stochastic")
+periodD = input.int(3, title='D', minval=1, inline="stoch", group="Stochastic")
+smoothK = input.int(4, title='Smooth', minval=1, inline="stoch", group="Stochastic")
+k = ta.sma(ta.stoch(close, high, low, periodK), smoothK)
+d = ta.sma(k, periodD)
+plot(k, title='%K', color=color.new(color.blue, 0))
+plot(d, title='%D', color=color.new(color.orange, 0))
+h0 = hline(80)
+h1 = hline(20)
+fill(h0, h1, color=color.new(color.purple, 75))
+
+GoLong = ta.crossover(k, d) and k < 80
+GoShort = ta.crossunder(k, d) and k > 20
+// } End of entries logic
+
+// **** Pivot-points and stop-loss logic **** {
+piv_high = ta.pivothigh(high, 1, 1)
+piv_low = ta.pivotlow(low, 1, 1)
+var float stoploss_long = low
+var float stoploss_short = high
+
+pl = ta.valuewhen(piv_low, piv_low, 0)
+ph = ta.valuewhen(piv_high, piv_high, 0)
+
+if GoLong
+    stoploss_long := low < pl ? low : pl
+    stoploss_long
+if GoShort
+    stoploss_short := high > ph ? high : ph
+    stoploss_short
+// } End of Pivot-points and stop-loss logic
+
+TP_type = input.string("pips", options=["percent", "pips"], title="TakeProfit Type")
+TakePartialProfitDistance = input.float(150, title="Partial TakeProfit Value")
+TakeProfitDistance = input.float(400, title="TakeProfit Value")
+
+TakePartialProfitDistance_Long = TP_type=="percent" ? (TakePartialProfitDistance/100)/syminfo.mintick : TakePartialProfitDistance
+TakeProfitDistance_Long = TP_type=="percent" ? (TakeProfitDistance/100)/syminfo.mintick : TakeProfitDistance
+
+TakePartialProfitDistance_Short = TP_type=="percent" ? (TakePartialProfitDistance/100)/syminfo.mintick : TakePartialProfitDistance
+TakeProfitDistance_Short = TP_type=="percent" ? (TakeProfitDistance/100)/syminfo.mintick : TakeProfitDistance
+
+
+strategy.entry('Long', strategy.long, when=GoLong)
+strategy.exit('XPartLong', from_entry='Long', qty_percent=50, profit=TakePartialProfitDistance_Long)
+strategy.exit('XLong', from_entry='Long', stop=stoploss_long, profit=TakeProfitDistance_Long)
+strategy.entry('Short', strategy.short, when=GoShort)
+strategy.exit('XPartShort', from_entry='Short', qty_percent=50, profit=TakePartialProfitDistance_Long)
+strategy.exit('XShort', from_entry='Short', stop=stoploss_short, profit=TakeProfitDistance_Long)
+
+string_tp1_type = TP_type=="percent" ? ' tp1perc=' : ' tp1='
+string_tp_type = TP_type=="percent" ? ' tpperc=' : ' tp='
+
+alertsyntax_golong = 'long slprice=' + str.tostring(stoploss_long) + string_tp1_type + str.tostring(TakePartialProfitDistance) + ' part1=0.5' + string_tp_type + str.tostring(TakeProfitDistance)
+alertsyntax_goshort = 'short slprice=' + str.tostring(stoploss_short) + string_tp1_type + str.tostring(TakePartialProfitDistance) + ' part1=0.5' + string_tp_type + str.tostring(TakeProfitDistance)
+
+if GoLong
+    alert(message=alertsyntax_golong, freq=alert.freq_once_per_bar_close)
+if GoShort
+    alert(message=alertsyntax_goshort, freq=alert.freq_once_per_bar_close)
+
+
+var table alertsDisplayTable = table.new(position.top_right, 1, 5, color.black)
+if barstate.islastconfirmedhistory
+    table.cell(alertsDisplayTable, 0, 0, "Alert sent at Long Entry:  " + alertsyntax_golong, text_color=color.white)
+    table.cell(alertsDisplayTable, 0, 1, "Alert sent at Short Entry:  " + alertsyntax_goshort, text_color=color.white)
+    table.cell(alertsDisplayTable, 0, 2, " ")
+    table.cell(alertsDisplayTable, 0, 3, "In this use-case exit alerts are not needed, because exit brackets are set already with the entry alert.", text_color=color.white)
+    table.cell(alertsDisplayTable, 0, 4, "Also, with TradingConnector's default settings, LONG entry alert will automatically close SHORT position and vice-versa.", text_color=color.white)
+
+View in Pine Editor・83 lines
+Use on chart
+7.3 K
+89
+225 771
+Nov 18, 2019
+Accidentally, I’m sharing open-source profitable Forex strategy. Accidentally, because this was aimed to be purely educational material. A few days ago TradingView released a very powerful feature of dynamic values from PineScript now being allowed to be passed in Alerts. And thanks to TradingConnector, they could be instantly executed in MT4 or MT5 platform of any broker in the world. So yeah - TradingConnector works with indices and commodities, too.
+
+The logic of this EURUSD 6h strategy is very simple - it is based on Stochastic crossovers with stop-loss set under most recent pivot point. Setting stop-loss with surgical precision is possible exactly thanks to allowance of dynamic values in alerts. TradingConnector has been also upgraded to take advantage of these dynamic values and it now enables executing trades with pre-calculated stop-loss, take-profit, as well as stop and limit orders.
+
+Another fresh feature of TradingConnector, is closing positions only partly - provided that the broker allows it, of course. A position needs to have trade_id specified at entry, referred to in further alerts with partial closing. Detailed spec of alerts syntax and functionalities can be found at TradingConnector website. How to include dynamic variables in alert messages can be seen at the very end of the script in alertcondition() calls.
+
+The strategy also takes commission into consideration.
+
+Slippage is intentionally left at 0. Due to shorter than 1 second delivery time of TradingConnector, slippage is practically non-existing. This can be achieved especially if you’re using VPS server, hosted in the same datacenter as your brokers’ servers. I am using such setup, it is doable. Small slippage and spread is already included in commission value.
+
+This strategy is NON-REPAINTING and uses NO TRAILING-STOP or any other feature known to be faulty in TradingView backtester. Does it make this strategy bulletproof and 100% success-guaranteed? Hell no! Remember the no.1 rule of backtesting - no matter how profitable and good looking a script is, it only tells about the past. There is zero guarantee the same strategy will get similar results in the future.
+
+To turn this script into study so that alerts can be produced, do 2 things:
+1. comment “strategy” line at the beginning and uncomment “study” line
+2. comment lines 54-59 and uncomment lines 62-65.
+Then add script to the chart and configure alerts.
+
+This script was build for educational purposes only.
+
+Certainly this is not financial advice. Anybody using this script or any of its parts in any way, must be aware of high risks connected with trading.
+
+Thanks LucF and a.tesla2018 for helping me with code fixes :)
+Nov 19, 2019
+Release Notes
+Stoch default K value was changed.
+Nov 20, 2019
+Release Notes
+Modified alertcondition() syntax.
+Dec 29, 2019
+Release Notes
+Added plot definitions and plot names to fix passing dynamic variables to alerts.
+
+Note! when converting to study for alerts, you need to uncomment lines 62-71, not 62-65, as explained in the original description.
+
+By they way - previous update took place November 20, when net profit was at $56336.34 and profit factor 1.208. 40 days later these numbers have improved to over $57k and 1.21 profit factor. So it continues to grow :)
+
+
+Jan 14, 2020
+Release Notes
+Fixed trade_id variable. Not all dynamic values were passed correctly to alerts.
+
+Aaaaand - another 2 weeks, another check. Account appears to continue growing, +$500 since December 29 :)
+Jun 18, 2021
+Release Notes
+With the fresh update to TradingConnector to version 2.5, I have decided to take a look at my previous scripts whether they are still using latest developments by TradingView dev team and guess what - this script definitely needed an update, too. It didn't include alerts-straight-from-strategy feature, so I have added the necessary lines at the end. Enjoy!
+Oct 25, 2021
+Release Notes
+Updated to PineScript version 5.
+Mar 14, 2022
+Release Notes
+With TradingConnector upgrade to version 1.35, a lot has been simplified, therefore this script update:
+- Multiple Take-Profit feature has been introduced and example code can be found in this update.
+- when dealing with single entries, tradeid= parameter is not needed (however still operational) for features like partial closing, slmod and tpmod. So tradeid= has been removed form this script.
+
+Other new features are: 'delay=' parameter, separating TradingConnector alerts from all others, breakeven exit.
+Dec 18, 2023
+Release Notes
+With the biggest TradingConnector's upgrade since its inception - including "Search&Replace Alerts Modifier", details can be found here:
+- it was highest time to update this script, to showcase the ability of setting exit conditions as percentage move from the entry price.
+
+Moreover, alerts examples are now being displayed in an overlay.

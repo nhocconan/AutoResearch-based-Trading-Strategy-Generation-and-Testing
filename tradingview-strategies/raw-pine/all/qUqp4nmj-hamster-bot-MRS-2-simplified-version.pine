@@ -1,0 +1,439 @@
+//@version=5
+strategy(title = "hamster-bot MRS 2", overlay = true, default_qty_type = strategy.percent_of_equity, initial_capital = 100, default_qty_value = 30, pyramiding = 1, commission_value = 0.1, backtest_fill_limits_assumption = 1)
+import TradingView/ta/7
+info_options = "Options"
+
+on_close = input(false, title = "Entry on close", inline=info_options, group=info_options)
+OFFS = input.int(0, minval = 0, maxval = 1, title = "| Offset View", inline=info_options, group=info_options)
+trade_offset = input.int(0, minval = 0, maxval = 1, title = "Trade", inline=info_options, group=info_options)
+use_kalman_filter = input.bool(false, title="Use Kalman filter", group=info_options, tooltip = "Дополнительное сглаживание МА")
+use_tv_mm = input.bool(false, title="Use TV lot", group=info_options, tooltip = "Использовать настройки лота из второй вкладки TV")
+
+//MA Opening
+info_opening = "MA Opening Long"
+maopeningtyp_l = input.string("SMA", options=["SMA", "EMA", "GMA", "Harmonic_Mean", "TEMA", "DEMA", "ZLEMA", "WMA", "VWMA", "Hma", "Thma", "Ehma", "H", "L", "DMA", "ATR"], title = "", inline=info_opening, group=info_opening)
+maopeningsrc_l = input.string("ohlc4", title = "", options = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"], inline=info_opening, group=info_opening)
+maopeninglen_l = input.int(3, minval = 1, title = "", inline=info_opening, group=info_opening)
+long1on    = input(true, title = "", inline = "long1")
+long1shift = input.float(0.96, step = 0.005, title = "Long", inline = "long1")
+long1lot   = input.int(100, minval = 0, maxval = 10000, step = 10, title = "Lot, %", inline = "long1")
+
+info_opening_s = "MA Opening Short"
+maopeningtyp_s = input.string("SMA", options=["SMA", "EMA", "GMA", "Harmonic_Mean", "TEMA", "DEMA", "ZLEMA", "WMA", "VWMA", "Hma", "Thma", "Ehma", "H", "L", "DMA", "ATR"], title = "", inline=info_opening_s, group=info_opening_s)
+maopeningsrc_s = input.string("ohlc4", title = "", options = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"], inline=info_opening_s, group=info_opening_s)
+maopeninglen_s = input.int(3, minval = 1, title = "", inline=info_opening_s, group=info_opening_s)
+short1on    = input(true, title = "", inline = "short1")
+short1shift = input.float(1.04, step = 0.005, title = "short", inline = "short1")
+short1lot   = input.int(100, minval = 0, maxval = 10000, step = 10, title = "Lot, %", inline = "short1")
+
+
+//MA Closing
+info_closing = "MA Closing"
+use_settings_from_open_long = input(false, title = "use MA opening Long settings", group=info_closing)
+maclosingtyp = input.string("SMA", title="Type", options=["SMA", "EMA", "GMA", "Harmonic_Mean", "TEMA", "DEMA", "ZLEMA", "WMA", "VWMA", "Hma", "Thma", "Ehma", "H", "L", "DMA", "ATR"], title = "", inline=info_closing, group=info_closing)
+maclosingsrc = input.string("ohlc4", title = "", options = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"], inline=info_closing, group=info_closing)
+maclosinglen = input.int(3, minval = 1, maxval = 200, title = "", inline=info_closing, group=info_closing)
+maclosingmul = input.float(1, step = 0.005, title = "mul", inline=info_closing, group=info_closing)
+
+info_closing_sl = "MA SL"
+maclosingSLuse = input.bool(false,"Use for LONG", group=info_closing_sl)
+maclosingSLtyp = input.string("SMA", title="Type", options=["SMA", "EMA", "GMA", "Harmonic_Mean", "TEMA", "DEMA", "ZLEMA", "WMA", "VWMA", "Hma", "Thma", "Ehma", "H", "L", "DMA", "ATR"], title = "", inline=info_closing, group=info_closing_sl)
+maclosingSLsrc = input.string("ohlc4", title = "", options = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"], inline=info_closing, group=info_closing_sl)
+maclosingSLlen = input.int(3, minval = 1, maxval = 200, title = "", inline=info_closing, group=info_closing_sl)
+maclosingSLmul = input.float(0.90, step = 0.005, title = "mul", inline=info_closing, group=info_closing_sl)
+info_closing_sl_short = "MA SL short"
+maclosingSL_short_use = input.bool(false,"Use for SHORT", group=info_closing_sl)
+maclosingSL_short_typ = input.string("SMA", title="Type", options=["SMA", "EMA", "GMA", "Harmonic_Mean", "TEMA", "DEMA", "ZLEMA", "WMA", "VWMA", "Hma", "Thma", "Ehma", "H", "L", "DMA", "ATR"], title = "", inline=info_closing_sl_short, group=info_closing_sl)
+maclosingSL_short_src = input.string("ohlc4", title = "", options = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"], inline=info_closing_sl_short, group=info_closing_sl)
+maclosingSL_short_len = input.int(3, minval = 1, maxval = 200, title = "", inline=info_closing_sl_short, group=info_closing_sl)
+maclosingSL_short_mul = input.float(1.10, step = 0.005, title = "mul", inline=info_closing_sl_short, group=info_closing_sl)
+
+startTime = input.time(timestamp("01 Jan 2010 00:00 +0000"), "Start date", inline = "period")
+finalTime = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Final date", inline = "period")
+
+distance_filter = input.float(0, step = 0.005, title = "distance_filter")
+pump_filter = input.bool(false, title = "pump_filter 1", inline = "pump_filter", tooltip = "Экспериментальная функция")
+pump_filter_src = input.source(ohlc4, title = "", inline = "pump_filter")
+pump_filter_offset = input.int(1, minval=0,title="offset", inline = "pump_filter")
+pump_filter_2 = input.bool(false, title = "pump_filter 2", inline = "pump_filter2", tooltip = "Экспериментальная функция. Если Максимум за N свечей назад более чем на X больше минимума")
+pump_filter_2_count = input.int(100, minval=0,title="count candles", inline = "pump_filter2")
+pump_filter_2_value = input.float(1.5, minval=0,title="value mul (1.5 = 50%)", inline = "pump_filter2")
+
+pine_gma(x, y) =>
+    mum = 1.0
+    for i = 0 to y - 1
+        mum := mum * x[i]
+    gma = math.pow(mum,1/y)
+    gma
+pine_Harmonic_Mean(x, y) =>
+    sum = 0.0
+    for i = 0 to y - 1
+        sum := sum + 1/x[i]
+    harm = y/sum
+    harm
+HMA(_src, _length) =>  ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+EHMA(_src, _length) =>  ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+THMA(_src, _length) =>  ta.wma(ta.wma(_src,_length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+tema(sec, length)=>
+    tema1= ta.ema(sec, length)
+    tema2= ta.ema(tema1, length)
+    tema3= ta.ema(tema2, length)
+    tema_r = 3*tema1-3*tema2+tema3
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+ATR_func(_src, _len)=>
+    atrLow = low - ta.atr(_len)
+    trailAtrLow = atrLow
+    trailAtrLow := na(trailAtrLow[1]) ? trailAtrLow : atrLow >= trailAtrLow[1] ? atrLow : trailAtrLow[1]
+    supportHit = _src <= trailAtrLow
+    trailAtrLow := supportHit ? atrLow : trailAtrLow
+    trailAtrLow
+f_dema(src, len)=>
+    EMA1 = ta.ema(src, len)
+    EMA2 = ta.ema(EMA1, len)
+    DEMA = (2*EMA1)-EMA2
+f_zlema(src, period) =>
+    lag = math.round((period - 1) / 2)
+    ema_data = src + (src - src[lag])
+    zl= ta.ema(ema_data, period)
+f_kalman_filter(src) =>
+    float value1= na
+    float value2 = na
+    value1 := 0.2 * (src - src[1]) + 0.8 * nz(value1[1])
+    value2 := 0.1 * (ta.tr) + 0.8 * nz(value2[1])
+    lambda = math.abs(value1 / value2)
+    alpha = (-math.pow(lambda, 2) + math.sqrt(math.pow(lambda, 4) + 16 * math.pow(lambda, 2)))/8
+    value3 = float(na)
+    value3 := alpha * src + (1 - alpha) * nz(value3[1])
+//SWITCH
+//"open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4", "oc2"
+get_src(src) =>
+      src == "open" ? open :
+      src == "high" ? high :
+      src == "low" ? low :
+      src == "close" ? close :
+      src == "hl2" ? hl2 :
+      src == "hlc3" ? hlc3 :
+      src == "ohlc4" ? ohlc4 :
+      src == "hlcc4" ? hlcc4 :
+      src == "oc2" ? (open + close) / 2 : na
+
+
+ma_func(modeSwitch, src, len, use_k_f=true) =>
+      modeSwitch == "SMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.sma(src, len))  : ta.sma(src, len) :
+      modeSwitch == "Harmonic_Mean"   ? use_kalman_filter and use_k_f ? f_kalman_filter(pine_Harmonic_Mean(src, len))  : pine_Harmonic_Mean(src, len) :
+      modeSwitch == "GMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(pine_gma(src, len))  : pine_gma(src, len) :
+      modeSwitch == "RMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.rma(src, len))  : ta.rma(src, len) :
+      modeSwitch == "EMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.ema(src, len))  : ta.ema(src, len) :
+      modeSwitch == "TEMA"  ? use_kalman_filter and use_k_f ? f_kalman_filter(tema(src, len))    : tema(src, len):
+      modeSwitch == "DEMA"  ? use_kalman_filter and use_k_f ? f_kalman_filter(f_dema(src, len))  : f_dema(src, len):
+      modeSwitch == "ZLEMA" ? use_kalman_filter and use_k_f ? f_kalman_filter(f_zlema(src, len)) : f_zlema(src, len):
+      modeSwitch == "WMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.wma(src, len))  : ta.wma(src, len):
+      modeSwitch == "VWMA"  ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.vwma(src, len)) : ta.vwma(src, len):
+      modeSwitch == "Hma"   ? use_kalman_filter and use_k_f ? f_kalman_filter(HMA(src, len))     : HMA(src, len):
+      modeSwitch == "Ehma"  ? use_kalman_filter and use_k_f ? f_kalman_filter(EHMA(src, len))    : EHMA(src, len):
+      modeSwitch == "Thma"  ? use_kalman_filter and use_k_f ? f_kalman_filter(THMA(src, len/2))  : THMA(src, len/2):
+      modeSwitch == "ATR"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ATR_func(src, len)): ATR_func(src, len) :
+      modeSwitch == "L"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.lowest(len)): ta.lowest(len) :
+      modeSwitch == "H"   ? use_kalman_filter and use_k_f ? f_kalman_filter(ta.highest(len)): ta.highest(len) :
+      modeSwitch == "DMA"   ? use_kalman_filter and use_k_f ? f_kalman_filter(donchian(len)) : donchian(len) : 
+      modeSwitch == "ATR" ? use_kalman_filter and use_k_f ? f_kalman_filter(ATR_func(src, len)) : ATR_func(src, len) : na
+
+//Var
+sum = 0.0
+maopening_l = 0.0
+maopening_s = 0.0
+maclosing = 0.0
+maclosingSL_long = 0.0
+maclosingSL_short = 0.0
+pos = strategy.position_size
+p = 0.0
+p := pos == 0 ? (strategy.equity / 100) / close : p[1]
+truetime = time > startTime and time < finalTime
+
+//MA Opening
+maopening_l := ma_func(maopeningtyp_l, get_src(maopeningsrc_l), maopeninglen_l)
+maopening_s := ma_func(maopeningtyp_s, get_src(maopeningsrc_s), maopeninglen_s)
+
+//MA Closing
+maclosing := use_settings_from_open_long ? ma_func(maopeningtyp_l, get_src(maopeningsrc_l), maopeninglen_l) * maclosingmul : ma_func(maclosingtyp, get_src(maclosingsrc), maclosinglen) * maclosingmul
+maclosingSL_long := ma_func(maclosingSLtyp, get_src(maclosingSLsrc), maclosingSLlen) * maclosingSLmul
+maclosingSL_short := ma_func(maclosingSL_short_typ, get_src(maclosingSL_short_src), maclosingSL_short_len) * maclosingSL_short_mul
+
+long1 = long1on == false ? 0 : long1shift == 0 ? 0 : long1lot == 0 ? 0 : maopening_l == 0 ? 0 : maopening_l * long1shift
+short1 = short1on == false ? 0 : short1shift == 0 ? 0 : short1lot == 0 ? 0 : maopening_s == 0 ? 0 : maopening_s * short1shift
+//Colors
+long1col = long1 == 0 ? na : color.green
+short1col = short1 == 0 ? na : color.red
+//Lines
+// plot(maopening_l, offset = OFFS, color = color.new(color.green, 50))
+// plot(maopening_s, offset = OFFS, color = color.new(color.red, 50))
+plot(maclosing, offset = OFFS, color = color.fuchsia)
+plot(maclosingSL_long, offset = OFFS, color = color.fuchsia, display=maclosingSLuse ? display.all : display.none)
+plot(maclosingSL_short, offset = OFFS, color = color.fuchsia, display=maclosingSL_short_use ? display.all : display.none)
+long1line = long1 == 0 ? close : long1
+short1line = short1 == 0 ? close : short1
+plot(long1line, offset = OFFS, color = long1col)
+plot(short1line, offset = OFFS, color = short1col)
+
+//Lots
+lotlong1 = p * long1lot
+lotshort1 = p * short1lot
+
+FILTER_DISABLE_TRADING = false
+if distance_filter != 0 and long1 != 0 and math.abs(ta.changePercent(long1, maclosing)) < math.abs(distance_filter) 
+    FILTER_DISABLE_TRADING := true
+if distance_filter != 0 and short1 != 0 and math.abs(ta.changePercent(maclosing, short1)) < math.abs(distance_filter) 
+    FILTER_DISABLE_TRADING := true
+
+var float line_pump_filter = 0.0
+line_pump_filter := ta.crossover(pump_filter_src, maclosing) ? maclosing[pump_filter_offset] : line_pump_filter[1] 
+plot(line_pump_filter, "line_pump_filter", color = pump_filter ? color.new(color.orange, 50) : color.new(color.orange, 100))
+
+
+pump_filter_2_res = pump_filter_2 ? ta.lowest(pump_filter_2_count) * pump_filter_2_value < ta.highest(pump_filter_2_count) : false
+barcolor(pump_filter_2_res ? color.white : na)
+
+if (pump_filter and long1line > line_pump_filter) or (pump_filter_2 and pump_filter_2_res)
+    FILTER_DISABLE_TRADING := true
+
+//Entry
+if truetime and not FILTER_DISABLE_TRADING
+    //Long
+    sum := 0
+    strategy.entry("L", strategy.long, use_tv_mm ? na : ((strategy.equity / 100) / long1) * long1lot, limit = on_close ? na : long1, when = long1 > 0 and pos <= sum and (on_close ? close <= long1[trade_offset] : true))
+    sum := lotlong1
+
+    //Short
+    sum := 0
+    pos := -1 * pos
+    strategy.entry("S", strategy.short, use_tv_mm ? na : lotshort1, limit = on_close ? na : short1, when = short1 > 0 and pos <= sum and (on_close ? close >= short1[trade_offset] : true))
+    sum := lotshort1
+
+if maclosingSLuse
+    strategy.exit("Exit", "L", limit = maclosing, stop = maclosingSL_long)
+else
+    strategy.exit("Exit", "L", limit = maclosing)
+
+if maclosingSL_short_use
+    strategy.exit("Exit", "S", limit = maclosing, stop = maclosingSL_short)
+else
+    strategy.exit("Exit", "S", limit = maclosing)
+
+if time > finalTime or FILTER_DISABLE_TRADING
+    strategy.close_all()
+    strategy.cancel_all()
+
+
+///////////////////
+// MONTHLY TABLE //
+prec = 2
+
+new_month = month(time) != month(time[1])
+new_year  = year(time)  != year(time[1])
+
+eq = strategy.equity
+
+bar_pnl = eq / eq[1] - 1
+
+cur_month_pnl = 0.0
+cur_year_pnl  = 0.0
+
+// Current Monthly P&L
+cur_month_pnl := new_month ? 0.0 : 
+                 (1 + cur_month_pnl[1]) * (1 + bar_pnl) - 1 
+
+// Current Yearly P&L
+cur_year_pnl := new_year ? 0.0 : 
+                 (1 + cur_year_pnl[1]) * (1 + bar_pnl) - 1  
+
+// Arrays to store Yearly and Monthly P&Ls
+var month_pnl  = array.new_float(0)
+var month_time = array.new_int(0)
+
+var year_pnl  = array.new_float(0)
+var year_time = array.new_int(0)
+
+last_computed = false
+
+if (not na(cur_month_pnl[1]) and (new_month or barstate.islast))
+    if (last_computed[1])
+        array.pop(month_pnl)
+        array.pop(month_time)
+        
+    array.push(month_pnl , cur_month_pnl[1])
+    array.push(month_time, time[1])
+
+if (not na(cur_year_pnl[1]) and (new_year or barstate.islast))
+    if (last_computed[1])
+        array.pop(year_pnl)
+        array.pop(year_time)
+        
+    array.push(year_pnl , cur_year_pnl[1])
+    array.push(year_time, time[1])
+
+last_computed := barstate.islast ? true : nz(last_computed[1])
+
+// Monthly P&L Table    
+var monthly_table = table(na)
+
+if (barstate.islast)
+    monthly_table := table.new(position.bottom_right, columns = 14, rows = array.size(year_pnl) + 1, border_width = 1)
+
+    table.cell(monthly_table, 0,  0, "",     bgcolor = #cccccc)
+    table.cell(monthly_table, 1,  0, "Jan",  bgcolor = #cccccc)
+    table.cell(monthly_table, 2,  0, "Feb",  bgcolor = #cccccc)
+    table.cell(monthly_table, 3,  0, "Mar",  bgcolor = #cccccc)
+    table.cell(monthly_table, 4,  0, "Apr",  bgcolor = #cccccc)
+    table.cell(monthly_table, 5,  0, "May",  bgcolor = #cccccc)
+    table.cell(monthly_table, 6,  0, "Jun",  bgcolor = #cccccc)
+    table.cell(monthly_table, 7,  0, "Jul",  bgcolor = #cccccc)
+    table.cell(monthly_table, 8,  0, "Aug",  bgcolor = #cccccc)
+    table.cell(monthly_table, 9,  0, "Sep",  bgcolor = #cccccc)
+    table.cell(monthly_table, 10, 0, "Oct",  bgcolor = #cccccc)
+    table.cell(monthly_table, 11, 0, "Nov",  bgcolor = #cccccc)
+    table.cell(monthly_table, 12, 0, "Dec",  bgcolor = #cccccc)
+    table.cell(monthly_table, 13, 0, "Year", bgcolor = #999999)
+
+
+    for yi = 0 to array.size(year_pnl) - 1
+        table.cell(monthly_table, 0,  yi + 1, str.tostring(year(array.get(year_time, yi))), bgcolor = #cccccc)
+        
+        y_color = array.get(year_pnl, yi) > 0 ? color.new(color.green, transp = 50) : color.new(color.red, transp = 50)
+        table.cell(monthly_table, 13, yi + 1, str.tostring(math.round(array.get(year_pnl, yi) * 100, prec)), bgcolor = y_color)
+        
+    for mi = 0 to array.size(month_time) - 1
+        m_row   = year(array.get(month_time, mi))  - year(array.get(year_time, 0)) + 1
+        m_col   = month(array.get(month_time, mi)) 
+        m_color = array.get(month_pnl, mi) > 0 ? color.new(color.green, transp = 70) : color.new(color.red, transp = 70)
+        
+        table.cell(monthly_table, m_col, m_row, str.tostring(math.round(array.get(month_pnl, mi) * 100, prec)), bgcolor = m_color)
+
+View in Pine Editor・309 lines
+Use on chart
+3
+7
+6
+7
+9 709
+Nov 13, 2023
+MRS - Mean Reversion Strategy (Countertrend) (Envelope strategy)
+
+This script does not claim to be unique and does not mislead anyone. Even the unattractive backtest result is attached. The source code is open. The idea has been described many times in various sources. But at the same time, their collection in one place provides unique opportunities.
+
+Published by popular demand and for ease of use. so that users can track the development of the script and can offer their ideas in the comments. Otherwise, you have to communicate in several telegram chats.
+
+Representative of the family of counter-trend strategies. The basis of the strategy is Mean reversion. You can also read about the Envelope strategy.
+
+Mean reversion, or reversion to the mean, is a theory used in finance that suggests that asset price volatility and historical returns eventually will revert to the long-run mean or average level of the entire dataset.
+
+The strategy is very simple. Has very few settings. Good for beginners to get acquainted with algorithmic trading. A simple adjustment will help avoid overfitting. There are many variations of this strategy, but for understanding it is better to start with this implementation.
+
+Principle of operation.
+1) [Closing]
+A conventional MA is being built. (fuchsia line). A limit order is placed on this line to close the position.
+2) [BUY | LONG]
+(green line) A limit order is placed on this line to open a long position
+3) [SELL | SHORT]
+(red line) A limit order is placed on this line to open a short position
+
+Attention!
+Please note that a limit order is used. Conclude that the strategy has a limited capacity. And the results obtained on low-liquid instruments will be too high in the tester. On real auctions there will be a different result.
+
+Note for testing the strategy in the spot market:
+When testing in the spot market, do not include both long and short at the same time. It is recommended to test only the long mode on the spot. Short mode for more advanced users.
+
+Settings:
+Available types of moving averages:
+
+SMA
+
+EMA
+
+TEMA - triple exponential moving average
+
+DEMA - Double Exponential Moving Average
+
+ZLEMA - Zero lag exponential moving average
+
+WMA - weighted moving average
+
+Hma - Hull Moving Average
+
+Thma - Triple Exponential Hull Moving Average
+
+Ehma - Exponential Hull Moving Average
+
+H - MA built based on highs for n candles | ta.highest(len)
+
+L - MA built based on lows for n candles | ta.lowest(len)
+
+DMA - Donchian Moving Average
+
+
+A Kalman filter can be applied to all MA
+
+The peculiarity of the strategy is a large selection of MA and the possibility of shifting lines. You can set up a reverse trending strategy on the Donchian channel for example.
+
+Use Long - enable/disable opening a Long position
+Use Short - enable/disable opening a Short position
+
+Lot Long, % - % allocated from the deposit for opening a Long position. In the spot market, do not use % greater than 100%
+Lot Short, % - allocated % of the deposit for opening a Short position
+
+Start date - the beginning of the testing period
+End date - the end of the testing period (Example: only August 2020 can be tested)
+
+Mul - multiplier. Used to offset lines. Example:
+Mul = 0.99 is shift -1%
+Mul = 1.01 is shift +1%
+
+Non-strict recommendations:
+1) Test the SPOT market on crypto exchanges. (The countertrend strategy has liquidation risk on futures)
+2) Symbols altcoin/bitcoin or altcoin/altcoin. Example: ETH/BTC or DOGE/ETH
+3) Timeframe is usually 1 hour
+
+If the script passes moderation, I will supplement it by adding separate settings for closing long and short positions according to their MA
+Feb 24, 2024
+Release Notes
+new option "distance_filter" value in %. If you set it to 0, it means the filter is turned off and not used. The filter disables trading and removes orders if the distance between the opening order and the closing one is less than a specified one
+Mar 22, 2024
+Release Notes
+Added new MA type - ATR
+Jun 25, 2024
+Release Notes
+Added pump filter
+Jun 25, 2024
+Release Notes
+Settings for pump filter (source and offset)
+Aug 2, 2024
+Release Notes
+Experimental function. Pump filter 2.
+If the Maximum for N candles ago is more than X greater than the minimum, then a filter is turned on that disables opening new positions.
+Aug 6, 2024
+Release Notes
+new source type: oc2 = (open + close) / 2
+Jun 19, 2025
+Release Notes
+new MA types:
+1) GMA - Geometric Mean.
+The geometric mean is the average of a set of products. Analysts, portfolio managers, and others commonly use the calculation of the geometric mean to determine the performance results of an investment or portfolio.
+
+Technically, a geometric mean is defined as "the nth root product of n numbers." The geometric mean must be used when working with percentages, which are derived from values, while the standard arithmetic mean works with the values themselves.
+
+
+2) Harmonic_Mean - Harmonic Mean. The harmonic mean is a numerical average used in finance to average multiples like the price-to-earnings ratio. It is calculated by dividing the number of observations, or entries in the series, by the reciprocal of each number. Thus, the harmonic mean is the reciprocal of the arithmetic mean of the reciprocals.
+Jul 7, 2025
+Release Notes
+Added closing moving averages work according to the logic of opening ones but are used as stop loss
+Aug 25, 2025
+Release Notes
+Monthly table PnL
+Aug 26, 2025
+Release Notes
+fix long lot size calculation
+Dec 2, 2025
+Release Notes
+VWMA
+Dec 10, 2025
+Release Notes
+Use TV lot option - Use the lot settings from the second TV tab

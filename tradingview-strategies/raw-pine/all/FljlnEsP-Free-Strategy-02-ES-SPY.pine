@@ -1,0 +1,75 @@
+//@version=3
+strategy("Free Strategy #02 (ES / SPY)", overlay=true)
+
+// Inputs
+Quantity = input(1, minval=1, title="Quantity")
+SmaPeriod01 = input(3, minval=1, title="SMA Period 01")
+SmaPeriod02 = input(8, minval=1, title="SMA Period 02")
+SmaPeriod03 = input(10, minval=1, title="SMA Period 03")
+EmaPeriod01 = input(5, minval=1, title="EMA Period 01")
+MaxProfitCloses = input(5, minval=1, title="Max Profit Close")
+MaxBars = input(10, minval=1, title="Max Total Bars")
+
+// Misc Variables
+src = close
+BarsSinceEntry = 0
+MaxProfitCount = 0
+Sma01 = sma(close, SmaPeriod01)
+Sma02 = sma(close, SmaPeriod02)
+Sma03 = sma(close, SmaPeriod03)
+Ema01 = ema(close, EmaPeriod01)
+
+// Conditions
+Cond00 = strategy.position_size == 0
+Cond01 = close < Sma03
+Cond02 = close <= Sma01
+Cond03 = close[1] > Sma01[1]
+Cond04 = open > Ema01
+Cond05 = Sma02 < Sma02[1]
+
+// Update Exit Variables
+BarsSinceEntry := Cond00 ? 0 : nz(BarsSinceEntry[1]) + 1
+MaxProfitCount := Cond00 ? 0 : (close > strategy.position_avg_price and BarsSinceEntry > 1) ? nz(MaxProfitCount[1]) + 1 : nz(MaxProfitCount[1])
+
+// Entries
+strategy.entry(id="L1", long=true, qty=Quantity, when=(Cond00 and Cond01 and Cond02 and Cond03 and Cond04 and Cond05))
+ 
+// Exits
+strategy.close("L1", (BarsSinceEntry - 1 >= MaxBars or MaxProfitCount >= MaxProfitCloses))
+
+View in Pine Editor・38 lines
+Use on chart
+7
+2
+3 028
+This strategy was designed to be traded on daily data on the ES and SPY—the strategy was originally developed for NinjaTrader, which displays daily ES data based on RTH hours instead of 24 hours (1440 minute) like TradingView does, so we are presenting the results on the SPY until we figure out how to overcome this hurdle.
+
+Strategy #02
+
+Quantity 100
+
+Slippage: 2 ticks
+
+Commission: 4.95 per order
+
+Net Profit: 10,118.30
+
+Max Drawdown: 4.037.60
+
+
+Buy and Hold (Custom)
+
+Quantity 100
+
+Slippage: 2 ticks
+
+Commission: 4.95 per order
+
+Entry Long: 1993-02-01 @ 43.99
+
+Exit Long: 2017-07-28 @ 246.34
+
+Net Profit: 20,225.10
+
+Max Drawdown: 9,042.00
+

@@ -1,0 +1,226 @@
+//@version=5
+strategy(
+     title           = "Robrechtian Long-Medium Breakout Trend System",
+     shorttitle      = "Robrecht Breakout Trend",
+     overlay         = true,
+     initial_capital = 100000,
+     currency        = currency.USD,
+     pyramiding      = 5,                     // Base + up to 4 pyramids (edit as desired)
+     default_qty_type= strategy.percent_of_equity,
+     default_qty_value = 1,                   // 1% of equity per entry; adjust to taste
+     calc_on_every_tick = false,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01                  // 0.01% per trade as placeholder
+     )
+
+// ─────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────
+entryLookback      = input.int(80,  "Entry / Exit Breakout Lookback (days)", minval = 20)
+confirmLookback    = input.int(20,  "Short-Term Confirmation Lookback",       minval = 5)
+maLength           = input.int(50,  "Trend Filter MA Length",                 minval = 10)
+atrLength          = input.int(20,  "ATR Length (Explosive Bar Filter)",      minval = 5)
+atrExplosiveMult   = input.float(2.5, "Explosive Bar Threshold (x ATR)",      minval = 1.0, step = 0.1)
+
+allowLongs         = input.bool(true,  "Allow Long Trades")
+allowShorts        = input.bool(true,  "Allow Short Trades")
+useExplosiveFilter = input.bool(true,  "Use Explosive Bar Filter")
+
+// ─────────────────────────────────────────────
+// Core Calculations
+// ─────────────────────────────────────────────
+
+// Long/short "state"
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// Donchian-style channels (shifted by 1 bar to avoid look-ahead)
+highestEntry  = ta.highest(high[1], entryLookback)
+lowestEntry   = ta.lowest(low[1],  entryLookback)
+
+highestConfirm = ta.highest(high[1], confirmLookback)
+lowestConfirm  = ta.lowest(low[1],  confirmLookback)
+
+// Moving average + slope filter
+ma      = ta.sma(close, maLength)
+maUp    = ma > ma[1]
+maDown  = ma < ma[1]
+
+// ATR + "explosive bar" detection
+atr         = ta.atr(atrLength)
+barRange    = high - low
+explosive   = barRange > atrExplosiveMult * atr
+okBar       = useExplosiveFilter ? not explosive : true
+
+// Safety: enough bars?
+enoughBars  = bar_index > entryLookback + 2
+
+// ─────────────────────────────────────────────
+// Entry Conditions
+// ─────────────────────────────────────────────
+
+// Base long entry: 80-day breakout + 20-day confirmation + upward slope + non-explosive
+longBaseBreakout =
+     enoughBars and
+     allowLongs and
+     not inLong and
+     not inShort and
+     close > highestEntry and
+     close > highestConfirm and
+     maUp and
+     okBar
+
+// Base short entry: mirror logic
+shortBaseBreakout =
+     enoughBars and
+     allowShorts and
+     not inShort and
+     not inLong and
+     close < lowestEntry and
+     close < lowestConfirm and
+     maDown and
+     okBar
+
+// Pyramiding: add on each new 20-day breakout in direction of existing trend
+longPyramidCond =
+     enoughBars and
+     allowLongs and
+     inLong and
+     close > highestConfirm and
+     maUp and
+     okBar
+
+shortPyramidCond =
+     enoughBars and
+     allowShorts and
+     inShort and
+     close < lowestConfirm and
+     maDown and
+     okBar
+
+// ─────────────────────────────────────────────
+// Exit Conditions (80-day opposite channel)
+// Infinite upside: no profit targets, exit only on trend break
+// ─────────────────────────────────────────────
+exitLongCond =
+     inLong and
+     enoughBars and
+     close < lowestEntry
+
+exitShortCond =
+     inShort and
+     enoughBars and
+     close > highestEntry
+
+// ─────────────────────────────────────────────
+// Execute Orders
+// Priority: exits → base entries → pyramids
+// ─────────────────────────────────────────────
+
+// Exits
+if exitLongCond
+    strategy.close("Long")
+
+if exitShortCond
+    strategy.close("Short")
+
+// Base entries
+if longBaseBreakout
+    strategy.entry("Long", strategy.long)
+
+if shortBaseBreakout
+    strategy.entry("Short", strategy.short)
+
+// Pyramids
+// We use the same order IDs; with `pyramiding > 0` this will add units
+if not longBaseBreakout and longPyramidCond
+    strategy.entry("Long", strategy.long)
+
+if not shortBaseBreakout and shortPyramidCond
+    strategy.entry("Short", strategy.short)
+
+// ─────────────────────────────────────────────
+// Plotting
+// ─────────────────────────────────────────────
+plot(ma, title = "Trend MA", color = color.new(color.orange, 0))
+
+plot(highestEntry,  "80-day High (Entry/Exit)",  color = color.new(color.navy,  60), style = plot.style_linebr)
+plot(lowestEntry,   "80-day Low (Entry/Exit)",   color = color.new(color.fuchsia,    60), style = plot.style_linebr)
+
+plot(highestConfirm,"20-day High (Pyramid Ref)", color = color.new(color.teal,   80), style = plot.style_linebr)
+plot(lowestConfirm, "20-day Low (Pyramid Ref)",  color = color.new(color.purple, 80), style = plot.style_linebr)
+
+View in Pine Editor・154 lines
+Use on chart
+1
+6
+773
+Robrechtian Long–Medium-Term Breakout Trend System
+A professional, rule-based trend-following strategy designed to capture large, sustained price movements using pure price action and breakouts.
+This system follows long-established trend-following philosophy: no prediction, no volatility targeting, and no profit targets. Only disciplined entries, position additions, and exits driven entirely by trend structure.
+
+Core Principles
+
+Breakout-driven entries: Initial positions are taken only when price breaks above/below the 80-day Donchian channel, confirming a long–medium-term trend shift.
+
+Short-term confirmation: Breakouts must also exceed the 20-day channel, reducing false positives.
+
+Trend-direction filter: A 50-day moving average slope filter ensures alignment with the broader trend.
+
+Explosive bar filter: Entries avoid excessively large, single-candle expansions (>2.5× ATR(20)) to prevent chasing exhaustion spikes.
+
+Pyramiding into strength: Additional units are added only when price makes fresh 20-day breakouts in the direction of the trend. No scaling out. No adding on dips.
+
+Exit only on trend violation: Positions are closed exclusively when price breaks the opposite 80-day channel. This preserves unlimited upside while enforcing disciplined exits.
+
+Pure trend philosophy: No volatility targeting, no smoothing, no discretionary overrides, no optimization for short-term performance.
+
+Intended Use
+This system is designed primarily for diversified futures portfolios, where diversification across dozens of globally liquid markets creates robustness and stability. However, it may also be used on individual assets for educational and analytical purposes.
+
+The system embraces the core trend-following logic:
+
+Small losses, big winners, and unlimited upside when trends persist.
+
+⚠️ WARNINGS / DISCLAIMERS
+
+⚠️ Warning 1 — This strategy is not optimized for single stocks
+
+The Robrechtian Trend System is designed for multi-asset futures portfolios, not single equities.
+Performance on individual tickers may vary greatly due to lack of diversification.
+
+⚠️ Warning 2 — Trend following includes substantial drawdowns
+
+Deep drawdowns are a normal and expected feature of all long-term trend-following systems.
+The strategy does not attempt to smooth returns or manage volatility.
+If you seek steady, low-volatility equity curves, this system is not suitable.
+
+⚠️ Warning 3 — No volatility targeting or risk smoothing
+
+This system intentionally avoids volatility-based position sizing.
+Trades may experience larger fluctuations than systems using risk parity or vol targeting.
+
+⚠️ Warning 4 — Not financial advice
+
+This script is for educational and research purposes only.
+Past performance does not guarantee future results.
+Use at your own risk.
+
+⚠️ Warning 5 — TradingView backtests have known limitations
+
+TradingView does not simulate:
+
+
+futures contract roll logic
+
+slippage
+
+real bid/ask spreads
+
+liquidity conditions
+
+limit-up/limit-down behavior
+
+
+
+Results may vary from live market execution.

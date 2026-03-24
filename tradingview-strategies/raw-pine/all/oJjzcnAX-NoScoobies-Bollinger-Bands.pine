@@ -1,0 +1,51 @@
+//@version=4
+strategy(title="NoScoobies Bollinger Bands Stocks Long Only", overlay=true)
+source = close
+length = input(20, minval=1, title = "Period") //Length of the Bollinger Band
+mult = input(1.5, minval=0.001, maxval=50, title = "Standard Deviation") // Use 1.5 SD for 20 period MA; Use 2 SD for 10 period MA
+
+basis = sma(source, length)
+dev = mult * stdev(source, length)
+
+upper = basis + dev
+lower = basis - dev
+
+long=crossover(source, basis) or crossover(source,upper)
+short=crossunder(source, basis) or crossunder(source, lower)
+close_long=crossunder(source, upper) or crossunder(source, basis)
+close_short=crossover(source, lower) or crossover(source, basis)
+
+if long
+    strategy.entry("Long", strategy.long)
+
+if close_long
+    strategy.close("Long", when = strategy.position_size>0)
+
+//if short
+//    strategy.entry("Short", strategy.short)
+//    
+//if close_short
+//    strategy.close("Short", when = strategy.position_size<0)
+
+
+plot(basis, color=color.red,title= "SMA")
+p1 = plot(upper, color=color.blue,title= "UB")
+p2 = plot(lower, color=color.blue,title= "LB")
+fill(p1, p2)
+
+plotshape(long, style=shape.arrowup, color=color.blue, size=size.normal, location=location.belowbar)
+plotshape(close_long, style=shape.arrowdown, color=color.gray, size=size.normal, location=location.abovebar)
+alertcondition(long, title="LONG", message="FCEL")
+alertcondition(close_long, title="CLOSE LONG", message="FCEL")
+
+View in Pine Editor・39 lines
+Use on chart
+4
+8
+22
+3 221
+Feb 1, 2020
+Bollinger Bands strategy that I am trying out, however I can't get my strategy.close to work. Looking for help.
+Feb 12, 2020
+Release Notes
+Bollinger Bands Long-only strategy. Recurring alerts that I am having trouble getting rid of.

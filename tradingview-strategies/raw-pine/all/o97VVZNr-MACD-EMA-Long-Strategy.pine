@@ -1,0 +1,64 @@
+//@version=2
+strategy(title="MACD/EMA Long Strategy",overlay=true,scale=scale.left)
+
+
+
+// SMA Indicator - Are we in a Bull or Bear market according to 200 SMA?
+SMA = sma(close, input(200))
+
+
+
+// EMA Indicator - Are we in a rally or not?
+EMA = ema(close, input(20))
+
+
+
+//MACD Indicator - Is the MACD bullish or bearish?
+
+fastLength = input(12)
+slowlength = input(26)
+MACDLength = input(9)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+// Set Buy/Sell conditions
+
+[main,signal,histo]=macd(close,fastLength,slowlength,MACDLength)
+
+buy_entry= if close>SMA
+    delta>0
+else
+    delta>0 and close>EMA
+    
+strategy.entry("Buy",true , when=buy_entry)
+
+alertcondition(delta, title='Long', message='MACD Bullish')
+
+
+sell_entry = if close<SMA
+    delta<0 
+else
+    delta<0 and close<EMA
+strategy.close("Buy",when= sell_entry)
+
+
+alertcondition(delta, title='Short', message='MACD Bearish')
+
+//plot(delta, title="Delta", style=cross, color=delta>=0 ? green : red )
+
+View in Pine Editor・49 lines
+Use on chart
+9
+7
+3
+3
+30 947
+This incredibly simple strategy uses a combination of the 20 EMA and bullish/bearish MACD crosses as a low risk method of getting in and out of markets.
+
+Depending on whether the market is above or below the 200 SMA, the script determines if the market is in bullish or bearish territory. Above the 200 SMA, the script will ignore the 20 EMA as a buy condition and buy solely on the confirmation of a bullish MACD cross upon the close of a candle. In this bullish market, the script will only enable the sell condition if both the MACD is bearish AND a close below the 20 EMA occurs. This is to reduce the chances of the script selling prematurely in the event of a bearish MACD cross, if the market is still in overall bullish territory.
+
+When the market is below the 200 SMA, the confirmation occurs in the opposite direction. The buy condition will only be met if both the MACD is bullish AND a close above the 20 EMA occurs. However, the sell condition ignores the 20 EMA and will sell solely on the confirmation of a bearish MACD cross upon the close of the candle.
+
+This strategy can be used in both bullish and bearish markets. This conservative strategy will slightly underperform in a bull market, with the sell condition occasionally being met and then potentially buying back higher. However, it will successfully get you out of a turning market and automatically switch into a more 'risk-off' mentality during a bear market. This strategy is not recommended for sideways markets, as trading around the 20 EMA coupled with a relatively flat MACD profile can cause the strategy to buy the peaks and sell troughs easily.

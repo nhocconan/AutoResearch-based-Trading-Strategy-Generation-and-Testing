@@ -1,0 +1,107 @@
+//@version=4
+
+// Strategy
+strategy("Up/Down Strategy", overlay=true, initial_capital = 10000, default_qty_value = 10000, default_qty_type = strategy.cash)
+
+consecutiveBarsUp = input(1, title='Consecutive Bars Up')
+consecutiveBarsDown = input(1, title='Consecutive Bars Down')
+
+price = close
+
+ups = 0.0
+ups := price > price[1] ? nz(ups[1]) + 1 : 0
+
+dns = 0.0
+dns := price < price[1] ? nz(dns[1]) + 1 : 0
+
+// Strategy Backtesting
+startDate  = input(timestamp("2021-01-01T00:00:00"), type = input.time, title='Backtesting Start Date')
+finishDate = input(timestamp("2021-12-31T00:00:00"), type = input.time, title='Backtesting End Date')
+
+time_cond  = time >= startDate and time <= finishDate
+
+//Time Restriction Settings
+startendtime = input("", title='Time Frame To Enter Trades')
+enableclose = input(false, title='Enable Close Trade At End Of Time Frame')
+timetobuy = (time(timeframe.period, startendtime))
+timetoclose = na(time(timeframe.period, startendtime))
+
+// Stop Loss & Take Profit Tick Based
+enablesltp = input(false, title='Enable Take Profit & Stop Loss')
+stopTick = input(5.0, title='Stop Loss Ticks', type=input.float) / 100
+takeTick = input(10.0, title='Take Profit Ticks', type=input.float) / 100
+
+longStop = strategy.position_avg_price - stopTick
+shortStop = strategy.position_avg_price + stopTick
+shortTake = strategy.position_avg_price - takeTick
+longTake = strategy.position_avg_price + takeTick
+
+plot(strategy.position_size > 0 and enablesltp ? longStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Long Fixed SL")
+plot(strategy.position_size < 0 and enablesltp ? shortStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Short Fixed SL")
+plot(strategy.position_size > 0 and enablesltp ? longTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Long Take Profit")
+plot(strategy.position_size < 0 and enablesltp ? shortTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Short Take Profit")
+
+// Alert messages
+message_enterlong  = input("", title="Long Entry message")
+message_entershort = input("", title="Short Entry message")
+message_closelong = input("", title="Close Long message")
+message_closeshort = input("", title="Close Short message")
+message_takeprofit = input("", title="Take Profit message")
+message_stoploss = input("", title="Stop Loss message")
+
+// Strategy Execution
+if (ups >= consecutiveBarsUp) and time_cond and timetobuy
+    strategy.entry("Long", strategy.long, stop = high + syminfo.mintick, alert_message = message_enterlong)
+    
+if (dns >= consecutiveBarsDown) and time_cond and timetobuy
+    strategy.entry("Short", strategy.short, stop = low + syminfo.mintick, alert_message = message_entershort)
+    
+if strategy.position_size > 0 and timetoclose and enableclose
+    strategy.close_all(alert_message = message_closelong)
+if strategy.position_size < 0 and timetoclose and enableclose
+    strategy.close_all(alert_message = message_closeshort)
+    
+if strategy.position_size > 0 and enablesltp and time_cond
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake, alert_message = message_takeprofit)
+if strategy.position_size < 0 and enablesltp and time_cond
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake, alert_message = message_stoploss)
+
+View in Pine Editor・67 lines
+Use on chart
+8
+1
+3 322
+Sep 29, 2021
+This is a consecutive bar up/down strategy where you can specify how many bars up to buy and how many bars down to sell. It also has code to check and make sure the condition is still true when launching the official alert, which helps back testing and live results line up, however be sure to enter commission and slippage into the properties to accurately reflect profits. I added back testing date ranges to this so you can easily pull up and see back tested results for a certain date range. I also added a buy and sell message fields in the properties so you can launch alerts that will work with automated trading services. Simply enter your buy message and sell message into those fields in the properties and then when you create an alert enter {{strategy.order.alert_message}} into the alert body and it will dynamically pull in your buy and sell messages when it fires alerts.
+Sep 29, 2021
+Release Notes
+I forgot to set overlay=true which caused the sub chart box to appear which is not needed.
+Sep 29, 2021
+Release Notes
+Found problem with logic in the calculation of bars up and down and corrected it.
+Sep 29, 2021
+Release Notes
+Corrected up/down code.
+Sep 29, 2021
+Release Notes
+Fixed issue with signals.
+Oct 1, 2021
+Release Notes
+Added stop loss and take profit exits based on %. You can check or uncheck whether to use the stop loss and take profit exits.
+Oct 1, 2021
+Release Notes
+Changed stop loss and take profit to tick based so it can be used with all chart types.
+Oct 3, 2021
+Release Notes
+Added time restriction so you can enter trades only during the time frame specified. By default it's set to 0000-0000 but you can change it to any time frame, such at 0930-1600. Keep it set to 0000-0000 to have it ignore time restriction and take all trades.
+
+I also added the ability to check off a box that will close the open trade at the end of the time restriction. So if you set the time frame to 0930-1600 and check off to enable close trade at end of time frame then it will look to exit the trade at the close of the next bar.
+Oct 3, 2021
+Release Notes
+Set time restriction field to empty by default since otherwise the strategy won't take all trades like normal. So to enable time restriction enter a time frame in the format 0000-0000.
+Oct 4, 2021
+Release Notes
+Added a separate close message that is used with the "Enable Close Trade At End Of Time Frame" so you can set a separate close message to be sent to your automation service telling it to close the open position.
+Oct 7, 2021
+Release Notes
+Added more alert message fields so you can set a different alert message for each action, such as enter long or short, close long or short and take profit/stop loss.

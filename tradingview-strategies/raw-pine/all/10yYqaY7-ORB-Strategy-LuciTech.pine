@@ -1,0 +1,463 @@
+//@version=5
+strategy('ORB Strategy [LuciTech]',
+ overlay=true,
+ max_bars_back=500,
+ max_lines_count=500,
+ max_boxes_count=500,
+ initial_capital=100000,
+ default_qty_type=strategy.percent_of_equity,
+ default_qty_value=100)
+
+//---Strategy Settings---
+sltip = 'Defines the stop-loss length based on candles. 0 means 1 candle, 1 means 2 candles, and so on.'
+betip = 'Enter the R multiple at which the stop loss moves to breakeven. 0 means breakeven is disabled.'
+rrtip = 'The risk-reward ratio determines the relationship between potential reward and risk. For example, 3 means risking 1 unit to gain 3 units.'
+risk_percent_tip = 'The percentage of your equity that you are willing to risk per trade.'
+sl_type_tip = 'Choose the stop-loss calculation type: ATR-based, Candle-based, or Midline (ORB midpoint).'
+ATRlength_tip = 'The number of periods used to calculate the Average True Range (ATR).'
+smoothing_tip = 'Choose the smoothing method for ATR: RMA, SMA, EMA, or WMA.'
+ATRlines_tip = 'Enable or disable plotting of ATR-based stop-loss lines.'
+fillcolour_tip = 'Select the background color to visually indicate the active time filter range on the chart.'
+time_filter_tip = 'Enable or disable the time filter. When disabled, trades can occur at any time.'
+day_filter_tip = 'Enable or disable the day filter. When enabled, trades only occur on selected days of the week.'
+
+//Time filter inputs
+use_time_filter = input.bool(false, title="Use Time Filter", group = 'Time Filter', tooltip=time_filter_tip)
+start_hour   = input.int(defval=0,  title='Start Hour (24h)', minval=0, maxval=23, group = 'Time Filter')
+start_minute = input.int(defval=59, title='Start Minute',     minval=0, maxval=59, group = 'Time Filter')
+end_hour     = input.int(defval=23, title='End Hour (24h)',   minval=0, maxval=23, group = 'Time Filter')
+end_minute   = input.int(defval=59, title='End Minute',       minval=0, maxval=59, group = 'Time Filter')
+showFill  = input.bool(defval=false, title="Fill Background", inline='colour1', group='Time Filter')
+fillColor = input.color(color.rgb(192, 192, 192, 90), title='', inline='colour1', group='Time Filter')
+
+//Day Filter Inputs
+use_day_filter = input.bool(false, title="Use Day Filter", group='Day Filter', tooltip=day_filter_tip)
+monday    = input.bool(true,  title="Monday",    inline="days1", group='Day Filter')
+tuesday   = input.bool(true,  title="Tuesday",   inline="days1", group='Day Filter')
+wednesday = input.bool(true,  title="Wednesday", inline="days1", group='Day Filter')
+thursday  = input.bool(true,  title="Thursday",  inline="days2", group='Day Filter')
+friday    = input.bool(true,  title="Friday",    inline="days2", group='Day Filter')
+saturday  = input.bool(false, title="Saturday",  inline="days3", group='Day Filter')
+sunday    = input.bool(false, title="Sunday",    inline="days3", group='Day Filter')
+
+//Monthly Filter Inputs
+use_month_filter = input.bool(false, title="Use Month Filter", group='Month Filter', tooltip="Enable to restrict trading to specific months")
+january   = input.bool(true, title="January",   inline="months1", group='Month Filter')
+february  = input.bool(true, title="February",  inline="months1", group='Month Filter')
+march     = input.bool(true, title="March",     inline="months1", group='Month Filter')
+april     = input.bool(true, title="April",     inline="months2", group='Month Filter')
+may       = input.bool(true, title="May",       inline="months2", group='Month Filter')
+june      = input.bool(true, title="June",      inline="months2", group='Month Filter')
+july      = input.bool(true, title="July",      inline="months3", group='Month Filter')
+august    = input.bool(true, title="August",    inline="months3", group='Month Filter')
+september = input.bool(true, title="September", inline="months3", group='Month Filter')
+october   = input.bool(true, title="October",   inline="months4", group='Month Filter')
+november  = input.bool(true, title="November",  inline="months4", group='Month Filter')
+december  = input.bool(true, title="December",  inline="months4", group='Month Filter')
+
+//Position Type Filter Inputs
+use_position_filter  = input.bool(false, title="Use Position Type Filter", group='Position Type', tooltip="Enable to restrict trading to specific position types")
+allow_long  = input.bool(true, title="Allow Long",  inline="positions", group='Position Type')
+allow_short = input.bool(true, title="Allow Short", inline="positions", group='Position Type')
+
+//Risk Management Inputs
+risk_percent = input.float(2, title="Risk %", minval=0.1, maxval=100, group='Risk Management', tooltip=risk_percent_tip) / 100
+Risk_reward  = input.float(defval=2, title='Risk:Reward', minval=1, maxval=10, step=0.1, group='Risk Management', tooltip=rrtip)
+breakeven    = input.float(0, title="Breakeven at R", minval=0.0, step=0.1, group='Risk Management', tooltip=betip)
+sl_type      = input.string("ATR", title="Stop Loss Type", options=["ATR", "Candle", "Midline"], group='Risk Management', tooltip=sl_type_tip)
+SL_length    = input(0, title='Candle Length', group='Risk Management', tooltip=sltip)
+ATRlength    = input.int(title='ATR length', defval=14, minval=1, group='Risk Management', tooltip=ATRlength_tip)
+smoothing    = input.string(title='ATR Smoothing/ATR Lines', defval='SMA', options=['RMA', 'SMA', 'EMA', 'WMA'], group='Risk Management', tooltip=smoothing_tip)
+ATRlines     = input(false, 'Show ATR Lines', group='Risk Management', tooltip=ATRlines_tip)
+ATRmulti     = input.float(0, title='ATRMulti', group='Risk Management', tooltip=sltip, step=0.1)
+
+// === Relative Volume Filter ===
+use_rvol_filter  = input.bool(false, title="Use RVOL Filter", group='Relative Volume', tooltip="Only allow entries when current bar volume exceeds the average by the set multiplier")
+rvol_length      = input.int(20, title="RVOL Lookback (bars)", minval=2, group='Relative Volume', tooltip="Number of bars used to calculate the average volume baseline")
+rvol_threshold   = input.float(1.5, title="Minimum RVOL", minval=0.1, step=0.1, group='Relative Volume', tooltip="Entry is only allowed when volume / avg_volume >= this value. e.g. 1.5 = 50% above average")
+rvol_show_label  = input.bool(false, title="Show RVOL Value on Signal Bar", group='Relative Volume', tooltip="Displays the RVOL ratio on the chart at each breakout bar for debugging/review")
+
+//Position Colour Inputs
+entrypricecolour = input.color(color.rgb(244, 244, 244, 75), title='Entry/SL/TP', group='Style', inline='peb')
+stoplosscolour   = input.color(color.rgb(255, 0, 0, 75),     title='',            group='Style', inline='peb')
+takeprofitcolour = input.color(color.rgb(0, 255, 0, 75),     title='',            group='Style', inline='peb')
+
+// Alert Settings Group
+group_alert = "Alert Settings"
+use_webhook_alerts = input.bool(true, "Use Webhook Alerts", group=group_alert, tooltip="Enable to send webhook alerts with trade information in JSON format")
+webhook_format     = input.string("Concise Telegram", title="Webhook Format", options=["Standard", "Telegram", "Concise Telegram"], group=group_alert)
+telegram_chat_id   = input.string("tele chatid", title="Telegram Chat ID", group=group_alert)
+
+// --- ATR ---
+ma_function(source, ATRlength) =>
+    if smoothing == 'RMA'
+        ta.rma(source, ATRlength)
+    else if smoothing == 'SMA'
+        ta.sma(source, ATRlength)
+    else if smoothing == 'EMA'
+        ta.ema(source, ATRlength)
+    else
+        ta.wma(source, ATRlength)
+
+a  = ma_function(ta.tr(true), ATRlength) * ATRmulti
+x  = ma_function(ta.tr(true), ATRlength) * ATRmulti + high
+x2 = low - ma_function(ta.tr(true), ATRlength) * ATRmulti
+p1 = plot(ATRlines ? x  : na, title='ATR Short Stop Loss', color=stoplosscolour,   trackprice=ATRlines)
+p2 = plot(ATRlines ? x2 : na, title='ATR Long Stop Loss',  color=takeprofitcolour, trackprice=ATRlines)
+
+// --- Relative Volume Calculation ---
+// avg_volume uses a simple moving average of the previous `rvol_length` bars (excludes current bar)
+avg_volume = ta.sma(volume, rvol_length)
+rvol       = avg_volume > 0 ? volume / avg_volume : 1.0
+rvol_pass  = not use_rvol_filter or rvol >= rvol_threshold
+
+// Time filter
+is_within_time_window() =>
+    current_time = time('1', 'America/New_York')
+    start_time = timestamp(year(current_time), month(current_time), dayofmonth(current_time), start_hour, start_minute, 0)
+    end_time   = timestamp(year(current_time), month(current_time), dayofmonth(current_time), end_hour,   end_minute,   0)
+    current_time >= start_time and current_time <= end_time
+
+// Day filter
+is_valid_trading_day() =>
+    current_day = dayofweek(time)
+    day_allowed = false
+    if current_day == 2 and monday
+        day_allowed := true
+    else if current_day == 3 and tuesday
+        day_allowed := true
+    else if current_day == 4 and wednesday
+        day_allowed := true
+    else if current_day == 5 and thursday
+        day_allowed := true
+    else if current_day == 6 and friday
+        day_allowed := true
+    else if current_day == 7 and saturday
+        day_allowed := true
+    else if current_day == 1 and sunday
+        day_allowed := true
+    day_allowed
+
+// Month filter
+is_valid_trading_month() =>
+    current_month = month(time)
+    month_allowed = false
+    if current_month == 1  and january
+        month_allowed := true
+    else if current_month == 2  and february
+        month_allowed := true
+    else if current_month == 3  and march
+        month_allowed := true
+    else if current_month == 4  and april
+        month_allowed := true
+    else if current_month == 5  and may
+        month_allowed := true
+    else if current_month == 6  and june
+        month_allowed := true
+    else if current_month == 7  and july
+        month_allowed := true
+    else if current_month == 8  and august
+        month_allowed := true
+    else if current_month == 9  and september
+        month_allowed := true
+    else if current_month == 10 and october
+        month_allowed := true
+    else if current_month == 11 and november
+        month_allowed := true
+    else if current_month == 12 and december
+        month_allowed := true
+    month_allowed
+
+// Position type filter
+is_valid_position_type(direction) =>
+    position_allowed = false
+    if direction == "LONG"  and allow_long
+        position_allowed := true
+    else if direction == "SHORT" and allow_short
+        position_allowed := true
+    position_allowed
+
+// Combine filters
+in_standard_time_range  = not use_time_filter    or is_within_time_window()
+in_valid_day            = not use_day_filter      or is_valid_trading_day()
+in_valid_month          = not use_month_filter    or is_valid_trading_month()
+in_valid_position_long  = not use_position_filter or is_valid_position_type("LONG")
+in_valid_position_short = not use_position_filter or is_valid_position_type("SHORT")
+inTimeRange = in_standard_time_range and in_valid_day and in_valid_month
+
+var color bgColor = na
+bgColor := showFill and use_time_filter and is_within_time_window() ? fillColor : na
+bgcolor(bgColor)
+
+// === ORB Inputs ===
+highColor    = input.color(color.green, "High Line Color")
+lowColor     = input.color(color.red,   "Low Line Color")
+midlineColor = input.color(color.white, "Midline Color")
+linewidth    = input.int(2, "Line Width", minval=1, maxval=4)
+showHistory  = input.bool(true, "Show Previous ORBs")
+maxSavedOrbs = input.int(5, "Show previous number of ORBs")
+
+// === ORB Time Logic ===
+startTime  = timestamp("America/New_York", year, month, dayofmonth, 9, 30)
+endTime    = timestamp("America/New_York", year, month, dayofmonth, 9, 45)
+cutoffTime = timestamp("America/New_York", year, month, dayofmonth, 11, 0)
+inSession  = time >= startTime and time < endTime
+pastCutoff = time >= cutoffTime
+
+// === Arrays ===
+var line[] orbHighLines = array.new_line()
+var line[] orbLowLines  = array.new_line()
+var line[] orbMidLines  = array.new_line()
+var line[] fibLines     = array.new_line()
+
+// === ORB Variables ===
+var float sessionHigh      = na
+var float sessionLow       = na
+var float mid              = na
+var int   orb_index        = na
+var line  liveHighLine     = na
+var line  liveLowLine      = na
+var line  liveMidLine      = na
+var int   start_index      = na
+var bool  sessionFinalized = false
+var bool  bullFired        = false
+var bool  bearFired        = false
+var line  prevHighLine     = na
+var line  prevLowLine      = na
+
+prevHigh = request.security(syminfo.tickerid, "D", high[1])
+prevLow  = request.security(syminfo.tickerid, "D", low[1])
+
+if dayofmonth != dayofmonth[1]
+    start_index := bar_index
+
+if not inSession[1] and inSession
+    bullFired := false
+    bearFired := false
+
+if not inSession[1] and inSession and showHistory
+    finalHigh = line.new(x1=orb_index, y1=sessionHigh, x2=bar_index-1, y2=sessionHigh, color=highColor,    width=linewidth, style=line.style_solid)
+    finalLow  = line.new(x1=orb_index, y1=sessionLow,  x2=bar_index-1, y2=sessionLow,  color=lowColor,     width=linewidth, style=line.style_solid)
+    finalMid  = line.new(x1=orb_index, y1=mid,          x2=bar_index-1, y2=mid,          color=midlineColor, width=linewidth, style=line.style_solid)
+    array.push(orbHighLines, finalHigh)
+    array.push(orbLowLines,  finalLow)
+    array.push(orbMidLines,  finalMid)
+    if array.size(orbHighLines) > maxSavedOrbs
+        line.delete(array.shift(orbHighLines))
+        line.delete(array.shift(orbLowLines))
+        line.delete(array.shift(orbMidLines))
+
+if not inSession[1] and inSession
+    orb_index        := bar_index
+    sessionHigh      := na
+    sessionLow       := na
+    mid              := na
+    sessionFinalized := false
+    line.delete(liveHighLine)
+    line.delete(liveLowLine)
+    line.delete(liveMidLine)
+    liveHighLine := na
+    liveLowLine  := na
+    liveMidLine  := na
+
+if inSession
+    sessionHigh := na(sessionHigh) ? high : math.max(sessionHigh, high)
+    sessionLow  := na(sessionLow)  ? low  : math.min(sessionLow,  low)
+    mid         := (sessionHigh + sessionLow) / 2
+    line.delete(liveHighLine)
+    line.delete(liveLowLine)
+    line.delete(liveMidLine)
+    liveHighLine := line.new(x1=orb_index, y1=sessionHigh, x2=bar_index+2, y2=sessionHigh, color=highColor,    width=linewidth)
+    liveLowLine  := line.new(x1=orb_index, y1=sessionLow,  x2=bar_index+2, y2=sessionLow,  color=lowColor,     width=linewidth)
+    liveMidLine  := line.new(x1=orb_index, y1=mid,         x2=bar_index+2, y2=mid,          color=midlineColor, width=linewidth)
+
+if not inSession
+    line.set_x2(liveHighLine, bar_index+2)
+    line.set_x2(liveLowLine,  bar_index+2)
+    line.set_x2(liveMidLine,  bar_index+2)
+
+// === Breakout Signals (visuals — RVOL not required for arrows, only for entries) ===
+orbLevelsReady = not na(sessionHigh) and not na(sessionLow) and not na(mid) and not inSession and not pastCutoff
+
+bullBreakout = orbLevelsReady and not bullFired and close > sessionHigh and close[1] <= sessionHigh
+if bullBreakout
+    bullFired := true
+
+bearBreakout = orbLevelsReady and not bearFired and close < sessionLow and close[1] >= sessionLow
+if bearBreakout
+    bearFired := true
+
+plotshape(bullBreakout, title="Bull ORB Break", style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
+plotshape(bearBreakout, title="Bear ORB Break", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small)
+
+// Optional RVOL label on signal bars (shows ratio for easy tuning)
+if rvol_show_label and (bullBreakout or bearBreakout)
+    label.new(bar_index, bullBreakout ? low : high,
+     text  = "RVOL: " + str.tostring(rvol, "#.##"),
+     style = bullBreakout ? label.style_label_up : label.style_label_down,
+     color = rvol_pass ? color.new(color.green, 60) : color.new(color.red, 60),
+     textcolor = color.white,
+     size  = size.small)
+
+// === Strategy Signal Integration (RVOL gates entries but not arrows) ===
+longCondition  = inTimeRange and bullBreakout and in_valid_position_long  and rvol_pass
+shortCondition = inTimeRange and bearBreakout and in_valid_position_short and rvol_pass
+
+// === Strategy Position Management ===
+var float stop_level         = na
+var float target_level       = na
+var float entry_price        = na
+var float initial_stop       = na
+var bool  moved_to_breakeven = false
+var box   current_bull_box        = na
+var box   current_bear_box        = na
+var box   current_second_bull_box = na
+var box   current_second_bear_box = na
+
+calculate_position_size(stop_distance) =>
+    if stop_distance > 0
+        risk_amount   = strategy.equity * risk_percent
+        position_size = risk_amount / stop_distance
+        math.floor(position_size / syminfo.mintick) * syminfo.mintick
+    else
+        na
+
+create_alert_message(direction, sl_price, tp_price) =>
+    '{"type":"' + direction + '","instrument":"' + syminfo.ticker + '","sl":' + str.tostring(sl_price, "#.#####") + ',"tp":' + str.tostring(tp_price, "#.#####") + '}'
+
+create_telegram_alert_message(direction, sl_price, tp_price) =>
+    header = direction == "BUY" ? "🟢BUY SIGNAL" : "🔴SELL SIGNAL"
+    y   = str.tostring(year)
+    m   = str.tostring(month)
+    d   = str.tostring(dayofmonth)
+    h   = str.tostring(hour)
+    min = str.tostring(minute)
+    m   := str.length(m)   == 1 ? "0" + m   : m
+    d   := str.length(d)   == 1 ? "0" + d   : d
+    h   := str.length(h)   == 1 ? "0" + h   : h
+    min := str.length(min) == 1 ? "0" + min : min
+    datetime_str = y + "-" + m + "-" + d + " " + h + ":" + min
+    '{"chat_id": "' + telegram_chat_id + '", "text": "' + header + '\\n\\n{[' + syminfo.prefix + ']:[' + syminfo.ticker + '], price = [' + str.tostring(close, "#.#####") + ']}\\nDateTime = [' + datetime_str + ']\\nSL: ' + str.tostring(sl_price, "#.#####") + '\\nTP: ' + str.tostring(tp_price, "#.#####") + '"}'
+
+create_concise_telegram_alert_message(direction, sl_price, tp_price) =>
+    header = direction == "BUY" ? "🟢BUY " : "🔴SELL "
+    '{"chat_id": "' + telegram_chat_id + '", "text": "' + header + syminfo.ticker + '\\nPRICE = ' + str.tostring(close, "#.#####") + '\\nSL: ' + str.tostring(sl_price, "#.#####") + '\\nTP: ' + str.tostring(tp_price, "#.#####") + '"}'
+
+if strategy.position_size == 0
+    moved_to_breakeven := false
+
+    if longCondition
+        stop_level := switch sl_type
+            "ATR"     => x2
+            "Candle"  => low[SL_length]
+            "Midline" => mid
+            => low[SL_length]
+        initial_stop  := stop_level
+        stop_distance  = close - stop_level
+        target_level  := close + (Risk_reward * stop_distance)
+        position_size  = calculate_position_size(stop_distance)
+        if use_webhook_alerts
+            alert_message = switch webhook_format
+                "Telegram"         => create_telegram_alert_message("BUY", stop_level, target_level)
+                "Concise Telegram" => create_concise_telegram_alert_message("BUY", stop_level, target_level)
+                => create_alert_message("BUY", stop_level, target_level)
+            alert(alert_message, alert.freq_once_per_bar)
+        if not na(position_size) and position_size > 0
+            strategy.entry("Long", strategy.long, qty=position_size)
+            strategy.exit("Exit Long", "Long", stop=stop_level, limit=target_level)
+            entry_price := close
+
+    if shortCondition
+        stop_level := switch sl_type
+            "ATR"     => x
+            "Candle"  => high[SL_length]
+            "Midline" => mid
+            => high[SL_length]
+        initial_stop  := stop_level
+        stop_distance  = stop_level - close
+        target_level  := close - (Risk_reward * stop_distance)
+        position_size  = calculate_position_size(stop_distance)
+        if use_webhook_alerts
+            alert_message = switch webhook_format
+                "Telegram"         => create_telegram_alert_message("SELL", stop_level, target_level)
+                "Concise Telegram" => create_concise_telegram_alert_message("SELL", stop_level, target_level)
+                => create_alert_message("SELL", stop_level, target_level)
+            alert(alert_message, alert.freq_once_per_bar)
+        if not na(position_size) and position_size > 0
+            strategy.entry("Short", strategy.short, qty=position_size)
+            strategy.exit("Exit Short", "Short", stop=stop_level, limit=target_level)
+            entry_price := close
+
+// Breakeven logic
+if breakeven > 0 and strategy.position_size != 0
+    initial_risk = math.abs(entry_price - initial_stop)
+    if strategy.position_size > 0
+        current_profit = high - entry_price
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Long")
+            stop_level := entry_price
+            strategy.exit("Exit Long", "Long", stop=entry_price, limit=target_level)
+    if strategy.position_size < 0
+        current_profit = entry_price - low
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Short")
+            stop_level := entry_price
+            strategy.exit("Exit Short", "Short", stop=entry_price, limit=target_level)
+
+// Plotting
+plot(strategy.position_size != 0 ? entry_price  : na, title="Entry Price", color=entrypricecolour, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? stop_level   : na, title="Stop Loss",   color=stoplosscolour,   style=plot.style_linebr)
+plot(strategy.position_size != 0 ? target_level : na, title="Take Profit", color=takeprofitcolour, style=plot.style_linebr)
+
+var int fill_extension = 0
+plot_entry    = plot(strategy.position_size != 0 ? entry_price : na, "Entry for SL Fill", display=display.none, offset=fill_extension)
+plot_sl       = plot(strategy.position_size != 0 ? stop_level  : na, "SL for Fill",       display=display.none)
+fill(plot_entry, plot_sl, color=strategy.position_size != 0 ? stoplosscolour : na)
+
+plot_entry_tp = plot(strategy.position_size != 0 ? entry_price  : na, "Entry for TP Fill", display=display.none, offset=fill_extension)
+plot_tp       = plot(strategy.position_size != 0 ? target_level : na, "TP for Fill",       display=display.none)
+fill(plot_entry_tp, plot_tp, color=strategy.position_size != 0 ? takeprofitcolour : na)
+
+View in Pine Editor・421 lines
+Use on chart
+7
+5
+8
+1
+8 764
+Credit:
+Bassic ORB:
+
+My Strategy Template:
+
+
+
+-What it does
+This is a complete Opening Range Breakout (ORB) strategy that captures the first directional breakout after the New York market open. It defines the opening range using the 9:30–9:45 AM ET window, then monitors for a close above the high or below the low of that range within a 75-minute validity window (until 11:00 AM ET). Only the first confirmed breakout per day is traded — one long signal and one short signal maximum per ORB session.
+
+-How it works
+The script captures the highest high and lowest low formed between 9:30 and 9:45 AM ET each day. A midline (average of the high and low) is also calculated. After the ORB window closes, the strategy watches for the first candle that closes beyond either boundary. If no breakout occurs before 11:00 AM ET, no trade is taken for that day.
+Entries are sized using a fixed percentage of equity risked per trade, with position size automatically calculated based on the distance to the chosen stop loss.
+
+-Stop loss options
+ATR — stop placed using Average True Range × multiplier
+Candle — stop placed at the high/low of a specified number of candles back
+Midline — stop placed at the ORB midpoint (halfway between the ORB high and low)
+
+Take profit is set automatically using the configured Risk:Reward ratio. An optional breakeven feature moves the stop to entry price once a specified R multiple is reached.
+
+-Relative Volume filter
+An optional RVOL filter compares the breakout candle's volume against a simple moving average of the prior N bars. If the ratio does not meet the minimum threshold (e.g. 1.5 = 50% above average), the entry is skipped. The arrows still plot on all valid breakouts regardless of the RVOL filter, so you can visually review filtered-out signals. A debug label option is available to display the RVOL ratio on each signal bar for threshold calibration.
+
+-Additional filters
+Time filter — restrict entries to a custom time window
+Day filter — select which days of the week to allow trades
+Month filter — select which months to allow trades
+Position type filter — allow longs only, shorts only, or both
+
+-Alerts
+The strategy supports webhook alerts in three formats: Standard JSON, Telegram JSON, and a concise Telegram format with emoji. Alerts fire on confirmed entry with entry price, stop loss, and take profit included.
+
+

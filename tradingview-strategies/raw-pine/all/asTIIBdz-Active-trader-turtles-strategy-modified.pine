@@ -1,0 +1,26 @@
+//@version=2
+//coded by tmr0
+//original idea from «Way of the Turtle: The Secret Methods that Turned Ordinary People into Legendary Traders» (2007) CURTIS FAITH
+strategy("Turtles strategy modified", shorttitle = "Turtles", overlay=true, pyramiding=5, default_qty_type= strategy.cash, default_qty_value = 1000)
+
+enter = input(55, minval=1)
+exit = input(20, minval=1)
+year_from = input(2009, minval=2000)
+year_before = input(2014, minval=2000)
+
+slowL = highest(enter)
+slowLC = lowest(exit)
+
+enterL = high > slowL[1]
+exitL = low <= slowLC[1]
+
+strategy.entry("slow L", strategy.long, when = enterL and year>=year_from and year<year_before)
+strategy.close("slow L", when = exitL and year>=year_from and year <year_before)
+
+View in Pine Editor・18 lines
+Use on chart
+1
+9
+0
+6 715
+Enter when price break 55 days high and exit when price break 20 days low

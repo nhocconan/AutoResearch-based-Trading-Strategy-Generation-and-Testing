@@ -1,0 +1,622 @@
+//@version=5
+strategy("Game Theory Trading Strategy", overlay=true, initial_capital=10000, pyramiding=3, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===========================
+// INPUTS - Kullanıcı Ayarları
+// ===========================
+
+// Sürü Davranışı Parametreleri
+grp1 = "🐑 Sürü Davranışı Analizi"
+rsi_length = input.int(14, "RSI Periyodu", group=grp1)
+volume_ma_length = input.int(20, "Volume MA Periyodu", group=grp1)
+herd_threshold = input.float(2.0, "Sürü Davranışı Eşiği", step=0.1, group=grp1)
+
+// Likidite Tuzakları
+grp2 = "💧 Likidite Analizi"
+liquidity_lookback = input.int(50, "Likidite Tarama Periyodu", group=grp2)
+liquidity_sensitivity = input.float(1.5, "Likidite Hassasiyeti", step=0.1, group=grp2)
+
+// Kurumsal Akış
+grp3 = "🏦 Kurumsal Akış Tespiti"
+inst_volume_mult = input.float(2.5, "Kurumsal Hacim Çarpanı", step=0.1, group=grp3)
+inst_ma_length = input.int(21, "Kurumsal MA Periyodu", group=grp3)
+
+// Nash Dengesi
+grp4 = "⚖️ Nash Dengesi"
+nash_period = input.int(100, "Nash Dengesi Periyodu", group=grp4)
+nash_deviation = input.float(0.02, "Denge Sapma Oranı", step=0.001, group=grp4)
+
+// Risk Yönetimi
+grp5 = "🛡️ Risk Yönetimi"
+use_sl = input.bool(true, "Stop Loss Kullan", group=grp5)
+sl_percent = input.float(2.0, "Stop Loss %", step=0.1, group=grp5)
+use_tp = input.bool(true, "Take Profit Kullan", group=grp5)
+tp_percent = input.float(5.0, "Take Profit %", step=0.1, group=grp5)
+
+// ===========================
+// HESAPLAMALAR
+// ===========================
+
+// 1. SÜRÜ DAVRANIŞI TESPİTİ
+// RSI ekstrem değerlerde mi?
+rsi = ta.rsi(close, rsi_length)
+rsi_extreme_high = rsi > 70
+rsi_extreme_low = rsi < 30
+
+// Volume normal mi?
+volume_ma = ta.sma(volume, volume_ma_length)
+volume_spike = volume > volume_ma * herd_threshold
+
+// Momentum hesaplama
+momentum = close - close[10]
+momentum_ma = ta.sma(momentum, 20)
+
+// Sürü davranışı skoru
+herd_buying = rsi_extreme_high and volume_spike and momentum > momentum_ma
+herd_selling = rsi_extreme_low and volume_spike and momentum < momentum_ma
+
+// 2. LİKİDİTE TUZAKLARI
+// Son X bardaki en yüksek/düşük seviyeleri bul
+recent_high = ta.highest(high, liquidity_lookback)
+recent_low = ta.lowest(low, liquidity_lookback)
+
+// Stop-loss yığılma seviyeleri (psikolojik seviyeler)
+round_level_up = math.round(close / 10) * 10 + 10
+round_level_down = math.round(close / 10) * 10 - 10
+
+// Likidite tuzağı tespiti
+liquidity_trap_up = high > recent_high[1] and close < recent_high[1] and volume_spike
+liquidity_trap_down = low < recent_low[1] and close > recent_low[1] and volume_spike
+
+// 3. KURUMSAL AKIŞ ANALİZİ
+// Büyük hacimli işlemler
+institutional_volume = volume > volume_ma * inst_volume_mult
+
+// Accumulation/Distribution
+ad = ta.cum(((close - low) - (high - close)) / (high - low) * volume)
+ad_ma = ta.sma(ad, inst_ma_length)
+accumulation = ad > ad_ma and institutional_volume
+distribution = ad < ad_ma and institutional_volume
+
+// Smart Money Index benzeri
+smart_money = (close - open) / (high - low) * volume
+smart_money_ma = ta.sma(smart_money, 20)
+smart_money_positive = smart_money > smart_money_ma
+
+// 4. NASH DENGESİ SEVİYELERİ
+// Fiyatın dengeye geldiği bölgeler
+price_mean = ta.sma(close, nash_period)
+price_std = ta.stdev(close, nash_period)
+upper_nash = price_mean + price_std * nash_deviation
+lower_nash = price_mean - price_std * nash_deviation
+
+// Nash dengesi yakınında mı?
+near_nash_equilibrium = close > lower_nash and close < upper_nash
+above_nash = close > upper_nash
+below_nash = close < lower_nash
+
+// 5. GAME THEORY SİNYALLERİ
+
+// Contrarian sinyaller (çoğunluğun tersine)
+contrarian_buy = herd_selling and (accumulation or liquidity_trap_down)
+contrarian_sell = herd_buying and (distribution or liquidity_trap_up)
+
+// Momentum sinyalleri (trend following ama smart money ile)
+momentum_buy = below_nash and smart_money_positive and not herd_buying
+momentum_sell = above_nash and not smart_money_positive and not herd_selling
+
+// Nash dengesi dönüş sinyalleri
+nash_reversion_buy = below_nash and close > close[1] and volume > volume_ma
+nash_reversion_sell = above_nash and close < close[1] and volume > volume_ma
+
+// Ana sinyaller
+long_signal = contrarian_buy or momentum_buy or nash_reversion_buy
+short_signal = contrarian_sell or momentum_sell or nash_reversion_sell
+
+// ===========================
+// POZİSYON YÖNETİMİ
+// ===========================
+
+// Pozisyon boyutu (Game theory minimax prensibi)
+position_size = 1.0
+if near_nash_equilibrium
+    position_size := 0.5  // Nash dengesinde düşük pozisyon
+else if institutional_volume
+    position_size := 1.5  // Kurumsal akışta yüksek pozisyon
+
+// ===========================
+// STRATEJİ UYGULAMASI
+// ===========================
+
+// Long pozisyonlar
+if long_signal and strategy.position_size <= 0
+    strategy.entry("GT Long", strategy.long, qty=position_size)
+    
+    if use_sl
+        strategy.exit("Long SL/TP", "GT Long", 
+                     stop=close * (1 - sl_percent/100), 
+                     limit=use_tp ? close * (1 + tp_percent/100) : na)
+
+// Short pozisyonlar (sadece hedge için)
+if short_signal and strategy.position_size >= 0
+    strategy.entry("GT Short", strategy.short, qty=position_size)
+    
+    if use_sl
+        strategy.exit("Short SL/TP", "GT Short", 
+                     stop=close * (1 + sl_percent/100), 
+                     limit=use_tp ? close * (1 - tp_percent/100) : na)
+
+// ===========================
+// VİZÜELLEŞTİRME
+// ===========================
+
+// Nash Dengesi Bantları
+plot(price_mean, "Nash Dengesi", color=color.orange, linewidth=2)
+plot(upper_nash, "Üst Nash", color=color.red, linewidth=1, style=plot.style_line)
+plot(lower_nash, "Alt Nash", color=color.green, linewidth=1, style=plot.style_line)
+
+// Arka plan renkleri
+bgcolor(herd_buying ? color.new(color.red, 90) : na, title="Sürü Alımı")
+bgcolor(herd_selling ? color.new(color.green, 90) : na, title="Sürü Satımı")
+bgcolor(institutional_volume ? color.new(color.blue, 95) : na, title="Kurumsal Hacim")
+
+// Sinyal işaretleri
+plotshape(contrarian_buy, "Contrarian Alım", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(contrarian_sell, "Contrarian Satım", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+plotshape(liquidity_trap_up, "Likidite Tuzağı Üst", shape.xcross, location.abovebar, color.red, size=size.tiny)
+plotshape(liquidity_trap_down, "Likidite Tuzağı Alt", shape.xcross, location.belowbar, color.green, size=size.tiny)
+
+// ===========================
+// BACKTEST SONUÇLARI PANELİ
+// ===========================
+
+// Performans metrikleri hesaplama
+var int total_trades = 0
+var int winning_trades = 0
+var int losing_trades = 0
+var float total_profit = 0.0
+var float max_drawdown = 0.0
+var float peak_equity = strategy.initial_capital
+var float win_rate = 0.0
+var float profit_factor = 0.0
+var float sharpe_ratio = 0.0
+
+// Trade sonuçlarını güncelle
+if strategy.closedtrades > 0
+    total_trades := strategy.closedtrades
+    winning_trades := strategy.wintrades
+    losing_trades := strategy.losstrades
+    
+    // Win rate hesaplama
+    win_rate := total_trades > 0 ? (winning_trades / total_trades) * 100 : 0
+    
+    // Profit factor hesaplama
+    gross_profit = strategy.grossprofit
+    gross_loss = math.abs(strategy.grossloss)
+    profit_factor := gross_loss > 0 ? gross_profit / gross_loss : 0
+    
+    // Net kar hesaplama
+    total_profit := strategy.netprofit
+    
+    // Maximum drawdown hesaplama
+    current_equity = strategy.equity
+    if current_equity > peak_equity
+        peak_equity := current_equity
+    
+    current_drawdown = ((peak_equity - current_equity) / peak_equity) * 100
+    if current_drawdown > max_drawdown
+        max_drawdown := current_drawdown
+
+// Sharpe Ratio basitleştirilmiş hesaplama
+returns = strategy.equity / strategy.initial_capital - 1
+sharpe_ratio := returns > 0 ? (returns * 100) / (max_drawdown > 0 ? max_drawdown : 1) : 0
+
+// ===========================
+// BİLGİ PANELİ
+// ===========================
+
+// Ana tablo
+var table gameTheoryTable = table.new(position.top_right, 4, 8)
+
+// Backtest sonuçları tablosu
+var table backtestTable = table.new(position.bottom_right, 2, 10)
+
+// Tablo başlıkları
+if barstate.islast
+    table.cell(gameTheoryTable, 0, 0, "📊 Game Theory Durumu", bgcolor=color.new(color.blue, 80), text_color=color.white)
+    table.cell(gameTheoryTable, 0, 1, "Sürü Davranışı:", bgcolor=color.new(color.gray, 90))
+    table.cell(gameTheoryTable, 1, 1, herd_buying ? "🔴 Alım Çılgınlığı" : herd_selling ? "🟢 Satış Paniği" : "😌 Normal", bgcolor=color.new(color.gray, 90))
+    
+    table.cell(gameTheoryTable, 0, 2, "Kurumsal Akış:", bgcolor=color.new(color.gray, 90))
+    table.cell(gameTheoryTable, 1, 2, accumulation ? "📈 Toplama" : distribution ? "📉 Dağıtım" : "➖ Nötr", bgcolor=color.new(color.gray, 90))
+    
+    table.cell(gameTheoryTable, 0, 3, "Nash Dengesi:", bgcolor=color.new(color.gray, 90))
+    table.cell(gameTheoryTable, 1, 3, near_nash_equilibrium ? "⚖️ Dengede" : above_nash ? "🔺 Üstünde" : "🔻 Altında", bgcolor=color.new(color.gray, 90))
+    
+    table.cell(gameTheoryTable, 0, 4, "Likidite Durumu:", bgcolor=color.new(color.gray, 90))
+    table.cell(gameTheoryTable, 1, 4, liquidity_trap_up or liquidity_trap_down ? "⚠️ Tuzak Var!" : "✅ Güvenli", bgcolor=color.new(color.gray, 90))
+    
+    table.cell(gameTheoryTable, 0, 5, "Pozisyon Önerisi:", bgcolor=color.new(color.gray, 90))
+    table.cell(gameTheoryTable, 1, 5, long_signal ? "🟢 LONG" : short_signal ? "🔴 SHORT" : "⏸️ BEKLE", 
+                 bgcolor=long_signal ? color.new(color.green, 80) : short_signal ? color.new(color.red, 80) : color.new(color.gray, 90))
+    
+    // BACKTEST SONUÇLARI TABLOSU
+    table.cell(backtestTable, 0, 0, "📈 BACKTEST SONUÇLARI", bgcolor=color.new(color.purple, 80), text_color=color.white, text_size=size.normal)
+    table.cell(backtestTable, 1, 0, "", bgcolor=color.new(color.purple, 80))
+    
+    // Toplam işlem sayısı
+    table.cell(backtestTable, 0, 1, "Toplam İşlem:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 1, str.tostring(total_trades), bgcolor=color.new(color.gray, 90), text_color=color.white)
+    
+    // Kazanç oranı
+    table.cell(backtestTable, 0, 2, "Kazanç Oranı:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 2, str.tostring(win_rate, "##.##") + "%", 
+                 bgcolor=color.new(win_rate > 50 ? color.green : color.red, 80), text_color=color.white)
+    
+    // Net kar/zarar
+    table.cell(backtestTable, 0, 3, "Net Kar/Zarar:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 3, "$" + str.tostring(total_profit, "##,###.##"), 
+                 bgcolor=color.new(total_profit > 0 ? color.green : color.red, 80), text_color=color.white)
+    
+    // Profit Factor
+    table.cell(backtestTable, 0, 4, "Profit Factor:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 4, str.tostring(profit_factor, "#.##"), 
+                 bgcolor=color.new(profit_factor > 1.5 ? color.green : profit_factor > 1 ? color.yellow : color.red, 80), 
+                 text_color=color.white)
+    
+    // Maximum Drawdown
+    table.cell(backtestTable, 0, 5, "Max Drawdown:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 5, str.tostring(max_drawdown, "##.##") + "%", 
+                 bgcolor=color.new(max_drawdown < 10 ? color.green : max_drawdown < 20 ? color.yellow : color.red, 80), 
+                 text_color=color.white)
+    
+    // Kazanan/Kaybeden işlemler
+    table.cell(backtestTable, 0, 6, "Kazanan/Kaybeden:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 6, str.tostring(winning_trades) + "/" + str.tostring(losing_trades), 
+                 bgcolor=color.new(color.gray, 90), text_color=color.white)
+    
+    // Sharpe Ratio (basitleştirilmiş)
+    table.cell(backtestTable, 0, 7, "Risk/Ödül Oranı:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 7, str.tostring(sharpe_ratio, "#.##"), 
+                 bgcolor=color.new(sharpe_ratio > 1 ? color.green : sharpe_ratio > 0.5 ? color.yellow : color.red, 80), 
+                 text_color=color.white)
+    
+    // Ortalama kazanç/kayıp
+    avg_win = winning_trades > 0 ? strategy.grossprofit / winning_trades : 0
+    avg_loss = losing_trades > 0 ? math.abs(strategy.grossloss) / losing_trades : 0
+    avg_win_loss_ratio = avg_loss > 0 ? avg_win / avg_loss : 0
+    
+    table.cell(backtestTable, 0, 8, "Ort. Kazanç/Kayıp:", bgcolor=color.new(color.gray, 90), text_color=color.white)
+    table.cell(backtestTable, 1, 8, str.tostring(avg_win_loss_ratio, "#.##") + ":1", 
+                 bgcolor=color.new(avg_win_loss_ratio > 2 ? color.green : avg_win_loss_ratio > 1 ? color.yellow : color.red, 80), 
+                 text_color=color.white)
+    
+    // Son güncelleme
+    table.cell(backtestTable, 0, 9, "Son Güncelleme:", bgcolor=color.new(color.gray, 90), text_color=color.white, text_size=size.tiny)
+    table.cell(backtestTable, 1, 9, str.format("{0,date,HH:mm}", timenow), bgcolor=color.new(color.gray, 90), 
+                 text_color=color.white, text_size=size.tiny)
+
+// ===========================
+// ALERTLER
+// ===========================
+
+// ===========================
+// BACKTEST İSTATİSTİKLERİ
+// ===========================
+
+// Ek performans grafikleri
+plot(strategy.equity, "Equity Curve", color=color.new(color.blue, 100), display=display.none)
+
+// Backtest dönem bilgisi
+var string backtest_start = str.format("{0,date,yyyy-MM-dd}", strategy.closedtrades > 0 ? strategy.closedtrades.entry_time(0) : time)
+var string backtest_end = str.format("{0,date,yyyy-MM-dd}", timenow)
+
+// Strategy tester için ek bilgiler
+if barstate.islastconfirmedhistory
+    label.new(bar_index, high * 1.02, 
+              text="Backtest: " + backtest_start + " - " + backtest_end + 
+              "\nToplam: " + str.tostring(total_trades) + " işlem" +
+              "\nKazanç Oranı: " + str.tostring(win_rate, "##.#") + "%" +
+              "\nNet Kar: $" + str.tostring(total_profit, "##,###"), 
+              style=label.style_label_down, 
+              color=color.new(color.blue, 80), 
+              textcolor=color.white,
+              size=size.small)
+
+View in Pine Editor・325 lines
+Use on chart
+4
+2
+1 585
+Game Theory Trading Strategy: Explanation and Working Logic
+This Pine Script (version 5) code implements a trading strategy named "Game Theory Trading Strategy" in TradingView. Unlike the previous indicator, this is a full-fledged strategy with automated entry/exit rules, risk management, and backtesting capabilities. It uses Game Theory principles to analyze market behavior, focusing on herd behavior, institutional flows, liquidity traps, and Nash equilibrium to generate buy (long) and sell (short) signals. Below, I'll explain the strategy's purpose, working logic, key components, and usage tips in detail.
+1. General Description
+
+Purpose: The strategy identifies high-probability trading opportunities by combining Game Theory concepts (herd behavior, contrarian signals, Nash equilibrium) with technical analysis (RSI, volume, momentum). It aims to exploit market inefficiencies caused by retail herd behavior, institutional flows, and liquidity traps. The strategy is designed for automated trading with defined risk management (stop-loss/take-profit) and position sizing based on market conditions.
+Key Features:
+
+Herd Behavior Detection: Identifies retail panic buying/selling using RSI and volume spikes.
+Liquidity Traps: Detects stop-loss hunting zones where price breaks recent highs/lows but reverses.
+Institutional Flow Analysis: Tracks high-volume institutional activity via Accumulation/Distribution and volume spikes.
+Nash Equilibrium: Uses statistical price bands to assess whether the market is in equilibrium or deviated (overbought/oversold).
+Risk Management: Configurable stop-loss (SL) and take-profit (TP) percentages, dynamic position sizing based on Game Theory (minimax principle).
+Visualization: Displays Nash bands, signals, background colors, and two tables (Game Theory status and backtest results).
+Backtesting: Tracks performance metrics like win rate, profit factor, max drawdown, and Sharpe ratio.
+
+
+Strategy Settings:
+
+Initial capital: $10,000.
+Pyramiding: Up to 3 positions.
+Position size: 10% of equity (default_qty_value=10).
+Configurable inputs for RSI, volume, liquidity, institutional flow, Nash equilibrium, and risk management.
+
+
+Warning: This is a strategy, not just an indicator. It executes trades automatically in TradingView's Strategy Tester. Always backtest thoroughly and use proper risk management before live trading.
+
+2. Working Logic (Step by Step)
+The strategy processes each bar (candle) to generate signals, manage positions, and update performance metrics. Here's how it works:
+a. Input Parameters
+The inputs are grouped for clarity:
+
+Herd Behavior (🐑):
+
+RSI Period (14): For overbought/oversold detection.
+Volume MA Period (20): To calculate average volume for spike detection.
+Herd Threshold (2.0): Volume multiplier for detecting herd activity.
+
+
+Liquidity Analysis (💧):
+
+Liquidity Lookback (50): Bars to check for recent highs/lows.
+Liquidity Sensitivity (1.5): Volume multiplier for trap detection.
+
+
+Institutional Flow (🏦):
+
+Institutional Volume Multiplier (2.5): For detecting large volume spikes.
+Institutional MA Period (21): For Accumulation/Distribution smoothing.
+
+
+Nash Equilibrium (⚖️):
+
+Nash Period (100): For calculating price mean and standard deviation.
+Nash Deviation (0.02): Multiplier for equilibrium bands.
+
+
+Risk Management (🛡️):
+
+Use Stop-Loss (true): Enables SL at 2% below/above entry price.
+Use Take-Profit (true): Enables TP at 5% above/below entry price.
+
+
+
+b. Herd Behavior Detection
+
+RSI (14): Checks for extreme conditions:
+
+Overbought: RSI > 70 (potential herd buying).
+Oversold: RSI < 30 (potential herd selling).
+
+
+Volume Spike: Volume > SMA(20) x 2.0 (herd_threshold).
+Momentum: Price change over 10 bars (close - close[10]) compared to its SMA(20).
+Herd Signals:
+
+Herd Buying: RSI > 70 + volume spike + positive momentum = Retail buying frenzy (red background).
+Herd Selling: RSI < 30 + volume spike + negative momentum = Retail selling panic (green background).
+
+
+
+c. Liquidity Trap Detection
+
+Recent Highs/Lows: Calculated over 50 bars (liquidity_lookback).
+Psychological Levels: Nearest round numbers (e.g., $100, $110) as potential stop-loss zones.
+Trap Conditions:
+
+Up Trap: Price breaks recent high, closes below it, with a volume spike (volume > SMA x 1.5).
+Down Trap: Price breaks recent low, closes above it, with a volume spike.
+
+
+Visualization: Traps are marked with small red/green crosses above/below bars.
+
+d. Institutional Flow Analysis
+
+Volume Check: Volume > SMA(20) x 2.5 (inst_volume_mult) = Institutional activity.
+Accumulation/Distribution (AD):
+
+Formula: ((close - low) - (high - close)) / (high - low) * volume, cumulated over time.
+Smoothed with SMA(21) (inst_ma_length).
+Accumulation: AD > MA + high volume = Institutions buying.
+Distribution: AD < MA + high volume = Institutions selling.
+
+
+Smart Money Index: (close - open) / (high - low) * volume, smoothed with SMA(20). Positive = Smart money buying.
+
+e. Nash Equilibrium
+
+Calculation:
+
+Price mean: SMA(100) (nash_period).
+Standard deviation: stdev(100).
+Upper Nash: Mean + StdDev x 0.02 (nash_deviation).
+Lower Nash: Mean - StdDev x 0.02.
+
+
+Conditions:
+
+Near Equilibrium: Price between upper and lower Nash bands (stable market).
+Above Nash: Price > upper band (overbought, sell potential).
+Below Nash: Price < lower band (oversold, buy potential).
+
+
+Visualization: Orange line (mean), red/green lines (upper/lower bands).
+
+f. Game Theory Signals
+The strategy generates three types of signals, combined into long/short triggers:
+
+Contrarian Signals:
+
+Buy: Herd selling + (accumulation or down trap) = Go against retail panic.
+Sell: Herd buying + (distribution or up trap).
+
+
+Momentum Signals:
+
+Buy: Below Nash + positive smart money + no herd buying.
+Sell: Above Nash + negative smart money + no herd selling.
+
+
+Nash Reversion Signals:
+
+Buy: Below Nash + rising close (close > close[1]) + volume > MA.
+Sell: Above Nash + falling close + volume > MA.
+
+
+Final Signals:
+
+Long Signal: Contrarian buy OR momentum buy OR Nash reversion buy.
+Short Signal: Contrarian sell OR momentum sell OR Nash reversion sell.
+
+
+
+g. Position Management
+
+Position Sizing (Minimax Principle):
+
+Default: 1.0 (10% of equity).
+In Nash equilibrium: Reduced to 0.5 (conservative).
+During institutional volume: Increased to 1.5 (aggressive).
+
+
+Entries:
+
+Long: If long_signal is true and no existing long position (strategy.position_size <= 0).
+Short: If short_signal is true and no existing short position (strategy.position_size >= 0).
+
+
+Exits:
+
+Stop-Loss: If use_sl=true, set at 2% below/above entry price.
+Take-Profit: If use_tp=true, set at 5% above/below entry price.
+
+
+Pyramiding: Up to 3 concurrent positions allowed.
+
+h. Visualization
+
+Nash Bands: Orange (mean), red (upper), green (lower).
+Background Colors:
+
+Herd buying: Red (90% transparency).
+Herd selling: Green.
+Institutional volume: Blue.
+
+
+Signals:
+
+Contrarian buy/sell: Green/red triangles below/above bars.
+Liquidity traps: Red/green crosses above/below bars.
+
+
+Tables:
+
+Game Theory Table (Top-Right):
+
+Herd Behavior: Buying frenzy, selling panic, or normal.
+Institutional Flow: Accumulation, distribution, or neutral.
+Nash Equilibrium: In equilibrium, above, or below.
+Liquidity Status: Trap detected or safe.
+Position Suggestion: Long (green), Short (red), or Wait (gray).
+
+
+Backtest Table (Bottom-Right):
+
+Total Trades: Number of closed trades.
+Win Rate: Percentage of winning trades.
+Net Profit/Loss: In USD, colored green/red.
+Profit Factor: Gross profit / gross loss.
+Max Drawdown: Peak-to-trough equity drop (%).
+Win/Loss Trades: Number of winning/losing trades.
+Risk/Reward Ratio: Simplified Sharpe ratio (returns / drawdown).
+Avg Win/Loss Ratio: Average win per trade / average loss per trade.
+Last Update: Current time.
+
+
+
+
+
+i. Backtesting Metrics
+
+Tracks:
+
+Total trades, winning/losing trades.
+Win rate (%).
+Net profit ($).
+Profit factor (gross profit / gross loss).
+Max drawdown (%).
+Simplified Sharpe ratio (returns / drawdown).
+Average win/loss ratio.
+
+
+Updates metrics on each closed trade.
+Displays a label on the last bar with backtest period, total trades, win rate, and net profit.
+
+j. Alerts
+
+No explicit alertconditions defined, but you can add them for long_signal and short_signal (e.g., alertcondition(long_signal, "GT Long Entry", "Long Signal Detected!")).
+Use TradingView's alert system with Strategy Tester outputs.
+
+3. Usage Tips
+
+Timeframe: Best for H1-D1 timeframes. Shorter frames (M1-M15) may produce noisy signals.
+Settings:
+
+Risk Management: Adjust sl_percent (e.g., 1% for volatile markets) and tp_percent (e.g., 3% for scalping).
+Herd Threshold: Increase to 2.5 for stricter herd detection in choppy markets.
+Liquidity Lookback: Reduce to 20 for faster markets (e.g., crypto).
+Nash Period: Increase to 200 for longer-term analysis.
+
+
+Backtesting:
+
+Use TradingView's Strategy Tester to evaluate performance.
+Check win rate (>50%), profit factor (>1.5), and max drawdown (<20%) for viability.
+Test on different assets/timeframes to ensure robustness.
+
+
+Live Trading:
+
+Start with a demo account.
+Combine with other indicators (e.g., EMAs, support/resistance) for confirmation.
+Monitor liquidity traps and institutional flow for context.
+
+
+Risk Management:
+
+Always use SL/TP to limit losses.
+Adjust position_size for risk tolerance (e.g., 5% of equity for conservative trading).
+Avoid over-leveraging (pyramiding=3 can amplify risk).
+
+
+Troubleshooting:
+
+If no trades are executed, check signal conditions (e.g., lower herd_threshold or liquidity_sensitivity).
+Ensure sufficient historical data for Nash and liquidity calculations.
+If tables overlap, adjust position.top_right/bottom_right coordinates.
+
+
+
+4. Key Differences from the Previous Indicator
+
+Indicator vs. Strategy: The previous code was an indicator (VP + Game Theory Integrated Strategy) focused on visualization and alerts. This is a strategy with automated entries/exits and backtesting.
+Volume Profile: Absent in this strategy, making it lighter but less focused on high-volume zones.
+Wick Analysis: Not included here, unlike the previous indicator's heavy reliance on wick patterns.
+Backtesting: This strategy includes detailed performance metrics and a backtest table, absent in the indicator.
+Simpler Signals: Focuses on Game Theory signals (contrarian, momentum, Nash reversion) without the "Power/Ultra Power" hierarchy.
+Risk Management: Explicit SL/TP and dynamic position sizing, not present in the indicator.
+
+5. Conclusion
+The "Game Theory Trading Strategy" is a sophisticated system leveraging herd behavior, institutional flows, liquidity traps, and Nash equilibrium to trade market inefficiencies. It’s designed for traders who understand Game Theory principles and want automated execution with robust risk management. However, it requires thorough backtesting and parameter optimization for specific markets (e.g., forex, crypto, stocks). The backtest table and visual aids make it easy to monitor performance, but always combine with other analysis tools and proper capital management.
+If you need help with backtesting, adding alerts, or optimizing parameters, let me know!

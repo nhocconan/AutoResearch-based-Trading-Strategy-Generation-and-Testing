@@ -1,0 +1,82 @@
+//@version=5
+strategy("单因子指数增强", overlay=true, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ==========================================
+// 1. 核心参数
+// ==========================================
+tf_macro     = input.timeframe("D", "宏观趋势周期", tooltip="建议用 D 或 4H 过滤大方向")
+ma_s_len     = input.int(60, "短均线周期", group="均线底座")
+ma_l_len     = input.int(100, "长均线周期", group="均线底座")
+conf_bars    = input.int(15, "假突破确认(K线)", group="均线底座", tooltip="金叉/死叉需持续 N 根 K 线才生效")
+
+z_len        = input.int(24, "Z-Score 周期", group="进攻引擎")
+z_entry      = input.float(-2.1, "入场阈值", step=0.1, group="进攻引擎")
+z_exit       = input.float(1.1, "止盈阈值", step=0.1, group="进攻引擎")
+
+// 新增：每笔最大回撤阈值 (止损)
+stop_loss_pct = input.float(3.0, "每笔最大回撤止损 (%)", step=0.1, group="风控设置", tooltip="若价格跌破开仓均价的此百分比，强行止损")
+
+// ==========================================
+// 2. 趋势底座逻辑
+// ==========================================
+[m_ma_s, m_ma_l] = request.security(syminfo.tickerid, tf_macro, [ta.sma(close, ma_s_len), ta.sma(close, ma_l_len)], lookahead=barmerge.lookahead_on)
+
+macro_bull_raw = m_ma_s > m_ma_l
+var int bull_conf_cnt = 0
+bull_conf_cnt := macro_bull_raw ? bull_conf_cnt + 1 : 0
+bull_regime = bull_conf_cnt >= conf_bars
+
+// ==========================================
+// 3. Z-Score 引擎计算
+// ==========================================
+p_mean = ta.sma(close, z_len)
+p_std  = ta.stdev(close, z_len)
+z_val  = (close - p_mean) / math.max(p_std, 0.0001)
+
+// ==========================================
+// 4. 执行逻辑与 3% 止损判断
+// ==========================================
+var bool is_long = false
+
+// 止损逻辑计算
+// strategy.position_avg_price 会自动记录当前持仓的平均入场价
+float stop_price = strategy.position_avg_price * (1 - stop_loss_pct / 100)
+bool is_stop_loss = strategy.position_size > 0 and close < stop_price
+
+// 入场条件
+if bull_regime and z_val < z_entry
+    is_long := true
+
+// 出场逻辑 (三重判定)
+// 1. 达到 Z-Score 盈利目标
+// 2. 宏观趋势反转 (死叉)
+// 3. 触发 3% 硬止损
+if z_val > z_exit or not bull_regime or is_stop_loss
+    is_long := false
+
+// 全仓执行
+if is_long and strategy.position_size == 0
+    strategy.entry("All-in Long", strategy.long, comment="圣杯入场")
+
+if not is_long and strategy.position_size > 0
+    // 自动判定出场评论，方便回测分析
+    string exit_msg = is_stop_loss ? "3%硬止损" : (not bull_regime ? "死叉清仓" : "止盈出场")
+    strategy.close_all(comment=exit_msg)
+
+// ==========================================
+// 5. 视觉可视化
+// ==========================================
+// 绘制入场后的止损线（仅在持仓时显示）
+plot(strategy.position_size > 0 ? stop_price : na, "实时止损线", color=color.red, style=plot.style_linebr, linewidth=2)
+
+plot(m_ma_s, "宏观短均线", color=color.new(color.blue, 30), linewidth=2)
+plot(m_ma_l, "宏观长均线", color=color.new(color.orange, 30), linewidth=2)
+
+bgcolor(bull_regime ? color.new(color.green, 96) : color.new(color.red, 96))
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 80) : na)
+
+View in Pine Editor・76 lines
+Use on chart
+7
+194
+An index enhancement strategy based on the 're-entry' factor, utilizing a captured past uptrend from the BTC 1H training market.

@@ -1,0 +1,29 @@
+//@version=5
+strategy("Smooth VWMA scalping contrarian", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+length1 = input(5, title = "Length1")
+length2 = input(200, title = "Length2")
+length3 = input(20, title = "Stop length")
+vwma1 = ta.vwma(ta.sma(close,5), length1)
+vwma2 = ta.vwma(ta.sma(close,5), length2)
+vwma3 = ta.vwma(ta.sma(close, 5), length3)
+plot(vwma1)
+plot(vwma2, color = color.white)
+if ta.crossover(vwma1, vwma2)
+    strategy.entry("Short", strategy.short)
+if ta.crossunder(vwma1, vwma3)
+    strategy.close("Short")
+if ta.crossunder(vwma1, vwma2)
+    strategy.entry("Long", strategy.long)
+if ta.crossover(vwma1, vwma3)
+    strategy.close("Long")
+
+View in Pine Editor・21 lines
+Use on chart
+2
+4
+8
+1
+11 319
+Uses the 5 period and 10 period VMWAs that have been smoothed with a 5 period SMA of the close price. Normally, a short crossover long formation signals a buy signal, but as scalpers know, the 1 minute chart moves so fast and with so much volatility that lagging indicators get wrecked by the market. According, this strategy operates under the assumption that by the time this lagging indicator makes a signal, the price is ready to reverse. Losses are taken swiftly in the case of a continuation pattern. This indicator averages a 55-65% profitable rate and is almost always a positive P/L on the 1 minute chart of the most commonly traded assets.
+
+Of course, there may be validity for this indicator outside the 1 minute chart, but I have found such success to be very limited. Accordingly, use this indicator on SPY, TQQQ, TSLA, AMZN, and major cryptos on the 1 min chart.

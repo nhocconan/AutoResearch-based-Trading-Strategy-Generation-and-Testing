@@ -1,0 +1,215 @@
+//@version=6
+strategy("BTC Trading Robot", overlay=true, pyramiding=1, initial_capital=100000)
+
+//============== Input Groups ==============//
+// Trading Profile
+group_trading = "BTC"
+systemType = input.int(1, title="Trading System (1:BTC)", group=group_trading)
+
+// Common Trading Inputs
+group_common = "Trading Inputs"
+RiskPercent   = input.float(4.0, title="Risk as % of trading capital", group=group_common)
+TradeComment  = input.string("BTC trading robot", title="Trade Comment", group=group_common)
+SHInput       = input.int(0, title="Start Hour (0 = no filter)", group=group_common)
+EHInput       = input.int(0, title="End Hour (0 = no filter)", group=group_common)
+
+// Gold Related Inputs
+group_BTC = "BTC Related Input"
+TPasPctBTC         = input.float(0.2, title="TP as % of Price", group=group_BTC)
+SLasPctBTC         = input.float(0.1, title="SL as % of Price", group=group_BTC)
+TSLasPctofTPBTC   = input.float(5.0, title="Trail SL as % of TP", group=group_BTC)
+TSLTgrasPctofTPBTC = input.float(7.0, title="Trail Tgra  SL as % of TP", group=group_BTC)
+
+// Other parameters
+BarsN = 5
+OrderDistPoints = 100.0
+
+//============== Calculate Trade Parameters ==============//
+var float Tppoints = 0.0
+var float Slpoints = 0.0
+var float TslTriggerPoints = 0.0
+var float TslPoints = 0.0
+
+price = close
+
+// Adjust parameters based on system type (using 1 for Gold)
+if systemType == 1
+    Tppoints := price * TPasPctBTC
+    Slpoints := price * SLasPctBTC
+    OrderDistPoints := Tppoints / 2.0
+    TslPoints := Tppoints * TSLTgrasPctofTPBTC / 100.0
+    TslTriggerPoints := Tppoints * TSLTgrasPctofTPBTC / 100.0
+
+//============== Time Filter ==============//
+currentHour = hour(time)
+inSession = true
+if SHInput != 0 and currentHour < SHInput
+    inSession := false
+if EHInput != 0 and currentHour >= EHInput
+    inSession := false
+
+//============== Find Local High and Low ==============//
+localHigh = ta.highest(high, BarsN * 2 + 1)
+localLow  = ta.lowest(low,  BarsN * 2 + 1)
+
+//============== Entry Orders ==============//
+if inSession and strategy.position_size == 0
+    // For a BuyStop order: only submit if current price is less than the desired entry level minus a buffer.
+    if price < localHigh - OrderDistPoints * syminfo.mintick
+        strategy.order("BuyStop", strategy.long, stop=localHigh, comment="BuyStop")
+    // For a SellStop order: only submit if current price is greater than the desired entry level plus a buffer.
+    if price > localLow + OrderDistPoints * syminfo.mintick
+        strategy.order("SellStop", strategy.short, stop=localLow, comment="SellStop")
+    
+//============== Trailing Stop Logic ==============//
+if strategy.position_size > 0  // Long positions
+    longProfit = price - strategy.position_avg_price
+    if longProfit > TslTriggerPoints * syminfo.mintick
+        strategy.exit("Long Exit", from_entry="BuyStop", stop=price - TslPoints * syminfo.mintick, limit=strategy.position_avg_price + Tppoints * syminfo.mintick)
+        
+if strategy.position_size < 0  // Short positions
+    shortProfit = strategy.position_avg_price - price
+    if shortProfit > TslTriggerPoints * syminfo.mintick
+        strategy.exit("Short Exit", from_entry="SellStop", stop=price + TslPoints * syminfo.mintick, limit=strategy.position_avg_price - Tppoints * syminfo.mintick)
+View in Pine Editor・73 lines
+Use on chart
+1
+8
+2
+4 043
+Apr 5, 2025
+Overview
+This Pine Script strategy is designed for trading Bitcoin (BTC) by placing pending orders (BuyStop and SellStop) based on local price extremes. The script also implements a trailing stop mechanism to protect profits once a position becomes sufficiently profitable.
+________________________________________
+Inputs and Parameter Setup
+1. Trading Profile:
+o The strategy is set up specifically for BTC trading.
+o The systemType input is set to 1, which means the strategy will calculate trade parameters using the BTC-specific inputs.
+2. Common Trading Inputs:
+o Risk Parameters: Although RiskPercent is defined, its actual use (e.g., for position sizing) isn’t implemented in this version.
+o Trading Hours Filter:
+ SHInput and EHInput let you restrict trading to a specific hour range. If these are set (non-zero), orders will only be placed during the allowed hours.
+3. BTC-Specific Inputs:
+o Take Profit (TP) and Stop Loss (SL) Percentages:
+ TPasPctBTC and SLasPctBTC are used to determine the TP and SL levels as a percentage of the current price.
+o Trailing Stop Parameters:
+ TSLasPctofTPBTC and TSLTgrasPctofTPBTC determine when and by how much a trailing stop is applied, again as percentages of the TP.
+4. Other Parameters:
+o BarsN is used to define the window (number of bars) over which the local high and low are calculated.
+o OrderDistPoints acts as a buffer to prevent the entry orders from being triggered too early.
+________________________________________
+Trade Parameter Calculation
+• Price Reference:
+o The strategy uses the current closing price as the reference for calculations.
+• Calculation of TP and SL Levels:
+o If the systemType is set to BTC (value 1), then:
+ Take Profit Points (Tppoints) are calculated by multiplying the current price by TPasPctBTC.
+ Stop Loss Points (Slpoints) are calculated similarly using SLasPctBTC.
+ A buffer (OrderDistPoints) is set to half of the take profit points.
+ Trailing Stop Levels:
+ TslPoints is calculated as a fraction of the TP (using TSLTgrasPctofTPBTC).
+ TslTriggerPoints is similarly determined, which sets the profit level at which the trailing stop will start to activate.
+________________________________________
+Time Filtering
+• Session Control:
+o The current hour is compared against SHInput (start hour) and EHInput (end hour).
+o If the current time falls outside the allowed window, the script will not place any new orders.
+________________________________________
+Entry Orders
+• Local Price Extremes:
+o The strategy calculates a local high and local low using a window of BarsN * 2 + 1 bars.
+• Placing Stop Orders:
+o BuyStop Order:
+ A long entry is triggered if the current price is less than the local high minus the order distance buffer.
+ The BuyStop order is set to trigger at the level of the local high.
+o SellStop Order:
+ A short entry is triggered if the current price is greater than the local low plus the order distance buffer.
+ The SellStop order is set to trigger at the level of the local low.
+Note: Orders are only placed if there is no current open position and if the session conditions are met.
+________________________________________
+Trailing Stop Logic
+Once a position is open, the strategy monitors profit levels to protect gains:
+• For Long Positions:
+o The script calculates the profit as the difference between the current price and the average entry price.
+o If this profit exceeds the TslTriggerPoints threshold, a trailing stop is applied by placing an exit order.
+o The stop price is set at a distance below the current price, while a limit (profit target) is also defined.
+• For Short Positions:
+o The profit is calculated as the difference between the average entry price and the current price.
+o A similar trailing stop exit is applied if the profit exceeds the trigger threshold.
+________________________________________
+Summary
+In essence, this strategy works by:
+• Defining entry levels based on recent local highs and lows.
+• Placing pending stop orders to enter the market when those levels are breached.
+• Filtering orders by time, ensuring trades are only taken during specified hours.
+• Implementing a trailing stop mechanism to secure profits once the trade moves favorably.
+This approach is designed to automate BTC trading based on price action and dynamic risk management, although further enhancements (like dynamic position sizing based on RiskPercent) could be added for a more complete risk management system.
+
+Apr 5, 2025
+Release Notes
+Overview
+BTC Trading Robot is designed for trading Bitcoin (BTC) by placing pending orders (BuyStop and SellStop) based on local price extremes. The script also implements a trailing stop mechanism to protect profits once a position becomes sufficiently profitable.
+________________________________________
+Inputs and Parameter Setup
+1. Trading Profile:
+o The strategy is set up specifically for BTC trading.
+o The systemType input is set to 1, which means the strategy will calculate trade parameters using the BTC-specific inputs.
+2. Common Trading Inputs:
+o Risk Parameters: Although RiskPercent is defined, its actual use (e.g., for position sizing) isn’t implemented in this version.
+o Trading Hours Filter:
+ SHInput and EHInput let you restrict trading to a specific hour range. If these are set (non-zero), orders will only be placed during the allowed hours.
+3. BTC-Specific Inputs:
+o Take Profit (TP) and Stop Loss (SL) Percentages:
+ TPasPctBTC and SLasPctBTC are used to determine the TP and SL levels as a percentage of the current price.
+o Trailing Stop Parameters:
+ TSLasPctofTPBTC and TSLTgrasPctofTPBTC determine when and by how much a trailing stop is applied, again as percentages of the TP.
+4. Other Parameters:
+o BarsN is used to define the window (number of bars) over which the local high and low are calculated.
+o OrderDistPoints acts as a buffer to prevent the entry orders from being triggered too early.
+________________________________________
+Trade Parameter Calculation
+• Price Reference:
+o The strategy uses the current closing price as the reference for calculations.
+• Calculation of TP and SL Levels:
+o If the systemType is set to BTC (value 1), then:
+ Take Profit Points (Tppoints) are calculated by multiplying the current price by TPasPctBTC.
+ Stop Loss Points (Slpoints) are calculated similarly using SLasPctBTC.
+ A buffer (OrderDistPoints) is set to half of the take profit points.
+ Trailing Stop Levels:
+ TslPoints is calculated as a fraction of the TP (using TSLTgrasPctofTPBTC).
+ TslTriggerPoints is similarly determined, which sets the profit level at which the trailing stop will start to activate.
+________________________________________
+Time Filtering
+• Session Control:
+o The current hour is compared against SHInput (start hour) and EHInput (end hour).
+o If the current time falls outside the allowed window, the script will not place any new orders.
+________________________________________
+Entry Orders
+• Local Price Extremes:
+o The strategy calculates a local high and local low using a window of BarsN * 2 + 1 bars.
+• Placing Stop Orders:
+o BuyStop Order:
+ A long entry is triggered if the current price is less than the local high minus the order distance buffer.
+ The BuyStop order is set to trigger at the level of the local high.
+o SellStop Order:
+ A short entry is triggered if the current price is greater than the local low plus the order distance buffer.
+ The SellStop order is set to trigger at the level of the local low.
+Note: Orders are only placed if there is no current open position and if the session conditions are met.
+________________________________________
+Trailing Stop Logic
+Once a position is open, the strategy monitors profit levels to protect gains:
+• For Long Positions:
+o The script calculates the profit as the difference between the current price and the average entry price.
+o If this profit exceeds the TslTriggerPoints threshold, a trailing stop is applied by placing an exit order.
+o The stop price is set at a distance below the current price, while a limit (profit target) is also defined.
+• For Short Positions:
+o The profit is calculated as the difference between the average entry price and the current price.
+o A similar trailing stop exit is applied if the profit exceeds the trigger threshold.
+________________________________________
+Summary
+In essence, this strategy works by:
+• Defining entry levels based on recent local highs and lows.
+• Placing pending stop orders to enter the market when those levels are breached.
+• Filtering orders by time, ensuring trades are only taken during specified hours.
+• Implementing a trailing stop mechanism to secure profits once the trade moves favorably.
+This approach is designed to automate BTC trading based on price action and dynamic risk management, although further enhancements (like dynamic position sizing based on RiskPercent) could be added for a more complete risk management system.

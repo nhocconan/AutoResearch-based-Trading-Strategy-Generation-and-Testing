@@ -1,0 +1,9 @@
+//@version=4
+overbought=##input(defval=70,type='INPUT_INTEGER',##id='in_1')
+oversold=##input(defval=30,type='INPUT_INTEGER',##id='in_2')
+stochOverbought=##input(defval=80,type='INPUT_INTEGER',##id='in_5')
+stochOversold=##input(defval=20,type='INPUT_INTEGER',##id='in_6')
+##root(root_metainfo,rm_0,overbought,input__float)
+##root(root_metainfo,rm_1,oversold,input__float)
+##root(root_metainfo,rm_2,stochOverbought,input__float)
+##root(root_metainfo,rm_3,stochOversold,input__float)

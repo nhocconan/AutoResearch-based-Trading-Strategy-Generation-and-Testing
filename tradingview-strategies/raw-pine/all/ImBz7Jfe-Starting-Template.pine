@@ -1,0 +1,41 @@
+//@version=2
+strategy("Tester", pyramiding = 50, default_qty_type = strategy.cash, default_qty_value = 20, initial_capital = 2000, commission_type = strategy.commission.percent, commission_value = 0.25)
+
+minGainPercent = input(0.6)
+gainMultiplier = minGainPercent * 0.01 + 1
+
+
+longCondition = crossover(sma(close, 14), sma(close, 28))
+shortCondition = crossunder(sma(close, 14), sma(close, 28))
+
+
+avg_protection = input(1)
+gain_protection = input(1)
+
+
+strategy.entry("Buy", strategy.long, when = longCondition and time > timestamp(2017, 10, 09, 04, 20)  and (avg_protection >= 1 ? (na(strategy.position_avg_price) ? true : close <= strategy.position_avg_price) : true))
+strategy.close_all(when = shortCondition and time > timestamp(2017, 10, 09, 04, 20) and (gain_protection >=1 ? (close >= gainMultiplier * strategy.position_avg_price) : true))
+
+View in Pine Editor・17 lines
+Use on chart
+6
+8
+1
+4 085
+This script sets defaults that I like to start with:
+
+Trade commission set to 0.25%
+
+Allow multiple buys before sells
+
+Fixed trade size
+
+
+
+Also included are setting a minimum desired gain (change gain_protection to 0 if you want to sell regardless of your gain), and buying only if it will reduce your average bought price (change avg_protection to 0 to turn this feature off).
+
+This strategy only takes long positions since Gunbot does not make short positions.
+
+We also start the backtesting at a specific time, to avoid going over the maximum of 2000 trades. Especially helpful when trying to tune a high frequency strategy, or when comparing the efficacy of a strategy on candlesticks with different time periods (this is why I did not use max bars back).
+
+Cheers!

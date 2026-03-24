@@ -1,0 +1,869 @@
+//@version=5
+strategy("ETH Momentum Breakout v15.0",
+     shorttitle   = "ETH Breakout v15",
+     overlay      = true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 100,
+     initial_capital    = 10000,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.1,
+     slippage           = 2,
+     pyramiding         = 0,
+     calc_on_every_tick = false,
+     process_orders_on_close = false)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS — tuned for 2H timeframe
+// ═══════════════════════════════════════════════════════════════
+
+// --- Direction ---
+GRP_DIR     = "Direction"
+dirMode     = input.string("Long Only", "Trade Direction", options=["Long Only", "Short Only", "Both"], group=GRP_DIR)
+
+// --- Regime Filter ---
+GRP_REG     = "Regime Filter"
+useRegime   = input.bool(true, "Enable Regime Filter", group=GRP_REG)
+regimeTF    = input.timeframe("D", "Regime Timeframe", group=GRP_REG)
+
+useAdxFilter = input.bool(false, "ADX Filter", group=GRP_REG,
+                 tooltip="OFF by default — squeeze detection already handles consolidation filtering")
+adxDiLen    = input.int(14, "ADX DI Length", minval=5, group=GRP_REG)
+adxSmooth   = input.int(14, "ADX Smoothing", minval=5, group=GRP_REG)
+adxMin      = input.float(18.0, "Min ADX", step=1.0, minval=0.0, group=GRP_REG)
+adxMax      = input.float(40.0, "Max ADX", step=1.0, minval=0.0, group=GRP_REG)
+
+useEmaDistFilter = input.bool(true, "EMA Distance Filter", group=GRP_REG)
+emaDistLen  = input.int(200, "Long-term EMA Length", minval=50, group=GRP_REG)
+emaDistMax  = input.float(35.0, "Max Distance From EMA %", step=1.0, minval=5.0, group=GRP_REG)
+
+useVolRegime = input.bool(true, "Volatility Regime Filter", group=GRP_REG)
+volRegimeLen = input.int(100, "Vol History Length", minval=20, group=GRP_REG)
+volRegimeMax = input.float(2.0, "Max Vol Ratio", step=0.1, minval=1.0, group=GRP_REG)
+volRegimeMin = input.float(0.4, "Min Vol Ratio", step=0.1, minval=0.0, maxval=1.0, group=GRP_REG)
+
+// --- HTF Trend Filter ---
+GRP_TREND   = "Trend Filter"
+useTrend    = input.bool(true, "Enable HTF Trend Filter", group=GRP_TREND)
+trendTF     = input.timeframe("60", "Trend Timeframe", group=GRP_TREND,
+                 tooltip="1H micro-trend on 2H chart — responsive, granular trend confirmation")
+trendEmaLen = input.int(50, "Trend EMA Length", minval=10, group=GRP_TREND)
+trendAtrLen = input.int(14, "Trend ATR Length", minval=5, group=GRP_TREND)
+trendAtrMul = input.float(0.5, "EMA Buffer (ATR x)", step=0.1, group=GRP_TREND)
+useSlope    = input.bool(true, "Require EMA Slope Confirmation", group=GRP_TREND)
+slopeBars   = input.int(5, "Slope Lookback (HTF bars)", minval=1, maxval=20, group=GRP_TREND)
+
+// --- Squeeze Detection ---
+GRP_SQZ     = "Squeeze Detection"
+bbLen       = input.int(20, "BB Length", minval=5, group=GRP_SQZ)
+bbMult      = input.float(2.0, "BB Multiplier", step=0.1, group=GRP_SQZ)
+kcLen       = input.int(20, "KC Length", minval=5, group=GRP_SQZ)
+kcMult      = input.float(1.5, "KC Multiplier", step=0.1, group=GRP_SQZ)
+sqzMaxBars  = input.int(6, "Max Bars After Squeeze", minval=1, maxval=20, group=GRP_SQZ)
+sqzMinBars  = input.int(3, "Min Squeeze Duration (bars)", minval=1, maxval=50, group=GRP_SQZ,
+                 tooltip="3 bars on 2H = 6 hours of compression")
+
+// --- Breakout Quality ---
+GRP_BRK     = "Breakout Quality"
+brkMargin   = input.float(0.3, "Breakout Margin (ATR x)", step=0.05, minval=0.0, group=GRP_BRK)
+minBodyPct  = input.float(40.0, "Min Candle Body %", step=5.0, minval=0.0, maxval=100.0, group=GRP_BRK)
+
+// --- RSI Extreme Filter ---
+GRP_RSI     = "RSI Filter"
+useRsiFilter = input.bool(true, "Enable RSI Extreme Filter", group=GRP_RSI,
+                 tooltip="Prevents entries at overbought/oversold extremes where reversals are likely")
+rsiLen      = input.int(14, "RSI Length", minval=5, maxval=50, group=GRP_RSI)
+rsiOBLevel  = input.float(75.0, "Overbought Level (skip longs above)", step=1.0, minval=60.0, maxval=95.0, group=GRP_RSI)
+rsiOSLevel  = input.float(25.0, "Oversold Level (skip shorts below)", step=1.0, minval=5.0, maxval=40.0, group=GRP_RSI)
+
+// --- Failed Breakout Exit ---
+GRP_FAILBRK = "Failed Breakout Exit"
+useFailBrk  = input.bool(false, "Enable Failed Breakout Exit", group=GRP_FAILBRK,
+                 tooltip="OFF by default — v7 data showed this cost $4,565 on longs. BE stop handles failures better.")
+failBrkBars = input.int(3, "Check Within (bars)", minval=1, maxval=10, group=GRP_FAILBRK)
+failBrkRef  = input.string("Entry Price", "Exit Below", options=["BB Upper", "BB Basis", "Entry Price"], group=GRP_FAILBRK,
+                 tooltip="Entry Price is safest — only exits true reversals, not normal pullbacks")
+
+// --- Volume ---
+GRP_VOL     = "Volume Filter"
+volLen      = input.int(20, "Volume SMA Length", minval=5, group=GRP_VOL)
+volMult     = input.float(1.8, "Spike Multiplier", step=0.1, minval=1.0, group=GRP_VOL)
+
+// --- Momentum ---
+GRP_MOM     = "Momentum"
+momLen      = input.int(12, "Momentum Length", minval=1, group=GRP_MOM)
+momThresh   = input.float(0.0, "Momentum Threshold", step=0.1, group=GRP_MOM)
+
+// --- Risk Management ---
+GRP_RISK    = "Risk Management"
+atrLen      = input.int(14, "ATR Length", minval=1, group=GRP_RISK)
+slMult      = input.float(2.0, "Stop Loss (ATR x)", step=0.1, group=GRP_RISK)
+usePartialTP = input.bool(true, "Enable Partial Take-Profit", group=GRP_RISK,
+                 tooltip="Take profit at TP1 on a portion, let remainder ride to TP2 with tighter trail")
+tp1Mult     = input.float(1.5, "TP1 (ATR x) — Partial Exit", step=0.1, group=GRP_RISK)
+tp1Pct      = input.float(50.0, "TP1 Exit %", step=5.0, minval=10.0, maxval=90.0, group=GRP_RISK)
+tp2Mult     = input.float(3.5, "TP2 (ATR x) — Final Exit", step=0.1, group=GRP_RISK)
+useTrail    = input.bool(true, "Enable Trailing Stop", group=GRP_RISK)
+trailMult   = input.float(2.5, "Trail Distance (ATR x)", step=0.1, group=GRP_RISK)
+trailTightMult = input.float(1.5, "Trail After Partial (ATR x)", step=0.1, group=GRP_RISK,
+                 tooltip="Tighter trail after first profit locked in")
+useRunnerMode  = input.bool(true, "Runner Mode (trail-only after TP1)", group=GRP_RISK,
+                 tooltip="After partial TP1 profit is taken, removes the TP2 ceiling — remaining position rides the trail indefinitely. Captures big multi-day trends.")
+runnerTrailBars = input.int(8, "Runner Structure Trail (N-bar low)", minval=2, maxval=20, group=GRP_RISK,
+                 tooltip="After TP1, also trail using the N-bar low. Adapts to market structure — tighter in smooth trends, wider in volatile ones. 8 bars = 16h on 2H.")
+
+// --- Breakeven Stop ---
+GRP_BE      = "Breakeven Stop"
+useBE       = input.bool(true, "Enable Breakeven Stop", group=GRP_BE)
+beThresh    = input.float(1.2, "Activate After (ATR x)", step=0.1, minval=0.1, group=GRP_BE)
+beOffset    = input.float(0.2, "BE Offset (ATR x)", step=0.05, group=GRP_BE,
+                 tooltip="0.2 ATR buffer above entry — wider than v7 to survive 2H bar noise")
+
+// --- Trade Management ---
+GRP_MGMT    = "Trade Management"
+cooldownLen = input.int(12, "Cooldown Bars After Exit", minval=0, maxval=100, group=GRP_MGMT)
+useSmartCool = input.bool(true, "Smart Cooldown (faster after runners)", group=GRP_MGMT,
+                 tooltip="Halves cooldown after a runner trade exits — re-enter trending markets faster")
+minAtrPerc  = input.float(0.3, "Min ATR % of Price", step=0.05, minval=0.0, group=GRP_MGMT)
+maxBarsInTrade = input.int(100, "Max Bars In Trade (0=off)", minval=0, maxval=500, group=GRP_MGMT,
+                 tooltip="100 bars on 2H = ~8 days. Only applies to trades that haven't hit TP1. Runner mode trades have no timeout.")
+useStagnation  = input.bool(true, "Enable Stagnation Exit", group=GRP_MGMT)
+stagnBars   = input.int(10, "Stagnation Check After (bars)", minval=5, maxval=100, group=GRP_MGMT,
+                 tooltip="10 bars on 2H = 20 hours. Tightened from v10 (15) — stagnation trades never recover, cut sooner to free capital")
+stagnThresh = input.float(0.5, "Min Progress (ATR x)", step=0.1, minval=0.0, group=GRP_MGMT)
+
+// --- Crypto Fundamentals ---
+GRP_FUND    = "Crypto Fundamentals"
+useFund     = input.bool(false, "Enable Fundamental Filters", group=GRP_FUND)
+addrTicker  = input.string("INTOTHEBLOCK:ETH_ACTIVEADDRESSES", "Active Addresses", group=GRP_FUND)
+lgTxTicker  = input.string("INTOTHEBLOCK:ETH_LARGETXCOUNT",    "Large Tx Count",   group=GRP_FUND)
+sentTicker  = input.string("INTOTHEBLOCK:ETH_SENTIMENT",       "Sentiment",        group=GRP_FUND)
+fundTF      = input.timeframe("D", "Fundamental Timeframe", group=GRP_FUND)
+fundSmaLen  = input.int(14, "Fundamental SMA Length", minval=3, group=GRP_FUND)
+sentBull    = input.float(55.0, "Bullish Sentiment Threshold", minval=0, maxval=100, step=1.0, group=GRP_FUND)
+
+// --- Adaptive Regime (ML-lite) ---
+GRP_ADAPT   = "Adaptive Regime"
+useAdaptive = input.bool(true, "Enable Adaptive Parameters", group=GRP_ADAPT,
+                 tooltip="Classifies market into Hot/Normal/Cold regimes at entry time and scales TP, SL, trail, and TP1% accordingly.")
+adaptVolLen = input.int(100, "Vol Rank Lookback", minval=20, maxval=500, group=GRP_ADAPT)
+adaptTrendLen = input.int(50, "Trend EMA Length", minval=10, maxval=200, group=GRP_ADAPT)
+hotVolThresh = input.float(60.0, "Hot: Min Vol Percentile", step=5.0, minval=30.0, maxval=90.0, group=GRP_ADAPT,
+                 tooltip="Volatility must be above this percentile to qualify as Hot regime.")
+hotTrendThresh = input.float(1.5, "Hot: Min Trend Score (ATR)", step=0.1, minval=0.5, maxval=5.0, group=GRP_ADAPT,
+                 tooltip="Price distance from trend EMA in ATR units. >1.5 means strong trend.")
+coldVolThresh = input.float(30.0, "Cold: Max Vol Percentile", step=5.0, minval=10.0, maxval=60.0, group=GRP_ADAPT)
+coldTrendThresh = input.float(0.5, "Cold: Max Trend Score (ATR)", step=0.1, minval=0.1, maxval=2.0, group=GRP_ADAPT,
+                 tooltip="Price near the EMA with low vol = ranging market.")
+hotScale    = input.float(1.35, "Hot: Parameter Scale", step=0.05, minval=1.0, maxval=2.0, group=GRP_ADAPT,
+                 tooltip="TP/SL/Trail multiplied by this in hot regimes. 1.35 = 35% wider targets.")
+coldScale   = input.float(0.75, "Cold: Parameter Scale", step=0.05, minval=0.3, maxval=1.0, group=GRP_ADAPT,
+                 tooltip="TP/SL/Trail multiplied by this in cold regimes. 0.75 = 25% tighter targets.")
+hotTP1Pct   = input.float(35.0, "Hot: TP1 Exit %", step=5.0, minval=10.0, maxval=80.0, group=GRP_ADAPT,
+                 tooltip="In hot regimes, take LESS at TP1 — let more ride the runner.")
+coldTP1Pct  = input.float(60.0, "Cold: TP1 Exit %", step=5.0, minval=20.0, maxval=90.0, group=GRP_ADAPT,
+                 tooltip="In cold regimes, take MORE at TP1 — lock profit before chop erodes it.")
+
+// --- Session ---
+GRP_TIME    = "Session Filter"
+useSess     = input.bool(false, "Enable Session Filter", group=GRP_TIME)
+sess        = input.session("0800-2000", "Session (Exchange TZ)", group=GRP_TIME)
+
+// ═══════════════════════════════════════════════════════════════
+// DIRECTION FLAGS
+// ═══════════════════════════════════════════════════════════════
+
+allowLong  = dirMode == "Long Only" or dirMode == "Both"
+allowShort = dirMode == "Short Only" or dirMode == "Both"
+
+// ═══════════════════════════════════════════════════════════════
+// REGIME FILTER
+// ═══════════════════════════════════════════════════════════════
+
+f_adx(diLen, smooth) =>
+    [_p, _m, adxVal] = ta.dmi(diLen, smooth)
+    adxVal
+
+f_atrRatio(atrL, histL) =>
+    curAtr = ta.atr(atrL)
+    avgAtr = ta.sma(curAtr, histL)
+    avgAtr > 0 ? curAtr / avgAtr : 1.0
+
+regimeAdx      = request.security(syminfo.tickerid, regimeTF, f_adx(adxDiLen, adxSmooth))
+regimeLtEma    = request.security(syminfo.tickerid, regimeTF, ta.ema(close, emaDistLen))
+regimeVolRatio = request.security(syminfo.tickerid, regimeTF, f_atrRatio(14, volRegimeLen))
+
+emaDist = regimeLtEma > 0 ? math.abs(close - regimeLtEma) / regimeLtEma * 100.0 : 0.0
+
+adxOk     = not useRegime or not useAdxFilter     or (not na(regimeAdx) and regimeAdx >= adxMin and regimeAdx <= adxMax)
+emaDistOk = not useRegime or not useEmaDistFilter  or emaDist <= emaDistMax
+volRegOk  = not useRegime or not useVolRegime      or (not na(regimeVolRatio) and regimeVolRatio >= volRegimeMin and regimeVolRatio <= volRegimeMax)
+
+regimeOk = adxOk and emaDistOk and volRegOk
+
+// ═══════════════════════════════════════════════════════════════
+// HTF TREND FILTER + SLOPE
+// ═══════════════════════════════════════════════════════════════
+
+htfEma     = request.security(syminfo.tickerid, trendTF, ta.ema(close, trendEmaLen))
+htfAtr     = request.security(syminfo.tickerid, trendTF, ta.atr(trendAtrLen))
+htfEmaLag  = request.security(syminfo.tickerid, trendTF, ta.ema(close, trendEmaLen)[slopeBars])
+
+emaRising  = not useSlope or htfEma > htfEmaLag
+emaFalling = not useSlope or htfEma < htfEmaLag
+
+bullTrend = not useTrend or (close > htfEma + htfAtr * trendAtrMul and emaRising)
+bearTrend = not useTrend or (close < htfEma - htfAtr * trendAtrMul and emaFalling)
+
+// ═══════════════════════════════════════════════════════════════
+// SQUEEZE DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+bbBasis  = ta.sma(close, bbLen)
+bbDev    = bbMult * ta.stdev(close, bbLen)
+bbUpper  = bbBasis + bbDev
+bbLower  = bbBasis - bbDev
+
+kcBasis  = ta.sma(close, kcLen)
+kcRange  = ta.atr(kcLen) * kcMult
+kcUpper  = kcBasis + kcRange
+kcLower  = kcBasis - kcRange
+
+sqzOn = bbLower > kcLower and bbUpper < kcUpper
+
+var int sqzDuration = 0
+sqzDuration := sqzOn ? sqzDuration + 1 : 0
+
+var int barsSinceSqz = 999
+var bool lastSqzValid = false
+
+if sqzOn
+    barsSinceSqz := 0
+else
+    if barsSinceSqz == 0
+        lastSqzValid := sqzDuration[1] >= sqzMinBars
+    barsSinceSqz += 1
+
+recentSqz = barsSinceSqz > 0 and barsSinceSqz <= sqzMaxBars and lastSqzValid
+
+// ═══════════════════════════════════════════════════════════════
+// BREAKOUT QUALITY
+// ═══════════════════════════════════════════════════════════════
+
+atr = ta.atr(atrLen)
+
+runnerLowRef  = ta.lowest(low, runnerTrailBars)
+runnerHighRef = ta.highest(high, runnerTrailBars)
+
+// ═══════════════════════════════════════════════════════════════
+// ADAPTIVE REGIME DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+volRank    = ta.percentrank(atr, adaptVolLen)
+adaptEMA   = ta.ema(close, adaptTrendLen)
+trendLong  = atr > 0 ? (close - adaptEMA) / atr : 0.0
+trendShort = atr > 0 ? (adaptEMA - close) / atr : 0.0
+
+bool hotLong   = volRank > hotVolThresh and trendLong > hotTrendThresh
+bool hotShort  = volRank > hotVolThresh and trendShort > hotTrendThresh
+bool coldLong  = volRank < coldVolThresh or trendLong < coldTrendThresh
+bool coldShort = volRank < coldVolThresh or trendShort < coldTrendThresh
+
+int  curRegimeLong  = hotLong ? 1 : coldLong ? -1 : 0
+int  curRegimeShort = hotShort ? 1 : coldShort ? -1 : 0
+
+var int   entryRegime     = 0
+var float dynTP1Mult      = na
+var float dynTP2Mult      = na
+var float dynSLMult       = na
+var float dynTP1ExitPct   = na
+var float dynTrailTightM  = na
+var float dynTrailM       = na
+
+candleBody  = math.abs(close - open)
+candleRange = high - low
+bodyRatio   = candleRange > 0 ? candleBody / candleRange * 100.0 : 0.0
+strongBody  = bodyRatio >= minBodyPct
+
+longBreakout  = close > bbUpper + atr * brkMargin
+shortBreakout = close < bbLower - atr * brkMargin
+
+// ═══════════════════════════════════════════════════════════════
+// RSI EXTREME FILTER
+// ═══════════════════════════════════════════════════════════════
+
+rsiVal      = ta.rsi(close, rsiLen)
+rsiLongOk   = not useRsiFilter or rsiVal < rsiOBLevel
+rsiShortOk  = not useRsiFilter or rsiVal > rsiOSLevel
+
+// ═══════════════════════════════════════════════════════════════
+// MOMENTUM
+// ═══════════════════════════════════════════════════════════════
+
+mom     = ta.linreg(close - ta.sma(close, momLen), momLen, 0)
+momUp   = mom > momThresh and mom > mom[1]
+momDown = mom < -momThresh and mom < mom[1]
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME FILTER
+// ═══════════════════════════════════════════════════════════════
+
+volSma   = ta.sma(volume, volLen)
+volSpike = volume > volSma * volMult
+
+// ═══════════════════════════════════════════════════════════════
+// VOLATILITY FILTER
+// ═══════════════════════════════════════════════════════════════
+
+atrPercent = atr / close * 100.0
+volOk = atrPercent >= minAtrPerc
+
+// ═══════════════════════════════════════════════════════════════
+// TRADE TRACKING (vars declared early for cooldown reference)
+// ═══════════════════════════════════════════════════════════════
+
+var int   barsInTrade     = 0
+var float maxFavExcursion = 0.0
+var float entryATR        = na
+var float entryQty        = na
+var float entryPrice      = na
+var bool  partialFilled   = false
+
+// ═══════════════════════════════════════════════════════════════
+// COOLDOWN
+// ═══════════════════════════════════════════════════════════════
+
+var int barsSinceExit = 999
+var bool lastWasRunner = false
+wasInTrade = strategy.position_size[1] != 0
+isFlat     = strategy.position_size == 0
+
+if wasInTrade and isFlat
+    lastWasRunner := partialFilled ? true : false
+    barsSinceExit := 0
+else if isFlat
+    barsSinceExit += 1
+
+int dynCooldown = useSmartCool and lastWasRunner ? math.round(cooldownLen * 0.5) : cooldownLen
+cooldownOk = barsSinceExit >= dynCooldown
+
+// ═══════════════════════════════════════════════════════════════
+// TRADE TRACKING (logic)
+// ═══════════════════════════════════════════════════════════════
+
+if strategy.position_size != 0
+    barsInTrade += 1
+    if strategy.position_size > 0
+        maxFavExcursion := math.max(maxFavExcursion, close - strategy.position_avg_price)
+    else
+        maxFavExcursion := math.max(maxFavExcursion, strategy.position_avg_price - close)
+    if not na(entryQty) and not partialFilled and strategy.position_size < entryQty * 0.75
+        partialFilled := true
+else
+    barsInTrade     := 0
+    maxFavExcursion := 0.0
+    entryATR        := na
+    entryQty        := na
+    entryPrice      := na
+    partialFilled   := false
+
+timeoutExit    = maxBarsInTrade > 0 and barsInTrade >= maxBarsInTrade and not partialFilled
+stagnationExit = useStagnation and barsInTrade >= stagnBars and maxFavExcursion < nz(entryATR, atr) * stagnThresh
+
+// ═══════════════════════════════════════════════════════════════
+// FAILED BREAKOUT DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+float failRefLong = switch failBrkRef
+    "BB Upper"    => bbUpper
+    "BB Basis"    => bbBasis
+    "Entry Price" => nz(entryPrice, close)
+    => bbUpper
+
+float failRefShort = switch failBrkRef
+    "BB Upper"    => bbLower
+    "BB Basis"    => bbBasis
+    "Entry Price" => nz(entryPrice, close)
+    => bbLower
+
+failedBrkLong  = useFailBrk and strategy.position_size > 0 and barsInTrade >= 1 and barsInTrade <= failBrkBars and close < failRefLong
+failedBrkShort = useFailBrk and strategy.position_size < 0 and barsInTrade >= 1 and barsInTrade <= failBrkBars and close > failRefShort
+
+// ═══════════════════════════════════════════════════════════════
+// CRYPTO FUNDAMENTALS
+// ═══════════════════════════════════════════════════════════════
+
+activeAddr = request.security(addrTicker,  fundTF, close, ignore_invalid_symbol=true)
+largeTx    = request.security(lgTxTicker,  fundTF, close, ignore_invalid_symbol=true)
+sentiment  = request.security(sentTicker,  fundTF, close, ignore_invalid_symbol=true)
+
+addrSma  = ta.sma(nz(activeAddr), fundSmaLen)
+lgTxSma  = ta.sma(nz(largeTx),    fundSmaLen)
+
+addrOk      = not useFund or na(activeAddr) or activeAddr > addrSma
+lgTxOk      = not useFund or na(largeTx)    or largeTx    > lgTxSma
+sentLongOk  = not useFund or na(sentiment)  or sentiment  > sentBull
+sentShortOk = not useFund or na(sentiment)  or sentiment  < (100.0 - sentBull)
+
+fundLong  = addrOk and lgTxOk and sentLongOk
+fundShort = addrOk and lgTxOk and sentShortOk
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ═══════════════════════════════════════════════════════════════
+
+inSession = not useSess or not na(time(timeframe.period, sess))
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+
+longCond  = allowLong  and regimeOk and recentSqz and momUp   and volSpike and longBreakout  and strongBody and bullTrend and rsiLongOk  and volOk and cooldownOk and fundLong  and inSession
+shortCond = allowShort and regimeOk and recentSqz and momDown and volSpike and shortBreakout and strongBody and bearTrend and rsiShortOk and volOk and cooldownOk and fundShort and inSession
+
+// ═══════════════════════════════════════════════════════════════
+// ORDER EXECUTION
+// ═══════════════════════════════════════════════════════════════
+
+var float stopL = na
+var float tp1L  = na
+var float tp2L  = na
+var float stopS = na
+var float tp1S  = na
+var float tp2S  = na
+var bool  beActiveL = false
+var bool  beActiveS = false
+
+// ---- LOCK REGIME + ENTRY ----
+if (longCond or shortCond) and strategy.position_size == 0
+    if useAdaptive
+        entryRegime     := longCond ? curRegimeLong : curRegimeShort
+        float sc = entryRegime == 1 ? hotScale : entryRegime == -1 ? coldScale : 1.0
+        dynTP1Mult      := tp1Mult * sc
+        dynTP2Mult      := tp2Mult * sc
+        dynSLMult       := slMult * sc
+        dynTrailTightM  := trailTightMult * sc
+        dynTrailM       := trailMult * sc
+        dynTP1ExitPct   := entryRegime == 1 ? hotTP1Pct : entryRegime == -1 ? coldTP1Pct : tp1Pct
+    else
+        entryRegime     := 0
+        dynTP1Mult      := tp1Mult
+        dynTP2Mult      := tp2Mult
+        dynSLMult       := slMult
+        dynTrailTightM  := trailTightMult
+        dynTrailM       := trailMult
+        dynTP1ExitPct   := tp1Pct
+
+    entryATR      := atr
+    entryPrice    := close
+    beActiveL     := false
+    beActiveS     := false
+    partialFilled := false
+
+    if longCond
+        stopL := close - atr * dynSLMult
+        tp1L  := close + atr * dynTP1Mult
+        tp2L  := close + atr * dynTP2Mult
+        strategy.entry("Long", strategy.long)
+        if usePartialTP
+            strategy.exit("XL1", "Long", qty_percent=dynTP1ExitPct, stop=stopL, limit=tp1L)
+            strategy.exit("XL2", "Long", qty_percent=100,    stop=stopL, limit=tp2L)
+        else
+            strategy.exit("XL", "Long", stop=stopL, limit=tp2L)
+
+    if shortCond
+        stopS := close + atr * dynSLMult
+        tp1S  := close - atr * dynTP1Mult
+        tp2S  := close - atr * dynTP2Mult
+        strategy.entry("Short", strategy.short)
+        if usePartialTP
+            strategy.exit("XS1", "Short", qty_percent=dynTP1ExitPct, stop=stopS, limit=tp1S)
+            strategy.exit("XS2", "Short", qty_percent=100,    stop=stopS, limit=tp2S)
+        else
+            strategy.exit("XS", "Short", stop=stopS, limit=tp2S)
+
+// ---- Record entry qty on first bar of trade ----
+if strategy.position_size != 0 and na(entryQty)
+    entryQty := math.abs(strategy.position_size)
+
+// ---- LONG EXIT MANAGEMENT ----
+if strategy.position_size > 0
+    float ep     = strategy.position_avg_price
+    float refATR = nz(entryATR, atr)
+
+    if useBE and not beActiveL and (close - ep) >= refATR * beThresh
+        beActiveL := true
+        stopL := math.max(nz(stopL), ep + refATR * beOffset)
+
+    if useTrail
+        float _tTight = nz(dynTrailTightM, trailTightMult)
+        float _tWide  = nz(dynTrailM, trailMult)
+        float trailDist = partialFilled ? atr * _tTight : atr * _tWide
+        float atrTrail  = close - trailDist
+        if partialFilled and useRunnerMode
+            stopL := math.max(nz(stopL), math.max(atrTrail, runnerLowRef))
+        else
+            stopL := math.max(nz(stopL), atrTrail)
+
+    if usePartialTP
+        float _pct = nz(dynTP1ExitPct, tp1Pct)
+        if not partialFilled
+            strategy.exit("XL1", "Long", qty_percent=_pct, stop=stopL, limit=tp1L)
+            strategy.exit("XL2", "Long", qty_percent=100, stop=stopL, limit=tp2L)
+        else if useRunnerMode
+            strategy.exit("XL2", "Long", qty_percent=100, stop=stopL)
+        else
+            strategy.exit("XL2", "Long", qty_percent=100, stop=stopL, limit=tp2L)
+    else
+        strategy.exit("XL", "Long", stop=stopL, limit=tp2L)
+
+// ---- SHORT EXIT MANAGEMENT ----
+if strategy.position_size < 0
+    float ep     = strategy.position_avg_price
+    float refATR = nz(entryATR, atr)
+
+    if useBE and not beActiveS and (ep - close) >= refATR * beThresh
+        beActiveS := true
+        stopS := math.min(nz(stopS), ep - refATR * beOffset)
+
+    if useTrail
+        float _tTight = nz(dynTrailTightM, trailTightMult)
+        float _tWide  = nz(dynTrailM, trailMult)
+        float trailDist = partialFilled ? atr * _tTight : atr * _tWide
+        float atrTrail  = close + trailDist
+        if partialFilled and useRunnerMode
+            stopS := math.min(nz(stopS), math.min(atrTrail, runnerHighRef))
+        else
+            stopS := math.min(nz(stopS), atrTrail)
+
+    if usePartialTP
+        float _pctS = nz(dynTP1ExitPct, tp1Pct)
+        if not partialFilled
+            strategy.exit("XS1", "Short", qty_percent=_pctS, stop=stopS, limit=tp1S)
+            strategy.exit("XS2", "Short", qty_percent=100, stop=stopS, limit=tp2S)
+        else if useRunnerMode
+            strategy.exit("XS2", "Short", qty_percent=100, stop=stopS)
+        else
+            strategy.exit("XS2", "Short", qty_percent=100, stop=stopS, limit=tp2S)
+    else
+        strategy.exit("XS", "Short", stop=stopS, limit=tp2S)
+
+// ---- FAILED BREAKOUT EXIT ----
+if failedBrkLong
+    strategy.close("Long", comment="FailBrk")
+if failedBrkShort
+    strategy.close("Short", comment="FailBrk")
+
+// ---- TIMEOUT EXIT ----
+if timeoutExit and strategy.position_size > 0
+    strategy.close("Long", comment="Timeout")
+if timeoutExit and strategy.position_size < 0
+    strategy.close("Short", comment="Timeout")
+
+// ---- STAGNATION EXIT ----
+if stagnationExit and strategy.position_size > 0
+    strategy.close("Long", comment="Stagnant")
+if stagnationExit and strategy.position_size < 0
+    strategy.close("Short", comment="Stagnant")
+
+// ---- RESET ON FLAT ----
+if strategy.position_size == 0
+    stopL     := na
+    tp1L      := na
+    tp2L      := na
+    stopS     := na
+    tp1S      := na
+    tp2S      := na
+    beActiveL := false
+    beActiveS := false
+
+// ═══════════════════════════════════════════════════════════════
+// VISUALS
+// ═══════════════════════════════════════════════════════════════
+
+plot(useTrend ? htfEma : na, "HTF EMA", color.new(#FF9800, 30), linewidth=2)
+plot(useTrend ? htfEma + htfAtr * trendAtrMul : na, "HTF Upper", color.new(#FF9800, 70), style=plot.style_circles)
+plot(useTrend ? htfEma - htfAtr * trendAtrMul : na, "HTF Lower", color.new(#FF9800, 70), style=plot.style_circles)
+
+pU = plot(bbUpper, "BB Upper", color.new(#2196F3, 70))
+pL = plot(bbLower, "BB Lower", color.new(#2196F3, 70))
+plot(bbBasis, "Basis", color.new(#2196F3, 85))
+fill(pU, pL, color=sqzOn ? color.new(#FFEB3B, 90) : color.new(#2196F3, 95))
+
+plotshape(longCond  and strategy.position_size == 0, "Long",  shape.labelup,
+     location.belowbar, color.new(#4CAF50, 0), text="L", textcolor=color.white, size=size.small)
+plotshape(shortCond and strategy.position_size == 0, "Short", shape.labeldown,
+     location.abovebar, color.new(#F44336, 0), text="S", textcolor=color.white, size=size.small)
+
+plotshape(sqzOn and not sqzOn[1],  "Sqz Start",  shape.diamond, location.bottom, color.new(#FF9800, 60), size=size.tiny)
+plotshape(not sqzOn and sqzOn[1] and lastSqzValid,      "Valid Release", shape.diamond, location.bottom, color.new(#4CAF50, 0),  size=size.tiny)
+plotshape(not sqzOn and sqzOn[1] and not lastSqzValid,   "Weak Release",  shape.diamond, location.bottom, color.new(#F44336, 60), size=size.tiny)
+
+plotshape(failedBrkLong  and strategy.position_size > 0, "FailBrk L", shape.cross, location.abovebar, color.new(#E91E63, 0), size=size.tiny)
+plotshape(failedBrkShort and strategy.position_size < 0, "FailBrk S", shape.cross, location.belowbar, color.new(#E91E63, 0), size=size.tiny)
+plotshape(timeoutExit    and strategy.position_size != 0, "Timeout",   shape.xcross, location.abovebar, color.new(#FF9800, 0), size=size.tiny)
+plotshape(stagnationExit and strategy.position_size != 0, "Stagnant",  shape.xcross, location.belowbar, color.new(#9C27B0, 0), size=size.tiny)
+
+plotshape(strategy.position_size > 0 and beActiveL and not beActiveL[1], "BE Long",  shape.flag, location.abovebar, color.new(#2196F3, 0), size=size.tiny)
+plotshape(strategy.position_size < 0 and beActiveS and not beActiveS[1], "BE Short", shape.flag, location.belowbar, color.new(#2196F3, 0), size=size.tiny)
+
+partialEvent = (partialFilled and not partialFilled[1])
+plotshape(partialEvent and strategy.position_size > 0, "Partial L", shape.diamond, location.abovebar, color.new(#00BCD4, 0), size=size.tiny)
+plotshape(partialEvent and strategy.position_size < 0, "Partial S", shape.diamond, location.belowbar, color.new(#00BCD4, 0), size=size.tiny)
+
+plot(strategy.position_size > 0 ? stopL : na, "Long Stop",   color.new(#F44336, 30), style=plot.style_linebr)
+plot(strategy.position_size > 0 and not partialFilled ? tp1L : na, "Long TP1", color.new(#00BCD4, 50), style=plot.style_linebr)
+plot(strategy.position_size > 0 and not (useRunnerMode and partialFilled) ? tp2L : na, "Long TP2", color.new(#4CAF50, 30), style=plot.style_linebr)
+plot(strategy.position_size < 0 ? stopS : na, "Short Stop",  color.new(#F44336, 30), style=plot.style_linebr)
+plot(strategy.position_size < 0 and not partialFilled ? tp1S : na, "Short TP1", color.new(#00BCD4, 50), style=plot.style_linebr)
+plot(strategy.position_size < 0 and not (useRunnerMode and partialFilled) ? tp2S : na, "Short TP2", color.new(#4CAF50, 30), style=plot.style_linebr)
+
+rsiBlocked = useRsiFilter and ((strategy.position_size == 0 and allowLong and rsiVal >= rsiOBLevel) or (strategy.position_size == 0 and allowShort and rsiVal <= rsiOSLevel))
+regimeBlocked = useRegime and not regimeOk
+bgcolor(regimeBlocked ? color.new(#F44336, 93) : rsiBlocked ? color.new(#FF5722, 95) : sqzOn ? color.new(#FFEB3B, 95) : na, title="State BG")
+trendBG = useTrend and not regimeBlocked ? (bullTrend ? color.new(#4CAF50, 96) : bearTrend ? color.new(#F44336, 96) : na) : na
+bgcolor(trendBG, title="Trend BG")
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 16,
+     bgcolor=color.new(#1a1a2e, 5), border_width=1, border_color=color.new(#333333, 0))
+
+if barstate.islast
+    table.cell(dash, 0, 0, "v15 / 2H", text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 0, dirMode, text_color=#dddddd, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Regime",    text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 1, regimeOk ? "OK" : "BLOCKED",
+         text_color=regimeOk ? #4CAF50 : #F44336, text_size=size.small)
+
+    table.cell(dash, 0, 2, "ADX",       text_color=#aaaaaa, text_size=size.small)
+    adxText = not useAdxFilter ? "OFF" : na(regimeAdx) ? "N/A" : str.tostring(regimeAdx, "#.#")
+    table.cell(dash, 1, 2, adxText,
+         text_color=not useAdxFilter ? #666666 : adxOk ? #4CAF50 : #F44336, text_size=size.small)
+
+    table.cell(dash, 0, 3, "EMA Dist",  text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(emaDist, "#.#") + "%",
+         text_color=emaDistOk ? #4CAF50 : #F44336, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Vol Ratio", text_color=#aaaaaa, text_size=size.small)
+    vrText = na(regimeVolRatio) ? "N/A" : str.tostring(regimeVolRatio, "#.##") + "x"
+    table.cell(dash, 1, 4, vrText,
+         text_color=volRegOk ? #4CAF50 : #F44336, text_size=size.small)
+
+    table.cell(dash, 0, 5, "RSI",       text_color=#aaaaaa, text_size=size.small)
+    rsiColor = not useRsiFilter ? #666666 : rsiVal >= rsiOBLevel ? #F44336 : rsiVal <= rsiOSLevel ? #2196F3 : #4CAF50
+    table.cell(dash, 1, 5, not useRsiFilter ? "OFF" : str.tostring(rsiVal, "#.#"),
+         text_color=rsiColor, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Trend",     text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 6, bullTrend ? "BULL" : bearTrend ? "BEAR" : "CHOP",
+         text_color=bullTrend ? #4CAF50 : bearTrend ? #F44336 : #FF9800, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Squeeze",   text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 7, sqzOn ? "ON (" + str.tostring(sqzDuration) + ")" : "OFF",
+         text_color=sqzOn ? #FF9800 : #666666, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Momentum",  text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 8, momUp ? "Bull" : momDown ? "Bear" : "Flat",
+         text_color=momUp ? #4CAF50 : momDown ? #F44336 : #888888, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Cooldown",  text_color=#aaaaaa, text_size=size.small)
+    cdLeft = dynCooldown - barsSinceExit
+    cdText = cooldownOk ? "READY" : str.tostring(cdLeft) + (lastWasRunner and useSmartCool ? "f" : "")
+    table.cell(dash, 1, 9, cdText,
+         text_color=cooldownOk ? #4CAF50 : #FF9800, text_size=size.small)
+
+    table.cell(dash, 0, 10, "Position", text_color=#aaaaaa, text_size=size.small)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posClr  = strategy.position_size > 0 ? #4CAF50 : strategy.position_size < 0 ? #F44336 : #666666
+    barsTxt = barsInTrade > 0 ? " (" + str.tostring(barsInTrade) + ")" : ""
+    table.cell(dash, 1, 10, posText + barsTxt, text_color=posClr, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Partial TP", text_color=#aaaaaa, text_size=size.small)
+    ptpStatus = not usePartialTP ? "OFF" : strategy.position_size == 0 ? "-" : partialFilled ? "TAKEN" : "PENDING"
+    ptpClr = not usePartialTP ? #666666 : partialFilled ? #00BCD4 : #FF9800
+    table.cell(dash, 1, 11, ptpStatus, text_color=ptpClr, text_size=size.small)
+
+    table.cell(dash, 0, 12, "BE Stop",  text_color=#aaaaaa, text_size=size.small)
+    beStatus = strategy.position_size == 0 ? "-" : (beActiveL or beActiveS) ? "ACTIVE" : "WAITING"
+    table.cell(dash, 1, 12, beStatus,
+         text_color=(beActiveL or beActiveS) ? #2196F3 : #666666, text_size=size.small)
+
+    table.cell(dash, 0, 13, "Trail",    text_color=#aaaaaa, text_size=size.small)
+    trailInfo = not useTrail ? "OFF" : partialFilled ? str.tostring(trailTightMult, "#.#") + " ATR" : str.tostring(trailMult, "#.#") + " ATR"
+    table.cell(dash, 1, 13, trailInfo,
+         text_color=partialFilled ? #00BCD4 : #aaaaaa, text_size=size.small)
+
+    table.cell(dash, 0, 14, "Runner",    text_color=#aaaaaa, text_size=size.small)
+    runText = not useRunnerMode ? "OFF" : strategy.position_size == 0 ? "-" : partialFilled ? "RUNNING" : "ARMED"
+    runClr  = not useRunnerMode ? #666666 : partialFilled ? #00E676 : #FF9800
+    table.cell(dash, 1, 14, runText, text_color=runClr, text_size=size.small)
+
+    table.cell(dash, 0, 15, "Regime",    text_color=#aaaaaa, text_size=size.small)
+    int _dispRegime = allowLong ? curRegimeLong : curRegimeShort
+    regText = not useAdaptive ? "OFF" : _dispRegime == 1 ? "HOT" : _dispRegime == -1 ? "COLD" : "NORM"
+    regClr  = not useAdaptive ? #666666 : _dispRegime == 1 ? #FF5722 : _dispRegime == -1 ? #2196F3 : #4CAF50
+    table.cell(dash, 1, 15, regText, text_color=regClr, text_size=size.small)
+
+    table.cell(dash, 0, 16, "Fav Excur", text_color=#aaaaaa, text_size=size.small)
+    table.cell(dash, 1, 16, str.tostring(maxFavExcursion, "#.##"),
+         text_color=maxFavExcursion > 0 ? #4CAF50 : #666666, text_size=size.small)
+
+View in Pine Editor・712 lines
+Use on chart
+9
+585
+ETH Momentum Breakout Strategy
+
+A volatility-squeeze momentum breakout strategy designed for major crypto tokens (ETH, BTC, SOL, etc.) on 1H to 8H timeframes. Detects compressed volatility, waits for explosive directional breakouts confirmed by volume and momentum, then rides the trend with adaptive risk management.
+
+Core philosophy: take fewer, higher-conviction trades and let them ride. Averages ~12 trades/year on 2H with 65% win rate and 2.4:1 win/loss ratio.
+
+═══════════════════════════════════════
+HOW IT WORKS — ENTRY
+═══════════════════════════════════════
+
+A trade triggers when ALL conditions align:
+
+1. VOLATILITY SQUEEZE (TMM Squeeze)
+Bollinger Bands (20-period, 2.0x StdDev) compress inside Keltner Channels (20-period, 1.5x ATR). Squeeze must last at least 3 bars. Breakout must occur within 6 bars of squeeze release.
+
+2. BREAKOUT CONFIRMATION
+Price breaks above upper BB + 0.3x ATR margin (longs) or below lower BB - margin (shorts). Candle body must be ≥40% of range — ensures conviction, not just a wick.
+
+3. MOMENTUM CONFIRMATION
+Linear regression of price deviation from 12-period SMA must be positive and accelerating (longs). Confirms the breakout has directional force.
+
+4. VOLUME SPIKE
+Volume must exceed 1.8x its 20-period SMA. Ensures real institutional money is behind the move.
+
+5. RSI EXTREME FILTER
+RSI(14) must be below 75 for longs, above 25 for shorts. Prevents entries at overbought/oversold extremes.
+
+6. REGIME FILTER (Daily)
+• EMA Distance: Price within 35% of 200-EMA on daily. Blocks parabolic tops and capitulation crashes.
+• Volatility Regime: ATR between 0.3x and 1.5x the 100-period average. Blocks dead markets and panics.
+
+7. COOLDOWN
+12-bar wait after each exit. Prevents revenge trading.
+
+═══════════════════════════════════════
+ADAPTIVE REGIME (ML-Lite Decision Tree)
+═══════════════════════════════════════
+
+At entry, the market is classified into HOT / NORMAL / COLD and locked for the trade's duration:
+
+HOT (Vol Rank >60th pctl AND Trend Score >1.5 ATR):
+→ TP, SL, Trail scaled by 1.35x (wider targets)
+→ Stagnation timeout: 15 bars, 0.3 ATR threshold
+
+NORMAL (everything else):
+→ Default parameters
+→ Stagnation timeout: 10 bars
+
+COLD (Vol Rank <30th pctl OR Trend Score <0.5 ATR):
+→ TP, SL, Trail scaled by 0.75x (tighter targets)
+→ Stagnation timeout: 7 bars
+
+Same entry signal gets aggressive management in trends, defensive in chop.
+
+═══════════════════════════════════════
+HOW IT WORKS — EXIT
+═══════════════════════════════════════
+
+Five independent exit mechanisms:
+
+1. TAKE PROFIT (TP2)
+Full position exits at 3.5x ATR (scaled by regime: 4.7 in hot, 2.6 in cold).
+
+2. ATR TRAILING STOP
+2.5x ATR trailing stop (scaled by regime). Only ratchets in favorable direction.
+
+3. BREAKEVEN STOP
+After 1.2x ATR favorable move, stop moves to entry + 0.2 ATR. Trade becomes risk-free.
+
+4. STAGNATION EXIT
+If trade hasn't moved 0.5x ATR after regime-dependent bars (hot:15, normal:10, cold:7), it's cut. These trades have 8% win rate — they rarely recover.
+
+5. TIMEOUT
+100 bars max (~8 days on 2H). Safety net for stuck trades.
+
+═══════════════════════════════════════
+OPTIONAL MODULES (off by default)
+═══════════════════════════════════════
+
+• Partial Take-Profit: Exit portion at TP1 (1.5x ATR), let rest ride. Reduces variance but caps big winners.
+• Runner Mode: After partial TP, removes TP2 ceiling — rides trail indefinitely. Requires Partial TP on.
+• HTF Trend Filter: Requires price above/below higher-TF EMA with slope. Additional trend confirmation.
+• Crypto Fundamentals: Filters via IntoTheBlock on-chain data (active addresses, large tx count, sentiment).
+• Session Filter: Restrict trading to specific hours.
+
+═══════════════════════════════════════
+SUGGESTED SETTINGS
+═══════════════════════════════════════
+
+TARGET: 1H to 8H timeframes, major tokens (ETH, BTC, SOL, AVAX, LINK, etc.)
+
+▸ 2H (Recommended — Best Tested)
+Direction: Long Only
+Commission: 0.1%
+BB/KC Length: 20/20, KC Mult: 1.5
+Min Squeeze Duration: 3 bars (6h)
+Volume Spike: 1.8x
+Stop Loss: 2.0x ATR
+TP2: 3.5x ATR
+Trail: 2.5x ATR
+BE Threshold: 1.2x ATR
+Cooldown: 12 bars (24h)
+Stagnation: 10 bars (20h)
+Max Vol Ratio: 1.5x
+Adaptive Regime: ON
+Partial TP: OFF
+
+▸ 1H (Faster, more trades)
+Min Squeeze Duration: 5-6 bars
+Cooldown: 20-24 bars
+Stagnation: 18-20 bars
+Max Bars In Trade: 200
+Vol Spike: 2.0x
+
+▸ 4H (Slower, higher conviction)
+Min Squeeze Duration: 2 bars
+Cooldown: 6 bars
+Stagnation: 5-6 bars
+Max Bars: 50
+Stop Loss: 1.8x ATR
+
+▸ 8H (Swing trading)
+Min Squeeze Duration: 2 bars
+Cooldown: 3 bars
+Stagnation: 3 bars
+Max Bars: 25
+TP2: 4.0-4.5x ATR
+Trail: 3.0x ATR
+
+═══════════════════════════════════════
+APPLYING TO OTHER TOKENS
+═══════════════════════════════════════
+
+• Change symbol to Bybit perpetual (BYBIT:BTCUSDT.P, BYBIT:SOLUSDT.P)
+• Update IntoTheBlock tickers if using fundamentals (INTOTHEBLOCK:BTC_ACTIVEADDRESSES)
+• Smaller-cap tokens: higher Vol Spike (2.0-2.5x), tighter Max Vol Ratio (1.2-1.3x)
+• BTC: same parameters work well
+• SOL and others: consider wider SL (2.5x ATR) for higher intraday volatility
+
+═══════════════════════════════════════
+PERFORMANCE (2H ETH, Oct 2020–Feb 2026)
+═══════════════════════════════════════
+
+Net Profit: ~$29,700 on $10,000 (197%)
+CAGR: ~29%
+Profit Factor: 3.08
+Win Rate: 56% (wins 2.4x larger than losses)
+Max Drawdown: ~$4,200 (14% of peak)
+Return / Max DD: 7.1x
+~12 trades/year
+Profitable 6 of 7 years (only 2022 bear negative)
+

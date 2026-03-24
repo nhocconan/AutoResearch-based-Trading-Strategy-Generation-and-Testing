@@ -1,0 +1,289 @@
+//@version=5
+strategy("Uptrick: Price Memory Trend Strategy", overlay=true, max_labels_count=500, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+//────────────────────────────────────────────
+// INPUTS
+//────────────────────────────────────────────
+grpA = "Core Engine"
+memoryStrength = input.float(0.12, "Memory Strength", step=0.01, group=grpA)
+memoryDecay = input.float(0.96, "Memory Decay", step=0.01, group=grpA)
+devLen = input.int(34, "Deviation Length", minval=5, group=grpA)
+bandMult = input.float(1.6, "Band Multiplier", step=0.1, group=grpA)
+
+//────────────────────────────────────────────
+// COLOR PALETTES (PRESET ONLY)
+//────────────────────────────────────────────
+grpP = "Customization"
+palette = input.string( "Default", "Color Palette", options = [ "Default", "Emerald vs Red", "Neon Cyan vs Magenta", "Electric Lime vs Crimson", "Ice Blue vs Inferno", "Gold vs Violet" ], group = grpP )
+
+bull = palette == "Default" ? #00ffea : palette == "Emerald vs Red" ? color.rgb(0, 255, 170) : palette == "Neon Cyan vs Magenta" ? color.rgb(0, 255, 255) : palette == "Electric Lime vs Crimson" ? color.rgb(170, 255, 0) : palette == "Ice Blue vs Inferno" ? color.rgb(120, 200, 255) : color.rgb(255, 210, 80)
+bear = palette == "Default" ? #ff00ff : palette == "Emerald vs Red" ? color.rgb(255, 60, 60) : palette == "Neon Cyan vs Magenta" ? color.rgb(255, 0, 200) : palette == "Electric Lime vs Crimson" ? color.rgb(200, 0, 40) : palette == "Ice Blue vs Inferno" ? color.rgb(255, 80, 0) : color.rgb(150, 60, 255)
+neutral = #85858559
+
+showBands = input.bool(true, "Show Bands", group=grpP)
+look = input.string( "Bands", "Look", options = [ "Bands", "Trail", "Intense" ], group = grpP )
+
+//────────────────────────────────────────────
+// PRICE MEMORY BASE (UNIQUE CORE)
+//────────────────────────────────────────────
+price = close
+var float memory = price
+delta = price - memory
+memory := memory + delta * memoryStrength
+memory := memory * memoryDecay + price * (1 - memoryDecay)
+base = memory
+
+//────────────────────────────────────────────
+// ADAPTIVE DEVIATION BANDS (NOT ATR)
+//────────────────────────────────────────────
+dev = math.abs(price - base)
+avgDev = ta.ema(dev, devLen)
+upper = base + avgDev * bandMult
+lower = base - avgDev * bandMult
+
+//────────────────────────────────────────────
+// SIGNAL CONDITIONS
+//────────────────────────────────────────────
+bullCond = ta.crossover(price, upper)
+bearCond = ta.crossunder(price, lower)
+
+//────────────────────────────────────────────
+// NON-PYRAMIDING TREND STATE
+//────────────────────────────────────────────
+var int trendState = 0 // 1 = bull, -1 = bear
+newBull = bullCond and trendState != 1
+newBear = bearCond and trendState != -1
+if newBull
+    trendState := 1
+else if newBear
+    trendState := -1
+else
+    trendState := nz(trendState[1], 0)
+
+//────────────────────────────────────────────
+// STRATEGY ENTRIES (Predict & Trade Trend Changes)
+//────────────────────────────────────────────
+// Enter long on new bullish breakout (predict up trend)
+// Enter short on new bearish breakdown (predict down trend)
+// This flips position automatically on opposite signal
+if newBull
+    strategy.entry("Up Trend", strategy.long)
+if newBear
+    strategy.entry("Down Trend", strategy.short)
+
+//────────────────────────────────────────────
+// CANDLE COLORING (plotcandle ONLY)
+//────────────────────────────────────────────
+candleCol = trendState == 1 ? bull : trendState == -1 ? bear : neutral
+plotcandle(open, high, low, close, color=candleCol, wickcolor=candleCol, bordercolor=candleCol)
+
+//────────────────────────────────────────────
+// PLOTS
+//────────────────────────────────────────────
+inup = plot(showBands ? upper : na, "Upper Band", color=trendState == -1 ? color.new(bear, 40): color.new(bear, 100), linewidth = look != "Trail"? 1 : 3)
+inlow = plot(showBands ? lower : na, "Lower Band", color=trendState == 1 ? color.new(bull, 40): color.new(bull, 100), linewidth = look != "Trail"? 1 : 3)
+outup = plot(showBands and look != "Trail" ? upper + ta.atr(14) : na, "Upper Band Outer", color=trendState == -1 ? color.new(bear, 40): color.new(bear, 100))
+outlow = plot(showBands and look != "Trail" ? lower - ta.atr(14) : na, "Lower Band Outer", color=trendState == 1 ? color.new(bull, 40): color.new(bull, 100))
+
+fill(inup, outup, color=trendState == -1 ? color.new(bear,70):na)
+fill(inlow, outlow, color=trendState == 1 ? color.new(bull,70):na)
+fill(inlow, plot(close, color=#363a4500), color=trendState == 1 and look == "Intense" ? color.new(bull,100):na)
+fill(inup, plot(close, color=#363a4500), color=trendState == -1 and look == "Intense" ? color.new(bear,70):na)
+
+//────────────────────────────────────────────
+// LABEL-STYLE SIGNALS (STATE CHANGE ONLY)
+//────────────────────────────────────────────
+bandOffset = avgDev * 0.25
+yUp = lower - bandOffset
+yDn = upper + bandOffset
+
+if newBull
+    label.new(bar_index, yUp, text = "𝓤𝓹", style = label.style_label_up, size = size.normal, color = bull, textcolor = color.black)
+if newBear
+    label.new(bar_index, yDn, text = "𝓓𝓸𝔀𝓷", style = label.style_label_down, size = size.normal, color = bear, textcolor = color.white)
+
+//────────────────────────────────────────────
+// ALERTS (NON-PYRAMIDING)
+//────────────────────────────────────────────
+alertcondition(newBull, "Bullish Shift", "Price Memory Trend → BULL (Up Trend Predicted)")
+alertcondition(newBear, "Bearish Shift", "Price Memory Trend → BEAR (Down Trend Predicted)")
+
+//────────────────────────────────────────────
+// INFO TABLE (KEPT FOR REFERENCE)
+//────────────────────────────────────────────
+// ... (the entire table code remains the same as in your original indicator)
+// You can copy-paste the full table section from the original code here if desired.
+
+View in Pine Editor・115 lines
+Use on chart
+9
+0
+2 025
+Here are clear, structured notes explaining the Pine Script code — the simplified "LSTM-like" trend predictor you were given earlier.
+Overall Purpose of the Script
+The script tries to imitate LSTM memory behavior (long-term memory + selective forgetting/updating) using only Pine Script's basic math and variables — because real LSTM neural networks (with matrices, multiple gates, backpropagation) are not possible in Pine.
+It creates a persistent memory line that:
+
+slowly forgets old information,
+selectively accepts new price information,
+tries to act as a trend-following / regime-detecting centerline.
+
+Then it uses momentum of this memory line + deviation size to decide whether the market is in an uptrend or downtrend.
+Key Sections Explained
+1. Inputs (tunable parameters)
+pinescriptmemoryStrength = input.float(0.14, "Forget Gate strength (like 1-f)", step=0.01, minval=0.01, maxval=0.99)
+inputGate = input.float(0.22, "Input Gate strength", step=0.01, minval=0.01, maxval=1.0)
+cellDecay = input.float(0.965, "Cell state decay", step=0.001, minval=0.8, maxval=0.999)
+lookback = input.int(21, "Lookback for momentum", minval=5)
+sensitivity = input.float(1.35, "Trend sensitivity multiplier", step=0.05)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ParameterWhat it controlsTypical effectHigher value means…memoryStrengthHow aggressively old memory is forgottenControls "forget gate" strengthForgets faster, more responsiveinputGateHow much new price is allowed into memoryControls how much price influences cellMemory follows price more closelycellDecayNatural fading of long-term memory per barPrevents memory from living foreverLower = memory fades fasterlookbackPeriod for momentum and deviation calculationSmoothness of trend detectionLonger = smoother, fewer signalssensitivityHow strong momentum must be to flip trendFinal trigger strictnessHigher = fewer but stronger signals
+2. Memory Variables (the "LSTM core")
+pinescriptvar float cell = na // long-term memory ≈ cell state C
+var float hidden = na // short-term state ≈ hidden state h
+
+if bar_index == 0
+cell := price
+hidden := price
+
+cell → tries to act like LSTM cell state (long memory)
+hidden → tries to act like LSTM hidden state (what we actually observe/use)
+
+3. Simplified Gates
+pinescriptforget = math.tanh(hidden * memoryStrength)
+i_gate = math.tanh(price * inputGate)
+candidate = price - hidden
+
+forget — value between -1 and +1, but we treat higher positive = forget more
+i_gate — how much new info we want to accept
+candidate — the new information we could add (difference from current hidden)
+
+Very crude approximation — real LSTM uses sigmoid + learned weights.
+4. Core LSTM-like Update Rule
+pinescriptcell := cell * (1 - forget) + candidate * i_gate
+cell := cell * cellDecay
+hidden := cell * 0.65 + price * 0.35
+This is the heart of the "fake LSTM":
+
+Keep (1 – forget) of old cell
+Add a portion (i_gate) of the candidate change
+Apply slow exponential decay (cellDecay < 1)
+Hidden state = mix between long memory and current price
+
+→ base = hidden becomes our smoothed, memory-aware centerline.
+5. Trend Detection Logic
+pinescriptmom = ta.change(base, lookback) // how much did memory move in last N bars?
+dev = math.abs(price - base) // how far is price from memory center?
+avgDev = ta.ema(dev, lookback * 2) // smoothed deviation size
+
+trendScore = (mom / avgDev) * sensitivity // normalized momentum × sensitivity
+
+Normalizes momentum by current volatility/deviation
+High positive → strong upward memory movement → likely uptrend
+High negative → strong downward memory movement → likely downtrend
+
+6. Trend State Machine (non-repainting flip)
+pinescriptvar int trend = 0 // 1 = Up, -1 = Down, 0 = Neutral
+
+bullCondition = trendScore > 1.0 and trendScore[1] <= 1.0
+bearCondition = trendScore < -1.0 and trendScore[1] >= -1.0
+
+if bullCondition
+trend := 1
+else if bearCondition
+trend := -1
+else
+trend := nz(trend[1])
+
+Only changes trend when crossing the threshold from the other side
+Prevents flickering / frequent flipping
+Persistent until strong opposite signal appears
+
+7. Visualization Summary
+
+Background tint (light green/red)
+Thick memory line (changes color with trend)
+Dashed ±1.6× deviation bands
+Big up/down labels on trend flips
+Alert conditions on every new trend direction
+
+Quick Tuning Guide
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GoalSuggestionFewer but stronger signals↑ sensitivity (1.6–2.2), ↑ lookback (30–60)More responsive / earlier entries↑ inputGate, ↓ cellDecay, ↓ memoryStrengthSmoother memory line↓ inputGate, ↑ cellDecay (0.98+)Better in choppy markets↑ lookback, ↑ sensitivityBetter in trending markets↓ lookback, moderate sensitivity (~1.2–1.5)
+Most Important Takeaway
+This is not a real LSTM — it's a hand-crafted, analog-style memory filter inspired by LSTM ideas.
+It tries to combine:
+
+slow-adapting memory (like EMA but with forgetting control)
+selective update depending on current deviation
+momentum-of-memory as trend strength
+
+Many traders find this kind of memory line more "intelligent" than simple moving averages when tuning the forget/input/decay parameters to match the market personality.

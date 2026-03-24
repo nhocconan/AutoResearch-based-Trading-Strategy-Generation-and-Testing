@@ -1,0 +1,937 @@
+//@version=6
+strategy( title="ChronoPulse MS-MACD Resonance Strategy", shorttitle="ChronPulse", overlay=true, max_labels_count=500, max_lines_count=500, initial_capital=100000, currency=currency.USD, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.015, slippage=2, default_qty_type=strategy.percent_of_equity, default_qty_value=2.0, calc_on_order_fills=true, calc_on_every_tick=true, process_orders_on_close=true)
+
+//──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+//──────────────────────────────────────────────────────────────────────────────
+priceSrc             = input.source(close,     "Price Source")
+structureTf          = input.timeframe("240",  "Structure Timeframe", tooltip="Higher timeframe used for market structure parsing. 240 = 4H by default.")
+structureLeft        = input.int(3,            "Structure Pivot Left", minval=1, maxval=15)
+structureRight       = input.int(3,            "Structure Pivot Right", minval=1, maxval=15)
+structureBreakBuff   = input.float(0.15,       "Structure Break Buffer (%)", minval=0.0, maxval=2.0, step=0.05) / 100.0
+macdTf               = input.timeframe("",     "MACD Timeframe (optional)", tooltip="Leave empty to use the chart timeframe, or provide a higher timeframe such as 240.")
+macdFast             = input.int(12,           "MACD Fast Length", minval=1, maxval=50)
+macdSlow             = input.int(26,           "MACD Slow Length", minval=2, maxval=100)
+macdSignal           = input.int(9,            "MACD Signal Length", minval=1, maxval=60)
+fusionEnabled        = input.bool(true,        "Enable Dual MACD Fusion", tooltip="Requires both classic MACD and the crypto-tuned reactor profile to agree.")
+fusionFast           = input.int(8,            "Fusion MACD Fast", minval=5, maxval=30)
+fusionSlow           = input.int(21,           "Fusion MACD Slow", minval=10, maxval=60)
+fusionSignal         = input.int(5,            "Fusion MACD Signal", minval=3, maxval=30)
+biasEmaLen           = input.int(55,           "Directional EMA Length", minval=5, maxval=400)
+trendGuideLen        = input.int(34,           "Execution Trend Guide", minval=5, maxval=400, tooltip="Secondary EMA used for volume/trend gating.")
+enableVolumeGate     = input.bool(true,        "Enable Volume Surge Filter")
+volumeLookback       = input.int(20,           "Volume SMA Length", minval=5, maxval=200)
+volumeThreshold      = input.float(1.4,        "Volume Threshold (x avg)", minval=1.0, maxval=3.0, step=0.1)
+enableQualityGate    = input.bool(true,        "Enable Quality Gate")
+qualityThreshold     = input.float(0.62,       "Quality Threshold (0-1)", minval=0.4, maxval=0.95, step=0.01)
+atrLen               = input.int(14,           "ATR Length", minval=3, maxval=100)
+atrTf                = input.timeframe("",     "ATR Timeframe (optional)", tooltip="Supply a higher timeframe (e.g., 240) if you want smoother risk levels.")
+stopAtrMult          = input.float(1.5,        "ATR Stop Multiplier", minval=0.5, maxval=10.0, step=0.1)
+tpAtrMult            = input.float(3.0,        "ATR Target Multiplier", minval=0.5, maxval=15.0, step=0.1)
+trailTriggerAtr      = input.float(1.0,        "Trail Activation (ATR)", minval=0.5, maxval=5.0, step=0.25)
+trailDistanceAtr     = input.float(1.5,        "Trail Distance (ATR)", minval=0.5, maxval=5.0, step=0.25)
+minAtrFilter         = input.float(0.0,        "Minimum ATR Filter", minval=0.0, maxval=10.0, step=0.1, tooltip="Optional absolute ATR filter to avoid ultra-low volatility regimes. Set to 0 to disable.")
+enableCryptoMode     = input.bool(false,       "Activate BTC/crypto Bias Pack", tooltip="Adds a higher-timeframe impulse filter and optional short disabling tuned for trending BTC behavior.")
+cryptoFastLen        = input.int(34,           "Impulse Fast EMA", minval=5, maxval=200)
+cryptoSlowLen        = input.int(144,          "Impulse Slow EMA", minval=10, maxval=400)
+longOnlyMode         = input.bool(false,       "Long-Only Resonance Mode", tooltip="Disables shorts (recommended for strong BTC bull phases).")
+maxTradesPerDay      = input.int(6,            "Max Trades Per Session", minval=1, maxval=50)
+cooldownBars         = input.int(5,            "Cooldown Bars Between Entries", minval=0, maxval=200)
+performanceWinTarget = input.float(40.0,       "Win-Rate Target %", minval=10.0, maxval=95.0, step=0.5)
+performancePfTarget  = input.float(1.4,        "Profit Factor Target", minval=0.5, maxval=5.0, step=0.1)
+performanceMinTrades = input.int(25,           "Minimum Trades for QA", minval=5, maxval=200)
+qaMinScore           = input.float(0.8,        "QA Certification Threshold", minval=0.5, maxval=1.0, step=0.05)
+validationMode       = input.string("Basic",   "Integrity Suite Mode", options=["Off", "Basic", "Enhanced"])
+showValidationPanel  = input.bool(true,        "Show Integrity Panel")
+showValidationDetail = input.bool(false,       "Show Validation Detail Table")
+showStructureLabels  = input.bool(true,        "Show Structure Labels")
+showDashboard        = input.bool(true,        "Show ChronoPulse Dashboard")
+showQaConsole        = input.bool(true,        "Show QA Console")
+
+groupLayout          = "Layout & Display"
+dashboardLayout      = input.string("Full",     "Dashboard Layout", options=["Full", "Compact"], group=groupLayout)
+dashboardCorner      = input.string("Bottom Right", "Dashboard Corner", options=["Top Left","Top Right","Bottom Left","Bottom Right"], group=groupLayout)
+qaLayout             = input.string("Detailed", "QA Panel Layout", options=["Summary","Detailed"], group=groupLayout)
+qaCornerOption       = input.string("Top Left", "QA Panel Corner", options=["Top Left","Top Right","Bottom Left","Bottom Right"], group=groupLayout)
+integrityCornerOption= input.string("Bottom Left", "Integrity Panel Corner", options=["Top Left","Top Right","Bottom Left","Bottom Right"], group=groupLayout)
+panelOpacity         = input.int(70,            "Panel Opacity (0-100)", minval=0, maxval=100, step=5, group=groupLayout)
+
+const color clrPanel          = color.rgb(15, 23, 48)
+const color clrPanelSoft      = color.rgb(24, 36, 74)
+const color clrAccent         = color.rgb(0, 149, 255)
+const color clrAccentMuted    = color.rgb(72, 199, 180)
+const color clrWarn           = color.rgb(255, 181, 64)
+const color clrDanger         = color.rgb(255, 92, 115)
+const color clrNeutral        = color.rgb(110, 120, 142)
+const color clrBgSoft         = color.rgb(7, 12, 26)
+
+panelBgColor   = color.new(clrPanel, panelOpacity)
+panelSoftColor = color.new(clrPanelSoft, panelOpacity)
+
+getPanelPosition(posText) =>
+    switch posText
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Bottom Left" => position.bottom_left
+        => position.bottom_right
+
+var bool validationRan = false
+var int validationPassed = 0
+var int validationFailed = 0
+var int validationTotal = 0
+var float validationPassRate = na
+var array<string> validationNames = array.new<string>()
+var array<bool> validationResults = array.new<bool>()
+var array<string> validationDescriptions = array.new<string>()
+
+var table dash = na
+var string dashCornerState = ""
+var int dashRowsState = 0
+var int dashOpacityState = na
+
+var table qaTable = na
+var string qaCornerState = ""
+var int qaRowsState = 0
+var string qaLayoutState = ""
+var int qaOpacityState = na
+
+var table integrityTable = na
+var string integrityCornerState = ""
+var int integrityOpacityState = na
+
+var table validationDetailTable = na
+var string validationDetailCornerState = ""
+var int validationDetailOpacityState = na
+
+validationPush(testName, condition, description) =>
+    array.push(validationNames, testName)
+    array.push(validationResults, condition)
+    array.push(validationDescriptions, description)
+    condition
+
+trackValidation(testName, condition, description) =>
+    flag = validationPush(testName, condition, description)
+    totalDelta = 1
+    passDelta = flag ? 1 : 0
+    failDelta = flag ? 0 : 1
+    [totalDelta, passDelta, failDelta]
+
+f_macd(srcSeries, fastLen, slowLen, signalLen) =>
+    _fast  = ta.ema(srcSeries, fastLen)
+    _slow  = ta.ema(srcSeries, slowLen)
+    _macd  = _fast - _slow
+    _sig   = ta.ema(_macd, signalLen)
+    _hist  = _macd - _sig
+    [_macd, _sig, _hist]
+
+f_atr(len) =>
+    ta.atr(len)
+
+//──────────────────────────────────────────────────────────────────────────────
+// DATA SOURCES
+//──────────────────────────────────────────────────────────────────────────────
+structureHigh = structureTf == "" ? high  : request.security(syminfo.tickerid, structureTf, high,  lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+structureLow  = structureTf == "" ? low   : request.security(syminfo.tickerid, structureTf, low,   lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+structureClose= structureTf == "" ? close : request.security(syminfo.tickerid, structureTf, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+macdSource    = macdTf == "" ? priceSrc : request.security(syminfo.tickerid, macdTf, priceSrc, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+atrSeries     = atrTf == "" ? f_atr(atrLen) : request.security(syminfo.tickerid, atrTf, ta.atr(atrLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+atrReady      = not na(atrSeries)
+atrFallback   = ta.atr(atrLen)
+atrSafe       = atrReady ? atrSeries : atrFallback
+
+// guard ATR filter
+volatilityOk  = atrReady ? (atrSafe >= minAtrFilter or minAtrFilter == 0.0) : false
+
+// volume & trend gating
+volSma        = ta.sma(volume, volumeLookback)
+volumeReady   = not enableVolumeGate or (not na(volSma) and volume > volSma * volumeThreshold)
+volumeIntensity = not na(volSma) and volSma > 0 ? volume / volSma : 1.0
+trendGuide    = ta.ema(priceSrc, trendGuideLen)
+trendGuideBull= close > trendGuide
+trendGuideBear= close < trendGuide
+
+// crypto impulse bias (optional)
+impulseFast   = ta.ema(priceSrc, cryptoFastLen)
+impulseSlow   = ta.ema(priceSrc, cryptoSlowLen)
+cryptoImpulse = impulseFast - impulseSlow
+cryptoBull    = cryptoImpulse > 0
+cryptoBear    = cryptoImpulse < 0
+
+// trade budget & cooldown
+var int entriesToday = 0
+var int trackedDay   = na
+var int lastEntryBar = na
+currentDay           = int(math.floor(time / 86400000))
+if na(trackedDay)
+    trackedDay := currentDay
+if currentDay != trackedDay
+    entriesToday := 0
+    trackedDay := currentDay
+cooldownReady = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+tradeBudgetOk = entriesToday < maxTradesPerDay
+//──────────────────────────────────────────────────────────────────────────────
+// MARKET STRUCTURE ENGINE
+//──────────────────────────────────────────────────────────────────────────────
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var float prevSwingHigh = na
+var float prevSwingLow  = na
+var int   structureBias = 0   // 1 bull, -1 bear, 0 neutral
+
+pivHigh = ta.pivothigh(structureHigh, structureLeft, structureRight)
+pivLow  = ta.pivotlow(structureLow, structureLeft, structureRight)
+
+if not na(pivHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := pivHigh
+
+if not na(pivLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pivLow
+
+float bullThreshold = not na(lastSwingHigh) ? lastSwingHigh * (1.0 + structureBreakBuff) : na
+float bearThreshold = not na(lastSwingLow)  ? lastSwingLow  * (1.0 - structureBreakBuff) : na
+
+bullBreak      = not na(bullThreshold) and high > bullThreshold
+bearBreak      = not na(bearThreshold) and low  < bearThreshold
+
+bullBreakEvent = bullBreak and not bullBreak[1]
+bearBreakEvent = bearBreak and not bearBreak[1]
+
+biasPrev       = structureBias
+bool bosBull   = false
+bool chochBull = false
+bool bosBear   = false
+bool chochBear = false
+
+if bullBreakEvent
+    chochBull := biasPrev <= 0
+    bosBull   := biasPrev == 1
+    structureBias := 1
+
+if bearBreakEvent
+    chochBear := biasPrev >= 0
+    bosBear   := biasPrev == -1
+    structureBias := -1
+
+msBullish = chochBull or bosBull
+msBearish = chochBear or bosBear
+
+// inducement proxy (distance to last violated liquidity pocket divided by ATR)
+liquidityMid = not na(lastSwingHigh) and not na(lastSwingLow) ? (lastSwingHigh + lastSwingLow) / 2.0 : na
+idmScore     = not na(atrSeries) and not na(liquidityMid) ? math.abs(close - liquidityMid) / atrSeries : na
+
+//──────────────────────────────────────────────────────────────────────────────
+// MACD + TREND FILTERS
+//──────────────────────────────────────────────────────────────────────────────
+[macdLine, macdSignalLine, macdHist] = f_macd(macdSource, macdFast, macdSlow, macdSignal)
+[macdLineFusion, macdSignalFusion, macdHistFusion] = f_macd(macdSource, fusionFast, fusionSlow, fusionSignal)
+
+macdBullCore = macdLine > macdSignalLine and macdLine > 0 and macdHist > macdHist[1]
+macdBearCore = macdLine < macdSignalLine and macdLine < 0 and macdHist < macdHist[1]
+macdBullFusion = macdLineFusion > macdSignalFusion and macdLineFusion > 0 and macdHistFusion > macdHistFusion[1]
+macdBearFusion = macdLineFusion < macdSignalFusion and macdLineFusion < 0 and macdHistFusion < macdHistFusion[1]
+
+macdBull = fusionEnabled ? (macdBullCore and macdBullFusion) : macdBullCore
+macdBear = fusionEnabled ? (macdBearCore and macdBearFusion) : macdBearCore
+
+momentumStrength = (math.abs(macdHist) + math.abs(macdHistFusion)) / 2.0
+
+directionalEma = ta.ema(priceSrc, biasEmaLen)
+
+trendBull = close > directionalEma
+trendBear = close < directionalEma
+
+atrBaseline   = ta.sma(atrSafe, 14)
+volScore      = atrBaseline > 0 ? math.min(math.max(atrSafe / atrBaseline, 0.0), 1.5) / 1.5 : 1.0
+volumeScore   = enableVolumeGate ? math.min(math.max(volumeIntensity / volumeThreshold, 0.0), 1.5) / 1.5 : 1.0
+structureScore= msBullish ? 1.0 : msBearish ? 0.0 : 0.5
+momentumScore = macdBull ? 1.0 : macdBear ? 0.0 : 0.5
+trendScore    = trendGuideBull ? 1.0 : trendGuideBear ? 0.0 : 0.5
+qualityScore  = (structureScore + momentumScore + trendScore + volScore + volumeScore) / 5.0
+qualityPass   = enableQualityGate ? qualityScore >= qualityThreshold : true
+
+//──────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+//──────────────────────────────────────────────────────────────────────────────
+executionReady = tradeBudgetOk and cooldownReady
+cryptoGateLong = not enableCryptoMode or cryptoBull
+cryptoGateShort= not enableCryptoMode or cryptoBear or not cryptoBull
+
+longConditionBase  = atrReady and volatilityOk and msBullish and macdBull and trendBull and trendGuideBull and volumeReady and executionReady and qualityPass and cryptoGateLong
+shortConditionBase = atrReady and volatilityOk and msBearish and macdBear and trendBear and trendGuideBear and volumeReady and executionReady and qualityPass and cryptoGateShort
+
+longCondition  = longConditionBase
+shortCondition = not longOnlyMode and shortConditionBase
+
+//──────────────────────────────────────────────────────────────────────────────
+// RISK MANAGEMENT (SL / TP / TRAIL)
+//──────────────────────────────────────────────────────────────────────────────
+float longStop  = close - atrSafe * stopAtrMult
+float longLimit = close + atrSafe * tpAtrMult
+float shortStop = close + atrSafe * stopAtrMult
+float shortLimit= close - atrSafe * tpAtrMult
+
+var float peakSinceEntry   = na
+var float troughSinceEntry = na
+var float trailLong        = na
+var float trailShort       = na
+
+if strategy.position_size > 0
+    peakSinceEntry := na(peakSinceEntry) ? high : math.max(peakSinceEntry, high)
+    profitFromEntry = peakSinceEntry - strategy.position_avg_price
+    if profitFromEntry >= atrSafe * trailTriggerAtr
+        trailLong := peakSinceEntry - atrSafe * trailDistanceAtr
+    else
+        trailLong := na
+else
+    peakSinceEntry := na
+    trailLong := na
+
+if strategy.position_size < 0
+    troughSinceEntry := na(troughSinceEntry) ? low : math.min(troughSinceEntry, low)
+    profitShort = strategy.position_avg_price - troughSinceEntry
+    if profitShort >= atrSafe * trailTriggerAtr
+        trailShort := troughSinceEntry + atrSafe * trailDistanceAtr
+    else
+        trailShort := na
+else
+    troughSinceEntry := na
+    trailShort := na
+
+float protectiveLongStop  = na(trailLong)  ? longStop  : math.max(longStop,  trailLong)
+float protectiveShortStop = na(trailShort) ? shortStop : math.min(shortStop, trailShort)
+
+//──────────────────────────────────────────────────────────────────────────────
+// ORDER EXECUTION
+//──────────────────────────────────────────────────────────────────────────────
+if longCondition and strategy.position_size <= 0
+    strategy.entry("ChronoLong", strategy.long, comment="ChronoPulse Long")
+
+if shortCondition and strategy.position_size >= 0
+    strategy.entry("ChronoShort", strategy.short, comment="ChronoPulse Short")
+
+strategy.exit("ChronoLong Exit",  from_entry="ChronoLong", stop=protectiveLongStop,  limit=longLimit)
+strategy.exit("ChronoShort Exit", from_entry="ChronoShort", stop=protectiveShortStop, limit=shortLimit)
+
+// safety: close on signal flip
+if strategy.position_size > 0 and shortCondition
+    strategy.close("ChronoLong", comment="Signal Flip")
+
+if strategy.position_size < 0 and longCondition
+    strategy.close("ChronoShort", comment="Signal Flip")
+
+enteredLong   = strategy.position_size > 0 and strategy.position_size[1] <= 0 and strategy.position_size != strategy.position_size[1]
+enteredShort  = strategy.position_size < 0 and strategy.position_size[1] >= 0 and strategy.position_size != strategy.position_size[1]
+enteredNew    = enteredLong or enteredShort
+if enteredNew
+    entriesToday += 1
+    lastEntryBar := bar_index
+
+//──────────────────────────────────────────────────────────────────────────────
+// VISUALS
+//──────────────────────────────────────────────────────────────────────────────
+emaPlot = plot(directionalEma, "Directional EMA", color=color.new(color.orange, 0), linewidth=2)
+plot(trailLong,  "Long Trail",  color=color.new(color.green,  0), linewidth=1, style=plot.style_linebr)
+plot(trailShort, "Short Trail", color=color.new(color.red,    0), linewidth=1, style=plot.style_linebr)
+
+plotshape(chochBull, title="CHOCH Bull", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="CHOCH↑", textcolor=color.white, size=size.tiny, display=showStructureLabels ? display.all : display.none)
+plotshape(bosBull,   title="BOS Bull",   location=location.belowbar, color=color.new(color.teal,  0), style=shape.labelup, text="BOS↑",   textcolor=color.white, size=size.tiny, display=showStructureLabels ? display.all : display.none)
+plotshape(chochBear, title="CHOCH Bear", location=location.abovebar, color=color.new(color.red,   0), style=shape.labeldown, text="CHOCH↓", textcolor=color.white, size=size.tiny, display=showStructureLabels ? display.all : display.none)
+plotshape(bosBear,   title="BOS Bear",   location=location.abovebar, color=color.new(color.maroon,0), style=shape.labeldown, text="BOS↓",   textcolor=color.white, size=size.tiny, display=showStructureLabels ? display.all : display.none)
+
+// diagnostic plots (hidden)
+plot(structureBias, "Structure Bias", color=structureBias >= 0 ? color.new(color.green, 70) : color.new(color.red, 70), display=display.none)
+plot(macdHist, "MACD Histogram", color=color.new(color.blue, 70), display=display.none)
+
+//──────────────────────────────────────────────────────────────────────────────
+// DASHBOARD
+//──────────────────────────────────────────────────────────────────────────────
+dashRows = dashboardLayout == "Full" ? 10 : 6
+if na(dash) or dashCornerState != dashboardCorner or dashRowsState != dashRows or dashOpacityState != panelOpacity
+    dash := table.new(getPanelPosition(dashboardCorner), 2, dashRows, border_width=1, bgcolor=panelBgColor)
+    dashCornerState := dashboardCorner
+    dashRowsState := dashRows
+    dashOpacityState := panelOpacity
+
+biasText = structureBias == 1 ? "Bullish" : structureBias == -1 ? "Bearish" : "Neutral"
+macdText = macdBull ? "Fusion Bull" : macdBear ? "Fusion Bear" : "MACD Neutral"
+trailState = not na(trailLong) or not na(trailShort) ? "Active" : "Armed"
+cryptoText = enableCryptoMode ? (cryptoBull ? "Bull Impulse" : cryptoBear ? "Bear Impulse" : "Flat") : "Off"
+tfLabel = atrTf == "" ? "Chart" : atrTf
+
+if showDashboard and barstate.islastconfirmedhistory
+    for r = 0 to dashRows - 1
+        for c = 0 to 1
+            table.cell(dash, c, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+    table.cell(dash, 0, 0, "ChronoPulse Resonance", text_color=color.red, bgcolor=panelSoftColor, text_size=size.small)
+
+    if dashboardLayout == "Full"
+        table.cell(dash, 0, 1, "Structure", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 1, biasText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 2, "MACD State", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 2, macdText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 3, "ATR (TF)", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 3, str.tostring(atrSeries, format.mintick) + " / " + tfLabel, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 4, "IDM Score", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 4, na(idmScore) ? "n/a" : str.tostring(idmScore, "#.00"), text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 5, "Trail", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 5, trailState, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 6, "Volume Gate", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 6, volumeReady ? "Live" : "Dormant", text_color=color.white, bgcolor=color.new(volumeReady ? clrAccentMuted : clrWarn, panelOpacity), text_size=size.tiny)
+        table.cell(dash, 0, 7, "Quality", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 7, str.tostring(qualityScore, "#.00"), text_color=color.white, bgcolor=color.new(qualityPass ? clrAccentMuted : clrDanger, panelOpacity), text_size=size.tiny)
+        table.cell(dash, 0, 8, "Discipline", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 8, str.tostring(entriesToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white, bgcolor=color.new(executionReady ? clrAccentMuted : clrWarn, panelOpacity), text_size=size.tiny)
+        table.cell(dash, 0, 9, "PnL", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 9, str.tostring(strategy.netprofit, "#.0"), text_color=color.white, bgcolor=color.new(strategy.netprofit >= 0 ? clrAccentMuted : clrDanger, panelOpacity), text_size=size.tiny)
+    else
+        table.cell(dash, 0, 1, "Structure", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 1, biasText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 2, "MACD", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 2, macdText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 3, "ATR/TF", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 3, str.tostring(atrSeries, format.mintick) + " / " + tfLabel, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(dash, 0, 4, "Quality", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 4, str.tostring(qualityScore, "#.00"), text_color=color.white, bgcolor=color.new(qualityPass ? clrAccentMuted : clrDanger, panelOpacity), text_size=size.tiny)
+        table.cell(dash, 0, 5, "PnL", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(dash, 1, 5, str.tostring(strategy.netprofit, "#.0"), text_color=color.white, bgcolor=color.new(strategy.netprofit >= 0 ? clrAccentMuted : clrDanger, panelOpacity), text_size=size.tiny)
+
+winRate         = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
+lossAbs         = math.abs(strategy.grossloss)
+profitFactor    = lossAbs > 0 ? strategy.grossprofit / lossAbs : na
+qaStructure     = structureBias != 0
+qaMomentum      = macdBull or macdBear
+qaRisk          = atrReady and volatilityOk
+qaQualityMetric = qualityPass
+qaDiscipline    = executionReady
+qaPerformance   = strategy.closedtrades >= performanceMinTrades and not na(winRate) and winRate >= performanceWinTarget and not na(profitFactor) and profitFactor >= performancePfTarget and strategy.netprofit > 0
+qaScore         = ( (qaStructure ? 1.0 : 0.0) + (qaMomentum ? 1.0 : 0.0) + (qaRisk ? 1.0 : 0.0) + (qaQualityMetric ? 1.0 : 0.0) + (qaDiscipline ? 1.0 : 0.0) + (qaPerformance ? 1.0 : 0.0) ) / 6.0
+qaCertified     = qaScore >= qaMinScore and qaQualityMetric and qaRisk and qaPerformance
+qaWatch         = not qaCertified and qaScore >= qaMinScore * 0.9
+qaStatusText    = qaCertified ? "CERTIFIED" : qaWatch ? "WATCH" : "BLOCK"
+qaStatusColor   = qaCertified ? color.new(color.green, 0) : qaWatch ? color.new(color.orange, 0) : color.new(color.red, 0)
+
+qaRows = qaLayout == "Detailed" ? 8 : 4
+if na(qaTable) or qaCornerState != qaCornerOption or qaRowsState != qaRows or qaOpacityState != panelOpacity or qaLayoutState != qaLayout
+    qaTable := table.new(getPanelPosition(qaCornerOption), 3, qaRows, border_width=1, bgcolor=panelBgColor)
+    qaCornerState := qaCornerOption
+    qaRowsState := qaRows
+    qaOpacityState := panelOpacity
+    qaLayoutState := qaLayout
+
+if showQaConsole and barstate.islastconfirmedhistory
+    for r = 0 to qaRows - 1
+        for c = 0 to 2
+            table.cell(qaTable, c, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+    table.cell(qaTable, 0, 0, "Quality Assurance", text_color=color.red, bgcolor=panelSoftColor, text_size=size.small)
+    table.cell(qaTable, 1, 0, qaStatusText, text_color=color.white, bgcolor=color.new(qaStatusColor, panelOpacity), text_size=size.small)
+    table.cell(qaTable, 2, 0, str.tostring(qaScore * 100.0, "#.0") + "%", text_color=color.white, bgcolor=panelSoftColor, text_size=size.small)
+
+    if qaLayout == "Detailed"
+        table.cell(qaTable, 0, 1, "Structure", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 1, qaStructure ? "✓" : "✗", text_color=qaStructure ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 1, biasText, text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 2, "Momentum", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 2, qaMomentum ? "✓" : "✗", text_color=qaMomentum ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 2, str.tostring(momentumStrength, "#.000"), text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 3, "Volatility", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 3, qaRisk ? "✓" : "✗", text_color=qaRisk ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 3, str.tostring(atrSafe, format.mintick), text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 4, "Quality", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 4, qaQualityMetric ? "✓" : "✗", text_color=qaQualityMetric ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 4, str.tostring(qualityScore, "#.00"), text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 5, "Discipline", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 5, qaDiscipline ? "✓" : "✗", text_color=qaDiscipline ? clrAccentMuted : clrWarn, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 5, str.tostring(entriesToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 6, "Performance", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 6, qaPerformance ? "✓" : "✗", text_color=qaPerformance ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        perfText = (na(winRate) or na(profitFactor)) ? "n/a" : str.tostring(winRate, "#.0") + "% / PF " + str.tostring(profitFactor, "#.00")
+        table.cell(qaTable, 2, 6, perfText, text_color=color.white, bgcolor=panelBgColor)
+
+        table.cell(qaTable, 0, 7, "Net PnL", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 7, strategy.netprofit >= 0 ? "POS" : "NEG", text_color=strategy.netprofit >= 0 ? clrAccentMuted : clrDanger, bgcolor=panelBgColor)
+        table.cell(qaTable, 2, 7, str.tostring(strategy.netprofit, "#.0"), text_color=color.white, bgcolor=panelBgColor)
+    else
+        table.cell(qaTable, 0, 1, "Structure", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        table.cell(qaTable, 1, 1, biasText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(qaTable, 2, 1, str.tostring(momentumStrength, "#.000"), text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+        table.cell(qaTable, 0, 2, "Vol / Qual", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        volQualText = str.tostring(atrSafe, format.mintick) + " | " + str.tostring(qualityScore, "#.00")
+        table.cell(qaTable, 1, 2, volQualText, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(qaTable, 2, 2, str.tostring(entriesToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+        table.cell(qaTable, 0, 3, "Performance", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+        compactPerf = (na(winRate) or na(profitFactor)) ? "n/a" : str.tostring(winRate, "#.0") + "% | PF " + str.tostring(profitFactor, "#.00")
+        table.cell(qaTable, 1, 3, compactPerf, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(qaTable, 2, 3, str.tostring(strategy.netprofit, "#.0"), text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+if not validationRan and validationMode != "Off" and barstate.islastconfirmedhistory
+    validationRan := true
+    array.clear(validationNames)
+    array.clear(validationResults)
+    array.clear(validationDescriptions)
+    validationPassed := 0
+    validationFailed := 0
+    validationTotal := 0
+
+    [totDelta0, passDelta0, failDelta0] = trackValidation("CFG_RANGE", structureLeft >= 1 and structureRight >= 1 and structureLeft <= structureRight, "Structure pivot range logical")
+    validationTotal += totDelta0
+    validationPassed += passDelta0
+    validationFailed += failDelta0
+
+    [totDelta1, passDelta1, failDelta1] = trackValidation("RISK_SPAN", stopAtrMult > 0 and tpAtrMult > stopAtrMult, "TP exceeds SL distance")
+    validationTotal += totDelta1
+    validationPassed += passDelta1
+    validationFailed += failDelta1
+
+    [totDelta2, passDelta2, failDelta2] = trackValidation("ATR_READY", atrReady and atrSafe > 0, "ATR feed initialized")
+    validationTotal += totDelta2
+    validationPassed += passDelta2
+    validationFailed += failDelta2
+
+    [totDelta3, passDelta3, failDelta3] = trackValidation("VOL_GATE", not enableVolumeGate or (volumeLookback >= 5 and volumeThreshold >= 1.0), "Volume filter configured")
+    validationTotal += totDelta3
+    validationPassed += passDelta3
+    validationFailed += failDelta3
+
+    [totDelta4, passDelta4, failDelta4] = trackValidation("QUALITY_BOUNDS", not enableQualityGate or (qualityThreshold >= 0.4 and qualityThreshold <= 0.95), "Quality threshold sane")
+    validationTotal += totDelta4
+    validationPassed += passDelta4
+    validationFailed += failDelta4
+
+    [totDelta5, passDelta5, failDelta5] = trackValidation("DISCIPLINE", maxTradesPerDay > 0 and cooldownBars >= 0, "Trade budget + cooldown valid")
+    validationTotal += totDelta5
+    validationPassed += passDelta5
+    validationFailed += failDelta5
+
+    [totDelta6, passDelta6, failDelta6] = trackValidation("CRYPTO_IMP", not enableCryptoMode or cryptoSlowLen > cryptoFastLen, "Impulse EMA hierarchy valid")
+    validationTotal += totDelta6
+    validationPassed += passDelta6
+    validationFailed += failDelta6
+
+    [totDelta7, passDelta7, failDelta7] = trackValidation("QA_SCORE", qaScore >= qaMinScore * 0.75, "QA score trending towards threshold")
+    validationTotal += totDelta7
+    validationPassed += passDelta7
+    validationFailed += failDelta7
+
+    if validationMode == "Enhanced"
+        [totDelta8, passDelta8, failDelta8] = trackValidation("REALISM_WIN", na(winRate) or winRate <= 95, "Win-rate realism check")
+        validationTotal += totDelta8
+        validationPassed += passDelta8
+        validationFailed += failDelta8
+
+        [totDelta9, passDelta9, failDelta9] = trackValidation("REALISM_PF", na(profitFactor) or profitFactor <= 6, "Profit factor realism check")
+        validationTotal += totDelta9
+        validationPassed += passDelta9
+        validationFailed += failDelta9
+
+        [totDelta10, passDelta10, failDelta10] = trackValidation("PERF_DEPTH", strategy.closedtrades >= math.min(performanceMinTrades, 10), "Minimum trade depth achieved")
+        validationTotal += totDelta10
+        validationPassed += passDelta10
+        validationFailed += failDelta10
+
+    validationPassRate := validationTotal > 0 ? (validationPassed / validationTotal) * 100.0 : na
+
+validationGate = validationMode == "Enhanced" ? 95.0 : 90.0
+validationStatus = validationPassRate >= validationGate ? "PASS" : "REVIEW"
+validationColor = validationPassRate >= validationGate ? clrAccentMuted : clrWarn
+
+if showValidationPanel and validationMode != "Off" and validationRan and barstate.islastconfirmedhistory
+    if na(integrityTable) or integrityCornerState != integrityCornerOption or integrityOpacityState != panelOpacity
+        integrityTable := table.new(getPanelPosition(integrityCornerOption), 2, 4, border_width=1, bgcolor=panelBgColor)
+        integrityCornerState := integrityCornerOption
+        integrityOpacityState := panelOpacity
+
+    for r = 0 to 3
+        for c = 0 to 1
+            table.cell(integrityTable, c, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+    table.cell(integrityTable, 0, 0, "Integrity Suite", text_color=color.red, bgcolor=panelSoftColor, text_size=size.small)
+    table.cell(integrityTable, 1, 0, validationStatus, text_color=color.white, bgcolor=color.new(validationColor, panelOpacity), text_size=size.small)
+
+    table.cell(integrityTable, 0, 1, "Total", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+    table.cell(integrityTable, 1, 1, str.tostring(validationTotal), text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+    table.cell(integrityTable, 0, 2, "Passed", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+    table.cell(integrityTable, 1, 2, str.tostring(validationPassed), text_color=clrAccentMuted, bgcolor=panelBgColor, text_size=size.tiny)
+
+    table.cell(integrityTable, 0, 3, "Pass Rate", text_color=color.white, bgcolor=panelSoftColor, text_size=size.tiny)
+    table.cell(integrityTable, 1, 3, na(validationPassRate) ? "n/a" : str.tostring(validationPassRate, "#.0") + "%", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+if showValidationDetail and validationMode != "Off" and validationRan and barstate.islastconfirmedhistory
+    if na(validationDetailTable) or validationDetailOpacityState != panelOpacity
+        validationDetailTable := table.new(position.middle_right, 3, 25, border_width=1, bgcolor=panelBgColor)
+        validationDetailOpacityState := panelOpacity
+    for r = 0 to 24
+        for c = 0 to 2
+            table.cell(validationDetailTable, c, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+    table.cell(validationDetailTable, 0, 0, "Test", text_color=color.white, bgcolor=panelSoftColor, text_size=size.small)
+    table.cell(validationDetailTable, 1, 0, "Status", text_color=color.white, bgcolor=panelSoftColor, text_size=size.small)
+    table.cell(validationDetailTable, 2, 0, "Description", text_color=color.white, bgcolor=panelSoftColor, text_size=size.small)
+    for i = 0 to array.size(validationNames) - 1
+        status = array.get(validationResults, i)
+        desc = array.get(validationDescriptions, i)
+        name = array.get(validationNames, i)
+        table.cell(validationDetailTable, 0, i + 1, name, text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(validationDetailTable, 1, i + 1, status ? "PASS" : "FAIL", text_color=status ? clrAccentMuted : clrDanger, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(validationDetailTable, 2, i + 1, desc, text_color=clrNeutral, bgcolor=panelBgColor, text_size=size.tiny)
+else if not na(validationDetailTable)
+    table.cell(validationDetailTable, 0, 0, "Detail Panel Off", text_color=color.white, bgcolor=panelSoftColor, text_size=size.small)
+    for r = 1 to 24
+        table.cell(validationDetailTable, 0, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(validationDetailTable, 1, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+        table.cell(validationDetailTable, 2, r, "", text_color=color.white, bgcolor=panelBgColor, text_size=size.tiny)
+
+//──────────────────────────────────────────────────────────────────────────────
+// ALERTS
+//──────────────────────────────────────────────────────────────────────────────
+alertcondition(longCondition,  title="ChronoPulse Long Setup",  message="ChronoPulse: bullish structure + MACD confluence detected. Prepare long entry.")
+alertcondition(shortCondition, title="ChronoPulse Short Setup", message="ChronoPulse: bearish structure + MACD confluence detected. Prepare short entry.")
+alertcondition(qaCertified,    title="ChronoPulse QA Certification", message="Quality Assurance console just printed CERTIFIED. All systems green.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// NOTES & SAFEGUARDS
+//──────────────────────────────────────────────────────────────────────────────
+var label deploymentLabel = na
+if barstate.islast
+    verdict = longCondition ? "Bullish Opportunity" : shortCondition ? "Bearish Opportunity" : "Waiting"
+    verdictColor = longCondition ? color.new(color.green, 0) : shortCondition ? color.new(color.red, 0) : color.new(color.orange, 0)
+    if na(deploymentLabel)
+        deploymentLabel := label.new(bar_index, high, text="", style=label.style_label_left, textcolor=color.white, color=verdictColor)
+    label.set_xy(deploymentLabel, bar_index, high)
+    label.set_text(deploymentLabel, "ChronoPulse Status:\n" + verdict + "\nStructure: " + biasText + "\nMACD: " + macdText + "\nQA: " + qaStatusText + " (" + str.tostring(qaScore * 100.0, "#.0") + "%)")
+    label.set_color(deploymentLabel, qaCertified ? color.new(color.green, 0) : verdictColor)
+
+View in Pine Editor・612 lines
+Use on chart
+8
+0
+1 733
+ChronoPulse MS-MACD Resonance Strategy
+
+A systematic trading strategy that combines higher-timeframe market structure analysis with dual MACD momentum confirmation, ATR-based risk management, and real-time quality assurance monitoring.
+
+Core Principles
+
+The strategy operates on the principle of multi-timeframe confluence, requiring agreement between:
+
+Market structure breaks (CHOCH/BOS) on a higher timeframe
+
+Dual MACD momentum confirmation (classic and crypto-tuned profiles)
+
+Trend alignment via directional EMAs
+
+Volatility and volume filters
+
+Quality score composite threshold
+
+
+
+Strategy Components
+
+
+Market Structure Engine: Detects Break of Structure (BOS) and Change of Character (CHOCH) events using confirmed pivots on a configurable higher timeframe. Default structure timeframe is 240 minutes (4H).
+
+
+Dual MACD Fusion: Requires agreement between two MACD configurations:
+Classic MACD: 12/26/9 (default)
+Fusion MACD: 8/21/5 (default, optimized for crypto volatility)
+
+Both must agree on direction before trade execution. This can be disabled to use single MACD confirmation.
+
+
+Trend Alignment: Uses two EMAs for directional bias:
+Directional EMA: 55 periods (default)
+Execution Trend Guide: 34 periods (default)
+
+Both must align with trade direction.
+
+
+ATR Risk Management: All risk parameters are expressed in ATR multiples:
+Stop Loss: 1.5 × ATR (default)
+Take Profit: 3.0 × ATR (default)
+Trail Activation: 1.0 × ATR profit required (default)
+Trail Distance: 1.5 × ATR behind price (default)
+
+Volume Surge Filter: Optional gate requiring current volume to exceed a multiple of the volume SMA. Default threshold is 1.4× the 20-period volume SMA.
+
+
+Quality Score Gate: Composite score (0-1) combining:
+Structure alignment (0.0-1.0)
+Momentum strength (0.0-1.0)
+Trend alignment (0.0-1.0)
+ATR volatility score (0.0-1.0)
+Volume intensity (0.0-1.0)
+
+Default threshold: 0.62. Trades only execute when quality score exceeds this threshold.
+
+
+Execution Discipline: Trade budgeting system:
+Maximum trades per session: 6 (default)
+Cooldown bars between entries: 5 (default)
+
+Quality Assurance Console: Real-time monitoring panel displaying:
+Structure status (pass/fail)
+Momentum confirmation (pass/fail)
+Volatility readiness (pass/fail)
+Quality score (pass/fail)
+Discipline compliance (pass/fail)
+Performance metrics (win rate, profit factor)
+Net PnL
+
+Certification requires: Win Rate ≥ 40%, Profit Factor ≥ 1.4, Minimum 25 closed trades, and positive net profit.
+
+
+Integrity Suite: Optional validation panel that audits:
+
+Configuration sanity checks
+
+ATR data readiness
+
+EMA hierarchy validity
+
+Performance realism checks
+
+
+
+Strategy Settings
+
+
+Pine Script®
+strategy(
+    title="ChronoPulse MS-MACD Resonance Strategy",
+    shorttitle="ChronPulse",
+    overlay=true,
+    max_labels_count=500,
+    max_lines_count=500,
+    initial_capital=100000,
+    currency=currency.USD,
+    pyramiding=0,
+    commission_type=strategy.commission.percent,
+    commission_value=0.015,
+    slippage=2,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=2.0,
+    calc_on_order_fills=true,
+    calc_on_every_tick=true,
+    process_orders_on_close=true
+)
+
+Expand 13 lines
+
+
+Key Input Parameters
+
+
+
+
+
+Structure Timeframe: 240 (4H) - Higher timeframe for structure analysis
+
+Structure Pivot Left/Right: 3/3 - Pivot confirmation periods
+
+Structure Break Buffer: 0.15% - Buffer for structure break confirmation
+
+MACD Fast/Slow/Signal: 12/26/9 - Classic MACD parameters
+
+Fusion MACD Fast/Slow/Signal: 8/21/5 - Crypto-tuned MACD parameters
+
+Directional EMA Length: 55 - Primary trend filter
+
+Execution Trend Guide: 34 - Secondary trend filter
+
+ATR Length: 14 - ATR calculation period
+
+ATR Stop Multiplier: 1.5 - Stop loss in ATR units
+
+ATR Target Multiplier: 3.0 - Take profit in ATR units
+
+Trail Activation: 1.0 ATR - Profit required before trailing
+
+Trail Distance: 1.5 ATR - Distance behind price
+
+Volume Threshold: 1.4× - Volume surge multiplier
+
+Quality Threshold: 0.62 - Minimum quality score (0-1)
+
+Max Trades Per Session: 6 - Daily trade limit
+
+Cooldown Bars: 5 - Bars between entries
+
+Win-Rate Target: 40% - Minimum for QA certification
+
+Profit Factor Target: 1.4 - Minimum for QA certification
+
+Minimum Trades for QA: 25 - Required closed trades
+
+
+
+Signal Generation Logic
+
+A trade signal is generated when ALL of the following conditions are met:
+
+
+Higher timeframe structure shows bullish (CHOCH/BOS) or bearish structure break
+
+Both MACD profiles agree on direction (if fusion enabled)
+
+Price is above both EMAs for longs (below for shorts)
+
+ATR data is ready and above minimum threshold
+
+Volume exceeds threshold × SMA (if volume gate enabled)
+
+Quality score ≥ quality threshold
+
+Trade budget available (under max trades per day)
+
+Cooldown period satisfied
+
+
+
+Risk Management
+
+
+Stop loss and take profit are set immediately on entry
+
+Trailing stop activates after 1.0 ATR of profit
+
+Trailing stop maintains 1.5 ATR distance behind highest profit point
+
+Position sizing uses 2% of equity per trade (default)
+
+No pyramiding (single position per direction)
+
+
+
+Limitations and Considerations
+
+
+The strategy requires sufficient historical data for higher timeframe structure analysis
+
+Quality gate may filter out many potential trades, reducing trade frequency
+
+Performance metrics are based on historical backtesting and do not guarantee future results
+
+Commission and slippage assumptions (0.015% + 2 ticks) may vary by broker
+
+The strategy is optimized for trending markets with clear structure breaks
+
+Choppy or ranging markets may produce false signals
+
+Crypto markets may require different parameter tuning than traditional assets
+
+
+
+Optimization Notes
+
+The strategy includes several parameters that can be tuned for different market conditions:
+
+
+Quality Threshold: Lower values (0.50-0.60) allow more trades but may reduce average quality. Higher values (0.70+) are more selective but may miss opportunities.
+
+Structure Timeframe: Use 240 (4H) for intraday trading, Daily for swing trading, Weekly for position trading
+
+Volume Gate: Disable for low-liquidity pairs or when volume data is unreliable
+
+Dual MACD Fusion: Disable for mean-reverting markets where single MACD may be more responsive
+
+Trade Discipline: Adjust max trades and cooldown based on your risk tolerance and market volatility
+
+
+
+Non-Repainting Guarantee
+
+All higher timeframe data requests use
+Pine Script®
+lookahead=barmerge.lookahead_off
+
+to prevent repainting. Pivot detection waits for full confirmation before registering structure breaks. All visual elements (tables, labels) update only on closed bars.
+
+Alerts
+
+Three alert conditions are available:
+
+
+ChronoPulse Long Setup: Fires when all long entry conditions are met
+
+ChronoPulse Short Setup: Fires when all short entry conditions are met
+
+ChronoPulse QA Certification: Fires when Quality Assurance console reaches CERTIFIED status
+
+
+
+Configure alerts with "Once Per Bar Close" delivery to match the non-repainting design.
+
+
+
+
+Visual Elements
+
+
+Structure Labels: CHOCH↑, CHOCH↓, BOS↑, BOS↓ markers on structure breaks
+
+Directional EMA: Orange line showing trend bias
+
+Trailing Stop Lines: Green (long) and red (short) trailing stop levels
+
+Dashboard Panel: Real-time status display (structure, MACD, ATR, quality, PnL)
+
+QA Console: Quality assurance monitoring panel
+
+Integrity Suite Panel: Optional validation status display
+
+
+
+Recommended Usage
+
+
+Forward test with paper trading before live deployment
+
+Monitor the QA console until it reaches CERTIFIED status
+
+Adjust parameters based on your specific market and timeframe
+
+Respect the trade discipline limits to avoid over-trading
+
+Review quality scores and adjust threshold if needed
+
+Use appropriate commission and slippage settings for your broker
+
+
+
+Technical Implementation
+
+The strategy uses Pine Script v6 with the following key features:
+
+
+Multi-timeframe data requests with lookahead protection
+
+Confirmed pivot detection for structure analysis
+
+Dynamic trailing stop management
+
+Real-time quality score calculation
+
+Trade budgeting and cooldown enforcement
+
+Comprehensive dashboard and monitoring panels
+
+
+
+All source code is open and available for review and modification.
+
+Disclaimer
+
+This script is for educational and informational purposes only. It is not intended as financial, investment, or trading advice. Past performance does not guarantee future results. Trading involves substantial risk of loss and is not suitable for all investors. Always conduct your own research and consult with a qualified financial advisor before making any trading decisions. The author and TradingView are not responsible for any losses incurred from using this strategy.
+
+

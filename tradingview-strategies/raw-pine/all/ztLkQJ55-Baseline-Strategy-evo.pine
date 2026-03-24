@@ -1,0 +1,128 @@
+//@version=4
+strategy("Baseline Strategy - evo", "Baseline Strategy", true)
+
+// INPUTS
+Resolution      =   input("",           "Resolution",                           type=input.resolution)
+Show_Ma         =   input(false,        "Show moving average")
+
+// Strategy entry should be good on this setting
+Repaint         =   (true)
+
+Type            =   input("SMA",        "Type",                                 options=["SMA", "EMA", "HMA", "RMA", "WMA", "VWMA", "ALMA", "Donchian"])
+Length          =   input(30,           "Length",                               minval=1)
+ALMA_Offset     =   (0.85)
+ALMA_Sigma      =   (6)
+
+Strategy        =   input("CLOSE",      "Closing Strategy",                     options=["OHLC4", "HLC3", "HL2", "CLOSE"])
+
+Signals         =   input(false,        "Show signals")
+Bars            =   input(false,        "Show barcolor")
+Background      =   input(false,        "Show Background")
+Fill            =   input(false,        "Fill baseline")
+
+// SETTINGS
+O               =   Repaint ? open  : open[1]
+H               =   Repaint ? high  : high[1]
+L               =   Repaint ? low   : low[1]
+C               =   Repaint ? close : close[1]
+OHLC            =   Repaint ? ohlc4 : ohlc4[1]
+HLC             =   Repaint ? hlc3  : hlc3[1]
+HL              =   Repaint ? hl2   : hl2[1]
+
+OPEN            =   security(syminfo.tickerid, Resolution, O)
+HIGH            =   security(syminfo.tickerid, Resolution, H)
+LOW             =   security(syminfo.tickerid, Resolution, L)
+CLOSE           =   security(syminfo.tickerid, Resolution, C)
+OHLC4           =   security(syminfo.tickerid, Resolution, OHLC)
+HLC3            =   security(syminfo.tickerid, Resolution, HLC)
+HL2             =   security(syminfo.tickerid, Resolution, HL)
+
+Average_        =    
+ Type == "SMA"        ? sma(CLOSE, Length)                                  : 
+ Type == "EMA"        ? ema(CLOSE, Length)                                  : 
+ Type == "HMA"        ? hma(CLOSE, Length)                                  : 
+ Type == "RMA"        ? rma(CLOSE, Length)                                  : 
+ Type == "WMA"        ? wma(CLOSE, Length)                                  : 
+ Type == "VWMA"       ? vwma(CLOSE, Length)                                 : 
+ Type == "ALMA"       ? alma(CLOSE, Length, ALMA_Offset, ALMA_Sigma)        : 
+ Type == "Donchian"   ? avg(highest(CLOSE, Length), lowest(CLOSE, Length))  : na 
+
+Upper_          =   
+ Type == "SMA"        ? sma(HIGH, Length)                                   : 
+ Type == "EMA"        ? ema(HIGH, Length)                                   : 
+ Type == "HMA"        ? hma(HIGH, Length)                                   : 
+ Type == "RMA"        ? rma(HIGH, Length)                                   : 
+ Type == "WMA"        ? wma(HIGH, Length)                                   : 
+ Type == "VWMA"       ? vwma(HIGH, Length)                                  : 
+ Type == "ALMA"       ? alma(HIGH, Length, ALMA_Offset, ALMA_Sigma)         : 
+ Type == "Donchian"   ? avg(highest(HIGH, Length), lowest(HIGH, Length))    : na 
+
+Lower_          =   
+ Type == "SMA"        ? sma(LOW, Length)                                    : 
+ Type == "EMA"        ? ema(LOW, Length)                                    : 
+ Type == "HMA"        ? hma(LOW, Length)                                    : 
+ Type == "RMA"        ? rma(LOW, Length)                                    : 
+ Type == "WMA"        ? wma(LOW, Length)                                    : 
+ Type == "VWMA"       ? vwma(LOW, Length)                                   : 
+ Type == "ALMA"       ? alma(LOW, Length, ALMA_Offset, ALMA_Sigma)          : 
+ Type == "Donchian"   ? avg(highest(LOW, Length), lowest(LOW, Length))      : na 
+
+Average         =   security(syminfo.tickerid, Resolution, Average_)
+Upper           =   security(syminfo.tickerid, Resolution, Upper_)
+Lower           =   security(syminfo.tickerid, Resolution, Lower_)
+
+H_Set           =   Strategy == "OHLC4" ? OHLC4 : Strategy == "HLC3" ? HLC3 : Strategy == "HL2" ? HL2 : Strategy == "CLOSE" ? CLOSE : na
+L_Set           =   Strategy == "OHLC4" ? OHLC4 : Strategy == "HLC3" ? HLC3 : Strategy == "HL2" ? HL2 : Strategy == "CLOSE" ? CLOSE : na
+
+Dir_1           =   float(na), Dir_1 := L_Set > Upper ? 1 : H_Set < Lower ? -1 : nz(Dir_1[1])
+Up_Sig          =   Dir_1 != Dir_1[1] and Dir_1 ==  1 and Signals
+Dn_Sig          =   Dir_1 != Dir_1[1] and Dir_1 == -1 and Signals
+Color_1_1       =   Dir_1 == 1 ? (close > open ? color.new(#a5d6a7, 0) : color.new(#81c784, 0)) : (close > open ? color.new(#ef9a9a, 0) : color.new(#e57373, 0))
+Color_1_2       =   Dir_1 == 1 ? color.new(#4caf50, 80) : color.new(#f44336, 80)
+
+Dir_2           =   float(na), Dir_2 := Average > Average[1] ? 1 : Average < Average[1] ? -1 : nz(Dir_2[1])
+Color_2         =   Dir_2 == 1 ? color.new(#000000, 1) : color.new(#000000, 0)
+
+Color_3         =   Fill ? color.new(#000000, 90) : color.new(#000000, 100)
+
+// PLOT
+plot(Show_Ma ? Average : na, "Moving Average", Color_2, 2)
+
+P1 = plot(Upper, "Upper Line", Color_2, 2)
+P2 = plot(Lower, "Upper Line", Color_2, 2)
+fill(P1, P2, title="Baseline Fill", color=Color_3)
+
+plotshape(Up_Sig ? Lower : na, "Buy", color=color.new(#00ff00, 40), location=location.absolute, size=size.small, style=shape.labelup, text="Buy", textcolor=color.new(#000000, 0))
+plotshape(Dn_Sig ? Upper : na, "Sell", color=color.new(#ff0000, 40), location=location.absolute, size=size.small, style=shape.labeldown, text="Sell", textcolor=color.new(#ffffff, 0))
+
+barcolor(Bars ? Color_1_1 : na, title="Bar Color")
+bgcolor(Background ? Color_1_2 : na, title="Background")
+
+// STRATEGY
+if (Dir_1 ==  1)
+    strategy.entry("Long", strategy.long)
+if (Dir_1 == -1)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・108 lines
+Use on chart
+2
+0
+9
+4
+5 254
+Oct 29, 2019
+Strategy version of my baseline indicator, helpful for back testing.
+Feb 4, 2020
+Release Notes
+Update
+- Same updates as non strategy version
+Jun 20, 2020
+Release Notes
+UPDATE
+Same update as study version, only repaint option is not changeable.
+
+Jun 21, 2020
+Release Notes
+UPDATE
+- Fixed mtf error

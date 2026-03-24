@@ -1,0 +1,89 @@
+//@version=5
+strategy("Alligator + MA Trend Catcher [TradeDots]", overlay=true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 80, commission_type = strategy.commission.percent, commission_value = 0.01)
+
+// william alligator
+smma(src, length) =>
+    smma =  0.0
+    smma := na(smma[1]) ? ta.sma(src, length) : (smma[1] * (length - 1) + src) / length
+    smma
+
+jawLength = input.int(8, minval=1, title="Jaw Length", group = "william alligator settings")
+teethLength = input.int(5, minval=1, title="Teeth Length", group = "william alligator settings")
+lipsLength = input.int(3, minval=1, title="Lips Length", group = "william alligator settings")
+jawOffset = input(8, title="Jaw Offset", group = "william alligator settings")
+teethOffset = input(5, title="Teeth Offset", group = "william alligator settings")
+lipsOffset = input(3, title="Lips Offset", group = "william alligator settings")
+jaw = smma(hl2, jawLength)
+teeth = smma(hl2, teethLength)
+lips = smma(hl2, lipsLength)
+
+// ma
+input_trendline_length = input.int(200, "Trendline Length", group = "moving average settings")
+trendline = ta.ema(close, input_trendline_length)
+
+// strategy settings
+input_long_orders = input.bool(true, "Long", group = "Strategy Settings")
+input_short_orders = input.bool(true, "Short", group = "Strategy Settings")
+
+//long
+if close > trendline and lips > teeth and teeth > jaw and input_long_orders and strategy.opentrades == 0
+    strategy.entry("Long", strategy.long)
+    label.new(bar_index, low, text = "🟢 Long", style = label.style_label_up, color = #9cff87)
+
+if close < trendline and lips < teeth and teeth < jaw
+    strategy.close("Long")
+
+//short
+if close < trendline and lips < teeth and teeth < jaw and input_short_orders and strategy.opentrades == 0
+    strategy.entry("Short", strategy.short)
+    label.new(bar_index, high, text = "🔴 Short", style = label.style_label_down, color = #f9396a, textcolor = color.white)
+
+if close > trendline and lips > teeth and teeth > jaw 
+    strategy.close("Short")
+
+//ploting
+plot(trendline, "Trendline", color = #9cff87, linewidth = 3)
+plot(jaw, "Jaw", offset = jawOffset, color=#b3e9c7)
+plot(teeth, "Teeth", offset = teethOffset, color=#c2f8cb)
+plot(lips, "Lips", offset = lipsOffset, color=#f0fff1)
+
+View in Pine Editor・51 lines
+Use on chart
+5
+0
+3
+14 366
+The "Alligator + MA Trend Catcher" is a trading strategy that integrates the William Alligator indicator with a Moving Average (MA) to establish robust entry and exit conditions, optimized for capturing trends.
+
+HOW IT WORKS
+
+This strategy combines the traditional William Alligator set up with an additional Moving Average indicator for enhanced trend confirmation, creating a user-friendly backtesting tool for traders who prefer the Alligator method.
+
+The original Alligator strategy can frequently present fluctuations, even in well-established trends, leading to potentially premature exits. To mitigate this, we incorporate a Moving Average as a secondary confirmation measure to ensure the market trend has indeed shifted.
+
+Here’s the operational flow for long orders:
+
+Entry Signal: When the price rises above the Moving Average, it confirms a bullish market state. Enter if Alligator spread in an upward direction. The trade remains active even if the Alligator indicator suggests a trend reversal.
+
+
+Exit Signal: The position is closed when the price falls below the Moving Average, and the Alligator spreads in the downward direction. This setup helps traders to maintain positions through the entirety of the trend for maximum gain.
+
+
+
+APPLICATION
+
+This strategy is tailored for assets with significant, well-defined trends, such as Bitcoin and Ethereum, which are known for their high volatility and substantial price movements.
+
+This strategy offers a low win-rate but high reward configuration, making asset selection critical for long-term profitability. If you choose assets that lack strong price momentum, there's a high chance that this strategy may not be effective.
+
+For traders seeking to maximize gains from large trends without exiting prematurely, this strategy provides an aggressive yet controlled approach to riding out substantial market waves.
+
+DEFAULT SETUP
+
+Commission: 0.01%
+Initial Capital: $10,000
+Equity per Trade: 80%
+
+RISK DISCLAIMER
+
+Trading entails substantial risk, and most day traders incur losses. All content, tools, scripts, articles, and education provided by TradeDots serve purely informational and educational purposes. Past performances are not definitive predictors of future results.

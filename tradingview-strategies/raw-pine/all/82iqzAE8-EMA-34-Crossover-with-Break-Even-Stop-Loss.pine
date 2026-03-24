@@ -1,0 +1,100 @@
+//@version=5
+strategy("EMA 34 Crossover with Break Even Stop Loss", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// EMA 34
+ema34 = ta.ema(close, 34)
+plot(ema34, color=color.orange, title="EMA 34")
+
+// Variables to manage trade
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+var bool inTrade = false
+var float breakEvenLevel = na
+var float risk = na
+
+// Condition for EMA 34 crossover (price crossing above EMA 34)
+longCondition = close > ema34 and close[1] <= ema34[1]
+
+// Set up the trade when the crossover occurs
+if longCondition and not inTrade
+    entryPrice := close
+    stopLoss := low[1]  // Set stop loss to the low of the previous candle (not the crossover candle)
+    risk := entryPrice - stopLoss
+    takeProfit := entryPrice + (risk * 10)  // 1:10 risk-to-reward ratio
+    strategy.entry("Long", strategy.long)
+    inTrade := true
+
+// Move stop loss to break-even when 1:3 RR is reached
+if inTrade and close >= entryPrice + (risk * 3)  // 1:3 RR reached
+    stopLoss := entryPrice  // Move stop loss to entry price (break-even)
+    breakEvenLevel := entryPrice
+
+// Exit the trade if stop loss or take profit is hit
+if inTrade
+    if low <= stopLoss  // Stop loss condition
+        strategy.close("Long", comment="Stop Loss Hit")
+        inTrade := false
+    if high >= takeProfit  // Take profit condition
+        strategy.close("Long", comment="Take Profit Hit")
+        inTrade := false
+
+// Optionally plot stop loss and take profit levels for visualization
+plot(stopLoss, color=color.red, title="Stop Loss", linewidth=2, style=plot.style_line)
+plot(takeProfit, color=color.green, title="Take Profit", linewidth=2, style=plot.style_line)
+
+View in Pine Editor・44 lines
+Use on chart
+4
+8
+2 492
+EMA 34 Crossover with Break Even Stop Loss Strategy
+
+This trading strategy is based on the 34-period Exponential Moving Average (EMA) and aims to enter long positions when the price crosses above the EMA 34. The strategy is designed to manage risk effectively with a dynamic stop loss and take-profit mechanism.
+
+Key Features:
+EMA 34 Crossover:
+
+The strategy generates a long entry signal when the closing price of the current bar crosses above the 34-period EMA, with the condition that the previous closing price was below the EMA. This crossover indicates a potential upward trend.
+
+Risk Management:
+
+Upon entering a trade, the strategy sets a stop loss at the low of the previous bar. This helps in controlling the downside risk.
+
+A take profit level is set at a 10:1 risk-to-reward ratio, meaning the potential profit is ten times the amount risked on the trade.
+
+Break-even Stop Loss:
+
+As the price moves in favor of the trade and reaches a 3:1 risk-to-reward ratio, the strategy moves the stop loss to the entry price (break-even). This ensures that no loss will be incurred if the market reverses, effectively protecting profits.
+
+Exit Conditions:
+
+The strategy exits the trade when either the stop loss is hit (if the price drops below the stop loss level) or the take profit target is reached (if the price rises to the take profit level).
+
+If the price reaches the break-even level (entry price), the stop loss is adjusted to lock in profits and prevent any loss.
+
+Visualization:
+
+The stop loss and take profit levels are plotted on the chart for easy visualization, helping traders track the status of their trade.
+
+Trade Management Summary:
+Long Entry: When price crosses above the 34-period EMA.
+
+Stop Loss: Set to the low of the previous candle.
+
+Take Profit: Set to a 10:1 risk-to-reward ratio.
+
+Break-even: Stop loss is moved to entry price when a 3:1 risk-to-reward ratio is reached.
+
+Exit: The trade is closed either when the stop loss or take profit levels are hit.
+
+This strategy is designed to minimize losses by employing a dynamic stop loss and to maximize gains by setting a favorable risk-to-reward ratio, making it suitable for traders who prefer a structured, automated approach to risk management and trend-following.
+
+
+
+
+
+
+
+
+

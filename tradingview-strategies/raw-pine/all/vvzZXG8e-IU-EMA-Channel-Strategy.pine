@@ -1,0 +1,125 @@
+//@version=6
+strategy('IU EMA Channel Strategy', overlay = true, initial_capital = 100000, slippage = 1, commission_value = 0.02)
+// ____________________________________________ User input __________________________________________ \\
+RTR = input.float(2, "RTR = ", tooltip = "Risk to Reward ")
+ema_lenght = input.int(100 , 'EMA Lenght = ')
+
+// ____________________________________________ Indiactors ___________________________________________ \\
+high_based_ema = ta.ema(high, ema_lenght)
+low_based_ema = ta.ema(low, ema_lenght)
+
+//@function -> Returns color green if value1 > value2 else color red with given transp 
+set_color(value1, value2, trans = 60)=>
+    color_type = color(na)
+    if value1 > value2 
+        color_type := color.new(color.green, trans)
+    if value1 < value2 
+        color_type := color.new(color.red, trans)
+    color_type
+
+// _________________________________________ Plotting the EMAs __________________________________________ \\
+high_based_ema_plot = plot(high_based_ema, "High Based EMA", set_color(close , high_based_ema), 2)
+low_based_ema_plot  = plot(low_based_ema , "Low Based EMA" , set_color(close , high_based_ema), 2)
+// ---------- Filling the EMA ---------- \\
+fill(high_based_ema_plot, low_based_ema_plot, top_value = high_based_ema, 
+         bottom_value = low_based_ema, top_color = color(na), bottom_color = set_color(close , high_based_ema, 20))
+
+// ____________________________________ Long and Short Condtion ___________________________________________ \\
+high_cross = ta.crossover(close, high_based_ema) 
+low_cross  = ta.crossunder(close, low_based_ema) 
+// ----------- Going long ------------ \\
+if high_cross and strategy.position_size == 0 and barstate.isconfirmed
+    strategy.entry("long", strategy.long, comment = "Long Entry")
+// ----------- Going Short ------------ \\
+if low_cross and strategy.position_size == 0 and barstate.isconfirmed 
+    strategy.entry("short", strategy.short, comment = "Short Entry")
+
+//_____________________________ Stop Loss and Take Profit ____________________________\\
+// ---- long and short SL ------ \\
+long_SL = ta.valuewhen(strategy.position_size > 0 and strategy.position_size[1] == 0 , low[1], 0)
+short_SL = ta.valuewhen(strategy.position_size < 0 and strategy.position_size[1] == 0, high[1], 0)
+// ----- long and short TP ------ \\
+long_TP = (strategy.position_avg_price - long_SL) * RTR + strategy.position_avg_price
+short_TP = strategy.position_avg_price - (short_SL - strategy.position_avg_price) * RTR
+
+// ____________________________ Stting long and short SL / TP ___________________________\\
+if strategy.position_size > 0 
+    strategy.exit("long", "long", stop = long_SL, limit = long_TP, comment = "Long Exit")
+
+if strategy.position_size < 0 
+    strategy.exit("short", "short", stop = short_SL, limit = short_TP, comment = "Short Exit")
+
+//______________________________ Plotting long and short SL , TP ___________________________________\\
+// ---- for long positions ------ \\
+long_SL_plot = plot(strategy.position_size[1] > 0 ? long_SL : na   , 'Long SL', color.red  , style = plot.style_linebr)
+long_TP_plot = plot(strategy.position_size[1] > 0 ? long_TP[1] : na, 'Long TP', color.green, style = plot.style_linebr)
+// ---- for short positions ----- \\
+short_SL_plot = plot(strategy.position_size[1] < 0 ? short_SL : na   , 'Short SL', color.red  , style = plot.style_linebr)
+short_TP_plot = plot(strategy.position_size[1] < 0 ? short_TP[1] : na, 'Short SL', color.green, style = plot.style_linebr)
+
+//______________________________ Filling stop loss and take profits ______________//
+entry_plot = plot(strategy.position_size[1] != 0 ? strategy.position_avg_price[1] : na, 
+             color = color.new(color.silver, 20), style = plot.style_linebr)
+// ------------- for long ----------- \\
+fill(entry_plot, long_SL_plot , color =color.new(color.red, 85)   , title = 'Long SL plot')
+fill(entry_plot, long_TP_plot , color = color.new(color.green, 85), title = 'Long TP plot')
+// ------------- for short ---------- \\ 
+fill(entry_plot, short_SL_plot, color.new(color.red, 85)  , 'Short SL plot')
+fill(entry_plot, short_TP_plot, color.new(color.green, 85), 'Short TP plot')
+
+View in Pine Editor・72 lines
+Use on chart
+2
+9
+6
+4 688
+IU EMA Channel Strategy
+
+Overview:
+The IU EMA Channel Strategy is a simple yet effective trend-following strategy that uses two Exponential Moving Averages (EMAs) based on the high and low prices. It provides clear entry and exit signals by identifying price crossovers relative to the EMAs while incorporating a built-in Risk-to-Reward Ratio (RTR) for effective risk management.
+
+
+Inputs ( Settings ):
+- RTR (Risk-to-Reward Ratio): Define the ratio for risk-to-reward (default = 2).
+- EMA Length: Adjust the length of the EMA channels (default = 100).
+
+
+How the Strategy Works
+
+1. EMA Channels:
+- High-based EMA: EMA calculated on the high price.
+- Low-based EMA: EMA calculated on the low price.
+The area between these two EMAs creates a "channel" that visually highlights potential support and resistance zones.
+
+2. Entry Rules:
+- Long Entry: When the price closes above the high-based EMA (crossover).
+- Short Entry: When the price closes below the low-based EMA (crossunder).
+These entries ensure trades are taken in the direction of momentum.
+
+3. Stop Loss (SL) and Take Profit (TP):
+- Stop Loss:
+- For long positions, the SL is set at the previous bar's low.
+- For short positions, the SL is set at the previous bar's high.
+- Take Profit:
+- TP is automatically calculated using the Risk-to-Reward Ratio (RTR) you define.
+- Example: If RTR = 2, the TP will be 2x the risk distance.
+
+4. Exit Rules:
+- Positions are closed at either the stop loss or the take profit level.
+- The strategy manages exits automatically to enforce disciplined risk management.
+
+Visual Features
+1. EMA Channels:
+- The high and low EMAs are dynamically color-coded:
+- Green: Price is above the EMA (bullish condition).
+- Red: Price is below the EMA (bearish condition).
+- The area between the EMAs is shaded for better visual clarity.
+
+2. Stop Loss and Take Profit Zones:
+- SL and TP levels are plotted for both long and short positions.
+- Zones are filled with:
+- Red: Stop Loss area.
+- Green: Take Profit area.
+
+Be sure to manage your risk and position size properly.
+

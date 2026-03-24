@@ -1,0 +1,80 @@
+//@version=5
+strategy("İlker %85", overlay=true, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     pyramiding=0, calc_on_order_fills=false, calc_on_every_tick=false)
+
+// === Parametreler ===
+tpPct   = 0.03     // %3 TP
+slPct   = 0.04      // %4 SL
+gapMax  = 0.015     // %1.5 gap üst sınırı
+cmfLen  = 10
+eps     = 1e-10     // sıfıra bölme koruması
+
+// Hacim filtresi (optimum)
+volLen  = 50
+volMult = 1.2
+
+// === Göstergeler ===
+rsi = ta.rsi(close, 14)
+
+// --- CMF (formülle, SMA ile) ---
+rangeHL = math.max(high - low, eps)
+mfm     = ((close - low) - (high - close)) / rangeHL
+mfv     = mfm * volume
+smaMFV  = ta.sma(mfv, cmfLen)
+smaVol  = ta.sma(volume, cmfLen)
+cmf10   = smaMFV / math.max(smaVol, eps)
+
+// --- OBV (elde hesap) ---
+obvDelta = close > close[1] ?  volume :
+           close < close[1] ? -volume : 0.0
+var float obv = 0.0
+obv := nz(obv[1]) + obvDelta
+
+// --- EMA/ATR ---
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+atr14 = ta.atr(14)
+
+// --- Hacim MA ---
+volMA = ta.sma(volume, volLen)
+
+// === t barındaki koşullar (kapandı: [1]) ===
+rsi_ok        = rsi[1] > 70
+cmf_ok        = cmf10[1] > 0
+obv_slope_ok  = (obv[1]   - obv[6])  > 0          // OBV 5-bar eğimi > 0
+ema_slope_ok  = (ema20[1] - ema20[6]) > 0         // EMA20 5-bar eğimi > 0
+stack_ok      = close[1] > ema20[1] and ema20[1] > ema50[1]
+prev_green    = close[2] > open[2]
+atr_band_ok   = (atr14[1] / close[1] >= 0.01) and (atr14[1] / close[1] <= 0.05)
+
+// Hacim filtresi (signal barı: [1]) -> yeşil mum + hacim güçlü
+vol_ok        = close[1] > open[1] and volume[1] >= volMA[1] * volMult
+
+// t barında tüm sinyaller
+signal_t = rsi_ok and cmf_ok and obv_slope_ok and ema_slope_ok and stack_ok and prev_green and atr_band_ok and vol_ok
+
+// === t+1 giriş filtresi ===
+gap_ok   = math.abs(open - close[1]) / close[1] <= gapMax
+flat_now = strategy.position_size == 0
+entry_ok = signal_t and gap_ok and flat_now
+
+// === Emirler ===
+if entry_ok
+    strategy.entry("Long", strategy.long)
+
+// Çıkışlar: %2.4 TP / %9 SL
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    strategy.exit("TP/SL", "Long", limit=avg * (1 + tpPct), stop=avg * (1 - slPct))
+
+// === Alarm & Görsel ===
+alertcondition(entry_ok, title="AL", message="AL")
+plotshape(entry_ok, title="AL İşareti", style=shape.triangleup, location=location.belowbar, size=size.tiny, text="AL")
+
+View in Pine Editor・73 lines
+Use on chart
+2
+3
+737
+This strategy is a short-term momentum approach based on moving averages and volume. Studies show it performs more effectively on the 1-hour and 4-hour timeframes. Take-profit and stop-loss distances are kept short, resulting in a high win rate, while the profit factor ranges between 1.4 and 2.

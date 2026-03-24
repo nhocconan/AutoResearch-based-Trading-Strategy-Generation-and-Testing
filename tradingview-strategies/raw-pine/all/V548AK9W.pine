@@ -1,0 +1,338 @@
+//@version=6
+strategy("Caja Tavo", overlay=true)//, timeframe="5")
+//Entrada
+
+color boxColor = input.color(color.new(color.gray, 80), title="Color de la Caja")
+color borderColor = input.color(color.gray, title="Color del Borde")
+int borderWidth = input.int(1, title="Ancho del Borde", minval=1, maxval=5)
+bool eval_tend = input.bool (false, title="evaluar tendencia")
+bool control_rsi = input.bool (false, title="Evaluar RSI")
+bool control_testeo = input.bool (false, title="Evaluar Testeo")
+bool mover_SL = input.bool (false, title="Mover SL en TP")
+string Stra_Exit = input.string("TP1=100%", "Estrategia de Salida", options=["TP1=100%", "TP1=70% - TP2=30%", "TP1=50% - TP2=30% - TP3=20%" ])
+
+//Entradas de apertura de Caja Límite // Filtro por apertura
+
+float Filtro_Apertura_Min_Caja = input.float(0, title="Ancho Min Caja")
+float Filtro_Apertura_Max_Caja = input.float(0.8, title="Ancho Max Caja")
+
+// Horas de la caja
+
+Hora_Inicio = input(8)
+Minuto_Inicio = input(30)
+Hora_Final = input(9)
+Minuto_Final = input(55)
+
+
+//Get Price Data
+
+
+CandleOpen = open
+CandleHigh = high
+CandleLow = low
+CandleClose = close
+Hora = hour(time, "America/Bogota")
+Minuto = minute(time, "America/Bogota")
+var box Box = na
+inicio_caja = time - 5300000
+fin_caja = time
+
+Condicion_Entrada_Larga = false
+Condicion_Entrada_Corto = false
+
+var float alto = na
+var float bajo = na
+var float TP_alto = na
+var float TP_bajo = na
+var float TP_2_alto = na
+var float TP_3_alto = na
+var float TP_2_bajo = na
+var float TP_3_bajo = na
+var float rsi_alto = na
+var float rsi_bajo = na
+var bool tradebyday = false
+var bool close_50 = false
+var bool close_75 = false
+var bool close_100 = false
+var bool short = false
+var bool long = false
+// Definir el rango horario
+var bool inSession = false
+if not na(time(timeframe.period, "0830-0955", "America/Bogota"))
+    inSession := true
+else
+    inSession := false
+
+// Parámetros de entrada para el RSI
+rsiLength = input.int(14, "Longitud RSI", minval=1)
+rsiSource = input.source(close, "Fuente RSI")
+// Calcular el RSI para la vela actual
+currentRSI = ta.rsi(rsiSource, rsiLength)
+
+
+// Lógica para calcular el máximo y el mínimo dentro del rango horario
+if inSession
+    if na(alto) or high > alto
+        alto := high
+    if na(bajo) or low < bajo
+        bajo := low
+    if na(rsi_alto) or currentRSI > rsi_alto
+        rsi_alto := currentRSI
+    if na(rsi_bajo) or currentRSI < rsi_bajo
+        rsi_bajo := currentRSI
+
+// Resetear variables a las 00:00
+
+if (Hora == 8 and Minuto == 0) or (Hora >11 and tradebyday==false)
+    alto := na
+    bajo := na
+    rsi_alto := na
+    rsi_bajo := na
+    TP_bajo := na
+    TP_alto := na
+    strategy.close("LongEntry")
+    strategy.close("ShortEntry")
+    tradebyday := false
+    close_50 := false
+    close_75 := false
+    close_100 := false
+    short := false
+    long:= false
+ 
+// variable ancho de caja
+float percentChange = na
+
+
+
+//Analize price Data
+if (Hora == Hora_Final and Minuto == Minuto_Final) 
+
+    box.new(inicio_caja, alto, fin_caja, bajo, border_color=borderColor, border_width=borderWidth,
+             bgcolor=boxColor, xloc=xloc.bar_time)
+    // 2. Calcular el Porcentaje del Rango
+    float rangeAbs = alto - bajo
+    float percentChange = na
+    if bajo != 0 // Evitar división por cero
+        percentChange := (rangeAbs / bajo) * 100
+    // 3. Crear el Texto para el Label
+    string labelText = "Ancho: " // Muestra el rango absoluto
+    if not na(percentChange)
+        labelText := labelText  + str.tostring(percentChange, "#.##") + "%" + "\nRSI Alto" + str.tostring(rsi_alto, " #.##") + "\nRSI Bajo" + str.tostring(rsi_bajo, " #.##")// Añade el porcentaje si es válido
+    // 4. Dibujar el Label
+    // Posicionamos el label ligeramente a la derecha del final de la caja, a la altura del máximo
+        label.new(x=inicio_caja, // Añade 5 minutos en milisegundos para desplazarlo a la derecha
+                 y=bajo-0.25*(alto-bajo),
+                 text=labelText,
+                 xloc=xloc.bar_time, // Posicionar por tiempo
+                 yloc=yloc.price,    // Posicionar por precio
+                 color=color.rgb(208, 210, 219),
+                 textcolor=color.rgb(0, 0, 0),
+                 size=14,
+                 style=label.style_label_left) // Alinea el texto a la izquierda del punto x
+
+// Dibujar EMA's
+
+var float ema_short = na
+var float ema_long = na
+var float ema_long2 = na
+
+if eval_tend
+
+    ema_short := ta.ema(close, 20)
+    ema_long := ta.ema(close, 50)
+    ema_long2 := ta.ema(close, 100)
+
+plot(ema_short, color=color.green, linewidth = 3)
+plot(ema_long, color=color.red, linewidth = 3)
+plot(ema_long2, color=color.yellow, linewidth = 3)
+
+
+
+
+// Entradas Estrategia
+
+// La condición se cumple cuando el precio de cierre (close) es mayor que nuestro valorUmbral
+
+if (Hora >= 10 and Hora < 12) and tradebyday == false
+    percentChange := ((alto - bajo) / bajo) * 100
+    if close > alto and percentChange > Filtro_Apertura_Min_Caja and percentChange < Filtro_Apertura_Max_Caja and (currentRSI > rsi_alto or  not control_rsi)
+        tradebyday := true
+        long := true
+        if control_testeo 
+            if ema_short>ema_long or not eval_tend
+                strategy.entry("LongEntry", strategy.long,  limit = alto, comment="\n rsi: " +str.tostring(currentRSI, " #.##"))
+                alert("Entrada en Largo")
+        else 
+            if ema_short>ema_long or not eval_tend 
+                strategy.entry("LongEntry", strategy.long, comment="\n rsi: " +str.tostring(currentRSI, " #.##"))
+                alert("Entrada en Largo")
+
+
+
+    if close < bajo and percentChange > Filtro_Apertura_Min_Caja and percentChange < Filtro_Apertura_Max_Caja and (currentRSI < rsi_bajo or  not control_rsi)
+        tradebyday := true
+        short := true
+        if control_testeo
+            if ema_short<ema_long or not eval_tend
+                strategy.entry("ShortEntry", strategy.short ,  limit = bajo, comment="\n rsi: " +str.tostring(currentRSI, " #.##"))
+                alert("Entrada en Corto")
+        else
+            if ema_short<ema_long or not eval_tend
+                strategy.entry("ShortEntry", strategy.short , comment="\n rsi: " +str.tostring(currentRSI, " #.##"))
+                alert("Entrada en Corto")
+
+
+if (Hora >= 12) and tradebyday == true
+    strategy.cancel("LongEntry")
+    strategy.cancel("ShortEntry")
+
+// Salida Estrategia
+
+if (Hora >= 10 or Hora < 9) and tradebyday == true
+    if long
+        TP_alto := (alto + (alto - bajo))
+    if short
+        TP_bajo := (bajo - (alto - bajo))
+    TP_2_alto := (alto + (1.5*(alto - bajo)))
+    TP_3_alto := (alto + (2*(alto - bajo)))
+    TP_2_bajo := (bajo - (1.5*(alto - bajo)))
+    TP_3_bajo := (bajo - (2*(alto - bajo)))
+
+//Cerrar Largo
+
+    if low < bajo
+        strategy.close("LongEntry", comment="Stop LOSS")
+        close_100 := true
+    if  Stra_Exit == "TP1=100%" and  close > TP_alto and close_50 == false and close_75 == false 
+        strategy.close("LongEntry", comment="TP1 Cierre 100% Long")
+        close_100 := true
+        //Estrategia de salida al 70% en TP1 y 30% en TP2
+    if  Stra_Exit == "TP1=70% - TP2=30%" and  close > TP_alto and close_50 == false and close_75 == false 
+        strategy.close("LongEntry", qty_percent = 70, comment="TP1 Cierre 70% Long")
+        close_50 := true
+    if Stra_Exit == "TP1=70% - TP2=30%" and close > TP_2_alto and close_75 == false
+        strategy.close("LongEntry", comment="TP2 Cierre 30% Long")
+        close_100 := true
+        //Estrategia de salida al 50% en TP1, 30% en TP2 y 20% en TP3
+    if close > TP_alto and close_50 == false and close_75 == false
+        strategy.close("LongEntry", qty_percent = 50, comment="TP1 Cierre 50% Long")
+        close_50 := true
+    if close > TP_2_alto and close_75 == false
+        strategy.close("LongEntry", qty_percent = 60, comment="TP2 Cierre 75% Long")
+        close_75 := true
+    if close > TP_3_alto and close_50 == true and close_75 == true
+        strategy.close("LongEntry", comment="TP3 Cierre 100% Long")
+        close_100 := true
+
+
+// Cerrar Corto
+    if high > alto
+        strategy.close("ShortEntry", comment="Stop LOSS")
+        close_100 := true
+        //Estrategia de salida al 100% en TP1
+    if  Stra_Exit == "TP1=100%" and  close < TP_bajo and close_50 == false and close_75 == false 
+        strategy.close("ShortEntry", comment="TP1 Cierre 100% Short")
+        close_100 := true
+        //Estrategia de salida al 70% en TP1 y 30% en TP2
+    if  Stra_Exit == "TP1=70% - TP2=30%" and  close < TP_bajo and close_50 == false and close_75 == false 
+        strategy.close("ShortEntry", qty_percent = 70, comment="TP1 Cierre 70% Short")
+        close_50 := true
+    if Stra_Exit == "TP1=70% - TP2=30%" and close < TP_2_bajo and close_75 == false
+        strategy.close("ShortEntry", comment="TP2 Cierre 30% Short")
+        close_100 := true
+        //Estrategia de salida al 50% en TP1, 30% en TP2 y 20% en TP3
+    if close < TP_bajo and close_50 == false and close_75 == false
+        strategy.close("ShortEntry", qty_percent = 50, comment="TP1 Cierre 50% Short")
+        close_50 := true
+    if close < TP_2_bajo and close_75 == false
+        strategy.close("ShortEntry", qty_percent = 60, comment="TP2 Cierre 30% Short")
+        close_75 := true
+    if close < TP_3_bajo and close_50 == true and close_75 == true
+        strategy.close("ShortEntry", comment="TP3 Cierre 20% Short")
+        close_100 := true
+
+
+if mover_SL
+    if close_50 == true and close_75 == false
+        TP_alto := TP_2_alto
+        TP_bajo := TP_2_bajo
+        if (close < (alto + (0.5*(alto - bajo))) and long) or (close > (bajo - (0.5*(alto - bajo))) and short)
+            strategy.close("LongEntry", comment="Stop LOSS")
+            strategy.close("ShortEntry", comment="Stop LOSS__")
+    if close_75 == true
+        TP_alto := TP_3_alto
+        TP_bajo := TP_3_bajo
+        if (close < (alto + (alto - bajo)) and long) or (close > (bajo - (alto - bajo)) and short)
+            strategy.close("LongEntry", comment="Stop LOSS")
+            strategy.close("ShortEntry", comment="Stop LOSS")
+else
+    if close_50 == true and close_75 == false
+        TP_alto := TP_2_alto
+        TP_bajo := TP_2_bajo
+        if ((close < alto)and long or ((close > bajo)and short))
+            strategy.close("LongEntry", comment="Stop LOSS")
+            strategy.close("ShortEntry", comment="Stop LOSS__")
+    if close_75 == true
+        TP_alto := TP_3_alto
+        TP_bajo := TP_3_bajo
+        if (close < alto and long) or (close > bajo and short)
+            strategy.close("LongEntry", comment="Stop LOSS")
+            strategy.close("ShortEntry", comment="Stop LOSS")    
+
+// Variable booleana para verificar si alguna posición está abierta
+var bool posicionAbierta = false
+
+// Obtener el número de operaciones abiertas
+int numOpenTrades = strategy.opentrades
+
+// Actualizar la variable booleana
+fill_color_red = color.new(color.red, 100)
+
+if numOpenTrades > 0
+    posicionAbierta := true
+else
+    posicionAbierta := false
+
+if not posicionAbierta
+    TP_alto := na
+    TP_bajo := na
+    
+else
+    fill_color_red := color.new(color.red, 80)
+
+plot_alto = plot(alto, color=color.green, style=plot.style_linebr)
+plot_bajo = plot(bajo, color=color.red, style=plot.style_linebr)
+
+if long or not (tradebyday)
+    TP_bajo := na
+
+if short or not (tradebyday)
+    TP_alto := na
+
+Plot_TP_bajo = plot(TP_bajo, color=color.gray, style=plot.style_linebr)
+Plot_TP_alto = plot(TP_alto, color=color.gray, style=plot.style_linebr)
+
+fill_color = color.new(color.green, 80)
+fill (plot_alto, Plot_TP_alto, color= fill_color)
+fill (plot_bajo, Plot_TP_bajo, color= fill_color)
+
+
+fill (plot_alto, plot_bajo, color= fill_color_red)
+
+View in Pine Editor・323 lines
+Use on chart
+9
+535
+Jan 15
+Strategy based on "The Box" by Z and Scott
+
+This strategy is based on measuring price volatility one hour before the market opens and half an hour after.
+
+The trade is made in the direction that breaks the upper or lower limits.rior o inferior.
+Jan 31
+Release Notes
+Strategy based on "The Box" by Z and Scott
+
+This strategy is based on measuring price volatility one hour before the market opens and half an hour after.
+
+The trade is made in the direction that breaks the upper or lower limits

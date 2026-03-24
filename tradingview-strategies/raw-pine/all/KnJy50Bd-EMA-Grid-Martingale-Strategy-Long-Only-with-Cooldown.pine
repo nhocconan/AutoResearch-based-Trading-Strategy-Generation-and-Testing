@@ -1,0 +1,110 @@
+//@version=5
+strategy("EMA Grid + Martingale Strategy (Long-Only) with Cooldown",  
+     overlay=true,  
+     pyramiding=10,         // allows up to 10 concurrent long entries  
+     calc_on_every_tick=true)
+
+// ── INPUTS FOR OPTIMIZATION ────────────────────────────────────────────
+ema1Len      = input.int(10,    "EMA 1 Length (Fast Group 1)",    minval=1,   maxval=50,   step=1)
+ema2Len      = input.int(20,    "EMA 2 Length (Slow Group 1)",    minval=1,   maxval=100,  step=1)
+ema3Len      = input.int(50,    "EMA 3 Length (Fast Group 2)",    minval=1,   maxval=200,  step=1)
+ema4Len      = input.int(100,   "EMA 4 Length (Slow Group 2)",    minval=1,   maxval=300,  step=1)
+
+maxEntries   = input.int(5,     "Max Grid Entries",               minval=1,   maxval=1000, step=1)
+gridStepPips = input.int(20,    "Grid Step (pips)",               minval=1,   maxval=100,  step=1)
+baseSize     = input.float(0.1, "Base Order Size",                minval=0.001, maxval=10000, step=0.001)
+useMG        = input.bool(true, "Use Martingale Sizing")
+mgFactor     = input.float(2.0,"Martingale Factor",               minval=1.0, maxval=5.0, step=0.1)
+
+closeAtW     = input.bool(true, "Close at Weighted Price")
+bufferPips   = input.int(0,     "Close Buffer (pips)",           minval=0,   maxval=50,   step=1)
+
+cooldownBars = input.int(20,    "Cooldown Bars Between Grids",    minval=0,   maxval=1000, step=1)
+
+// ── CALCULATE PRICE STEPS ──────────────────────────────────────────────
+tickSize     = syminfo.mintick
+pipValue     = tickSize * 10      // adjust if your symbol defines pip differently
+stepPrice    = gridStepPips * pipValue
+bufferPrice  = bufferPips * pipValue
+
+// ── EMAs & SIGNALS ─────────────────────────────────────────────────────
+e1 = ta.ema(close, ema1Len)
+e2 = ta.ema(close, ema2Len)
+e3 = ta.ema(close, ema3Len)
+e4 = ta.ema(close, ema4Len)
+
+grp1Bull = e1 > e2
+grp2Bull = e3 > e4
+
+buySignal  = grp1Bull and grp2Bull and not (grp1Bull[1] and grp2Bull[1])
+
+// ── STATE VARIABLES ────────────────────────────────────────────────────
+var bool   inGrid          = false
+var int    entryCount      = 0
+var float  lastEntryPrice  = na
+var int    lastCloseBar    = na
+
+// ── COOL-DOWN CHECK ────────────────────────────────────────────────────
+canOpenNewGrid = na(lastCloseBar) or (bar_index - lastCloseBar > cooldownBars)
+
+// ── OPEN INITIAL GRID LEG ─────────────────────────────────────────────
+if buySignal and not inGrid and canOpenNewGrid
+    strategy.close_all(comment="Reset Shorts")
+    inGrid         := true
+    entryCount     := 1
+    lastEntryPrice := close
+    strategy.entry("Long1", strategy.long, qty=baseSize)
+
+// ── ADDITIONAL GRID ENTRIES ────────────────────────────────────────────
+if inGrid and entryCount < maxEntries
+    if strategy.position_size > 0 and low <= lastEntryPrice - stepPrice
+        entryCount     += 1
+        lastEntryPrice := close
+        size            = useMG ? baseSize * math.pow(mgFactor, entryCount - 1) : baseSize
+        strategy.entry("Long" + str.tostring(entryCount), strategy.long, qty=size)
+
+// ── WEIGHTED-AVERAGE CLOSE ─────────────────────────────────────────────
+if closeAtW and inGrid and strategy.position_size > 0
+    avgPrice = strategy.position_avg_price
+    if high >= avgPrice + bufferPrice
+        strategy.close_all(comment="Weighted Close")
+        inGrid       := false
+        entryCount   := 0
+        lastCloseBar := bar_index
+
+View in Pine Editor・73 lines
+Use on chart
+9
+2
+2 252
+Title:
+EMA Grid + Martingale Strategy (Long-Only) with Cooldown
+
+Short Summary:
+A long-only strategy combining EMA trend filters, grid-based entries, optional martingale sizing, and a cooldown feature to manage position timing and exits.
+
+Full Description:
+This strategy uses a 4-EMA trend confirmation system to detect bullish momentum, then deploys a grid-style entry method with optional martingale position sizing. It includes a cooldown mechanism to prevent reentry too soon after a completed trade cycle.
+
+How It Works
+1. Trend Confirmation: Two EMA groups (fast/slow) determine whether market conditions are bullish.
+2. Initial Entry: A new position is entered when both EMA groups confirm an uptrend and no position is currently active.
+3. Grid Entries: Additional long entries are placed when price drops by a defined pip distance from the last entry, respecting the maximum number of entries.
+4. Martingale Sizing (Optional): Grid orders can increase in size with each level using a customizable multiplier.
+5. Weighted-Average Exit: All positions close once price reaches or exceeds the average entry price plus a buffer.
+6. Cooldown Timer: After closing a position set, the strategy waits a defined number of bars before opening a new grid.
+
+Key Features
+• 4 customizable EMAs for trend confirmation.
+• Dynamic grid-style long entries based on pip intervals.
+• Optional martingale-style position sizing.
+• Weighted-average price exit logic with buffer control.
+• Cooldown bar period to limit overtrading.
+• Suitable for optimization and backtesting with full control over inputs.
+
+Use Cases
+• Designed for trending markets where pullbacks present entry opportunities.
+• Helps manage staged entries while avoiding premature reentry.
+• Ideal for testing martingale and grid-based strategies with exit precision.
+
+Note: This strategy is for testing and educational purposes only. It does not guarantee profits and is not financial advice.

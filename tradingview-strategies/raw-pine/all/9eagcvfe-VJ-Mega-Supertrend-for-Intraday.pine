@@ -1,0 +1,183 @@
+//@version=4
+strategy("[VJ]Mega ST - Intra Strat", overlay=true, calc_on_every_tick = false)
+
+// ********** Strategy inputs - Start **********
+
+// Used for intraday handling
+// Session value should be from market start to the time you want to square-off 
+// your intraday strategy
+// Important: The end time should be at least 2 minutes before the intraday
+// square-off time set by your broker
+var i_marketSession = input(title="Market session", type=input.session, 
+     defval="0915-1455", confirm=true)
+
+// Make inputs that set the take profit % (optional)
+longProfitPerc = input(title="Long Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+
+shortProfitPerc = input(title="Short Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+     
+// Set stop loss level with input options (optional)
+longLossPerc = input(title="Long Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01
+
+shortLossPerc = input(title="Short Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01    
+
+var float i_multiplier = input(title = "ST Multiplier", type = input.float, 
+     defval = 3, step = 0.1, confirm=true)
+
+var int i_atrPeriod = input(title = "ST ATR Period", type = input.integer, 
+     defval = 7, confirm=true)
+     
+// rsiSource = input(title="RSI Source", type=input.source, defval=close)
+// rsiLength = input(title="RSI Length", type=input.integer, defval=14)
+// rsiOverbought = input(title="RSI Overbought Level", type=input.integer, defval=70)
+// rsiOversold = input(title="RSI Oversold Level", type=input.integer, defval=30)
+// // Get RSI value
+// rsiValue = rsi(rsiSource, rsiLength)
+// //rsi sell
+// rsisell = rsiValue >= rsiOverbought
+
+// //rsi buy
+// rsibuy = rsiValue <= rsiOversold  
+
+
+//Get Stochastic values
+fast = 20, slow = 50, ultraSlow = 200
+fastMA = sma(close, fast)
+slowMA = sma(close, slow)
+ultraSlowMA = sma(close, ultraSlow)
+ema150 = 200
+ema150MA = ema(close, ema150)
+
+// smooth = input(3, minval=1), K = input(14, minval=1), D=input(3,minval=1)
+// hh=highest(high,K)
+// ll=lowest(low,K)
+// k = sma((close-ll)/(hh-ll)*100, smooth)
+// d = sma(k, 3)
+// stochiasticHigh = 80
+// stochiasticLow = 20
+
+
+// ********** Strategy inputs - End **********
+
+
+// ********** Supporting functions - Start **********
+
+// A function to check whether the bar or period is in intraday session
+barInSession(sess) => time(timeframe.period, sess) != 0
+
+// ********** Supporting functions - End **********
+
+
+// ********** Strategy - Start **********
+// See if intraday session is active
+bool intradaySession = barInSession(i_marketSession)
+
+// Trade only if intraday session is active
+
+
+
+
+[superTrend, dir] = supertrend(i_multiplier, i_atrPeriod)
+
+colResistance = dir == 1 and dir == dir[1] ? color.new(color.red, 0) : color.new(color.red, 100)
+colSupport = dir == -1 and dir == dir[1] ? color.new(color.green, 0) : color.new(color.green, 100)
+
+// plot(superTrend, color = colResistance, linewidth=2)
+// plot(superTrend, color = colSupport, linewidth=2)
+
+// Super Trend Long/short condition
+stlong = close > superTrend
+stshort = close < superTrend
+
+//Vol Confirmation
+vol = volume > volume[1]
+
+//Engulfing candle confirm
+bullishEC = close > open[1] and close[1] < open[1]
+bearishEC = close < open[1] and close[1] > open[1]
+
+//Candles colors
+greenCandle = (close > open)
+redCandle = (close < open)
+
+// //Stochastic computation
+// selldata = close < ema150MA and k>stochiasticHigh and d>stochiasticHigh and close>open
+// // plotshape(selldata, style=shape.triangledown, location=location.belowbar, color=color.red)
+
+// buydata2 = close > ema150MA and k<stochiasticLow and d<stochiasticLow and close<open
+// // plotshape(buydata2, style=shape.triangleup, location=location.abovebar, color=color.green)
+
+// Figure out take profit price
+longExitPrice  = strategy.position_avg_price * (1 + longProfitPerc)
+shortExitPrice = strategy.position_avg_price * (1 - shortProfitPerc)
+
+// Determine stop loss price
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+ 
+ 
+//Final Long/Short Condition
+longCondition = stlong and redCandle and vol and vwap > vwap[1]
+shortCondition =stshort and greenCandle and vol and vwap < vwap[1]
+
+
+ 
+//Long Strategy - buy condition and exits with Take profit and SL
+if (longCondition and intradaySession)
+    stop_level = longStopPrice
+    profit_level = longExitPrice
+    strategy.entry("My Long Entry Id", strategy.long)
+    strategy.exit("TP/SL", "My Long Entry Id", stop=stop_level, limit=profit_level)
+
+
+//Short Strategy - sell condition and exits with Take profit and SL
+if (shortCondition and intradaySession)
+    stop_level = shortStopPrice
+    profit_level = shortExitPrice
+    strategy.entry("My Short Entry Id", strategy.short)
+    strategy.exit("TP/SL", "My Short Entry Id", stop=stop_level, limit=profit_level)
+ 
+ 
+// Square-off position (when session is over and position is open)
+squareOff = (not intradaySession) and (strategy.position_size != 0)
+strategy.close_all(when = squareOff, comment = "Square-off")
+
+// ********** Strategy - End **********
+
+View in Pine Editor・153 lines
+Use on chart
+1
+5
+0
+2
+6 809
+This is a simple intraday strategy for working on Stocks or commodities based out on Super Trend and intraday's best friend - VWAP . You can modify the start time and end time based on your timezones. Session value should be from market start to the time you want to square-off
+
+Important: The end time should be at least 2 minutes before the intraday square-off time set by your broker
+
+Comment below if you get good returns
+
+Strategy: Tweaked Super trend with VWAP
+Indicators used :
+
+Super trend is simple and easy to use indicator and gives a precise reading about an on going trend.It is built with two parameters, namely period and multiplier.The Buy and Sell signal modifies once the indicator tosses over the closing price. When the Super trend closes above the Price, a Buy signal is generated, and when the Super trend closes below the Price, a Sell signal is generated. In this case we use it only for direction .
+Multiplier is a vital input for Super trend. If the multiplier value is too high, then lesser number of signals is made.
+
+Volume is important as we don’t want to get stuck with a stock which has few takers, even if you think it is priced attractively. Thus, the VWAP was created to take into account both volume as well as Price so that the potential trader would make the trading decision or not.
+In simple terms, the Volume Weighted Average price is the cumulative average price with respect to the volume
+
+Buying/Selling
+when the closing price starts moving up/down and farther from the VWAP, there is pressure among the traders to sell/buy, a general belief kicks in that it might be that the stock is overvalued/undervalued .This is the time when we couple the Super trend to take our entries
+
+
+Usage & Best setting :
+Choose a good volatile stock and a time frame - 5m.
+ST multiplier : 3
+There is stop loss and take profit that can be used to optimise your trade
+
+The template also includes daily square off based on your time.
