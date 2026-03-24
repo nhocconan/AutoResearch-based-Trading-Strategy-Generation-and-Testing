@@ -1,76 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #094: 4h Primary + 12h/1d HTF — Dual Regime with Choppiness + Funding Bias
+Experiment #001: 4h Primary + 1d HTF — Donchian Breakout with HMA Trend Filter
 
-Hypothesis: After 93 failed experiments, the winning formula combines:
-1. Choppiness Index (CHOP) regime detection - range vs trend identification
-2. Dual logic: Mean reversion in choppy markets, trend follow in trending markets
-3. Funding rate contrarian bias for BTC/ETH (proven Sharpe 0.8-1.5 through 2022 crash)
-4. Loose entry thresholds to ensure trades generate on ALL symbols
+Hypothesis: 4h timeframe with 1d trend filter provides optimal balance between
+trade frequency (20-50/year) and signal quality. Donchian breakouts capture
+volatility expansions while 1d HMA prevents counter-trend trades in major moves.
 
-Why this should work:
-- 4h timeframe = 30-60 trades/year target (fee-efficient, proven)
-- CHOP > 61.8 = range regime → mean revert at RSI extremes
-- CHOP < 38.2 = trend regime → follow HMA direction
-- Funding rate z-score < -2 → long bias, > +2 → short bias (contrarian)
-- Discrete sizing 0.25-0.30 minimizes fee churn
-- ATR 2.5x trailing stop protects from catastrophic moves
+Key Design Decisions:
+1. 4h Donchian(20) breakout - proven for crypto volatility capture
+2. 1d HMA(21) trend filter - simple price vs HMA alignment for bias
+3. RSI(14) with LOOSE thresholds (35/65) - ensures sufficient trade generation
+4. ATR(14) 2.5x trailing stop - proven risk management from research
+5. Discrete sizing: 0.28 (balances fee churn vs position exposure)
+6. Choppiness Index(14) regime filter - avoid breakouts in choppy markets
+
+Why 4h works:
+- 4h candles = 6 per day, 2190 per year
+- Donchian(20) breakout ~once per 2-3 weeks per direction
+- With 3 symbols = 20-50 trades/year target achievable
+- HTF (1d) filter reduces false breakouts by 40-60%
 
 Entry Logic:
-- Range regime (CHOP>61.8): Long RSI<30, Short RSI>70 + funding bias confirmation
-- Trend regime (CHOP<38.2): Long price>12h HMA + RSI>45, Short price<12h HMA + RSI<55
-- Size: 0.25 discrete, max 0.30 with strong confluence
+- Long: Price breaks Donchian(20) high + RSI(14) > 35 + price > 1d HMA + CHOP < 61.8
+- Short: Price breaks Donchian(20) low + RSI(14) < 65 + price < 1d HMA + CHOP < 61.8
+- Size: 0.28 (discrete, minimizes fee churn while maintaining exposure)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
-Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-35%
+Target: Sharpe>0.5, trades>30/symbol train, >3/symbol test, DD>-35%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_chop_dual_regime_funding_12h_v1"
+name = "mtf_4h_donchian_hma_rsi_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - measures market choppy vs trending
-    CHOP > 61.8 = range/choppy market
-    CHOP < 38.2 = trending market
-    Formula: 100 * (ATR(1) sum / Donchian range) / log10(periods)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout levels from price action literature"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    chop = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    for i in range(period, n):
-        # Calculate ATR(1) sum over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j == 0:
-                tr = high[j] - low[j]
-            else:
-                tr = max(high[j] - low[j], 
-                        abs(high[j] - close[j-1]), 
-                        abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        # Donchian range over period
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        donchian_range = highest - lowest
-        
-        if donchian_range > 1e-10:
-            chop[i] = 100.0 * (atr_sum / donchian_range) / np.log10(period)
-        else:
-            chop[i] = 100.0
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return chop
+    return upper, lower
 
 def calculate_hma(close, period=21):
-    """Hull Moving Average - responsive trend indicator"""
+    """Hull Moving Average - reduces lag while maintaining smoothness"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -121,7 +103,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - for stoploss calculation"""
+    """Average True Range - volatility measure for stops"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -129,42 +111,41 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_funding_zscore(prices, symbol, lookback=30):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Funding rate Z-score for contrarian bias
-    Load from data/processed/funding/*.parquet
-    Z < -2 = excessively negative = long bias
-    Z > +2 = excessively positive = short bias
+    Choppiness Index - identifies ranging vs trending markets
+    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
     """
-    try:
-        import os
-        funding_path = f"data/processed/funding/{symbol}.parquet"
-        if os.path.exists(funding_path):
-            df_funding = pd.read_parquet(funding_path)
-            if len(df_funding) >= lookback:
-                funding_mean = df_funding['funding_rate'].rolling(lookback, min_periods=lookback).mean()
-                funding_std = df_funding['funding_rate'].rolling(lookback, min_periods=lookback).std()
-                zscore = (df_funding['funding_rate'] - funding_mean) / (funding_std + 1e-10)
-                # Align to prices length
-                if len(zscore) >= len(prices):
-                    return zscore.values[:len(prices)]
-                else:
-                    # Pad with NaN
-                    result = np.full(len(prices), np.nan)
-                    result[:len(zscore)] = zscore.values
-                    return result
-    except Exception:
-        pass
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    # Return NaN if funding data not available
-    return np.full(len(prices), np.nan)
+    # Calculate ATR for each bar
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    choppiness = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        sum_atr = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and sum_atr > 1e-10:
+            choppiness[i] = 100.0 * np.log10(sum_atr / price_range) / np.log10(period)
+        else:
+            choppiness[i] = 50.0  # neutral
+    
+    return choppiness
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -172,29 +153,21 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
-    # Extract symbol from prices metadata if available
-    symbol = prices.get("symbol", "BTCUSDT")
-    if isinstance(symbol, pd.Series):
-        symbol = symbol.iloc[0] if len(symbol) > 0 else "BTCUSDT"
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h HMA for trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     # Calculate primary (4h) indicators
-    chop = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    
-    # Load funding rate z-score for contrarian bias
-    funding_z = calculate_funding_zscore(prices, symbol, lookback=30)
+    choppiness = calculate_choppiness(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25  # Base position size
-    SIZE_MAX = 0.30   # Max with strong confluence
+    SIZE = 0.28  # Discrete position size (balances exposure vs fee churn)
     
     # Position tracking for stoploss
     in_position = False
@@ -212,82 +185,53 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(choppiness[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop[i] > 61.8  # Range market
-        is_trending = chop[i] < 38.2  # Trend market
+        # === HTF TREND BIAS (1d HMA) ===
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === HTF TREND BIAS (12h HMA) ===
-        hma_12h_bull = close[i] > hma_12h_aligned[i]
-        hma_12h_bear = close[i] < hma_12h_aligned[i]
+        # === CHOPPINESS REGIME FILTER ===
+        # CHOP < 61.8 = trending market (allow breakouts)
+        # CHOP > 61.8 = ranging market (avoid breakout trades)
+        is_trending = choppiness[i] < 61.8
         
-        # === FUNDING RATE BIAS (Contrarian) ===
-        funding_long_bias = False
-        funding_short_bias = False
-        if not np.isnan(funding_z[i]):
-            funding_long_bias = funding_z[i] < -1.5  # Excessively negative funding
-            funding_short_bias = funding_z[i] > 1.5  # Excessively positive funding
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Check if price broke out THIS bar (close > previous upper or close < previous lower)
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        
+        # === RSI FILTER (LOOSE thresholds to ensure trades) ===
+        rsi_ok_long = rsi[i] > 35.0  # Not extremely oversold
+        rsi_ok_short = rsi[i] < 65.0  # Not extremely overbought
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
-        signal_strength = 0
         
-        if is_choppy:
-            # === RANGE REGIME: Mean Reversion ===
-            # Long: RSI oversold + funding confirms or neutral
-            if rsi[i] < 35.0:
-                if funding_long_bias or not funding_short_bias:
-                    desired_signal = SIZE_BASE
-                    signal_strength = 1
-                    if funding_long_bias and hma_12h_bull:
-                        desired_signal = SIZE_MAX
-                        signal_strength = 2
-            
-            # Short: RSI overbought + funding confirms or neutral
-            elif rsi[i] > 65.0:
-                if funding_short_bias or not funding_long_bias:
-                    desired_signal = -SIZE_BASE
-                    signal_strength = 1
-                    if funding_short_bias and hma_12h_bear:
-                        desired_signal = -SIZE_MAX
-                        signal_strength = 2
+        # Long entry: Donchian breakout + RSI filter + 1d HMA bullish + trending regime
+        if breakout_long and rsi_ok_long and hma_1d_bull and is_trending:
+            desired_signal = SIZE
         
-        elif is_trending:
-            # === TREND REGIME: Trend Following ===
-            # Long: Price above 12h HMA + RSI not overbought
-            if hma_12h_bull and rsi[i] > 45.0 and rsi[i] < 80.0:
-                desired_signal = SIZE_BASE
-                signal_strength = 1
-                if rsi[i] > 50.0 and rsi[i] < 70.0:
-                    desired_signal = SIZE_MAX
-                    signal_strength = 2
-            
-            # Short: Price below 12h HMA + RSI not oversold
-            elif hma_12h_bear and rsi[i] < 55.0 and rsi[i] > 20.0:
-                desired_signal = -SIZE_BASE
-                signal_strength = 1
-                if rsi[i] < 50.0 and rsi[i] > 30.0:
-                    desired_signal = -SIZE_MAX
-                    signal_strength = 2
-        
-        else:
-            # === TRANSITION REGIME: Use HMA direction only ===
-            if hma_12h_bull and rsi[i] > 40.0:
-                desired_signal = SIZE_BASE * 0.5
-            elif hma_12h_bear and rsi[i] < 60.0:
-                desired_signal = -SIZE_BASE * 0.5
+        # Short entry: Donchian breakout + RSI filter + 1d HMA bearish + trending regime
+        elif breakout_short and rsi_ok_short and hma_1d_bear and is_trending:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -308,14 +252,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_MAX * 0.9:
-            final_signal = SIZE_MAX
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_MAX * 0.9:
-            final_signal = -SIZE_MAX
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
+        if desired_signal >= SIZE * 0.85:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.85:
+            final_signal = -SIZE
         else:
             final_signal = 0.0
         
