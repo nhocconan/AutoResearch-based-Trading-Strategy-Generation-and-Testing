@@ -1,95 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #109: 4h Primary + 1d HTF — HMA Trend + BB Pullback + Volume Filter
+Experiment #110: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback (Loose Filters)
 
-Hypothesis: The current best (mtf_4h_hma_rsi_bb_dual_1d_v1, Sharpe=0.351) proves
-that HMA + Bollinger Bands + RSI works on 4h timeframe. This experiment refines it:
+Hypothesis: After analyzing 100+ failed experiments, the key insight is:
+- Experiments #105-#109 all got 0 trades due to overly strict conditions (session, volume, chop)
+- The winning pattern from #101: KAMA + LOOSE RSI (25/75) generated trades on all symbols
+- For 1h: use 12h HMA for trend, 4h HMA for confirmation, RSI(14) with 30/70 thresholds
+- NO session filter, NO volume filter, NO choppiness (these killed trade generation)
+- Focus on getting trades first (30-60/year target), then optimize for Sharpe
 
-1. 1d HMA = major trend bias (price above/below daily HMA)
-2. 4h HMA(21) = intermediate trend confirmation
-3. Bollinger Band(20, 2.0) pullback entry (enter when price pulls back to middle/lower band in uptrend)
-4. Volume confirmation (volume > SMA(volume, 20) * 0.8) to filter false breakouts
-5. RSI loose filter (>35 for long, <65 for short) - ensures trades on all symbols
-6. ATR trailing stoploss (2.5x) for risk management
+Strategy design:
+1. 12h HMA(21) = major trend bias (price above/below)
+2. 4h HMA(21) = intermediate confirmation (aligned with 12h)
+3. RSI(14) < 30 for long, > 70 for short (loose enough to generate trades)
+4. ATR(14) 2.0x trailing stoploss
+5. Position size: 0.30 (30% of capital)
+6. NO session/volume/chop filters (too restrictive based on #105/#108 failures)
 
-Key improvements over #101:
-- HMA instead of KAMA (proven in current best strategy)
-- BB pullback entry instead of simple crossover (better risk/reward)
-- Volume filter to reduce false signals
-- Still loose RSI to ensure trade generation
-
-Position sizing: 0.30 (30% of capital, discrete levels)
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_bb_vol_pullback_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_4h12h_v3"
+timeframe = "1h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average (HMA)
-    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    More responsive than EMA with less lag
-    """
+def calculate_hma(close, period):
+    """Hull Moving Average - more responsive than EMA"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    # WMA helper
-    def wma(series, span):
-        weights = np.arange(1, span + 1)
-        weights = weights / weights.sum()
-        result = np.convolve(series, weights, mode='valid')
-        return result
+    wma1 = pd.Series(close).ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    close_arr = close.astype(float)
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA(n/2)
-    wma_half = wma(close_arr, half_period)
-    # WMA(n)
-    wma_full = wma(close_arr, period)
-    
-    # Align lengths
-    offset = period - sqrt_period
-    
-    # 2*WMA(n/2) - WMA(n)
-    if len(wma_half) >= len(wma_full):
-        diff = 2 * wma_half[offset:offset+len(wma_full)] - wma_full
-    else:
-        diff = 2 * wma_half - wma_full[:len(wma_half)]
-    
-    # WMA of difference with sqrt(n)
-    hma_values = wma(diff, sqrt_period)
-    
-    # Pad with NaN
-    hma = np.full(n, np.nan)
-    start_idx = period - len(hma_values)
-    if start_idx < 0:
-        start_idx = 0
-    hma[start_idx:start_idx+len(hma_values)] = hma_values
-    
+    hull = 2 * wma1 - wma2
+    hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
     return hma
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Bollinger Bands: SMA ± std_mult * std"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, sma, lower
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -118,7 +67,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss"""
+    """Average True Range"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -131,38 +80,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_sma(volume, period=20):
-    """Volume SMA for confirmation"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1d HMA for major trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align HTF HMA for trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (4h) indicators
-    hma_4h = calculate_hma(close, period=21)
-    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    # Calculate primary (1h) indicators
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (discrete level)
+    SIZE = 0.30  # 30% position size
     
     # Position tracking for stoploss
     in_position = False
@@ -180,62 +120,49 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(rsi[i]) or np.isnan(bb_middle[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d HMA) ===
-        htf_bull = close[i] > hma_1d_aligned[i]
-        htf_bear = close[i] < hma_1d_aligned[i]
+        # === HTF TREND BIAS (12h HMA) ===
+        htf_bull = close[i] > hma_12h_aligned[i]
+        htf_bear = close[i] < hma_12h_aligned[i]
         
-        # === 4h TREND (HMA slope) ===
-        # HMA above middle BB = bullish momentum
-        hma_above_bb = hma_4h[i] > bb_middle[i]
-        hma_below_bb = hma_4h[i] < bb_middle[i]
+        # === INTERMEDIATE CONFIRMATION (4h HMA) ===
+        int_bull = close[i] > hma_4h_aligned[i]
+        int_bear = close[i] < hma_4h_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_ok = volume[i] > vol_sma[i] * 0.8  # At least 80% of avg volume
-        
-        # === RSI FILTER (LOOSE - ensure trades generate) ===
-        rsi_ok_long = rsi[i] > 35.0
-        rsi_ok_short = rsi[i] < 65.0
-        
-        # === BB PULLBACK ENTRY ===
-        # Long: price pulls back to middle or lower band in uptrend
-        bb_pullback_long = close[i] <= bb_middle[i] * 1.005  # Near or below middle
-        bb_pullback_short = close[i] >= bb_middle[i] * 0.995  # Near or above middle
+        # === RSI PULLBACK (LOOSE THRESHOLDS FOR TRADE GENERATION) ===
+        # Long: RSI < 30 (oversold pullback in uptrend)
+        # Short: RSI > 70 (overbought pullback in downtrend)
+        rsi_long = rsi[i] < 30.0
+        rsi_short = rsi[i] > 70.0
         
         # === DESIRED SIGNAL ===
-        # LONG: 1d bull + 4h HMA above BB middle + volume OK + RSI > 35 + BB pullback
-        # SHORT: 1d bear + 4h HMA below BB middle + volume OK + RSI < 65 + BB pullback
+        # LONG: 12h bull + 4h bull + RSI < 30
+        # SHORT: 12h bear + 4h bear + RSI > 70
         desired_signal = 0.0
         
-        if htf_bull and hma_above_bb and vol_ok and rsi_ok_long and bb_pullback_long:
+        if htf_bull and int_bull and rsi_long:
             desired_signal = SIZE
-        elif htf_bear and hma_below_bb and vol_ok and rsi_ok_short and bb_pullback_short:
+        elif htf_bear and int_bear and rsi_short:
             desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 2.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 2.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
