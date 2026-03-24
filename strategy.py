@@ -1,34 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #264: 12h Primary + 1d/1w HTF — Funding Rate Mean Reversion + Trend Filter
+Experiment #265: 15m Primary + 4h/1d HTF — Daily Pivot + RSI Mean Reversion v1
 
-Hypothesis: Funding rate mean reversion is the BEST EDGE for BTC/ETH (Sharpe 0.8-1.5 
-through 2022 crash per research). When funding is extreme (>2 std dev), crowd is 
-too long/short and price reverses. Combined with HTF trend filter for direction bias.
+Hypothesis: 15m timeframe can work with VERY selective entries using daily pivot levels
+as key S/R zones. This combines:
+1. Daily pivot levels (from 1d HTF) as support/resistance zones
+2. 4h HMA(21) for intermediate trend direction
+3. 15m RSI(7) for oversold/overbought entry timing
+4. Session filter: 00-12 UTC (London+NY overlap, highest crypto volume)
+5. Require 3+ confluence before entry
 
-Key improvements from failed experiments:
-1. FUNDING RATE Z-SCORE: contrarian signal works in bear markets (2025 test)
-2. LOOSENED ENTRY: z-score > 1.5 (not 2.0) to ensure 20-50 trades/year
-3. HTF TREND BIAS: only take trades with 1d HMA direction (reduces whipsaw)
-4. SIMPLE STOPLOSS: 2.5x ATR trailing (proven to work)
-5. DISCRETE SIZING: 0.25 base, 0.30 strong (minimize fee churn)
+Key insight from failed 15m experiments (#257, #261):
+- Too many trades = fee death. Must be VERY selective.
+- Use HTF for DIRECTION, 15m only for ENTRY TIMING
+- Position size smaller (0.15-0.25) due to higher frequency
+
+Daily Pivot Calculation (Standard):
+P = (H + L + C) / 3
+R1 = 2*P - L, S1 = 2*P - H
+R2 = P + (H - L), S2 = P - (H - L)
+TC (Top Central) = (H + L) / 2, BC (Bottom Central) = (H + L + C) / 3
 
 Entry Logic:
-- Long: funding z-score < -1.5 (crowd too short) + price > 1d HMA(50)
-- Short: funding z-score > +1.5 (crowd too long) + price < 1d HMA(50)
-- Strong signal: add 1w HMA confirmation
+- Long: price near S1/S2 + RSI(7)<30 + 4h HMA bullish + session filter
+- Short: price near R1/R2 + RSI(7)>70 + 4h HMA bearish + session filter
 
-Position sizing: 0.25 base, 0.30 with 1w confirmation
-Stoploss: 2.5x ATR(14) trailing
-
-Target: Sharpe>0.40 (beat 0.399), DD>-40%, trades>=20 train, trades>=3 test
+Position sizing: 0.15 base, 0.25 strong (discrete levels)
+Stoploss: 2.5x ATR trailing
+Target: 40-100 trades/year, Sharpe>0.40, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_funding_zscore_trend_1d1w_v1"
-timeframe = "12h"
+name = "mtf_15m_daily_pivot_rsi_session_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -48,6 +54,32 @@ def calculate_hma(close, period):
     
     return hma
 
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    gain = np.concatenate([[0.0], gain])
+    loss = np.concatenate([[0.0], loss])
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
+    for i in range(period, n):
+        if avg_loss[i] < 1e-10:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -62,94 +94,73 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_zscore(series, window=30):
-    """Z-score of series over rolling window"""
-    n = len(series)
-    zscore = np.zeros(n)
-    zscore[:] = np.nan
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
     
-    for i in range(window, n):
-        window_data = series[i-window:i]
-        mean = np.mean(window_data)
-        std = np.std(window_data)
-        if std > 1e-10:
-            zscore[i] = (series[i] - mean) / std
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
+
+def calculate_daily_pivots(df_1d):
+    """
+    Calculate daily pivot levels from 1d data.
+    Returns arrays aligned to 1d bars that will be aligned to 15m later.
+    """
+    n = len(df_1d)
     
-    return zscore
+    # Pivot = (H + L + C) / 3
+    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2.0 * pivot - df_1d['low'].values
+    s1 = 2.0 * pivot - df_1d['high'].values
+    
+    # R2 = P + (H - L), S2 = P - (H - L)
+    r2 = pivot + (df_1d['high'].values - df_1d['low'].values)
+    s2 = pivot - (df_1d['high'].values - df_1d['low'].values)
+    
+    # TC (Top Central) = (H + L) / 2, BC (Bottom Central) = Pivot
+    tc = (df_1d['high'].values + df_1d['low'].values) / 2.0
+    bc = pivot
+    
+    return pivot, r1, s1, r2, s2, tc, bc
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Load funding rate data (BTC/ETH/SOL funding rates)
-    # Funding rate is available in processed data
-    try:
-        # Try to load funding data from standard location
-        import os
-        funding_path = None
-        for base_path in ['data/processed/funding/', '../data/processed/funding/', 'data/funding/']:
-            for symbol in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
-                test_path = f"{base_path}{symbol}.parquet"
-                if os.path.exists(test_path):
-                    funding_path = test_path
-                    break
-            if funding_path:
-                break
-        
-        if funding_path:
-            df_funding = pd.read_parquet(funding_path)
-            # Align funding to prices timeframe
-            funding_rates = df_funding['funding_rate'].values
-            
-            # Need to align funding data to prices length
-            # Funding is typically 8h intervals, prices is 12h
-            # Use simple interpolation/alignment
-            if len(funding_rates) >= n:
-                funding_aligned = funding_rates[:n]
-            else:
-                # Repeat last value if funding data is shorter
-                funding_aligned = np.zeros(n)
-                for i in range(n):
-                    idx = int(i * len(funding_rates) / n)
-                    funding_aligned[i] = funding_rates[min(idx, len(funding_rates)-1)]
-        else:
-            # Fallback: use price-based proxy for funding (returns z-score)
-            # This approximates funding behavior (extreme moves = extreme funding)
-            returns = np.zeros(n)
-            for i in range(1, n):
-                if close[i-1] > 1e-10:
-                    returns[i] = (close[i] - close[i-1]) / close[i-1]
-            funding_aligned = returns
-    except Exception:
-        # Fallback: use price returns as funding proxy
-        returns = np.zeros(n)
-        for i in range(1, n):
-            if close[i-1] > 1e-10:
-                returns[i] = (close[i] - close[i-1]) / close[i-1]
-        funding_aligned = returns
+    # Calculate and align 4h HMA for trend direction
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate funding z-score (30-period lookback)
-    funding_zscore = calculate_zscore(funding_aligned, window=30)
+    # Calculate daily pivot levels from 1d data
+    pivot_1d, r1_1d, s1_1d, r2_1d, s2_1d, tc_1d, bc_1d = calculate_daily_pivots(df_1d)
     
-    # Calculate and align HTF HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Align daily pivots to 15m (use previous day's pivots = shift by 1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate primary (12h) indicators
+    # Calculate primary (15m) indicators
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking
     in_position = False
@@ -159,7 +170,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -168,41 +179,94 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(funding_zscore[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        if np.isnan(rsi_7[i]) or np.isnan(sma_200[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # 1w for major trend confirmation
-        htf_1w_valid = not np.isnan(hma_1w_aligned[i])
-        htf_1w_bull = htf_1w_valid and close[i] > hma_1w_aligned[i]
-        htf_1w_bear = htf_1w_valid and close[i] < hma_1w_aligned[i]
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        # open_time is in milliseconds
+        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
+        in_session = (hour_utc >= 0 and hour_utc < 12)
         
-        # === FUNDING Z-SCORE SIGNAL ===
-        # Contrarian: extreme negative funding = long opportunity
-        # extreme positive funding = short opportunity
-        funding_extreme_long = funding_zscore[i] < -1.5  # crowd too short
-        funding_extreme_short = funding_zscore[i] > 1.5  # crowd too long
+        # === 4H TREND BIAS ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        
+        # === SMA200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
+        
+        # === DAILY PIVOT ZONES ===
+        # Check if price is near support (S1, S2) or resistance (R1, R2)
+        # Use 0.5% tolerance for "near"
+        tol = 0.005
+        
+        near_s1 = abs(close[i] - s1_aligned[i]) / close[i] < tol
+        near_s2 = abs(close[i] - s2_aligned[i]) / close[i] < tol
+        near_r1 = abs(close[i] - r1_aligned[i]) / close[i] < tol
+        near_r2 = abs(close[i] - r2_aligned[i]) / close[i] < tol
+        
+        near_support = near_s1 or near_s2
+        near_resistance = near_r1 or near_r2
+        
+        # Also check if price is BETWEEN pivot levels (value area)
+        in_value_area_long = (close[i] > s1_aligned[i]) and (close[i] < pivot_aligned[i])
+        in_value_area_short = (close[i] < r1_aligned[i]) and (close[i] > pivot_aligned[i])
+        
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_7[i] < 30.0
+        rsi_overbought = rsi_7[i] > 70.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # Long: funding extreme negative + 1d trend bull
-        if funding_extreme_long and htf_1d_bull:
-            if htf_1w_bull:
+        # LONG: Near support + RSI oversold + 4h bullish + session filter
+        # Need 3+ confluence
+        long_confluence = 0
+        if near_support:
+            long_confluence += 1
+        if rsi_oversold:
+            long_confluence += 1
+        if htf_4h_bull:
+            long_confluence += 1
+        if above_sma200:
+            long_confluence += 1
+        if in_session:
+            long_confluence += 0.5  # session is soft filter
+        
+        # SHORT: Near resistance + RSI overbought + 4h bearish + session filter
+        short_confluence = 0
+        if near_resistance:
+            short_confluence += 1
+        if rsi_overbought:
+            short_confluence += 1
+        if htf_4h_bear:
+            short_confluence += 1
+        if below_sma200:
+            short_confluence += 1
+        if in_session:
+            short_confluence += 0.5
+        
+        # Require 3+ confluence for entry
+        if long_confluence >= 3.0 and rsi_oversold:
+            # Strong signal if 4h trend + SMA200 aligned
+            if htf_4h_bull and above_sma200:
                 desired_signal = SIZE_STRONG
             else:
                 desired_signal = SIZE_BASE
         
-        # Short: funding extreme positive + 1d trend bear
-        elif funding_extreme_short and htf_1d_bear:
-            if htf_1w_bear:
+        if short_confluence >= 3.0 and rsi_overbought:
+            if htf_4h_bear and below_sma200:
                 desired_signal = -SIZE_STRONG
             else:
                 desired_signal = -SIZE_BASE
