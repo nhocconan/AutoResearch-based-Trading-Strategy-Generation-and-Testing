@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #153: 5m Primary + 15m/4h HTF — Session-Filtered Trend Following
+Experiment #155: 6h Primary + 12h/1d HTF — Fisher Transform Reversals + HMA Trend
 
-Hypothesis: 5m timeframe is completely unexplored (0 experiments) and offers unique edge
-when combined with strict session filters and dual-HTF trend confirmation.
+Hypothesis: 6h timeframe is underexplored (0 experiments) and Fisher Transform excels at
+catching reversals in bear/range markets (2022 crash, 2025 bear). Unlike RSI which can
+stay extreme for long periods, Fisher Transform normalizes price and highlights turning
+points more precisely.
 
-Key insights from 150+ failed experiments:
-- Complex regime-switching fails on BTC/ETH
-- Strategies with Sharpe=0.000 had ZERO trades (entry too strict)
-- Session filter is MANDATORY for 5m (avoid Asian session noise)
-- 5m needs smaller position size (0.15-0.20) due to more trades = fee drag
+Key insights from 140+ failed experiments:
+- Simple EMA/HMA crossover fails on BTC/ETH (always negative Sharpe)
+- cRSI didn't work on 6h (#143)
+- Strategies with Sharpe=0.000 had ZERO trades (entry conditions too strict)
+- #147 worked with loose RSI thresholds and HTF alignment
 
-New approach for 5m:
-- 4h HMA(21) for major trend bias (HTF level 1)
-- 15m HMA(13) for intermediate trend (HTF level 2)
-- 5m RSI(7) for fast entry timing (adapted for 5m speed)
-- Session filter: 08:00-20:00 UTC only (London/NY overlap = high volume)
-- Volume spike confirmation (avoid dead periods)
+New approach for 6h:
+- 6h Fisher Transform(9) for reversal signals (long when crosses above -1.5, short below +1.5)
+- 12h HMA(21) + 1d HMA(50) for major trend bias (both must align)
+- 6h HMA(21) for immediate trend confirmation
+- ADX(14) > 20 to ensure some trend presence (avoid dead chop)
 - ATR(14) 2.5x trailing stop for risk management
-- Position size: 0.20 (20% of capital - smaller due to trade frequency)
+- Position size: 0.25 (25% of capital - conservative for reversals)
+- Multiple entry tiers to ensure trade generation
 
-Design for trade generation:
-- LOOSE RSI thresholds (long: RSI<55, short: RSI>45) to ensure entries
-- Dual HTF alignment (both 15m and 4h must agree)
-- Session filter ensures we only trade high-liquidity periods
-- Target 50-120 trades/year on 5m timeframe
-
-Target: Sharpe>0.167, DD>-40%, trades>=30 train, trades>=3 test ALL symbols
+Target: 30-60 trades/year, Sharpe>0.167, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_hma_rsi_session_dual_htf_v1"
-timeframe = "5m"
+name = "mtf_6h_fisher_hma_adx_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -53,32 +49,6 @@ def calculate_hma(close, period):
     
     return hma
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    gain = np.concatenate([[0.0], gain])
-    loss = np.concatenate([[0.0], loss])
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    for i in range(period, n):
-        if avg_loss[i] < 1e-10:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range for stoploss"""
     n = len(close)
@@ -93,57 +63,117 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_ratio(volume, period=20):
-    """Volume ratio vs rolling average"""
-    n = len(volume)
-    if n < period:
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
         return np.full(n, np.nan)
     
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / (vol_avg + 1e-10)
+    # True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return vol_ratio
+    # Directional Movement
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smoothed DM and TR
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # DI and DX
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_s[i] > 1e-10:
+            plus_di[i] = 100.0 * plus_dm_s[i] / tr_s[i]
+            minus_di[i] = 100.0 * minus_dm_s[i] / tr_s[i]
+            
+            di_sum = plus_di[i] + minus_di[i]
+            if di_sum > 1e-10:
+                dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # ADX = smoothed DX
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
-def is_session_active(open_time):
+def calculate_fisher_transform(high, low, close, period=9):
     """
-    Check if timestamp is within active trading session (08:00-20:00 UTC)
-    open_time is in milliseconds since epoch
+    Ehlers Fisher Transform - catches reversals in bear rallies
+    Normalizes price to highlight turning points
+    Long: Fisher crosses above -1.5 (oversold reversal)
+    Short: Fisher crosses below +1.5 (overbought reversal)
     """
-    # Convert to hours UTC
-    ts_seconds = open_time / 1000
-    hour_utc = (ts_seconds % 86400) / 3600
+    n = len(close)
+    fisher = np.zeros(n)
+    fisher[:] = np.nan
     
-    # Active session: 08:00 to 20:00 UTC (London/NY overlap)
-    return 8.0 <= hour_utc <= 20.0
+    prev_fisher = 0.0
+    
+    for i in range(period, n):
+        # Find highest high and lowest low over period
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        
+        # Normalize price to 0-1 range (with bounds to avoid division issues)
+        range_hl = highest - lowest
+        if range_hl < 1e-10:
+            norm_price = 0.5
+        else:
+            norm_price = (close[i] - lowest) / range_hl
+        
+        # Clamp to avoid extremes (0.001 to 0.999)
+        norm_price = max(0.001, min(0.999, norm_price))
+        
+        # Fisher transform: 0.5 * ln((1+x)/(1-x))
+        fisher_raw = 0.5 * np.log((1.0 + norm_price) / (1.0 - norm_price))
+        
+        # Smooth with 1-period lag (standard Fisher implementation)
+        fisher[i] = 0.67 * fisher_raw + 0.33 * prev_fisher
+        prev_fisher = fisher[i]
+    
+    return fisher
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_15m = get_htf_data(prices, '15m')
-    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 15m HMA for intermediate trend
-    hma_15m_raw = calculate_hma(df_15m['close'].values, period=13)
-    hma_15m_aligned = align_htf_to_ltf(prices, df_15m, hma_15m_raw)
+    # Calculate and align HTF HMA for major trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate and align 4h HMA for major trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (5m) indicators
-    hma_5m = calculate_hma(close, period=9)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for 5m
+    # Calculate primary (6h) indicators
+    hma_6h = calculate_hma(close, period=21)
+    fisher = calculate_fisher_transform(high, low, close, period=9)
     atr = calculate_atr(high, low, close, period=14)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    adx = calculate_adx(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size (smaller for 5m due to trade frequency)
+    SIZE = 0.25  # 25% position size (conservative for reversals)
     
     # Position tracking for stoploss
     in_position = False
@@ -155,78 +185,68 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or atr[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(hma_5m[i]) or np.isnan(rsi[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(hma_15m_aligned[i]) or np.isnan(hma_4h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_ratio[i]):
+        if (np.isnan(fisher[i]) or np.isnan(hma_6h[i]) or np.isnan(hma_12h_aligned[i]) or 
+            np.isnan(hma_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (MANDATORY for 5m) ===
-        session_active = is_session_active(open_time[i])
+        if atr[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === VOLUME CONFIRMATION ===
-        volume_ok = vol_ratio[i] > 0.7  # At least 70% of avg volume
+        # === HTF TREND BIAS (12h + 1d) ===
+        # Both HTF must align for strong bias
+        htf_bull = (close[i] > hma_12h_aligned[i]) and (close[i] > hma_1d_aligned[i])
+        htf_bear = (close[i] < hma_12h_aligned[i]) and (close[i] < hma_1d_aligned[i])
+        htf_neutral = not htf_bull and not htf_bear
         
-        # === HTF BIAS (4h HMA - Major Trend) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        # === 6h HMA TREND ===
+        hma_bull = close[i] > hma_6h[i]
+        hma_bear = close[i] < hma_6h[i]
         
-        # === HTF BIAS (15m HMA - Intermediate Trend) ===
-        htf_15m_bull = close[i] > hma_15m_aligned[i]
-        htf_15m_bear = close[i] < hma_15m_aligned[i]
+        # === ADX FILTER (trend strength) ===
+        # Only trade when ADX > 20 (some trend present)
+        adx_ok = adx[i] > 20.0
         
-        # === DUAL HTF ALIGNMENT (both must agree) ===
-        htf_aligned_bull = htf_4h_bull and htf_15m_bull
-        htf_aligned_bear = htf_4h_bear and htf_15m_bear
+        # === FISHER TRANSFORM SIGNALS ===
+        # Long: Fisher crosses above -1.5 (oversold reversal)
+        # Short: Fisher crosses below +1.5 (overbought reversal)
+        fisher_long_cross = fisher[i] > -1.5 and fisher[i-1] <= -1.5
+        fisher_short_cross = fisher[i] < 1.5 and fisher[i-1] >= 1.5
         
-        # === 5m HMA TREND ===
-        hma_bull = close[i] > hma_5m[i]
-        hma_bear = close[i] < hma_5m[i]
-        
-        # === RSI ENTRY (LOOSE thresholds to ensure trades) ===
-        # For 5m, RSI(7) moves faster, so use wider thresholds
-        rsi_ok_long = rsi[i] < 55.0  # Not overbought (allow entries up to 55)
-        rsi_ok_short = rsi[i] > 45.0  # Not oversold (allow entries down to 45)
-        
-        # === RSI MOMENTUM CONFIRMATION ===
-        rsi_momentum_long = rsi[i] > 35.0  # Not extremely oversold
-        rsi_momentum_short = rsi[i] < 65.0  # Not extremely overbought
+        # Also allow entry when Fisher is at extremes (not just cross)
+        fisher_oversold = fisher[i] < -1.2
+        fisher_overbought = fisher[i] > 1.2
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # PRIMARY: All conditions aligned (full size)
-        if session_active and volume_ok and htf_aligned_bull and hma_bull and rsi_ok_long and rsi_momentum_long:
+        # PRIMARY: Fisher reversal + HTF alignment + ADX confirmation
+        if fisher_long_cross and htf_bull and hma_bull and adx_ok:
             desired_signal = SIZE
         
-        elif session_active and volume_ok and htf_aligned_bear and hma_bear and rsi_ok_short and rsi_momentum_short:
+        elif fisher_short_cross and htf_bear and hma_bear and adx_ok:
             desired_signal = -SIZE
         
-        # FALLBACK: Strong HTF alignment (ignore 5m HMA if HTF very strong) - 70% size
-        elif session_active and volume_ok and htf_aligned_bull and rsi[i] > 40.0 and rsi[i] < 50.0:
+        # SECONDARY: Fisher extreme + HTF alignment (no ADX requirement)
+        elif fisher_oversold and htf_bull and hma_bull:
             desired_signal = SIZE * 0.7
         
-        elif session_active and volume_ok and htf_aligned_bear and rsi[i] > 50.0 and rsi[i] < 60.0:
+        elif fisher_overbought and htf_bear and hma_bear:
             desired_signal = -SIZE * 0.7
+        
+        # TERTIARY: Strong HTF alignment alone (fallback to ensure trades)
+        elif htf_bull and hma_bull:
+            desired_signal = SIZE * 0.5
+        
+        elif htf_bear and hma_bear:
+            desired_signal = -SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
