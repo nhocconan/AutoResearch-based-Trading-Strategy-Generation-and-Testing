@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Auto-generated: ichimoku trend + pin_bar entry + adx_filter regime on 4h"""
+"""Auto-generated: ichimoku trend + vpin_proxy entry + choppiness regime on 15m"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "gen_ichimoku_pin_bar_adx_filter_4h_v1"
-timeframe = "4h"
+name = "gen_ichimoku_vpin_proxy_choppiness_15m_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,28 +32,27 @@ def generate_signals(prices):
 
     # ENTRY filter
 
-    _body = np.abs(close - prices["open"].values) if "open" in prices.columns else np.ones(n)
-    _range = high - low
-    _upper_wick = high - np.maximum(close, prices["open"].values if "open" in prices.columns else close)
-    _lower_wick = np.minimum(close, prices["open"].values if "open" in prices.columns else close) - low
-    entry_ok_long = np.array([_lower_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])
-    entry_ok_short = np.array([_upper_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])
+    # VPIN proxy via close location value — order flow imbalance
+    _clv = np.where(high-low>0, (2*close-low-high)/(high-low), 0)
+    _buy_vol = np.where(_clv > 0, volume * _clv, 0)
+    _sell_vol = np.where(_clv < 0, volume * abs(_clv), 0)
+    _buy_sum = pd.Series(_buy_vol).rolling(20, min_periods=20).sum().values
+    _sell_sum = pd.Series(_sell_vol).rolling(20, min_periods=20).sum().values
+    _total = _buy_sum + _sell_sum
+    _imbalance = np.where(_total > 0, (_buy_sum - _sell_sum) / _total, 0)
+    entry_ok_long = np.array([_imbalance[i] > 0.2 for i in range(n)])
+    entry_ok_short = np.array([_imbalance[i] < -0.2 for i in range(n)])
 
     # REGIME filter
 
-    _pdm = np.zeros(n); _ndm = np.zeros(n)
-    for i in range(1, n):
-        hd = high[i]-high[i-1]; ld = low[i-1]-low[i]
-        if hd > ld and hd > 0: _pdm[i] = hd
-        if ld > hd and ld > 0: _ndm[i] = ld
-    _tr2 = np.zeros(n)
-    for i in range(1, n): _tr2[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
-    _atr2 = pd.Series(_tr2).ewm(span=14, min_periods=14, adjust=False).mean().values
-    _pdi = np.where(_atr2>0, 100*pd.Series(_pdm).ewm(span=14,min_periods=14,adjust=False).mean().values/_atr2, 0)
-    _ndi = np.where(_atr2>0, 100*pd.Series(_ndm).ewm(span=14,min_periods=14,adjust=False).mean().values/_atr2, 0)
-    _dx = np.where(_pdi+_ndi>0, 100*np.abs(_pdi-_ndi)/(_pdi+_ndi), 0)
-    adx = pd.Series(_dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    regime_ok = np.array([adx[i] > 20 for i in range(n)])
+    _tr = np.zeros(n)
+    for i in range(1, n): _tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+    _atr_sum = pd.Series(_tr).rolling(14, min_periods=14).sum().values
+    _hh = pd.Series(high).rolling(14, min_periods=14).max().values
+    _ll = pd.Series(low).rolling(14, min_periods=14).min().values
+    _range = _hh - _ll
+    chop = np.where(_range > 0, 100 * np.log10(_atr_sum / _range) / np.log10(14), 50)
+    regime_ok = np.array([chop[i] < 45 for i in range(n)])
 
     signals = np.zeros(n)
     SIZE = 0.25

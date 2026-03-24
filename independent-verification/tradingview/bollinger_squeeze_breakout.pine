@@ -1,0 +1,103 @@
+//@version=6
+strategy(
+    "bollinger_squeeze_breakout [Independent Conversion]",
+    overlay = true,
+    initial_capital = 10000,
+    pyramiding = 0,
+    calc_on_every_tick = false,
+    process_orders_on_close = false,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.05,
+    default_qty_type = strategy.fixed,
+    default_qty_value = 0,
+    margin_long = 100,
+    margin_short = 100
+)
+
+float minSignal = input.float(0.15, "Min Signal", minval = 0.0, maxval = 1.0, step = 0.01)
+float maxSignal = input.float(0.85, "Max Signal", minval = 0.0, maxval = 1.0, step = 0.01)
+float squeezeThreshold = input.float(0.60, "Squeeze Threshold", minval = 0.1, maxval = 1.0, step = 0.01)
+float volumeThreshold = input.float(1.5, "Volume Ratio Threshold", minval = 0.1, step = 0.1)
+float volatilityTarget = input.float(0.015, "Volatility Target", minval = 0.001, step = 0.001)
+
+if barstate.isfirst and timeframe.period != "60"
+    runtime.error("Use this script on a 1h chart. It is a direct conversion of bollinger_squeeze_breakout.")
+
+f_round_qty(_qty) =>
+    float step = syminfo.mincontract > 0 ? syminfo.mincontract : 0.000001
+    float rounded = math.floor(_qty / step) * step
+    rounded >= step ? rounded : step
+
+float bbMiddle = ta.sma(close, 20)
+float bbDev = ta.stdev(close, 20)
+float bbUpper = bbMiddle + 2.0 * bbDev
+float bbLower = bbMiddle - 2.0 * bbDev
+float bbWidth = bbMiddle != 0 ? (bbUpper - bbLower) / bbMiddle : 0.0
+float rollingMaxWidth = ta.highest(bbWidth, 10)
+bool squeeze = rollingMaxWidth > 0 and bbWidth / rollingMaxWidth < squeezeThreshold
+bool recentSqueeze = ta.highest(squeeze ? 1.0 : 0.0, 10) > 0
+
+float emaFast = ta.ema(close, 20)
+float emaSlow = ta.ema(close, 50)
+float rsiValue = ta.rsi(close, 14)
+float atrValue = ta.ema(ta.tr(true), 14)
+float volumeSma = ta.sma(volume, 20)
+float volumeRatio = volumeSma > 0 ? volume / volumeSma : 1.0
+
+bool trendBullish = emaFast > emaSlow
+bool trendBearish = emaFast < emaSlow
+bool rsiBullishOk = rsiValue < 75
+bool rsiBearishOk = rsiValue > 25
+bool volumeConfirmed = volumeRatio >= volumeThreshold
+bool breakoutLong = close > bbUpper
+bool breakoutShort = close < bbLower
+
+float breakoutStrengthLong = breakoutLong and bbUpper > 0 ? math.min((close - bbUpper) / bbUpper, 0.05) : 0.0
+float breakoutStrengthShort = breakoutShort and bbLower > 0 ? math.min((bbLower - close) / bbLower, 0.05) : 0.0
+float trendStrength = close > 0 ? math.min(math.abs(emaFast - emaSlow) / close * 100.0, 1.0) : 0.0
+float atrPct = close > 0 ? atrValue / close : 0.0
+float volFactor = atrPct > 0 ? math.min(1.5, volatilityTarget / math.max(atrPct, 0.001)) : 1.0
+
+float rsiQualityLong = rsiValue >= 40 and rsiValue <= 70 ? 1.0 : rsiValue < 40 ? 0.7 : 0.6
+float rsiQualityShort = rsiValue >= 30 and rsiValue <= 60 ? 1.0 : rsiValue > 60 ? 0.7 : 0.6
+
+float rawSignal = 0.0
+if recentSqueeze
+    if breakoutLong and trendBullish and rsiBullishOk
+        rawSignal := breakoutStrengthLong * 20.0
+        if volumeConfirmed
+            rawSignal *= 1.3
+        rawSignal *= trendStrength
+        rawSignal *= rsiQualityLong
+    else if breakoutShort and trendBearish and rsiBearishOk
+        rawSignal := -breakoutStrengthShort * 20.0
+        if volumeConfirmed
+            rawSignal *= 1.3
+        rawSignal *= trendStrength
+        rawSignal *= rsiQualityShort
+
+float signal = rawSignal * volFactor
+signal := math.abs(signal) < minSignal ? 0.0 : math.max(-maxSignal, math.min(maxSignal, signal))
+
+float prevSignal = nz(signal[1], 0.0)
+bool signalChanged = barstate.isconfirmed and math.abs(signal - prevSignal) > 0.000001
+float rawQty = close > 0 ? (strategy.equity * math.abs(signal)) / close : 0.0
+float entryQty = f_round_qty(rawQty)
+
+if signalChanged
+    if prevSignal > 0
+        strategy.close("Long", comment = "Signal Exit")
+    if prevSignal < 0
+        strategy.close("Short", comment = "Signal Exit")
+    if signal > 0
+        strategy.entry("Long", strategy.long, qty = entryQty, comment = "Breakout Long")
+    if signal < 0
+        strategy.entry("Short", strategy.short, qty = entryQty, comment = "Breakout Short")
+
+plot(bbUpper, "BB Upper", color = color.new(color.blue, 20))
+plot(bbMiddle, "BB Middle", color = color.new(color.gray, 20))
+plot(bbLower, "BB Lower", color = color.new(color.blue, 20))
+plot(emaFast, "EMA 20", color = color.orange)
+plot(emaSlow, "EMA 50", color = color.aqua)
+plotchar(signal > 0, "Long Bias", "L", location.top, color = color.lime)
+plotchar(signal < 0, "Short Bias", "S", location.bottom, color = color.red)
