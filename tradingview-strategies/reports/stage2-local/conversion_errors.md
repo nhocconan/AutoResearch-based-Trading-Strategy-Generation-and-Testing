@@ -1,7 +1,7 @@
 # Stage 2 Conversion Errors
 
-- Generated at: `2026-03-24T04:59:46.747327+00:00`
-- Error count: `381`
+- Generated at: `2026-03-24T05:05:26.836997+00:00`
+- Error count: `380`
 
 ## 0dlk91nb-xauusd-1-minute-scalping-strategy-advanced-strategy-for-exits
 
@@ -178,14 +178,6 @@
 - URL: https://www.tradingview.com/script/4GpShajB-Quality-Controlled-Trend-Strategy/
 - Attempts used: `3`
 - Last error: `initial_attempt_3: Error code: 429 - {'error': {'code': 'throttling', 'message': 'hour allocated quota exceeded.', 'param': None, 'type': 'invalid_request_error'}, 'request_id': '331c6b9c-fdce-9ce8-90c2-02685a6a641c'}`
-
-## 4hz8mood-vwap-strategy
-
-- Lane: lane-1
-- Name: VWAP Strategy 
-- URL: https://www.tradingview.com/script/4HZ8MOod-VWAP-Strategy/
-- Attempts used: `3`
-- Last error: `initial_attempt_3: LLM call timed out after 60s`
 
 ## 4ievbowh-asia-liquidity-sweep-reversal-scalper-gc-gold-strategy
 
