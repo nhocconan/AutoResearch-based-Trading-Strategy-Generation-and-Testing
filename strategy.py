@@ -1,69 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #988: 4h Primary + 12h/1d HTF — Dual Regime (CHOP + CRSI/KAMA)
+Experiment #989: 15m Primary + 1h/1d HTF — Daily Pivot CPR + Camarilla Mean Reversion
 
-Hypothesis: 4h timeframe with Choppiness Index regime detection + dual entry logic
-will capture both trend and mean-reversion opportunities while HTF bias filters
-counter-trend trades. This targets the proven ETH pattern (CHOP+CRSI Sharpe +0.923).
+Hypothesis: 15m entries at Daily Pivot/CPR levels with 1h trend filter and session timing
+will capture intraday swings with high win rate while maintaining low trade frequency (40-100/yr).
 
 Key innovations:
-1. 12h HMA(21) for intermediate trend bias (aligns with multi-day swings)
-2. 1d momentum (close > SMA50) for long-term direction
-3. CHOP(14) regime: <38.2 = trend (use KAMA crossover), >61.8 = range (use CRSI)
-4. Connors RSI for mean-reversion entries in choppy markets
-5. KAMA(10/30) for adaptive trend entries (responds to volatility changes)
-6. ATR(14) 2.5x trailing stop for risk management
+1. Daily CPR (Central Pivot Range): BC/TC from 1d HTF defines value area
+   - Narrow CPR (<0.5% of price) = expansion day likely
+   - Price above TC = bullish bias, below BC = bearish bias
+2. Camarilla Levels (R3/R4, S3/S4): Mean reversion at extremes
+   - Fade at R3/S3 in ranging market
+   - Breakout at R4/S4 in trending market
+3. 1h HMA(21) for intermediate trend direction
+4. 15m RSI(7) for entry timing (oversold/overbought extremes)
+5. Session filter: 00-12 UTC (London+NY overlap) for higher probability
+6. Volume confirmation: taker_buy_volume > 1.5x 20-bar average
 
-Why this should work on 4h:
-- 4h captures 2-5 day swings, ideal for crypto volatility
-- CHOP filter avoids whipsaws in 2022 bottom and 2025 range
-- CRSI has 75% win rate for oversold/overbought reversals
-- HTF bias (12h/1d) prevents fighting the macro trend
-- KAMA adapts to volatility, better than fixed EMA in crypto
+Why this should work on 15m:
+- Daily pivots are institutional levels that matter across all timeframes
+- Camarilla levels catch intraday extremes with high reversal probability
+- 1h filter prevents counter-trend trades on lower TF noise
+- Session filter avoids low-liquidity Asian session whipsaws
+- Strict confluence (3+ factors) keeps trade count low (target 50-80/yr)
 
-Entry conditions (BALANCED for trade frequency):
-- LONG = 12h bull + 1d bull + (CHOP<38 + KAMA cross OR CHOP>61 + CRSI<18)
-- SHORT = 12h bear + 1d bear + (CHOP<38 + KAMA cross OR CHOP>61 + CRSI>82)
-- Relaxed thresholds to ensure 30+ trades/train, 3+/test
+Entry conditions (balanced for trades):
+- LONG = 1h bull + (price>TC OR narrow CPR) + RSI(7)<25 + session 00-12 + volume spike
+- SHORT = 1h bear + (price<BC OR narrow CPR) + RSI(7)>75 + session 00-12 + volume spike
+- Camarilla fade: RSI(7)>80 at R3 + 1h not strongly bull → short
+- Camarilla fade: RSI(7)<20 at S3 + 1h not strongly bear → long
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller for 15m frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_chop_crsi_kama_regime_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_pivot_camarilla_rsi_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
-
-def calculate_kama(close, fast_period=2, slow_period=30, er_period=10):
-    """Kaufman Adaptive Moving Average"""
-    n = len(close)
-    if n < er_period + 1:
-        return np.full(n, np.nan)
-    
-    fast_sc = 2.0 / (fast_period + 1.0)
-    slow_sc = 2.0 / (slow_period + 1.0)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(er_period, n):
-        net_change = abs(close[i] - close[i - er_period])
-        total_noise = 0.0
-        for j in range(i - er_period + 1, i + 1):
-            total_noise += abs(close[j] - close[j - 1])
-        
-        er = net_change / total_noise if total_noise > 1e-10 else 0.0
-        sc = er * (fast_sc - slow_sc) + slow_sc
-        
-        if i == er_period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -124,120 +101,144 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
-
-def calculate_choppiness(high, low, close, period=14):
+def calculate_daily_pivots(df_1d):
     """
-    Choppiness Index (CHOP)
-    Measures whether market is trending or choppy/ranging
-    CHOP > 61.8 = range/choppy
-    CHOP < 38.2 = trending
+    Calculate Daily Pivot Points and CPR (Central Pivot Range)
+    Uses previous day's OHLC to calculate today's levels
+    
+    Returns: dict with pivot, r1, r2, r3, s1, s2, s3, tc, bc, pivot_range
     """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    n = len(df_1d)
+    pivots = {
+        'pivot': np.full(n, np.nan),
+        'r1': np.full(n, np.nan),
+        'r2': np.full(n, np.nan),
+        'r3': np.full(n, np.nan),
+        's1': np.full(n, np.nan),
+        's2': np.full(n, np.nan),
+        's3': np.full(n, np.nan),
+        'tc': np.full(n, np.nan),  # Top Central (CPR)
+        'bc': np.full(n, np.nan),  # Bottom Central (CPR)
+        'pivot_range': np.full(n, np.nan),  # TC - BC
+    }
     
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        tr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-        
-        if highest_high > lowest_low and tr_sum > 1e-10:
-            chop[i] = 100.0 * np.log10((highest_high - lowest_low) / tr_sum) / np.log10(period)
-    
-    return chop
-
-def calculate_crsi(close):
-    """
-    Connors RSI (CRSI)
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    
-    RSI_Streak: RSI of consecutive up/down days
-    PercentRank: percentile rank of daily returns over 100 days
-    """
-    n = len(close)
-    if n < 100:
-        return np.full(n, np.nan)
-    
-    # RSI(3)
-    rsi_3 = calculate_rsi(close, period=3)
-    
-    # RSI Streak (2)
-    streak = np.zeros(n, dtype=np.float64)
     for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = streak[i-1]
+        prev_high = df_1d['high'].iloc[i-1]
+        prev_low = df_1d['low'].iloc[i-1]
+        prev_close = df_1d['close'].iloc[i-1]
+        
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        pivots['pivot'][i] = pivot
+        
+        # Standard pivot levels
+        pivots['r1'][i] = 2.0 * pivot - prev_low
+        pivots['s1'][i] = 2.0 * pivot - prev_high
+        pivots['r2'][i] = pivot + (prev_high - prev_low)
+        pivots['s2'][i] = pivot - (prev_high - prev_low)
+        pivots['r3'][i] = prev_high + 2.0 * (pivot - prev_low)
+        pivots['s3'][i] = prev_low - 2.0 * (prev_high - pivot)
+        
+        # CPR (Central Pivot Range)
+        pivots['tc'][i] = (prev_high + prev_low) / 2.0
+        pivots['bc'][i] = pivot
+        pivots['pivot_range'][i] = abs(pivots['tc'][i] - pivots['bc'][i])
     
-    # Convert streak to RSI-like value (0-100)
-    streak_rsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(2, n):
-        abs_streak = abs(streak[i])
-        if abs_streak >= 2:
-            streak_rsi[i] = 100.0 if streak[i] > 0 else 0.0
-        elif abs_streak == 1:
-            streak_rsi[i] = 75.0 if streak[i] > 0 else 25.0
-        else:
-            streak_rsi[i] = 50.0
+    return pivots
+
+def calculate_camarilla_levels(close, high, low, prev_close):
+    """
+    Camarilla Pivot Levels
+    R4/S4 = breakout levels
+    R3/S3 = mean reversion levels
+    """
+    range_val = high - low
     
-    # PercentRank(100) - percentile of daily return in last 100 days
-    returns = np.diff(close, prepend=close[0]) / (np.abs(close) + 1e-10)
-    pct_rank = np.full(n, np.nan, dtype=np.float64)
-    for i in range(100, n):
-        window = returns[i-99:i+1]
-        pct_rank[i] = 100.0 * np.sum(returns[i] >= window) / len(window)
+    r4 = prev_close + 1.5 * range_val
+    r3 = prev_close + 1.2 * range_val
+    r2 = prev_close + 1.1 * range_val
+    r1 = prev_close + 1.05 * range_val
     
-    # Combine into CRSI
-    crsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(100, n):
-        if not np.isnan(rsi_3[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(pct_rank[i]):
-            crsi[i] = (rsi_3[i] + streak_rsi[i] + pct_rank[i]) / 3.0
+    s4 = prev_close - 1.5 * range_val
+    s3 = prev_close - 1.2 * range_val
+    s2 = prev_close - 1.1 * range_val
+    s1 = prev_close - 1.05 * range_val
     
-    return crsi
+    return r4, r3, s3, s4
+
+def calculate_session_hour(prices):
+    """Extract UTC hour from open_time"""
+    # open_time is in milliseconds since epoch
+    timestamps = prices['open_time'].values / 1000.0
+    hours = np.array([(int(ts) // 3600) % 24 for ts in timestamps])
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
-    # Daily SMA50 for long-term trend
-    sma_1d_raw = calculate_sma(df_1d['close'].values, period=50)
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    # Daily pivots from 1d data
+    daily_pivots = calculate_daily_pivots(df_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivots['pivot'])
+    tc_aligned = align_htf_to_ltf(prices, df_1d, daily_pivots['tc'])
+    bc_aligned = align_htf_to_ltf(prices, df_1d, daily_pivots['bc'])
+    pivot_range_aligned = align_htf_to_ltf(prices, df_1d, daily_pivots['pivot_range'])
     
-    # Calculate 4h indicators
-    kama_4h_10 = calculate_kama(close, fast_period=2, slow_period=10, er_period=10)
-    kama_4h_30 = calculate_kama(close, fast_period=2, slow_period=30, er_period=10)
+    # Camarilla levels need special handling - align the components
+    prev_close_1d = np.roll(df_1d['close'].values, 1)
+    prev_close_1d[0] = df_1d['close'].values[0]
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    camarilla_r4 = np.full(len(df_1d), np.nan)
+    camarilla_s4 = np.full(len(df_1d), np.nan)
+    
+    for i in range(1, len(df_1d)):
+        r4, r3, s3, s4 = calculate_camarilla_levels(
+            df_1d['close'].values[i],
+            high_1d[i-1],
+            low_1d[i-1],
+            prev_close_1d[i]
+        )
+        camarilla_r3[i] = r3
+        camarilla_s3[i] = s3
+        camarilla_r4[i] = r4
+        camarilla_s4[i] = s4
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 15m indicators
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
-    crsi = calculate_crsi(close)
+    
+    # Volume average for spike detection
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    taker_ratio = taker_buy_vol / (volume + 1e-10)
+    
+    # Session hours
+    session_hours = calculate_session_hour(prices)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -248,7 +249,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -257,88 +258,138 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_4h_10[i]) or np.isnan(kama_4h_30[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(sma_1d_aligned[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(crsi[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === HTF TREND (1h HMA) ===
+        htf_1h_bull = close[i] > hma_1h_aligned[i]
+        htf_1h_bear = close[i] < hma_1h_aligned[i]
         
-        # === HTF BIAS (12h HMA + 1d SMA50) ===
-        htf_12h_bull = close[i] > hma_12h_aligned[i]
-        htf_12h_bear = close[i] < hma_12h_aligned[i]
+        # Strong trend: price significantly above/below HMA
+        hma_dist = (close[i] - hma_1h_aligned[i]) / (hma_1h_aligned[i] + 1e-10)
+        htf_1h_strong_bull = hma_dist > 0.01  # >1% above HMA
+        htf_1h_strong_bear = hma_dist < -0.01  # >1% below HMA
         
-        htf_1d_bull = close[i] > sma_1d_aligned[i]
-        htf_1d_bear = close[i] < sma_1d_aligned[i]
+        # === DAILY PIVOT CONTEXT ===
+        price_vs_pivot = (close[i] - pivot_aligned[i]) / (pivot_aligned[i] + 1e-10)
+        above_pivot = price_vs_pivot > 0.0
+        below_pivot = price_vs_pivot < 0.0
         
-        # === REGIME DETECTION (CHOP) ===
-        is_trending = chop_14[i] < 38.2
-        is_ranging = chop_14[i] > 61.8
-        is_neutral = not is_trending and not is_ranging
+        # CPR context
+        above_tc = close[i] > tc_aligned[i]
+        below_bc = close[i] < bc_aligned[i]
         
-        # === 4h KAMA CROSSOVER ===
-        kama_crossover_long = False
-        kama_crossover_short = False
-        if i > 0 and not np.isnan(kama_4h_10[i-1]) and not np.isnan(kama_4h_30[i-1]):
-            kama_crossover_long = (kama_4h_10[i-1] <= kama_4h_30[i-1]) and (kama_4h_10[i] > kama_4h_30[i])
-            kama_crossover_short = (kama_4h_10[i-1] >= kama_4h_30[i-1]) and (kama_4h_10[i] < kama_4h_30[i])
+        # Narrow CPR = expansion day likely (<0.5% of price)
+        cpr_ratio = pivot_range_aligned[i] / (pivot_aligned[i] + 1e-10)
+        narrow_cpr = cpr_ratio < 0.005
         
-        # === KAMA TREND CONTINUATION ===
-        kama_bull_trend = kama_4h_10[i] > kama_4h_30[i]
-        kama_bear_trend = kama_4h_10[i] < kama_4h_30[i]
+        # === CAMARILLA LEVELS ===
+        at_r3 = abs(close[i] - r3_aligned[i]) / close[i] < 0.002  # Within 0.2%
+        at_s3 = abs(close[i] - s3_aligned[i]) / close[i] < 0.002
+        at_r4 = close[i] > r4_aligned[i]
+        at_s4 = close[i] < s4_aligned[i]
         
-        # === CRSI EXTREMES (RELAXED FOR MORE TRADES) ===
-        crsi_oversold = crsi[i] < 18  # Relaxed from 10
-        crsi_overbought = crsi[i] > 82  # Relaxed from 90
-        crsi_moderate_oversold = crsi[i] < 35
-        crsi_moderate_overbought = crsi[i] > 65
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_7[i] < 25
+        rsi_overbought = rsi_7[i] > 75
+        rsi_extreme_oversold = rsi_7[i] < 20
+        rsi_extreme_overbought = rsi_7[i] > 80
         
-        # === ENTRY LOGIC (REGIME-ADAPTIVE) ===
+        # === SESSION FILTER (00-12 UTC = London+NY overlap) ===
+        in_session = 0 <= session_hours[i] <= 12
+        
+        # === VOLUME SPIKE ===
+        vol_spike = volume[i] > 1.5 * vol_avg_20[i] if not np.isnan(vol_avg_20[i]) else False
+        taker_buying = taker_ratio[i] > 0.55
+        taker_selling = taker_ratio[i] < 0.45
+        
+        # === ENTRY LOGIC (3+ CONFLUENCE REQUIRED) ===
         desired_signal = 0.0
+        confluence_count = 0
         
         # LONG entries
-        if htf_12h_bull and htf_1d_bull:
-            if is_trending and kama_crossover_long:
-                # Trend regime: KAMA crossover entry (strong signal)
-                desired_signal = SIZE_STRONG
-            elif is_ranging and crsi_oversold:
-                # Range regime: CRSI mean reversion entry
-                desired_signal = SIZE_BASE
-            elif is_neutral and kama_bull_trend and crsi_moderate_oversold:
-                # Neutral regime: trend continuation with pullback
-                desired_signal = SIZE_BASE
-            elif kama_bull_trend and crsi[i] < 45:
-                # Additional long condition for trade frequency
-                desired_signal = SIZE_BASE
+        long_conditions = []
+        
+        # Condition 1: 1h trend bullish
+        if htf_1h_bull:
+            long_conditions.append(True)
+        
+        # Condition 2: Price above pivot or narrow CPR
+        if above_pivot or narrow_cpr:
+            long_conditions.append(True)
+        
+        # Condition 3: RSI oversold
+        if rsi_oversold:
+            long_conditions.append(True)
+        
+        # Condition 4: In session
+        if in_session:
+            long_conditions.append(True)
+        
+        # Condition 5: Volume confirmation
+        if vol_spike or taker_buying:
+            long_conditions.append(True)
+        
+        # Camarilla S3 mean reversion (works even if 1h not strongly bull)
+        if at_s3 and rsi_extreme_oversold:
+            long_conditions.append(True)
+            long_conditions.append(True)  # Double weight for Camarilla
+        
+        confluence_count = sum(long_conditions)
+        
+        if confluence_count >= 3 and rsi_oversold:
+            desired_signal = SIZE_STRONG if confluence_count >= 4 else SIZE_BASE
         
         # SHORT entries
-        elif htf_12h_bear and htf_1d_bear:
-            if is_trending and kama_crossover_short:
-                # Trend regime: KAMA crossover entry (strong signal)
-                desired_signal = -SIZE_STRONG
-            elif is_ranging and crsi_overbought:
-                # Range regime: CRSI mean reversion entry
-                desired_signal = -SIZE_BASE
-            elif is_neutral and kama_bear_trend and crsi_moderate_overbought:
-                # Neutral regime: trend continuation with pullback
-                desired_signal = -SIZE_BASE
-            elif kama_bear_trend and crsi[i] > 55:
-                # Additional short condition for trade frequency
-                desired_signal = -SIZE_BASE
+        short_conditions = []
+        
+        # Condition 1: 1h trend bearish
+        if htf_1h_bear:
+            short_conditions.append(True)
+        
+        # Condition 2: Price below pivot or narrow CPR
+        if below_pivot or narrow_cpr:
+            short_conditions.append(True)
+        
+        # Condition 3: RSI overbought
+        if rsi_overbought:
+            short_conditions.append(True)
+        
+        # Condition 4: In session
+        if in_session:
+            short_conditions.append(True)
+        
+        # Condition 5: Volume confirmation
+        if vol_spike or taker_selling:
+            short_conditions.append(True)
+        
+        # Camarilla R3 mean reversion (works even if 1h not strongly bear)
+        if at_r3 and rsi_extreme_overbought:
+            short_conditions.append(True)
+            short_conditions.append(True)  # Double weight for Camarilla
+        
+        confluence_count_short = sum(short_conditions)
+        
+        if confluence_count_short >= 3 and rsi_overbought:
+            desired_signal = -SIZE_STRONG if confluence_count_short >= 4 else -SIZE_BASE
+        
+        # === BREAKOUT ENTRIES (at R4/S4) ===
+        if at_r4 and htf_1h_strong_bull and rsi_7[i] > 50 and in_session:
+            desired_signal = SIZE_STRONG
+        
+        if at_s4 and htf_1h_strong_bear and rsi_7[i] < 50 and in_session:
+            desired_signal = -SIZE_STRONG
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
