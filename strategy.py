@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #203: 6h Primary + 1d/1w HTF — Triple HMA Trend + RSI Pullback
+Experiment #204: 12h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
-Previous 6h attempts failed due to OVERLY STRICT entry conditions (0 trades).
-This version SIMPLIFIES entry logic to ensure adequate trade frequency:
+Hypothesis: Previous 12h strategies failed due to OVERLY COMPLEX entry conditions
+that generated ZERO trades. This version SIMPLIFIES drastically:
 
-Core Logic:
-- 1w HMA(50): Ultra-long-term bias (only trade with weekly trend)
-- 1d HMA(21): Major trend direction filter
-- 6h HMA(21): Primary trend + pullback entry zone
-- RSI(7): Faster response than RSI(14), entries at 35/65 (not 20/80)
+1. Remove Choppiness Index regime switching (too many no-trade zones)
+2. Remove Connors RSI (extreme thresholds = no signals)
+3. Use standard RSI(14) with generous thresholds (35/65 vs 15/85)
+4. Single regime: trend-following with pullback entries
+5. 1d HTF for bias only, not hard filter
 
-Entry Conditions (LOOSER than failed attempts):
-- Long: 1w HMA bull + 1d HMA bull + 6h price > 6h HMA + RSI(7) crosses above 35
-- Short: 1w HMA bear + 1d HMA bear + 6h price < 6h HMA + RSI(7) crosses below 65
+Key insight from 182 failed experiments: ENTRY CONDITIONS MUST BE LOOSE ENOUGH
+to generate 20-50 trades/year. Complex confluence = 0 trades = auto-reject.
 
-Why this should work:
-1. Triple HMA alignment ensures we trade with multi-timeframe trend
-2. RSI(7) at 35/65 triggers MORE often than RSI(14) at 20/80
-3. 6h timeframe = 4 candles/day = ~1460 candles/year = 30-60 trades achievable
-4. Simpler logic = fewer conditions that can all fail simultaneously
+Entry Logic:
+- Long: 12h HMA bullish + RSI(14) pulls back to 35-50 + 1d trend neutral/bull
+- Short: 12h HMA bearish + RSI(14) rallies to 50-65 + 1d trend neutral/bear
+- Exit: RSI crosses 50 against position OR 2.5x ATR stoploss
 
-Position sizing: 0.25 base, 0.30 for strong HTF alignment
-Stoploss: 2.0x ATR trailing (tighter than 2.5x to reduce DD)
+Position sizing: 0.25 base, 0.30 strong signals (discrete levels)
+Stoploss: Signal → 0 when price moves 2.5x ATR against position
 
-Target: Sharpe>0.40 (beat current 6h best), DD>-35%, trades>=120 train, trades>=15 test
+Target: Sharpe>0.40 (beat current best 0.399), trades>=30 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_triple_hma_rsi_pullback_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_hma_rsi_pullback_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -92,18 +89,14 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_momentum(close, period=10):
-    """Rate of Change momentum"""
+def calculate_sma(close, period):
+    """Simple Moving Average"""
     n = len(close)
-    if n < period + 1:
+    if n < period:
         return np.full(n, np.nan)
     
-    mom = np.zeros(n)
-    mom[:] = np.nan
-    for i in range(period, n):
-        mom[i] = (close[i] - close[i-period]) / close[i-period] * 100.0
-    
-    return mom
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -113,25 +106,21 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1w HMA for ultra-long-term bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate and align 1d HMA for major trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    # Calculate and align 1d HMA for major trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate primary (12h) indicators
+    hma_12h_fast = calculate_hma(close, period=16)
+    hma_12h_slow = calculate_hma(close, period=48)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for more signals
-    momentum = calculate_momentum(close, period=10)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25  # 25% base position size
-    SIZE_STRONG = 0.30  # 30% for strong signals
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -141,114 +130,104 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Track RSI crosses for entry timing
-    prev_rsi = np.nan
-    
-    for i in range(150, n):  # Start after indicators are ready
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
+            in_position = False
+            position_side = 0
             continue
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_12h_fast[i]) or np.isnan(hma_12h_slow[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
+            in_position = False
+            position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
+            in_position = False
+            position_side = 0
             continue
         
-        # === HTF BIAS (1w and 1d HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1d HMA50) ===
+        # More lenient: just check slope/direction, not hard filter
+        htf_bull = hma_1d_aligned[i] > hma_1d_aligned[i-1] if not np.isnan(hma_1d_aligned[i-1]) else True
+        htf_bear = hma_1d_aligned[i] < hma_1d_aligned[i-1] if not np.isnan(hma_1d_aligned[i-1]) else True
         
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === 12h HMA TREND (fast vs slow crossover) ===
+        hma_bull = hma_12h_fast[i] > hma_12h_slow[i]
+        hma_bear = hma_12h_fast[i] < hma_12h_slow[i]
         
-        # === 6h HMA TREND ===
-        hma_6h_bull = close[i] > hma_6h[i]
-        hma_6h_bear = close[i] < hma_6h[i]
+        # === RSI PULLBACK ZONES ===
+        # Long: RSI pulled back to 35-50 in uptrend
+        # Short: RSI rallied to 50-65 in downtrend
+        rsi_pullback_long = 35.0 <= rsi[i] <= 55.0
+        rsi_pullback_short = 45.0 <= rsi[i] <= 65.0
+        rsi_extreme_long = rsi[i] < 40.0
+        rsi_extreme_short = rsi[i] > 60.0
         
-        # === RSI CROSS DETECTION ===
-        rsi_cross_above_35 = False
-        rsi_cross_below_65 = False
+        # === SMA200 FILTER (soft) ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        if not np.isnan(prev_rsi) and not np.isnan(rsi[i]):
-            rsi_cross_above_35 = (prev_rsi < 35.0 and rsi[i] >= 35.0)
-            rsi_cross_below_65 = (prev_rsi > 65.0 and rsi[i] <= 65.0)
-        
-        # === MOMENTUM CONFIRMATION ===
-        mom_positive = False
-        mom_negative = False
-        if not np.isnan(momentum[i]):
-            mom_positive = momentum[i] > 0.5  # Small positive momentum
-            mom_negative = momentum[i] < -0.5  # Small negative momentum
-        
-        # === ENTRY LOGIC (LOOSER conditions for more trades) ===
+        # === ENTRY LOGIC (SIMPLIFIED - generate more trades) ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Weekly bull + Daily bull + 6h pullback complete + RSI cross
-        if htf_1w_bull and htf_1d_bull:
-            # Strong signal: All HTF align + RSI cross + momentum
-            if rsi_cross_above_35 and mom_positive:
-                desired_signal = SIZE_STRONG
-            # Base signal: HTF align + RSI cross (momentum optional)
-            elif rsi_cross_above_35 and hma_6h_bull:
-                desired_signal = SIZE_BASE
-            # Weaker signal: HTF align + price above 6h HMA + RSI rising
-            elif hma_6h_bull and rsi[i] > 40.0 and not np.isnan(prev_rsi) and rsi[i] > prev_rsi:
-                desired_signal = SIZE_BASE * 0.6
+        # LONG entries (multiple conditions, any can trigger)
+        if hma_bull:
+            # Base long: HMA bull + RSI pullback
+            if rsi_pullback_long:
+                if htf_bull and above_sma200:
+                    desired_signal = SIZE_STRONG
+                elif above_sma200:
+                    desired_signal = SIZE_BASE
+                elif htf_bull:
+                    desired_signal = SIZE_BASE
+            
+            # Extreme long: RSI very oversold in uptrend
+            if rsi_extreme_long and hma_bull:
+                desired_signal = max(desired_signal, SIZE_BASE)
         
-        # SHORT ENTRY: Weekly bear + Daily bear + 6h rally complete + RSI cross
-        elif htf_1w_bear and htf_1d_bear:
-            # Strong signal: All HTF align + RSI cross + momentum
-            if rsi_cross_below_65 and mom_negative:
-                desired_signal = -SIZE_STRONG
-            # Base signal: HTF align + RSI cross (momentum optional)
-            elif rsi_cross_below_65 and hma_6h_bear:
-                desired_signal = -SIZE_BASE
-            # Weaker signal: HTF align + price below 6h HMA + RSI falling
-            elif hma_6h_bear and rsi[i] < 60.0 and not np.isnan(prev_rsi) and rsi[i] < prev_rsi:
-                desired_signal = -SIZE_BASE * 0.6
+        # SHORT entries (multiple conditions, any can trigger)
+        if hma_bear:
+            # Base short: HMA bear + RSI rally
+            if rsi_pullback_short:
+                if htf_bear and below_sma200:
+                    desired_signal = -SIZE_STRONG
+                elif below_sma200:
+                    desired_signal = -SIZE_BASE
+                elif htf_bear:
+                    desired_signal = -SIZE_BASE
+            
+            # Extreme short: RSI very overbought in downtrend
+            if rsi_extreme_short and hma_bear:
+                desired_signal = min(desired_signal, -SIZE_BASE)
         
-        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT CONDITIONS (RSI extreme opposite) ===
-        if in_position and position_side > 0 and rsi[i] > 75.0:
-            # Long position, RSI overbought - reduce or exit
-            if desired_signal == 0.0:
-                desired_signal = 0.0  # Exit on stoploss
+        # === EXIT LOGIC (RSI cross 50 against position) ===
+        if in_position and position_side > 0 and rsi[i] > 60.0:
+            # Long position, RSI overbought = take profit
+            desired_signal = 0.0
         
-        if in_position and position_side < 0 and rsi[i] < 25.0:
-            # Short position, RSI oversold - reduce or exit
-            if desired_signal == 0.0:
-                desired_signal = 0.0  # Exit on stoploss
+        if in_position and position_side < 0 and rsi[i] < 40.0:
+            # Short position, RSI oversold = take profit
+            desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal >= SIZE_STRONG * 0.9:
@@ -259,10 +238,6 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
-        elif desired_signal >= SIZE_BASE * 0.5:
-            final_signal = SIZE_BASE * 0.6
-        elif desired_signal <= -SIZE_BASE * 0.5:
-            final_signal = -SIZE_BASE * 0.6
         else:
             final_signal = 0.0
         
@@ -296,6 +271,5 @@ def generate_signals(prices):
                 lowest_since_entry = float('inf')
         
         signals[i] = final_signal
-        prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
     
     return signals
