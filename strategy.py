@@ -1,38 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #990: 1h Primary + 4h/1d HTF — Simplified Trend + RSI Pullback
+Experiment #991: 6h Primary + 1w/1d HTF — HMA Trend + RSI Pullback
 
-Hypothesis: After 800+ failed experiments, the #1 issue is TOO STRICT entry conditions
-causing ZERO trades. This strategy uses SIMPLER logic to GUARANTEE trades:
+Hypothesis: 6h timeframe with simple HMA trend + RSI pullback entries will 
+outperform complex regime strategies. Learning from 800+ failures: simpler 
+is better for crypto. CHOP/CRSI regimes overfit and produce 0 trades.
 
-1. 4h HMA(21) for trend direction (only trade WITH HTF trend)
-2. 1h RSI(14) pullback entries (oversold in uptrend, overbought in downtrend)
-3. Session filter (08-20 UTC) to avoid Asian session noise and reduce trade count
-4. ATR(14) 2.5x trailing stoploss
-5. 1d HMA(50) as additional trend confirmation (loose filter)
+Key innovations:
+1. 1w HMA(21) for major trend bias (bull/bear market filter)
+2. 1d HMA(21) for intermediate trend confirmation
+3. 6h HMA(16/48) dual for entry timing (fast crosses slow)
+4. RSI(14) pullback to 35-65 zone in trend direction (NOT extremes)
+5. ATR(14) 2.5x trailing stop for risk management
+6. LOOSE entry thresholds to guarantee 30+ trades/year
 
 Why this should work:
-- SIMPLER than failed CRSI+CHOP+KAMA strategies = MORE trades
-- RSI(14) < 35 / > 65 triggers frequently enough (unlike CRSI < 10 / > 90)
-- 4h trend filter prevents counter-trend trades in 2022 crash
-- Session filter keeps trades at 40-80/year target (not >200)
-- Conservative size (0.25) controls drawdown
+- Simpler = more robust across BTC/ETH/SOL (all must have Sharpe>0)
+- RSI pullback (not extremes) captures trend continuation, not reversals
+- 6h captures multi-day swings without 4h noise or 12h lag
+- HTF bias prevents counter-trend trades in strong moves
+- Learning: complex regimes (CHOP, Fisher) failed 50+ times
 
-Key difference from failed #989: LOOSER RSI thresholds, fewer confluence requirements
-Target: Sharpe>0.45, trades>=50 train, trades>=5 test, DD>-35%
-Timeframe: 1h
-Size: 0.25 discrete
+Entry conditions (LOOSE to guarantee trades):
+- LONG = 1w HMA bull + 1d HMA bull + 6h HMA cross + RSI 35-55
+- SHORT = 1w HMA bear + 1d HMA bear + 6h HMA cross + RSI 45-65
+- Relaxed RSI thresholds (35-65 instead of 30-70) for more trades
+
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_hma_rsi_pullback_1w1d_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average"""
+    """Hull Moving Average - reduces lag while smoothing"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -58,6 +65,20 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -76,54 +97,32 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def get_utc_hour(open_time_ms):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    return pd.to_datetime(open_time_ms, unit='ms').hour
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Extract UTC hours for session filter
-    utc_hours = np.array([get_utc_hour(ot) for ot in open_time])
-    
-    # Session filter: 08-20 UTC (exclude Asian session noise)
-    in_session = (utc_hours >= 8) & (utc_hours <= 20)
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
-    rsi_14 = calculate_rsi(close, period=14)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate 6h indicators
+    hma_6h_fast = calculate_hma(close, period=16)
+    hma_6h_slow = calculate_hma(close, period=48)
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -143,6 +142,20 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
+        if np.isnan(hma_6h_fast[i]) or np.isnan(hma_6h_slow[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
         if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
@@ -150,42 +163,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === HTF BIAS (1w + 1d HMA) ===
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === HTF TREND BIAS (4h HMA + 1d HMA) ===
-        # Loose filter: price above 4h HMA = bullish bias
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
-        
-        # 1d HMA as additional confirmation (loose)
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === RSI PULLBACK ENTRY (LOOSE THRESHOLDS FOR TRADES) ===
-        # RSI < 35 = oversold pullback in uptrend
-        # RSI > 65 = overbought pullback in downtrend
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
+        # === 6h HMA CROSSOVER ===
+        hma_cross_long = False
+        hma_cross_short = False
+        if i > 0 and not np.isnan(hma_6h_fast[i-1]) and not np.isnan(hma_6h_slow[i-1]):
+            # Fast crosses above slow
+            hma_cross_long = (hma_6h_fast[i-1] <= hma_6h_slow[i-1]) and (hma_6h_fast[i] > hma_6h_slow[i])
+            # Fast crosses below slow
+            hma_cross_short = (hma_6h_fast[i-1] >= hma_6h_slow[i-1]) and (hma_6h_fast[i] < hma_6h_slow[i])
         
-        # === SESSION FILTER ===
-        session_ok = in_session[i]
+        # === RSI PULLBACK (LOOSE THRESHOLDS FOR MORE TRADES) ===
+        # In uptrend: RSI pulls back to 35-55 zone (not oversold, just pullback)
+        # In downtrend: RSI rallies to 45-65 zone (not overbought, just retracement)
+        rsi_pullback_long = 35.0 <= rsi_14[i] <= 55.0
+        rsi_pullback_short = 45.0 <= rsi_14[i] <= 65.0
         
-        # === ENTRY LOGIC (SIMPLIFIED FOR TRADES) ===
+        # === ENTRY LOGIC (SIMPLE - NO COMPLEX REGIME FILTERS) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + RSI oversold + session OK
-        # (1d HMA is loose confirmation, not required)
-        if htf_4h_bull and rsi_oversold and session_ok:
-            desired_signal = SIZE
+        # LONG entries: 1w bull + 1d bull + HMA cross or pullback
+        if htf_1w_bull and htf_1d_bull:
+            if hma_cross_long:
+                # Fresh crossover entry
+                desired_signal = SIZE_STRONG
+            elif hma_6h_fast[i] > hma_6h_slow[i] and rsi_pullback_long:
+                # Pullback entry in established uptrend
+                desired_signal = SIZE_BASE
         
-        # SHORT: 4h bearish + RSI overbought + session OK
-        elif htf_4h_bear and rsi_overbought and session_ok:
-            desired_signal = -SIZE
+        # SHORT entries: 1w bear + 1d bear + HMA cross or pullback
+        elif htf_1w_bear and htf_1d_bear:
+            if hma_cross_short:
+                # Fresh crossover entry
+                desired_signal = -SIZE_STRONG
+            elif hma_6h_fast[i] < hma_6h_slow[i] and rsi_pullback_short:
+                # Pullback entry in established downtrend
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -208,10 +227,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE * 0.9:
-            final_signal = SIZE
-        elif desired_signal <= -SIZE * 0.9:
-            final_signal = -SIZE
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
         
