@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1643: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Momentum
+Experiment #1644: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Momentum
 
-Hypothesis: The current best strategy (mtf_1d_donchian_hma_rsi_1w_atr_v1, Sharpe=0.618) proves
-that 1d primary with 1w HTF works well. This version SIMPLIFIES the entry logic to avoid
-the 0-trade problem seen in experiments 1635, 1638, 1640, 1641, 1642.
+Hypothesis: Previous 4h strategies failed due to OVER-FILTERING (too many confluence conditions).
+Strategy #1639 (KAMA+HMA+RSI) got Sharpe=-0.093 - close but negative. The issue is likely
+that requiring ALL three conditions (KAMA slope + 1d HMA bias + RSI>50) filters out too many
+valid trades, especially in 2022 crash and 2025 bear market.
 
-Key differences from failed experiments:
-1. NO Choppiness Index regime filter (kills trade frequency)
-2. NO dual-regime switching (conditions conflict = 0 trades)
-3. NO extreme RSI thresholds (use >50/<50, not <30/>70)
-4. Simple Donchian(20) breakout + 1w HMA bias + RSI momentum
-5. Discrete signal sizes (0.0, ±0.30) to minimize fee churn
+This strategy SIMPLIFIES to proven patterns from best performer (#1632 lineage):
+1. Donchian(20) breakout - generates MORE signals than KAMA crossover
+2. 1d HMA(21) for trend bias - proven in best strategy (Sharpe=0.618)
+3. RSI(14) with WIDE bands (35/65) - loose momentum filter = MORE TRADES
+4. ATR(14) 2.5x trailing stop - controlled drawdown
+5. NO regime switching - pure breakout with trend filter
 
-Why this should work on 1d:
-- 1d timeframe naturally produces 20-50 trades/year (optimal fee/trade balance)
-- 1w HMA provides clear major trend bias without over-filtering
-- Donchian(20) breakout catches sustained moves (not noise)
-- RSI >50/<50 is loose enough to generate trades but filters counter-trend
-- ATR 2.5x trailing stop controls drawdown
-- Simple logic = fewer conditions that can all fail simultaneously
+Key changes from #1639:
+- Donchian breakout instead of KAMA (breakouts generate more signals in volatile markets)
+- RSI bands 35/65 instead of 50/50 (wider = more entries)
+- Single HTF (1d) instead of complex multi-HTF logic
+- Simpler entry = fewer conditions that can conflict
 
+Timeframe: 4h (required)
+HTF: 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
 Target: Sharpe > 0.618, trades > 30/symbol train, > 5/symbol test, DD > -40%
-Timeframe: 1d (required for this experiment)
-HTF: 1w HMA via mtf_data.get_htf_data() — called ONCE before loop
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_1w_rsi_atr_v3"
-timeframe = "1d"
+name = "mtf_4h_donchian_hma_1d_rsi_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -64,21 +63,6 @@ def calculate_hma(close, period=21):
     
     hma = wma(diff, sqrt_period)
     return hma
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -116,6 +100,21 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper/lower bounds"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -123,16 +122,16 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for major trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1d) indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate primary (4h) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
@@ -153,7 +152,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -172,27 +171,29 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === MAJOR TREND BIAS (1w HMA) ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === TREND BIAS (1d HMA) ===
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT (1d) ===
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        # === DONCHIAN BREAKOUT (4h) ===
+        # Breakout above upper = bullish momentum
+        # Breakout below lower = bearish momentum
+        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
-        # === RSI MOMENTUM FILTER (loose - just direction) ===
-        rsi_bull = rsi[i] > 50.0
-        rsi_bear = rsi[i] < 50.0
+        # === RSI MOMENTUM FILTER (wide bands for more trades) ===
+        rsi_bull = rsi[i] > 35.0  # Wide band = more entries
+        rsi_bear = rsi[i] < 65.0  # Wide band = more entries
         
         # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: Weekly bull + Donchian breakout + RSI > 50
-        if weekly_bull and breakout_long and rsi_bull:
+        # LONG: Donchian breakout + price above 1d HMA + RSI not oversold
+        if breakout_long and daily_bull and rsi_bull:
             desired_signal = BASE_SIZE
         
-        # SHORT: Weekly bear + Donchian breakout + RSI < 50
-        elif weekly_bear and breakout_short and rsi_bear:
+        # SHORT: Donchian breakout + price below 1d HMA + RSI not overbought
+        elif breakout_short and daily_bear and rsi_bear:
             desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
