@@ -1,137 +1,150 @@
 #!/usr/bin/env python3
 """
-Experiment #064: 4h Primary + 12h/1d HTF — KAMA + Connors RSI + Choppiness Regime
+Experiment #065: 1h Primary + 4h/1d HTF — Volatility Regime + CRSI + Session Filter
 
-Hypothesis: Combining KAMA (adaptive trend) with Connors RSI (proven mean reversion)
-and Choppiness Index regime filter will outperform simple ADX regime switching.
-
-Key differences from #061:
-1. KAMA instead of HMA - adapts to market efficiency/volatility automatically
-2. Connors RSI (3-period RSI + streak RSI + percentile rank) - proven 75% win rate
-3. Choppiness Index with 50 threshold (not 61.8/38.2) - cleaner regime split
-4. Looser entry conditions to ensure 30+ trades/symbol on train
-5. Asymmetric sizing: 0.30 trend, 0.25 mean reversion
+Hypothesis: Previous CRSI strategies failed because they lacked proper regime filtering
+and traded during low-liquidity periods. This version adds:
+1. Bollinger Band Width percentile for volatility regime (squeeze vs expansion)
+2. 200 SMA for long-term trend bias (only trade with the trend)
+3. 4h HMA alignment for HTF confirmation
+4. Session filter (8-20 UTC) to avoid low-liquidity whipsaws
+5. Volume confirmation (>1.2x average)
+6. Looser CRSI thresholds (15/85 not 10/90) for trade generation
 
 Target: Sharpe>0.351, trades>30/symbol train, >3/symbol test, DD>-40%
-Timeframe: 4h (target 20-50 trades/year)
+Timeframe: 1h (target 30-60 trades/year with strict filters)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_crsi_chop_regime_12h1d_v1"
-timeframe = "4h"
+name = "mtf_1h_volregime_crsi_session_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Kaufman Adaptive Moving Average - adapts to market efficiency"""
+def calculate_hma(close, period=21):
+    """Hull Moving Average - less lag than EMA"""
     n = len(close)
-    if n < er_period + slow_period:
+    if n < period:
         return np.full(n, np.nan)
     
-    # Efficiency Ratio (ER)
-    er = np.full(n, np.nan)
-    for i in range(er_period, n):
-        signal = abs(close[i] - close[i - er_period])
-        noise = 0.0
-        for j in range(i - er_period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 1e-10:
-            er[i] = signal / noise
-        else:
-            er[i] = 0.0
+    half = period // 2
+    sqrt_p = int(np.sqrt(period))
     
-    # Smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    def wma(data, span):
+        res = np.full(len(data), np.nan)
+        w = np.arange(1, span + 1, dtype=np.float64)
+        for i in range(span - 1, len(data)):
+            res[i] = np.sum(data[i - span + 1:i + 1] * w) / np.sum(w)
+        return res
     
-    kama = np.full(n, np.nan)
-    kama[er_period] = close[er_period]  # Initialize
-    
-    for i in range(er_period + 1, n):
-        if np.isnan(er[i]):
-            kama[i] = kama[i - 1]
-        else:
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    double_wma = 2.0 * wma_half - wma_full
+    hma = wma(double_wma, sqrt_p)
+    return hma
 
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
-    if n < rank_period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    # RSI(3)
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     gain = np.concatenate([[0.0], gain])
     loss = np.concatenate([[0.0], loss])
     
-    avg_gain = pd.Series(gain).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     rsi = np.full(n, np.nan)
-    for i in range(rsi_period, n):
+    for i in range(period, n):
         if avg_loss[i] < 1e-10:
             rsi[i] = 100.0
         else:
             rs = avg_gain[i] / avg_loss[i]
             rsi[i] = 100.0 - (100.0 / (1.0 + rs))
     
-    # Streak RSI (consecutive up/down days)
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i - 1]:
-            streak[i] = streak[i - 1] + 1 if streak[i - 1] >= 0 else 1
-        elif close[i] < close[i - 1]:
-            streak[i] = streak[i - 1] - 1 if streak[i - 1] <= 0 else -1
-        else:
-            streak[i] = streak[i - 1]
-    
-    # Convert streak to RSI-like value (0-100)
-    streak_rsi = np.full(n, np.nan)
-    for i in range(streak_period, n):
-        abs_streak = abs(streak[i])
-        if streak[i] >= 0:
-            streak_rsi[i] = min(100.0, 50.0 + abs_streak * 10.0)
-        else:
-            streak_rsi[i] = max(0.0, 50.0 - abs_streak * 10.0)
-    
-    # Percentile Rank (100-period)
-    pct_rank = np.full(n, np.nan)
-    for i in range(rank_period, n):
-        window = close[i - rank_period + 1:i + 1]
-        rank = np.sum(window[:-1] < close[i])
-        pct_rank[i] = 100.0 * rank / (rank_period - 1)
-    
-    # Connors RSI
-    crsi = (rsi + streak_rsi + pct_rank) / 3.0
-    return crsi
+    return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - measures market chop vs trend"""
+def calculate_rsi_streak(close, period=2):
+    """RSI Streak component for Connors RSI"""
     n = len(close)
-    if n < period:
+    if n < period + 2:
         return np.full(n, np.nan)
     
-    chop = np.full(n, np.nan)
-    for i in range(period, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        
-        if highest > lowest:
-            tr_sum = 0.0
-            for j in range(i - period + 1, i + 1):
-                tr_sum += max(high[j] - low[j], abs(high[j] - close[j - 1]), abs(low[j] - close[j - 1]))
-            
-            chop[i] = 100.0 * np.log10(tr_sum / (highest - lowest)) / np.log10(period)
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] > 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] < 0 else -1
         else:
-            chop[i] = 100.0
+            streak[i] = 0
     
-    return chop
+    # RSI of streak
+    streak_rsi = calculate_rsi(streak, period)
+    return streak_rsi
+
+def calculate_percent_rank(close, period=100):
+    """Percent Rank component for Connors RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    pr = np.full(n, np.nan)
+    for i in range(period, n):
+        window = close[i-period+1:i+1]
+        current = close[i]
+        count_below = np.sum(window[:-1] < current)
+        pr[i] = 100.0 * count_below / (period - 1)
+    
+    return pr
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
+    """Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+    rsi = calculate_rsi(close, rsi_period)
+    streak_rsi = calculate_rsi_streak(close, streak_period)
+    pr = calculate_percent_rank(close, pr_period)
+    
+    crsi = (rsi + streak_rsi + pr) / 3.0
+    return crsi
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, sma, lower
+
+def calculate_bb_width_percentile(close, lookback=100):
+    """Bollinger Band Width percentile for volatility regime"""
+    n = len(close)
+    if n < lookback + 20:
+        return np.full(n, np.nan)
+    
+    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    bb_width = (bb_upper - bb_lower) / bb_mid
+    
+    bb_width_pct = np.full(n, np.nan)
+    for i in range(lookback, n):
+        if np.isnan(bb_width[i]):
+            continue
+        window = bb_width[i-lookback+1:i+1]
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) < lookback // 2:
+            continue
+        rank = np.sum(valid_window[:-1] <= bb_width[i])
+        bb_width_pct[i] = 100.0 * rank / (len(valid_window) - 1)
+    
+    return bb_width_pct
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range for stoploss"""
@@ -147,42 +160,49 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channels - breakout detection"""
-    n = len(close)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    return upper, mid, lower
+def calculate_volume_sma(volume, period=20):
+    """Volume SMA for confirmation filter"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+def get_utc_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds
+    ts_seconds = open_time / 1000.0
+    hour = int((ts_seconds % 86400) / 3600)
+    return hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h/1d KAMA for HTF trend bias
-    kama_12h_raw = calculate_kama(df_12h['close'].values, er_period=10)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_raw)
+    # Calculate and align 4h/1d HMA for HTF trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    kama_1d_raw = calculate_kama(df_1d['close'].values, er_period=10)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    kama_fast = calculate_kama(close, er_period=5, fast_period=2, slow_period=15)
-    kama_slow = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    chop = calculate_choppiness(high, low, close, period=14)
-    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    # Calculate primary (1h) indicators
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100)
+    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    bb_width_pct = calculate_bb_width_percentile(close, lookback=100)
     atr = calculate_atr(high, low, close, period=14)
-    donch_upper, donch_mid, donch_lower = calculate_donchian(high, low, period=20)
+    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_TREND = 0.30
-    SIZE_MR = 0.25
+    SIZE = 0.25  # Conservative size for 1h timeframe
     
     # Position tracking for stoploss
     in_position = False
@@ -192,7 +212,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(250, n):  # Need 250 bars for all indicators
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -200,82 +220,104 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(crsi[i]) or np.isnan(bb_width_pct[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(chop[i]) or np.isnan(crsi[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(kama_12h_aligned[i]) or np.isnan(kama_1d_aligned[i]):
+        if np.isnan(sma_200[i]) or np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (12h and 1d KAMA) ===
-        htf_bull = close[i] > kama_12h_aligned[i] and close[i] > kama_1d_aligned[i]
-        htf_bear = close[i] < kama_12h_aligned[i] and close[i] < kama_1d_aligned[i]
-        htf_neutral = not htf_bull and not htf_bear
+        # === SESSION FILTER (8-20 UTC only) ===
+        hour = get_utc_hour(open_time[i])
+        in_session = 8 <= hour <= 20
         
-        # === 4h TREND (KAMA crossover) ===
-        kama_cross_bull = kama_fast[i] > kama_slow[i]
-        kama_cross_bear = kama_fast[i] < kama_slow[i]
+        # === VOLATILITY REGIME (BB Width Percentile) ===
+        low_vol_regime = bb_width_pct[i] < 30.0  # Volatility squeeze (expecting expansion)
+        high_vol_regime = bb_width_pct[i] > 70.0  # Volatility expansion (mean reversion likely)
         
-        # === REGIME (Choppiness Index) ===
-        is_choppy = chop[i] > 50.0  # Range market
-        is_trending = chop[i] <= 50.0  # Trend market
+        # === LONG-TERM TREND BIAS (200 SMA) ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # === CONNORS RSI MEAN REVERSION ===
-        crsi_oversold = crsi[i] < 20.0  # Very oversold
-        crsi_overbought = crsi[i] > 80.0  # Very overbought
+        # === HTF TREND ALIGNMENT (4h and 1d HMA) ===
+        hma_4h_bull = close[i] > hma_4h_aligned[i]
+        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_up = close[i] > donch_upper[i - 1] if not np.isnan(donch_upper[i - 1]) else False
-        breakout_down = close[i] < donch_lower[i - 1] if not np.isnan(donch_lower[i - 1]) else False
+        # Strong HTF alignment (at least 4h agrees with 1d)
+        htf_bull_aligned = hma_4h_bull and hma_1d_bull
+        htf_bear_aligned = hma_4h_bear and hma_1d_bear
+        
+        # === CRSI EXTREMES (Looser than failed attempts) ===
+        crsi_oversold = crsi[i] < 20.0  # Was 10, too strict
+        crsi_overbought = crsi[i] > 80.0  # Was 90, too strict
+        
+        # === VOLUME CONFIRMATION ===
+        vol_above_avg = volume[i] > 1.2 * vol_sma[i]
+        
+        # === BOLLINGER POSITION ===
+        near_lower_bb = close[i] < bb_lower[i] * 1.005
+        near_upper_bb = close[i] > bb_upper[i] * 0.995
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # TREND FOLLOWING PATH (Chop <= 50)
-        if is_trending:
-            # Long: HTF bull + KAMA cross bull + Donchian breakout
-            if htf_bull and kama_cross_bull and breakout_up:
-                desired_signal = SIZE_TREND
-            # Short: HTF bear + KAMA cross bear + Donchian breakout
-            elif htf_bear and kama_cross_bear and breakout_down:
-                desired_signal = -SIZE_TREND
-            # Alternative: HTF neutral + strong KAMA cross
-            elif htf_neutral and kama_cross_bull and close[i] > kama_slow[i] * 1.002:
-                desired_signal = SIZE_TREND * 0.7
-            elif htf_neutral and kama_cross_bear and close[i] < kama_slow[i] * 0.998:
-                desired_signal = -SIZE_TREND * 0.7
+        # LONG ENTRY: Multiple confluence required
+        long_conditions = 0
+        if in_session:
+            long_conditions += 1
+        if above_sma200:
+            long_conditions += 1
+        if htf_bull_aligned:
+            long_conditions += 1
+        if crsi_oversold:
+            long_conditions += 1
+        if near_lower_bb or low_vol_regime:
+            long_conditions += 1
+        if vol_above_avg:
+            long_conditions += 1
         
-        # MEAN REVERSION PATH (Chop > 50)
-        if is_choppy:
-            # Long: HTF not bear + CRSI oversold
-            if not htf_bear and crsi_oversold:
-                desired_signal = SIZE_MR
-            # Short: HTF not bull + CRSI overbought
-            elif not htf_bull and crsi_overbought:
-                desired_signal = -SIZE_MR
-            # Additional MR: price at Donchian extremes
-            elif not htf_bear and close[i] < donch_lower[i - 1] * 1.005 if not np.isnan(donch_lower[i - 1]) else False:
-                desired_signal = SIZE_MR * 0.8
-            elif not htf_bull and close[i] > donch_upper[i - 1] * 0.995 if not np.isnan(donch_upper[i - 1]) else False:
-                desired_signal = -SIZE_MR * 0.8
+        # Need at least 4 out of 6 conditions for long
+        if long_conditions >= 4 and crsi_oversold and above_sma200:
+            desired_signal = SIZE
+        
+        # SHORT ENTRY: Multiple confluence required
+        short_conditions = 0
+        if in_session:
+            short_conditions += 1
+        if below_sma200:
+            short_conditions += 1
+        if htf_bear_aligned:
+            short_conditions += 1
+        if crsi_overbought:
+            short_conditions += 1
+        if near_upper_bb or high_vol_regime:
+            short_conditions += 1
+        if vol_above_avg:
+            short_conditions += 1
+        
+        # Need at least 4 out of 6 conditions for short
+        if short_conditions >= 4 and crsi_overbought and below_sma200:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -296,14 +338,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_TREND * 0.85:
-            final_signal = SIZE_TREND
-        elif desired_signal >= SIZE_MR * 0.85:
-            final_signal = SIZE_MR
-        elif desired_signal <= -SIZE_TREND * 0.85:
-            final_signal = -SIZE_TREND
-        elif desired_signal <= -SIZE_MR * 0.85:
-            final_signal = -SIZE_MR
+        if desired_signal >= SIZE * 0.85:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.85:
+            final_signal = -SIZE
         else:
             final_signal = 0.0
         
