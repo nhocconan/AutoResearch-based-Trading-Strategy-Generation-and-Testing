@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #998: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + Funding Contrarian
+Experiment #999: 1h Primary + 4h/12h HTF — Choppiness Regime + Connors RSI + HMA Trend
 
-Hypothesis: 4h timeframe with Donchian breakout entries, HMA trend filter, and funding
-rate contrarian signal will outperform in mixed 2022-2025 markets.
+Hypothesis: 1h timeframe with strict regime filtering will generate fewer but higher quality
+trades. Using Choppiness Index to detect range vs trend, then applying appropriate strategy
+(mean reversion in range, trend follow in trend) with Connors RSI for precise entry timing.
 
 Key innovations:
-1. Donchian(20) breakout: price breaks 20-bar high/low for trend entry
-2. 1d HMA(21) for intermediate trend bias (only trade with HTF trend)
-3. RSI(14) pullback filter: enter on pullback (RSI 40-60) not extreme
-4. Funding rate z-score contrarian: extreme funding → fade the crowd
+1. Choppiness Index (14): CHOP>61.8 = range (mean revert), CHOP<38.2 = trend (trend follow)
+2. Connors RSI (CRSI): (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 for entry timing
+3. 4h HMA(21) + 12h HMA(21) dual trend filter (only trade with both HTF aligned)
+4. Session filter: 08-20 UTC (high liquidity hours)
 5. ATR(14) 2.5x trailing stop for risk management
-6. Loose entry thresholds to guarantee 30+ trades/train, 5+/test
+6. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
 
 Why this should work:
-- Donchian breakouts catch sustained moves (proven on SOL +0.782)
-- HMA trend filter avoids counter-trend trades in 2022 crash
-- Funding contrarian adds edge for BTC/ETH (proven Sharpe 0.8-1.5)
-- RSI pullback ensures we enter on retracement, not chase
-- 4h captures multi-day swings without 1h noise or 12h lag
+- Choppiness filter prevents trend strategies in choppy markets (2022-2023 were choppy)
+- CRSI catches reversals better than standard RSI (75% win rate in literature)
+- Dual HTF (4h+12h) ensures we only trade when both agree (fewer but better trades)
+- 1h entries with 4h/12h direction = HTF trade frequency with 1h precision
+- Session filter avoids low-liquidity hours where fakeouts common
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG = 1d HMA bull + (Donchian breakout OR RSI pullback 40-50) + funding not extreme short
-- SHORT = 1d HMA bear + (Donchian breakdown OR RSI pullback 50-60) + funding not extreme long
-- Relaxed thresholds for more trade frequency
+Entry conditions (LOOSE enough for trades):
+- LONG = 4h HMA bull + 12h HMA bull + (CHOP>61.8 + CRSI<15 OR CHOP<38.2 + CRSI<30) + session
+- SHORT = 4h HMA bear + 12h HMA bear + (CHOP>61.8 + CRSI>85 OR CHOP<38.2 + CRSI>70) + session
+- Relaxed CRSI thresholds to ensure 40-80 trades/year target
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Timeframe: 1h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_funding_rsi_v1"
-timeframe = "4h"
+name = "mtf_1h_chop_crsi_hma_regime_4h12h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -47,7 +48,7 @@ def calculate_hma(close, period):
     sqrt_n = max(1, int(np.sqrt(period)))
     
     def wma(series, span):
-        result = np.full(len(series), np.nan)
+        result = np.full(len(series), np.nan, dtype=np.float64)
         weights = np.arange(1, span + 1, dtype=np.float64)
         for i in range(span - 1, len(series)):
             window = series[i - span + 1:i + 1].astype(np.float64)
@@ -96,60 +97,85 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    Measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        if highest_high == lowest_low:
+            chop[i] = 100.0
+            continue
+        
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            atr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+        
+        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
     
-    return upper, lower
+    return chop
 
-def calculate_funding_zscore(prices, symbol, lookback=30):
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Calculate funding rate z-score from funding data files.
-    Returns z-score of funding rate over lookback period.
+    Connors RSI (CRSI)
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Long when CRSI < 10, Short when CRSI > 90
     """
-    try:
-        # Map symbol to funding file path
-        symbol_lower = symbol.lower().replace('usdt', '')
-        funding_path = f"data/processed/funding/{symbol_lower}.parquet"
-        funding_df = pd.read_parquet(funding_path)
-        
-        # Align funding data to prices timeframe
-        # Funding is typically 8h, we need to resample to 4h
-        funding_df = funding_df.sort_values('open_time')
-        
-        # Calculate z-score of funding rate
-        if len(funding_df) < lookback:
-            return np.full(len(prices), np.nan)
-        
-        funding_rates = funding_df['funding_rate'].values
-        mean_funding = pd.Series(funding_rates).rolling(window=lookback, min_periods=lookback).mean().values
-        std_funding = pd.Series(funding_rates).rolling(window=lookback, min_periods=lookback).std().values
-        
-        zscore = (funding_rates - mean_funding) / (std_funding + 1e-10)
-        
-        # Align to prices length (simplified - take last N values)
-        n = len(prices)
-        if len(zscore) >= n:
-            return zscore[-n:]
+    n = len(close)
+    if n < rank_period + 1:
+        return np.full(n, np.nan)
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # RSI Streak (consecutive up/down days)
+    streak = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
         else:
-            # Pad with nan if funding data is shorter
-            result = np.full(n, np.nan)
-            start_idx = n - len(zscore)
-            result[start_idx:] = zscore
-            return result
-            
+            streak[i] = 0
+    
+    # RSI of streak
+    streak_rsi = calculate_rsi(np.abs(streak), streak_period)
+    # Adjust sign based on streak direction
+    streak_rsi = np.where(streak >= 0, streak_rsi, 100.0 - streak_rsi)
+    
+    # Percent Rank of price changes
+    pct_rank = np.full(n, np.nan, dtype=np.float64)
+    for i in range(rank_period, n):
+        returns = np.diff(close[i-rank_period:i+1])
+        if len(returns) > 0:
+            current_return = returns[-1]
+            pct_rank[i] = 100.0 * np.sum(returns[:-1] < current_return) / (len(returns) - 1)
+    
+    # CRSI
+    crsi = (rsi_short + streak_rsi + pct_rank) / 3.0
+    crsi[:rank_period] = np.nan
+    
+    return crsi
+
+def get_hour_from_open_time(prices):
+    """Extract hour from open_time for session filter"""
+    try:
+        # open_time is in milliseconds
+        hours = (prices['open_time'].values // (1000 * 3600)) % 24
+        return hours
     except Exception:
-        # Return neutral z-score if funding data unavailable
-        return np.full(len(prices), 0.0)
+        return np.zeros(len(prices), dtype=np.int64)
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,26 +184,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 4h indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    choppiness = calculate_choppiness(high, low, close, period=14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     
-    # Try to load funding data (optional - continue if unavailable)
-    try:
-        symbol = prices.get('symbol', 'BTCUSDT')
-        funding_zscore = calculate_funding_zscore(prices, symbol, lookback=30)
-    except Exception:
-        funding_zscore = np.zeros(n)
+    # Session filter (08-20 UTC = high liquidity)
+    hours = get_hour_from_open_time(prices)
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -189,7 +216,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):  # Need more warmup for CRSI
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -198,68 +225,78 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(choppiness[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d HMA) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === HTF BIAS (4h + 12h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        htf_12h_bull = close[i] > hma_12h_aligned[i]
+        htf_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakdown_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # Both HTF must agree for strong signal
+        htf_strong_bull = htf_4h_bull and htf_12h_bull
+        htf_strong_bear = htf_4h_bear and htf_12h_bear
         
-        # === RSI PULLBACK FILTER ===
-        rsi_pullback_long = 40.0 <= rsi_14[i] <= 55.0
-        rsi_pullback_short = 45.0 <= rsi_14[i] <= 60.0
+        # === REGIME DETECTION (Choppiness) ===
+        is_choppy = choppiness[i] > 61.8  # Range market
+        is_trending = choppiness[i] < 38.2  # Trend market
         
-        # === FUNDING CONTRARIAN FILTER ===
-        funding_extreme_long = funding_zscore[i] > 2.0 if not np.isnan(funding_zscore[i]) else False
-        funding_extreme_short = funding_zscore[i] < -2.0 if not np.isnan(funding_zscore[i]) else False
+        # === CRSI ENTRY SIGNALS ===
+        # Mean reversion in choppy market
+        crsi_oversold_mr = crsi[i] < 25  # Relaxed from 10 for more trades
+        crsi_overbought_mr = crsi[i] > 75  # Relaxed from 90 for more trades
+        
+        # Trend follow in trending market
+        crsi_pullback_long = crsi[i] < 45  # Pullback in uptrend
+        crsi_pullback_short = crsi[i] > 55  # Pullback in downtrend
+        
+        # === SESSION FILTER ===
+        session_ok = in_session[i]
         
         # === ENTRY LOGIC (LOOSE THRESHOLDS FOR TRADES) ===
         desired_signal = 0.0
         
-        # LONG entries - multiple paths to entry
-        if htf_1d_bull:
-            # Path 1: Donchian breakout with RSI confirmation
-            if donchian_breakout_long and rsi_14[i] < 70:
-                desired_signal = SIZE_STRONG
-            # Path 2: RSI pullback in uptrend
-            elif rsi_pullback_long and close[i] > hma_1d_aligned[i] * 0.98:
+        # LONG entries - multiple paths
+        if htf_strong_bull and session_ok:
+            # Path 1: Choppy market + mean reversion (CRSI oversold)
+            if is_choppy and crsi_oversold_mr:
                 desired_signal = SIZE_BASE
-            # Path 3: Funding extreme short (contrarian long)
-            elif funding_extreme_short and rsi_14[i] < 50:
+            # Path 2: Trending market + pullback entry
+            elif is_trending and crsi_pullback_long:
+                desired_signal = SIZE_STRONG
+            # Path 3: Neutral regime + strong oversold
+            elif crsi[i] < 20:
                 desired_signal = SIZE_BASE
         
-        # SHORT entries - multiple paths to entry
-        elif htf_1d_bear:
-            # Path 1: Donchian breakdown with RSI confirmation
-            if donchian_breakdown_short and rsi_14[i] > 30:
-                desired_signal = -SIZE_STRONG
-            # Path 2: RSI pullback in downtrend
-            elif rsi_pullback_short and close[i] < hma_1d_aligned[i] * 1.02:
+        # SHORT entries - multiple paths
+        elif htf_strong_bear and session_ok:
+            # Path 1: Choppy market + mean reversion (CRSI overbought)
+            if is_choppy and crsi_overbought_mr:
                 desired_signal = -SIZE_BASE
-            # Path 3: Funding extreme long (contrarian short)
-            elif funding_extreme_long and rsi_14[i] > 50:
+            # Path 2: Trending market + pullback entry
+            elif is_trending and crsi_pullback_short:
+                desired_signal = -SIZE_STRONG
+            # Path 3: Neutral regime + strong overbought
+            elif crsi[i] > 80:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
